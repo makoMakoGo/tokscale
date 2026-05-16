@@ -15,13 +15,13 @@ pub use cache::{load_cache, save_cached_data, CacheResult};
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
 
-pub(crate) use ui::widgets::get_provider_display_name;
 use std::collections::HashSet;
 use std::io;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 use std::thread;
 use std::time::Duration;
+pub(crate) use ui::widgets::{get_client_display_name, get_provider_display_name};
 
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -5,7 +5,7 @@ use ratatui::widgets::{
 };
 
 use super::hourly_profile;
-use super::widgets::{format_cache_hit_rate, format_cost, format_tokens};
+use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -132,7 +132,11 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_current = hour.datetime == current_hour;
 
             let clients_str: String = {
-                let mut c: Vec<&str> = hour.clients.iter().map(String::as_str).collect();
+                let mut c: Vec<String> = hour
+                    .clients
+                    .iter()
+                    .map(|client| get_client_display_name(client))
+                    .collect();
                 c.sort();
                 c.join(", ")
             };
