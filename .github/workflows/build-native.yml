@@ -22,45 +22,15 @@ jobs:
       matrix:
         settings:
           - host: macos-latest
-            target: x86_64-apple-darwin
-            build: cargo build --release -p tokscale-cli --target x86_64-apple-darwin
-            strip: strip -x target/x86_64-apple-darwin/release/tokscale
-            bin_name: tokscale
-          - host: macos-latest
             target: aarch64-apple-darwin
             build: cargo build --release -p tokscale-cli --target aarch64-apple-darwin
             strip: strip -x target/aarch64-apple-darwin/release/tokscale
             bin_name: tokscale
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
+            build: cargo build --release -p tokscale-cli --target x86_64-unknown-linux-gnu
             strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
             bin_name: tokscale
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-musl
-            strip: strip target/x86_64-unknown-linux-musl/release/tokscale
-            bin_name: tokscale
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            build: cargo zigbuild --release -p tokscale-cli --target aarch64-unknown-linux-gnu
-            strip: ""
-            bin_name: tokscale
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            build: cargo zigbuild --release -p tokscale-cli --target aarch64-unknown-linux-musl
-            strip: ""
-            bin_name: tokscale
-          - host: windows-latest
-            target: x86_64-pc-windows-msvc
-            build: cargo build --release -p tokscale-cli --target x86_64-pc-windows-msvc
-            strip: ""
-            bin_name: tokscale.exe
-          - host: windows-latest
-            target: aarch64-pc-windows-msvc
-            build: cargo build --release -p tokscale-cli --target aarch64-pc-windows-msvc
-            strip: ""
-            bin_name: tokscale.exe
 
     steps:
       - uses: actions/checkout@v5
@@ -80,19 +50,6 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: cli-${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('Cargo.lock') }}
-
-      - uses: mlugg/setup-zig@v2
-        if: ${{ contains(matrix.settings.target, 'linux') }}
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        if: ${{ contains(matrix.settings.target, 'linux') }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          tool: cargo-zigbuild
 
       - name: Build CLI binary
         run: ${{ matrix.settings.build }}
