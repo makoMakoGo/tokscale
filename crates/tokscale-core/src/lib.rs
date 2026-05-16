@@ -229,6 +229,34 @@ impl std::str::FromStr for GroupBy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ClientContributionTotals {
+    first_seen: usize,
+    total_tokens: i64,
+}
+
+fn ordered_clients_by_token_contribution(
+    client_totals: &HashMap<String, ClientContributionTotals>,
+) -> String {
+    let mut clients: Vec<(&str, ClientContributionTotals)> = client_totals
+        .iter()
+        .map(|(client, totals)| (client.as_str(), *totals))
+        .collect();
+    clients.sort_by(|(left_client, left), (right_client, right)| {
+        right
+            .total_tokens
+            .cmp(&left.total_tokens)
+            .then_with(|| left.first_seen.cmp(&right.first_seen))
+            .then_with(|| left_client.cmp(right_client))
+    });
+
+    clients
+        .into_iter()
+        .map(|(client, _)| client)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TokenBreakdown {
     pub input: i64,
@@ -1330,20 +1358,22 @@ fn aggregate_model_usage_entries(
     group_by: &GroupBy,
 ) -> Vec<ModelUsage> {
     let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
+    let mut client_totals_by_entry: HashMap<String, HashMap<String, ClientContributionTotals>> =
+        HashMap::new();
 
     for msg in messages {
         let normalized = normalize_model_for_grouping(&msg.model_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
-        let key = match group_by {
-            GroupBy::Model => normalized.clone(),
-            GroupBy::ClientModel => format!("{}:{}", msg.client, normalized),
-            GroupBy::ClientProviderModel => {
-                format!("{}:{}:{}", msg.client, msg.provider_id, normalized)
-            }
-            GroupBy::WorkspaceModel => format!("{}:{}", workspace_group_key, normalized),
+        let (key, merge_clients) = match group_by {
+            GroupBy::Model => (normalized.clone(), true),
+            GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized), false),
+            GroupBy::ClientProviderModel => (
+                format!("{}:{}:{}", msg.client, msg.provider_id, normalized),
+                false,
+            ),
+            GroupBy::WorkspaceModel => (format!("{}:{}", workspace_group_key, normalized), true),
         };
-        let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
-        let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
+        let entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
             client: msg.client.clone(),
             merged_clients: if merge_clients {
                 Some(msg.client.clone())
@@ -1372,15 +1402,15 @@ fn aggregate_model_usage_entries(
         });
 
         if merge_clients {
-            if !entry.client.split(", ").any(|s| s == msg.client) {
-                entry.client = format!("{}, {}", entry.client, msg.client);
-            }
-
-            if let Some(merged_clients) = &mut entry.merged_clients {
-                if !merged_clients.split(", ").any(|s| s == msg.client) {
-                    *merged_clients = format!("{}, {}", merged_clients, msg.client);
+            let client_totals = client_totals_by_entry.entry(key.clone()).or_default();
+            let client_count = client_totals.len();
+            let totals = client_totals.entry(msg.client.clone()).or_insert_with(|| {
+                ClientContributionTotals {
+                    first_seen: client_count,
+                    total_tokens: 0,
                 }
-            }
+            });
+            totals.total_tokens += msg.tokens.total();
         }
 
         if *group_by != GroupBy::ClientProviderModel
@@ -1399,8 +1429,16 @@ fn aggregate_model_usage_entries(
     }
 
     let mut entries: Vec<ModelUsage> = model_map
-        .into_values()
-        .map(|mut entry| {
+        .into_iter()
+        .map(|(key, mut entry)| {
+            if let Some(client_totals) = client_totals_by_entry.get(&key) {
+                let ordered_clients = ordered_clients_by_token_contribution(client_totals);
+                entry.client = ordered_clients.clone();
+                if let Some(merged_clients) = &mut entry.merged_clients {
+                    *merged_clients = ordered_clients;
+                }
+            }
+
             let mut providers: Vec<&str> = entry.provider.split(", ").collect();
             providers.sort_unstable();
             providers.dedup();
@@ -2407,6 +2445,35 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn make_message_with_tokens(
+        client: &str,
+        model_id: &str,
+        provider_id: &str,
+        session_id: &str,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+        reasoning: i64,
+    ) -> UnifiedMessage {
+        UnifiedMessage::new(
+            client,
+            model_id,
+            provider_id,
+            session_id,
+            1_733_011_200_000,
+            TokenBreakdown {
+                input,
+                output,
+                cache_read,
+                cache_write,
+                reasoning,
+            },
+            0.0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build_opencode_sqlite_payload(
         created_ms: f64,
         completed_ms: f64,
@@ -2692,6 +2759,45 @@ mod tests {
         assert_eq!(entries[0].model, "gpt-5.5");
         assert_eq!(entries[0].cost, 5.0);
         assert_eq!(entries[0].message_count, 2);
+    }
+
+    #[test]
+    fn test_model_grouping_orders_merged_clients_by_total_tokens() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_message_with_tokens(
+                    "opencode",
+                    "gpt-5.5",
+                    "openai",
+                    "session-opencode",
+                    10,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+                make_message_with_tokens(
+                    "codex",
+                    "gpt-5.5",
+                    "openai",
+                    "session-codex",
+                    30,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+                make_message_with_tokens("pi", "gpt-5.5", "openai", "session-pi", 100, 0, 0, 0, 0),
+            ],
+            &GroupBy::Model,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].merged_clients.as_deref(),
+            Some("pi, codex, opencode")
+        );
+        assert_eq!(entries[0].client, "pi, codex, opencode");
     }
 
     #[test]
