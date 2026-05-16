@@ -49,40 +49,139 @@ pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str>
     Some(base_model)
 }
 
+const GROUPING_NOISE_SUFFIXES: &[&str] = &[
+    "-sub2api-pro",
+    "-minimal",
+    "-low",
+    "-medium",
+    "-high",
+    "-xhigh",
+    "-auto",
+    "-none",
+    "-fast",
+    "-0",
+];
+
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
-    let mut name = model_id.to_lowercase();
+    let mut name = model_id.trim().to_lowercase();
+
+    name = strip_custom_model_prefix(&name).to_string();
+
+    if let Some(segment) = last_non_empty_path_segment(&name) {
+        name = strip_custom_model_prefix(segment).to_string();
+    }
 
     if let Some(base_model) = strip_parenthesized_reasoning_tier(&name) {
         name = base_model.to_string();
     }
+
+    let without_date = strip_trailing_date_suffix(&name);
+    if without_date.len() != name.len() {
+        name = without_date.to_string();
+    }
+
+    if let Some(normalized) = normalize_gpt_model_for_grouping(&name) {
+        return normalized;
+    }
+
+    if name.contains("claude") {
+        name = normalize_claude_version_dots(&name);
+    }
+
+    name
+}
+
+fn strip_custom_model_prefix(model_id: &str) -> &str {
+    model_id.strip_prefix("custom:").unwrap_or(model_id)
+}
+
+fn last_non_empty_path_segment(value: &str) -> Option<&str> {
+    let segment = value.rsplit('/').find(|segment| !segment.is_empty())?;
+    if segment.len() == value.len() {
+        None
+    } else {
+        Some(segment)
+    }
+}
+
+fn strip_trailing_date_suffix(name: &str) -> &str {
     if name.len() > 9 {
         let potential_date = &name[name.len() - 8..];
         if potential_date.chars().all(|c| c.is_ascii_digit())
             && name.as_bytes()[name.len() - 9] == b'-'
         {
-            name = name[..name.len() - 9].to_string();
+            return &name[..name.len() - 9];
         }
-    }
-
-    if name.contains("claude") {
-        let chars: Vec<char> = name.chars().collect();
-        let mut result = String::with_capacity(name.len());
-        for i in 0..chars.len() {
-            if chars[i] == '.'
-                && i > 0
-                && i < chars.len() - 1
-                && chars[i - 1].is_ascii_digit()
-                && chars[i + 1].is_ascii_digit()
-            {
-                result.push('-');
-            } else {
-                result.push(chars[i]);
-            }
-        }
-        name = result;
     }
 
     name
+}
+
+fn normalize_gpt_model_for_grouping(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("gpt-")?;
+    let (major, after_major) = split_leading_ascii_digits(rest)?;
+    let after_separator = after_major
+        .strip_prefix('.')
+        .or_else(|| after_major.strip_prefix('-'))?;
+    let (minor, tail) = split_leading_ascii_digits(after_separator)?;
+
+    if minor.len() > 2 {
+        return None;
+    }
+
+    let stripped_tail = strip_grouping_noise_tail(tail);
+    if stripped_tail.is_empty() {
+        return Some(format!("gpt-{major}.{minor}"));
+    }
+
+    Some(format!("gpt-{major}.{minor}{tail}"))
+}
+
+fn split_leading_ascii_digits(value: &str) -> Option<(&str, &str)> {
+    let digit_len = value
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digit_len == 0 {
+        return None;
+    }
+
+    Some(value.split_at(digit_len))
+}
+
+fn strip_grouping_noise_tail(mut tail: &str) -> &str {
+    loop {
+        let mut changed = false;
+        for suffix in GROUPING_NOISE_SUFFIXES {
+            if let Some(stripped) = tail.strip_suffix(suffix) {
+                tail = stripped;
+                changed = true;
+                break;
+            }
+        }
+
+        if !changed {
+            return tail;
+        }
+    }
+}
+
+fn normalize_claude_version_dots(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut result = String::with_capacity(name.len());
+    for i in 0..chars.len() {
+        if chars[i] == '.'
+            && i > 0
+            && i < chars.len() - 1
+            && chars[i - 1].is_ascii_digit()
+            && chars[i + 1].is_ascii_digit()
+        {
+            result.push('-');
+        } else {
+            result.push(chars[i]);
+        }
+    }
+    result
 }
 
 fn retain_for_requested_clients(
@@ -2433,6 +2532,35 @@ mod tests {
             normalize_model_for_grouping("claude-opus-4.5-20251101"),
             "claude-opus-4-5"
         );
+
+        assert_eq!(
+            normalize_model_for_grouping("custom:gpt-5.5-xhigh-sub2api-pro"),
+            "gpt-5.5"
+        );
+        assert_eq!(normalize_model_for_grouping("gpt-5.5-xhigh"), "gpt-5.5");
+        assert_eq!(normalize_model_for_grouping("gpt-5.5-fast"), "gpt-5.5");
+        assert_eq!(normalize_model_for_grouping("gpt-5-5-0"), "gpt-5.5");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4-medium"), "gpt-5.4");
+        assert_eq!(
+            normalize_model_for_grouping("deepseek/deepseek-v4-pro"),
+            "deepseek-v4-pro"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("minimaxai/minimax-m2.5"),
+            "minimax-m2.5"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("accounts/fireworks/models/deepseek-v3-0324"),
+            "deepseek-v3-0324"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.3-codex"),
+            "gpt-5.3-codex"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.1-codex-max"),
+            "gpt-5.1-codex-max"
+        );
     }
 
     #[test]
@@ -2536,6 +2664,30 @@ mod tests {
         assert_eq!(entries[0].cost, 4.0);
         assert_eq!(entries[0].message_count, 2);
         assert_eq!(entries[0].merged_clients.as_deref(), Some("claude, qwen"));
+    }
+
+    #[test]
+    fn test_model_grouping_merges_fast_variant_cost_without_repricing() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "opencode",
+                    "gpt-5.5-fast",
+                    "openai",
+                    "session-1",
+                    3.0,
+                    None,
+                    None,
+                ),
+                make_workspace_message("codex", "gpt-5.5", "openai", "session-2", 2.0, None, None),
+            ],
+            &GroupBy::Model,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "gpt-5.5");
+        assert_eq!(entries[0].cost, 5.0);
+        assert_eq!(entries[0].message_count, 2);
     }
 
     #[test]
