@@ -84,11 +84,15 @@ fn tab_divider(app: &App) -> Span<'static> {
     Span::styled(TAB_DIVIDER, Style::default().fg(app.theme.border))
 }
 
-fn register_tab_click_areas(app: &mut App, tabs_area: Rect) {
+fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
+    let Some(tab_row) = renderable_tab_row(tabs_area) else {
+        return Vec::new();
+    };
+
     let is_very_narrow = app.is_very_narrow();
-    let mut x = tabs_area.x;
-    let y = tabs_area.y;
-    let right = tabs_area.right();
+    let mut areas = Vec::with_capacity(Tab::all().len());
+    let mut x = tab_row.x;
+    let right = tab_row.right();
 
     let left_padding_width = TAB_PADDING_LEFT.width() as u16;
     let right_padding_width = TAB_PADDING_RIGHT.width() as u16;
@@ -123,10 +127,10 @@ fn register_tab_click_areas(app: &mut App, tabs_area: Rect) {
 
         let tab_width = x.saturating_sub(tab_start);
         if tab_width > 0 {
-            app.add_click_area(
-                Rect::new(tab_start, y, tab_width, 1),
-                ClickAction::Tab(*tab),
-            );
+            areas.push((
+                Rect::new(tab_start, tab_row.y, tab_width, tab_row.height),
+                *tab,
+            ));
         }
 
         let remaining_width = right.saturating_sub(x);
@@ -134,6 +138,25 @@ fn register_tab_click_areas(app: &mut App, tabs_area: Rect) {
             break;
         }
         x = x.saturating_add(divider_width.min(remaining_width));
+    }
+
+    areas
+}
+
+fn renderable_tab_row(tabs_area: Rect) -> Option<Rect> {
+    // Ratatui's Tabs render tab content on the first row of the block inner area.
+    // If that inner area is empty, no tab content is renderable and therefore no
+    // click hitboxes should exist.
+    if tabs_area.is_empty() {
+        return None;
+    }
+
+    Some(Rect::new(tabs_area.x, tabs_area.y, tabs_area.width, 1))
+}
+
+fn register_tab_click_areas(app: &mut App, tabs_area: Rect) {
+    for (rect, tab) in tab_click_areas(app, tabs_area) {
+        app.add_click_area(rect, ClickAction::Tab(tab));
     }
 }
 
@@ -170,6 +193,28 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn expected_normal_tab_areas() -> Vec<(Rect, Tab)> {
+        vec![
+            (Rect::new(21, 5, 10, 1), Tab::Overview),
+            (Rect::new(34, 5, 8, 1), Tab::Models),
+            (Rect::new(45, 5, 7, 1), Tab::Daily),
+            (Rect::new(55, 5, 8, 1), Tab::Hourly),
+            (Rect::new(66, 5, 7, 1), Tab::Stats),
+            (Rect::new(76, 5, 8, 1), Tab::Agents),
+        ]
+    }
+
+    fn expected_very_narrow_tab_areas() -> Vec<(Rect, Tab)> {
+        vec![
+            (Rect::new(8, 3, 5, 1), Tab::Overview),
+            (Rect::new(16, 3, 5, 1), Tab::Models),
+            (Rect::new(24, 3, 5, 1), Tab::Daily),
+            (Rect::new(32, 3, 4, 1), Tab::Hourly),
+            (Rect::new(39, 3, 5, 1), Tab::Stats),
+            (Rect::new(47, 3, 5, 1), Tab::Agents),
+        ]
     }
 
     fn render_header_symbols(
@@ -244,7 +289,43 @@ mod tests {
     }
 
     #[test]
-    fn tab_click_areas_cover_rendered_labels_and_padding_for_offset_area() {
+    fn tab_click_areas_are_empty_without_renderable_tab_row() {
+        let app = make_app(120);
+
+        for area in [
+            Rect::new(21, 5, 78, 0),
+            Rect::new(21, 5, 0, 1),
+            Rect::new(21, 5, 0, 0),
+        ] {
+            assert!(
+                tab_click_areas(&app, area).is_empty(),
+                "non-renderable tabs area {area} should not produce click hitboxes"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_click_areas_match_normal_renderable_tab_segments() {
+        let app = make_app(120);
+
+        assert_eq!(
+            tab_click_areas(&app, Rect::new(21, 5, 78, 1)),
+            expected_normal_tab_areas()
+        );
+    }
+
+    #[test]
+    fn tab_click_areas_match_very_narrow_renderable_tab_segments() {
+        let app = make_app(50);
+
+        assert_eq!(
+            tab_click_areas(&app, Rect::new(8, 3, 50, 1)),
+            expected_very_narrow_tab_areas()
+        );
+    }
+
+    #[test]
+    fn rendered_normal_tabs_match_click_area_geometry_for_offset_area() {
         let mut app = make_app(120);
         let area = Rect::new(20, 4, 80, 3);
 
@@ -256,21 +337,11 @@ mod tests {
         assert_eq!(symbols_at(&lines, 5, 55, 8), " Hourly ");
         assert_eq!(symbols_at(&lines, 5, 66, 7), " Stats ");
         assert_eq!(symbols_at(&lines, 5, 76, 8), " Agents ");
-        assert_eq!(
-            registered_tab_areas(&app),
-            vec![
-                (Rect::new(21, 5, 10, 1), Tab::Overview),
-                (Rect::new(34, 5, 8, 1), Tab::Models),
-                (Rect::new(45, 5, 7, 1), Tab::Daily),
-                (Rect::new(55, 5, 8, 1), Tab::Hourly),
-                (Rect::new(66, 5, 7, 1), Tab::Stats),
-                (Rect::new(76, 5, 8, 1), Tab::Agents),
-            ]
-        );
+        assert_eq!(registered_tab_areas(&app), expected_normal_tab_areas());
     }
 
     #[test]
-    fn tab_click_areas_cover_short_labels_and_padding_when_very_narrow() {
+    fn rendered_very_narrow_tabs_match_click_area_geometry() {
         let mut app = make_app(50);
         let area = Rect::new(7, 2, 52, 3);
 
@@ -282,17 +353,7 @@ mod tests {
         assert_eq!(symbols_at(&lines, 3, 32, 4), " Hr ");
         assert_eq!(symbols_at(&lines, 3, 39, 5), " Sta ");
         assert_eq!(symbols_at(&lines, 3, 47, 5), " Agt ");
-        assert_eq!(
-            registered_tab_areas(&app),
-            vec![
-                (Rect::new(8, 3, 5, 1), Tab::Overview),
-                (Rect::new(16, 3, 5, 1), Tab::Models),
-                (Rect::new(24, 3, 5, 1), Tab::Daily),
-                (Rect::new(32, 3, 4, 1), Tab::Hourly),
-                (Rect::new(39, 3, 5, 1), Tab::Stats),
-                (Rect::new(47, 3, 5, 1), Tab::Agents),
-            ]
-        );
+        assert_eq!(registered_tab_areas(&app), expected_very_narrow_tab_areas());
     }
 
     #[test]
@@ -352,17 +413,7 @@ mod tests {
 
         render_header_symbols(&mut app, area, 120, 8);
 
-        assert_clicks_select_tabs(
-            &mut app,
-            &[
-                (Rect::new(21, 5, 10, 1), Tab::Overview),
-                (Rect::new(34, 5, 8, 1), Tab::Models),
-                (Rect::new(45, 5, 7, 1), Tab::Daily),
-                (Rect::new(55, 5, 8, 1), Tab::Hourly),
-                (Rect::new(66, 5, 7, 1), Tab::Stats),
-                (Rect::new(76, 5, 8, 1), Tab::Agents),
-            ],
-        );
+        assert_clicks_select_tabs(&mut app, &expected_normal_tab_areas());
     }
 
     #[test]
@@ -372,16 +423,6 @@ mod tests {
 
         render_header_symbols(&mut app, area, 65, 6);
 
-        assert_clicks_select_tabs(
-            &mut app,
-            &[
-                (Rect::new(8, 3, 5, 1), Tab::Overview),
-                (Rect::new(16, 3, 5, 1), Tab::Models),
-                (Rect::new(24, 3, 5, 1), Tab::Daily),
-                (Rect::new(32, 3, 4, 1), Tab::Hourly),
-                (Rect::new(39, 3, 5, 1), Tab::Stats),
-                (Rect::new(47, 3, 5, 1), Tab::Agents),
-            ],
-        );
+        assert_clicks_select_tabs(&mut app, &expected_very_narrow_tab_areas());
     }
 }
