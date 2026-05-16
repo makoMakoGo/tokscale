@@ -1410,7 +1410,9 @@ fn aggregate_model_usage_entries(
                     total_tokens: 0,
                 }
             });
-            totals.total_tokens += msg.tokens.total();
+            totals.total_tokens = totals
+                .total_tokens
+                .saturating_add(msg.tokens.total().max(0));
         }
 
         if *group_by != GroupBy::ClientProviderModel
@@ -2798,6 +2800,44 @@ mod tests {
             Some("pi, codex, opencode")
         );
         assert_eq!(entries[0].client, "pi, codex, opencode");
+    }
+
+    #[test]
+    fn test_model_grouping_ignores_negative_client_token_contribution() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_message_with_tokens(
+                    "negative-client",
+                    "gpt-5.5",
+                    "openai",
+                    "session-negative",
+                    -1_000,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+                make_message_with_tokens(
+                    "positive-client",
+                    "gpt-5.5",
+                    "openai",
+                    "session-positive",
+                    10,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+            ],
+            &GroupBy::Model,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].merged_clients.as_deref(),
+            Some("positive-client, negative-client")
+        );
+        assert_eq!(entries[0].client, "positive-client, negative-client");
     }
 
     #[test]

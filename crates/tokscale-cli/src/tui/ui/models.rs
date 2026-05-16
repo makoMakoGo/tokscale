@@ -9,6 +9,7 @@ use super::widgets::{
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
     model
@@ -63,7 +64,11 @@ fn available_text_width(table_width: u16, fixed_width: u16, column_count: u16) -
 }
 
 fn display_width(s: &str) -> u16 {
-    s.chars().count().min(usize::from(u16::MAX)) as u16
+    s.width().min(usize::from(u16::MAX)) as u16
+}
+
+fn char_display_width(ch: char) -> usize {
+    ch.width().unwrap_or(0)
 }
 
 fn clamped_content_width(content_width: u16, min: u16, max: u16) -> u16 {
@@ -74,26 +79,24 @@ fn distribute_remaining_width(widths: &mut [u16], specs: &[TextColumnSpec], mut 
     while remaining > 0 {
         let mut advanced = false;
 
-        for _ in 0..2 {
-            for (index, spec) in specs.iter().enumerate() {
-                if widths[index] >= spec.ideal {
-                    continue;
-                }
+        for (index, spec) in specs.iter().enumerate() {
+            if widths[index] >= spec.ideal {
+                continue;
+            }
 
-                let grow_by = remaining
-                    .min(spec.weight)
-                    .min(spec.ideal.saturating_sub(widths[index]));
-                if grow_by == 0 {
-                    continue;
-                }
+            let grow_by = remaining
+                .min(spec.weight)
+                .min(spec.ideal.saturating_sub(widths[index]));
+            if grow_by == 0 {
+                continue;
+            }
 
-                widths[index] += grow_by;
-                remaining -= grow_by;
-                advanced = true;
+            widths[index] += grow_by;
+            remaining -= grow_by;
+            advanced = true;
 
-                if remaining == 0 {
-                    return;
-                }
+            if remaining == 0 {
+                return;
             }
         }
 
@@ -354,22 +357,22 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let visible_models = &models[start..end];
-    let model_content_width = visible_models
+    let model_content_width = models
         .iter()
         .map(|model| display_width(&model.model))
         .max()
         .unwrap_or(MODEL_MIN_WIDTH);
-    let provider_content_width = visible_models
+    let provider_content_width = models
         .iter()
         .map(|model| display_width(&get_provider_display_name(&model.provider)))
         .max()
         .unwrap_or(PROVIDER_MIN_WIDTH);
-    let source_content_width = visible_models
+    let source_content_width = models
         .iter()
         .map(|model| display_width(&get_client_display_name(&model.client)))
         .max()
         .unwrap_or(SOURCE_MIN_WIDTH);
+    let visible_models = &models[start..end];
     let table_layout = models_table_layout(
         inner.width,
         &group_by,
@@ -499,19 +502,46 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
+fn truncate(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
         return String::new();
     }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars <= 3 {
-        s.chars().take(max_chars).collect()
-    } else {
-        let head: String = s.chars().take(max_chars - 3).collect();
-        format!("{}...", head)
+
+    if s.width() <= max_width {
+        return s.to_string();
     }
+
+    let ellipsis = "...";
+    let ellipsis_width = ellipsis.width();
+    if max_width <= ellipsis_width {
+        return s
+            .chars()
+            .scan(0usize, |width, ch| {
+                let next_width = *width + char_display_width(ch);
+                if next_width > max_width {
+                    None
+                } else {
+                    *width = next_width;
+                    Some(ch)
+                }
+            })
+            .collect();
+    }
+
+    let head_width = max_width - ellipsis_width;
+    let head: String = s
+        .chars()
+        .scan(0usize, |width, ch| {
+            let next_width = *width + char_display_width(ch);
+            if next_width > head_width {
+                None
+            } else {
+                *width = next_width;
+                Some(ch)
+            }
+        })
+        .collect();
+    format!("{}{}", head, ellipsis)
 }
 
 #[cfg(test)]
@@ -576,6 +606,30 @@ mod tests {
         assert!(length_at(&wide.widths, 3) > length_at(&base.widths, 3));
         assert!(length_at(&wide.widths, 4) > length_at(&base.widths, 4));
         assert_eq!(length_at(&wide.widths, 4), 34);
+    }
+
+    #[test]
+    fn display_width_uses_terminal_columns_for_unicode() {
+        assert_eq!(display_width("模型"), 4);
+        assert_eq!(display_width("e\u{301}"), 1);
+    }
+
+    #[test]
+    fn truncate_uses_terminal_columns_for_unicode() {
+        assert_eq!(truncate("模型abc", 5), "模...");
+        assert_eq!(truncate("模型abc", 7), "模型abc");
+    }
+
+    #[test]
+    fn full_model_list_controls_layout_width_not_visible_page() {
+        let visible_only = model_layout(180, 28, 28, 26);
+        let full_dataset = model_layout(180, 28, 56, 26);
+
+        assert_eq!(
+            length_at(&visible_only.widths, 3),
+            length_at(&full_dataset.widths, 3)
+        );
+        assert!(length_at(&full_dataset.widths, 2) > length_at(&visible_only.widths, 2));
     }
 
     #[test]
