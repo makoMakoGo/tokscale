@@ -63,32 +63,28 @@ const GROUPING_NOISE_SUFFIXES: &[&str] = &[
 ];
 
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
-    let mut name = model_id.trim().to_lowercase();
+    let lowercased = model_id.trim().to_lowercase();
+    let mut name = strip_custom_model_prefix(&lowercased);
 
-    name = strip_custom_model_prefix(&name).to_string();
-
-    if let Some(segment) = last_non_empty_path_segment(&name) {
-        name = strip_custom_model_prefix(segment).to_string();
+    if let Some(segment) = last_non_empty_path_segment(name) {
+        name = strip_custom_model_prefix(segment);
     }
 
-    if let Some(base_model) = strip_parenthesized_reasoning_tier(&name) {
-        name = base_model.to_string();
+    if let Some(base_model) = strip_parenthesized_reasoning_tier(name) {
+        name = base_model;
     }
 
-    let without_date = strip_trailing_date_suffix(&name);
-    if without_date.len() != name.len() {
-        name = without_date.to_string();
-    }
+    name = strip_trailing_date_suffix(name);
 
-    if let Some(normalized) = normalize_gpt_model_for_grouping(&name) {
+    if let Some(normalized) = normalize_gpt_model_for_grouping(name) {
         return normalized;
     }
 
     if name.contains("claude") {
-        name = normalize_claude_version_dots(&name);
+        return normalize_claude_version_dots(name);
     }
 
-    name
+    name.to_string()
 }
 
 fn strip_custom_model_prefix(model_id: &str) -> &str {
@@ -134,7 +130,7 @@ fn normalize_gpt_model_for_grouping(name: &str) -> Option<String> {
         return Some(format!("gpt-{major}.{minor}"));
     }
 
-    Some(format!("gpt-{major}.{minor}{tail}"))
+    Some(format!("gpt-{major}.{minor}{stripped_tail}"))
 }
 
 fn split_leading_ascii_digits(value: &str) -> Option<(&str, &str)> {
@@ -167,20 +163,20 @@ fn strip_grouping_noise_tail(mut tail: &str) -> &str {
 }
 
 fn normalize_claude_version_dots(name: &str) -> String {
-    let chars: Vec<char> = name.chars().collect();
     let mut result = String::with_capacity(name.len());
-    for i in 0..chars.len() {
-        if chars[i] == '.'
-            && i > 0
-            && i < chars.len() - 1
-            && chars[i - 1].is_ascii_digit()
-            && chars[i + 1].is_ascii_digit()
-        {
+    let mut chars = name.chars().peekable();
+    let mut prev_was_digit = false;
+
+    while let Some(ch) = chars.next() {
+        if ch == '.' && prev_was_digit && chars.peek().is_some_and(|next| next.is_ascii_digit()) {
             result.push('-');
+            prev_was_digit = false;
         } else {
-            result.push(chars[i]);
+            result.push(ch);
+            prev_was_digit = ch.is_ascii_digit();
         }
     }
+
     result
 }
 
@@ -2559,6 +2555,14 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("gpt-5.1-codex-max"),
+            "gpt-5.1-codex-max"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.5-codex-fast"),
+            "gpt-5.5-codex"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.1-codex-max-xhigh"),
             "gpt-5.1-codex-max"
         );
     }
