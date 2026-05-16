@@ -36,6 +36,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(0);
 
     let block = header_block(app);
+    let tabs_area = block.inner(area);
 
     let tabs = Tabs::new(titles)
         .block(block)
@@ -50,7 +51,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     frame.render_widget(tabs, area);
 
-    register_tab_click_areas(app, area);
+    register_tab_click_areas(app, tabs_area);
 }
 
 fn header_block(app: &App) -> Block<'static> {
@@ -83,9 +84,8 @@ fn tab_divider(app: &App) -> Span<'static> {
     Span::styled(TAB_DIVIDER, Style::default().fg(app.theme.border))
 }
 
-fn register_tab_click_areas(app: &mut App, area: Rect) {
+fn register_tab_click_areas(app: &mut App, tabs_area: Rect) {
     let is_very_narrow = app.is_very_narrow();
-    let tabs_area = header_block(app).inner(area);
     let mut x = tabs_area.x;
     let y = tabs_area.y;
     let right = tabs_area.right();
@@ -95,6 +95,7 @@ fn register_tab_click_areas(app: &mut App, area: Rect) {
     let divider_width = TAB_DIVIDER.width() as u16;
 
     for (index, tab) in Tab::all().iter().enumerate() {
+        let tab_start = x;
         let remaining_width = right.saturating_sub(x);
         if remaining_width == 0 {
             break;
@@ -112,16 +113,21 @@ fn register_tab_click_areas(app: &mut App, area: Rect) {
             tab.as_str()
         };
         let width = (name.width() as u16).min(remaining_width);
-        if width > 0 {
-            app.add_click_area(Rect::new(x, y, width, 1), ClickAction::Tab(*tab));
+        if width == 0 {
+            break;
         }
         x = x.saturating_add(width);
 
         let remaining_width = right.saturating_sub(x);
-        if remaining_width == 0 {
-            break;
-        }
         x = x.saturating_add(right_padding_width.min(remaining_width));
+
+        let tab_width = x.saturating_sub(tab_start);
+        if tab_width > 0 {
+            app.add_click_area(
+                Rect::new(tab_start, y, tab_width, 1),
+                ClickAction::Tab(*tab),
+            );
+        }
 
         let remaining_width = right.saturating_sub(x);
         if remaining_width == 0 || index + 1 == Tab::all().len() {
@@ -210,66 +216,137 @@ mod tests {
 
                 assert_eq!(
                     app.current_tab, *tab,
-                    "clicking column {column} on {tab:?} label should select {tab:?}"
+                    "clicking column {column} on {tab:?} hitbox should select {tab:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_clicks_do_not_switch_tabs(app: &mut App, dividers: &[Rect]) {
+        for rect in dividers {
+            for column in rect.x..rect.x + rect.width {
+                app.current_tab = Tab::Agents;
+
+                app.handle_mouse_event(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+
+                assert_eq!(
+                    app.current_tab,
+                    Tab::Agents,
+                    "clicking divider column {column} should not switch tabs"
                 );
             }
         }
     }
 
     #[test]
-    fn tab_click_areas_start_at_rendered_labels_for_offset_area() {
+    fn tab_click_areas_cover_rendered_labels_and_padding_for_offset_area() {
         let mut app = make_app(120);
         let area = Rect::new(20, 4, 80, 3);
 
         let lines = render_header_symbols(&mut app, area, 120, 8);
 
-        assert_eq!(symbols_at(&lines, 5, 22, 8), "Overview");
-        assert_eq!(symbols_at(&lines, 5, 35, 6), "Models");
-        assert_eq!(symbols_at(&lines, 5, 46, 5), "Daily");
-        assert_eq!(symbols_at(&lines, 5, 56, 6), "Hourly");
-        assert_eq!(symbols_at(&lines, 5, 67, 5), "Stats");
-        assert_eq!(symbols_at(&lines, 5, 77, 6), "Agents");
+        assert_eq!(symbols_at(&lines, 5, 21, 10), " Overview ");
+        assert_eq!(symbols_at(&lines, 5, 34, 8), " Models ");
+        assert_eq!(symbols_at(&lines, 5, 45, 7), " Daily ");
+        assert_eq!(symbols_at(&lines, 5, 55, 8), " Hourly ");
+        assert_eq!(symbols_at(&lines, 5, 66, 7), " Stats ");
+        assert_eq!(symbols_at(&lines, 5, 76, 8), " Agents ");
         assert_eq!(
             registered_tab_areas(&app),
             vec![
-                (Rect::new(22, 5, 8, 1), Tab::Overview),
-                (Rect::new(35, 5, 6, 1), Tab::Models),
-                (Rect::new(46, 5, 5, 1), Tab::Daily),
-                (Rect::new(56, 5, 6, 1), Tab::Hourly),
-                (Rect::new(67, 5, 5, 1), Tab::Stats),
-                (Rect::new(77, 5, 6, 1), Tab::Agents),
+                (Rect::new(21, 5, 10, 1), Tab::Overview),
+                (Rect::new(34, 5, 8, 1), Tab::Models),
+                (Rect::new(45, 5, 7, 1), Tab::Daily),
+                (Rect::new(55, 5, 8, 1), Tab::Hourly),
+                (Rect::new(66, 5, 7, 1), Tab::Stats),
+                (Rect::new(76, 5, 8, 1), Tab::Agents),
             ]
         );
     }
 
     #[test]
-    fn tab_click_areas_use_short_labels_when_very_narrow() {
+    fn tab_click_areas_cover_short_labels_and_padding_when_very_narrow() {
         let mut app = make_app(50);
         let area = Rect::new(7, 2, 52, 3);
 
         let lines = render_header_symbols(&mut app, area, 65, 6);
 
-        assert_eq!(symbols_at(&lines, 3, 9, 3), "Ovw");
-        assert_eq!(symbols_at(&lines, 3, 17, 3), "Mod");
-        assert_eq!(symbols_at(&lines, 3, 25, 3), "Day");
-        assert_eq!(symbols_at(&lines, 3, 33, 2), "Hr");
-        assert_eq!(symbols_at(&lines, 3, 40, 3), "Sta");
-        assert_eq!(symbols_at(&lines, 3, 48, 3), "Agt");
+        assert_eq!(symbols_at(&lines, 3, 8, 5), " Ovw ");
+        assert_eq!(symbols_at(&lines, 3, 16, 5), " Mod ");
+        assert_eq!(symbols_at(&lines, 3, 24, 5), " Day ");
+        assert_eq!(symbols_at(&lines, 3, 32, 4), " Hr ");
+        assert_eq!(symbols_at(&lines, 3, 39, 5), " Sta ");
+        assert_eq!(symbols_at(&lines, 3, 47, 5), " Agt ");
         assert_eq!(
             registered_tab_areas(&app),
             vec![
-                (Rect::new(9, 3, 3, 1), Tab::Overview),
-                (Rect::new(17, 3, 3, 1), Tab::Models),
-                (Rect::new(25, 3, 3, 1), Tab::Daily),
-                (Rect::new(33, 3, 2, 1), Tab::Hourly),
-                (Rect::new(40, 3, 3, 1), Tab::Stats),
-                (Rect::new(48, 3, 3, 1), Tab::Agents),
+                (Rect::new(8, 3, 5, 1), Tab::Overview),
+                (Rect::new(16, 3, 5, 1), Tab::Models),
+                (Rect::new(24, 3, 5, 1), Tab::Daily),
+                (Rect::new(32, 3, 4, 1), Tab::Hourly),
+                (Rect::new(39, 3, 5, 1), Tab::Stats),
+                (Rect::new(47, 3, 5, 1), Tab::Agents),
             ]
         );
     }
 
     #[test]
-    fn clicks_on_rendered_tab_labels_select_matching_tabs() {
+    fn clicks_on_tab_dividers_do_not_switch_tabs() {
+        let mut app = make_app(120);
+        let area = Rect::new(20, 4, 80, 3);
+
+        let lines = render_header_symbols(&mut app, area, 120, 8);
+
+        assert_eq!(symbols_at(&lines, 5, 31, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 42, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 52, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 63, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 73, 3), TAB_DIVIDER);
+
+        assert_clicks_do_not_switch_tabs(
+            &mut app,
+            &[
+                Rect::new(31, 5, 3, 1),
+                Rect::new(42, 5, 3, 1),
+                Rect::new(52, 5, 3, 1),
+                Rect::new(63, 5, 3, 1),
+                Rect::new(73, 5, 3, 1),
+            ],
+        );
+    }
+
+    #[test]
+    fn clicks_on_very_narrow_tab_dividers_do_not_switch_tabs() {
+        let mut app = make_app(50);
+        let area = Rect::new(7, 2, 52, 3);
+
+        let lines = render_header_symbols(&mut app, area, 65, 6);
+
+        assert_eq!(symbols_at(&lines, 3, 13, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 21, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 29, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 36, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 44, 3), TAB_DIVIDER);
+
+        assert_clicks_do_not_switch_tabs(
+            &mut app,
+            &[
+                Rect::new(13, 3, 3, 1),
+                Rect::new(21, 3, 3, 1),
+                Rect::new(29, 3, 3, 1),
+                Rect::new(36, 3, 3, 1),
+                Rect::new(44, 3, 3, 1),
+            ],
+        );
+    }
+
+    #[test]
+    fn clicks_on_rendered_tab_labels_and_padding_select_matching_tabs() {
         let mut app = make_app(120);
         let area = Rect::new(20, 4, 80, 3);
 
@@ -278,18 +355,18 @@ mod tests {
         assert_clicks_select_tabs(
             &mut app,
             &[
-                (Rect::new(22, 5, 8, 1), Tab::Overview),
-                (Rect::new(35, 5, 6, 1), Tab::Models),
-                (Rect::new(46, 5, 5, 1), Tab::Daily),
-                (Rect::new(56, 5, 6, 1), Tab::Hourly),
-                (Rect::new(67, 5, 5, 1), Tab::Stats),
-                (Rect::new(77, 5, 6, 1), Tab::Agents),
+                (Rect::new(21, 5, 10, 1), Tab::Overview),
+                (Rect::new(34, 5, 8, 1), Tab::Models),
+                (Rect::new(45, 5, 7, 1), Tab::Daily),
+                (Rect::new(55, 5, 8, 1), Tab::Hourly),
+                (Rect::new(66, 5, 7, 1), Tab::Stats),
+                (Rect::new(76, 5, 8, 1), Tab::Agents),
             ],
         );
     }
 
     #[test]
-    fn clicks_on_very_narrow_rendered_tab_labels_select_matching_tabs() {
+    fn clicks_on_very_narrow_rendered_tab_labels_and_padding_select_matching_tabs() {
         let mut app = make_app(50);
         let area = Rect::new(7, 2, 52, 3);
 
@@ -298,12 +375,12 @@ mod tests {
         assert_clicks_select_tabs(
             &mut app,
             &[
-                (Rect::new(9, 3, 3, 1), Tab::Overview),
-                (Rect::new(17, 3, 3, 1), Tab::Models),
-                (Rect::new(25, 3, 3, 1), Tab::Daily),
-                (Rect::new(33, 3, 2, 1), Tab::Hourly),
-                (Rect::new(40, 3, 3, 1), Tab::Stats),
-                (Rect::new(48, 3, 3, 1), Tab::Agents),
+                (Rect::new(8, 3, 5, 1), Tab::Overview),
+                (Rect::new(16, 3, 5, 1), Tab::Models),
+                (Rect::new(24, 3, 5, 1), Tab::Daily),
+                (Rect::new(32, 3, 4, 1), Tab::Hourly),
+                (Rect::new(39, 3, 5, 1), Tab::Stats),
+                (Rect::new(47, 3, 5, 1), Tab::Agents),
             ],
         );
     }
