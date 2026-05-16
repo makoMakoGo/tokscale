@@ -15,6 +15,7 @@ pub use cache::{load_cache, save_cached_data, CacheResult};
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
 
+pub(crate) use ui::widgets::get_provider_display_name;
 use std::collections::HashSet;
 use std::io;
 use std::sync::mpsc;

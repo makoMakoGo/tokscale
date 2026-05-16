@@ -5,7 +5,7 @@ mod cursor;
 mod paths;
 mod tui;
 
-use crate::tui::client_ui;
+use crate::tui::{client_ui, get_provider_display_name};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, IsTerminal, Write};
@@ -1583,7 +1583,8 @@ fn run_models_report(
                             entry.input + entry.output + entry.cache_read + entry.cache_write;
                         table.add_row(vec![
                             Cell::new(capitalized_clients),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
@@ -1636,7 +1637,8 @@ fn run_models_report(
                             entry.input + entry.output + entry.cache_read + entry.cache_write;
                         table.add_row(vec![
                             Cell::new(capitalize_client(&entry.client)),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
@@ -1728,7 +1730,8 @@ fn run_models_report(
                             .join(", ");
                         table.add_row(vec![
                             Cell::new(capitalized_clients),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
@@ -1801,7 +1804,8 @@ fn run_models_report(
 
                         table.add_row(vec![
                             Cell::new(capitalize_client(&entry.client)),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_model_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
@@ -1881,7 +1885,8 @@ fn run_models_report(
 
                         table.add_row(vec![
                             Cell::new(workspace_name(entry.workspace_label.as_deref())),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(capitalized_clients),
                             Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))

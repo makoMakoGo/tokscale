@@ -261,7 +261,19 @@ pub fn get_client_display_name(client: &str) -> String {
     client.to_string()
 }
 
-pub fn get_provider_display_name(provider: &str) -> String {
+pub(crate) fn get_provider_display_name(provider: &str) -> String {
+    if provider.contains(',') {
+        return provider
+            .split(',')
+            .map(|segment| get_single_provider_display_name(segment.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+
+    get_single_provider_display_name(provider)
+}
+
+fn get_single_provider_display_name(provider: &str) -> String {
     let config = TokscaleConfig::load();
     if let Some(name) = config.get_provider_display_name(provider) {
         return name.to_string();
@@ -278,17 +290,10 @@ pub fn get_provider_display_name(provider: &str) -> String {
         "cohere" => "Cohere".to_string(),
         "opencode" => "OpenCode".to_string(),
         s if s.starts_with("github-cop") || s.contains("copilot") => "GitHub Copilot".to_string(),
-        _ => capitalize_first(provider),
+        _ => provider.to_string(),
     }
 }
 
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -340,6 +345,14 @@ mod tests {
         let rank_3 = get_provider_shade("some-new-provider", 3);
         assert_ne!(rank_0, rank_3);
         assert_ne!(rank_0, Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn provider_display_formats_each_segment_in_merged_list() {
+        assert_eq!(
+            get_provider_display_name("openai, openai-codex, amazon-bedrock"),
+            "OpenAI, openai-codex, amazon-bedrock"
+        );
     }
 
     #[test]
