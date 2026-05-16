@@ -9,6 +9,7 @@ use super::widgets::{
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
     model
@@ -22,6 +23,229 @@ fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) 
         format!("{} / {}", workspace_label(model), model.model)
     } else {
         model.model.clone()
+    }
+}
+
+const TABLE_COLUMN_SPACING: u16 = 1;
+const WIDE_MODEL_COLUMNS: u16 = 11;
+
+const MODEL_MIN_WIDTH: u16 = 20;
+const MODEL_MAX_WIDTH: u16 = 32;
+const PROVIDER_MIN_WIDTH: u16 = 18;
+const PROVIDER_MAX_WIDTH: u16 = 56;
+const SOURCE_MIN_WIDTH: u16 = 18;
+const SOURCE_MAX_WIDTH: u16 = 40;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextColumnSpec {
+    min: u16,
+    ideal: u16,
+    weight: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextColumnWidths {
+    model: u16,
+    provider: u16,
+    source: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelsTableLayout {
+    widths: Vec<Constraint>,
+    model_width: usize,
+}
+
+fn available_text_width(table_width: u16, fixed_width: u16, column_count: u16) -> u16 {
+    let spacing = TABLE_COLUMN_SPACING.saturating_mul(column_count.saturating_sub(1));
+    table_width
+        .saturating_sub(fixed_width)
+        .saturating_sub(spacing)
+}
+
+fn display_width(s: &str) -> u16 {
+    s.width().min(usize::from(u16::MAX)) as u16
+}
+
+fn char_display_width(ch: char) -> usize {
+    ch.width().unwrap_or(0)
+}
+
+fn clamped_content_width(content_width: u16, min: u16, max: u16) -> u16 {
+    content_width.clamp(min, max)
+}
+
+fn distribute_remaining_width(widths: &mut [u16], specs: &[TextColumnSpec], mut remaining: u16) {
+    while remaining > 0 {
+        let mut advanced = false;
+
+        for (index, spec) in specs.iter().enumerate() {
+            if widths[index] >= spec.ideal {
+                continue;
+            }
+
+            let grow_by = remaining
+                .min(spec.weight)
+                .min(spec.ideal.saturating_sub(widths[index]));
+            if grow_by == 0 {
+                continue;
+            }
+
+            widths[index] += grow_by;
+            remaining -= grow_by;
+            advanced = true;
+
+            if remaining == 0 {
+                return;
+            }
+        }
+
+        if !advanced {
+            return;
+        }
+    }
+}
+
+fn allocate_text_column_widths(budget: u16, specs: [TextColumnSpec; 3]) -> TextColumnWidths {
+    let min_total = specs.iter().map(|spec| spec.min).sum::<u16>();
+
+    if budget < min_total {
+        let budget = u32::from(budget);
+        let min_total = u32::from(min_total);
+        let model = (budget * u32::from(specs[0].min) / min_total) as u16;
+        let provider = (budget * u32::from(specs[1].min) / min_total) as u16;
+        let source = (budget as u16)
+            .saturating_sub(model)
+            .saturating_sub(provider);
+
+        return TextColumnWidths {
+            model,
+            provider,
+            source,
+        };
+    }
+
+    let mut widths = [specs[0].min, specs[1].min, specs[2].min];
+    distribute_remaining_width(&mut widths, &specs, budget - min_total);
+
+    TextColumnWidths {
+        model: widths[0],
+        provider: widths[1],
+        source: widths[2],
+    }
+}
+
+fn text_column_specs(
+    model_content_width: u16,
+    provider_content_width: u16,
+    source_content_width: u16,
+) -> [TextColumnSpec; 3] {
+    [
+        TextColumnSpec {
+            min: MODEL_MIN_WIDTH,
+            ideal: clamped_content_width(model_content_width, MODEL_MIN_WIDTH, MODEL_MAX_WIDTH),
+            weight: 1,
+        },
+        TextColumnSpec {
+            min: PROVIDER_MIN_WIDTH,
+            ideal: clamped_content_width(
+                provider_content_width,
+                PROVIDER_MIN_WIDTH,
+                PROVIDER_MAX_WIDTH,
+            ),
+            weight: 1,
+        },
+        TextColumnSpec {
+            min: SOURCE_MIN_WIDTH,
+            ideal: clamped_content_width(source_content_width, SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH),
+            weight: 2,
+        },
+    ]
+}
+
+fn models_table_layout(
+    table_width: u16,
+    group_by: &GroupBy,
+    is_narrow: bool,
+    is_very_narrow: bool,
+    model_content_width: u16,
+    provider_content_width: u16,
+    source_content_width: u16,
+) -> ModelsTableLayout {
+    if is_very_narrow {
+        ModelsTableLayout {
+            widths: vec![Constraint::Percentage(70), Constraint::Percentage(30)],
+            model_width: 15,
+        }
+    } else if is_narrow {
+        ModelsTableLayout {
+            widths: vec![
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ],
+            model_width: 25,
+        }
+    } else if *group_by == GroupBy::WorkspaceModel {
+        let text = allocate_text_column_widths(
+            available_text_width(
+                table_width,
+                3 + 18 + 10 + 10 + 12 + 12 + 10 + 10,
+                WIDE_MODEL_COLUMNS,
+            ),
+            text_column_specs(
+                model_content_width,
+                provider_content_width,
+                source_content_width,
+            ),
+        );
+
+        ModelsTableLayout {
+            widths: vec![
+                Constraint::Length(3),
+                Constraint::Length(18),
+                Constraint::Length(text.model),
+                Constraint::Length(text.provider),
+                Constraint::Length(text.source),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(12),
+                Constraint::Length(12),
+                Constraint::Length(10),
+                Constraint::Length(10),
+            ],
+            model_width: text.model as usize,
+        }
+    } else {
+        let text = allocate_text_column_widths(
+            available_text_width(
+                table_width,
+                3 + 10 + 10 + 10 + 10 + 8 + 10 + 10,
+                WIDE_MODEL_COLUMNS,
+            ),
+            text_column_specs(
+                model_content_width,
+                provider_content_width,
+                source_content_width,
+            ),
+        );
+
+        ModelsTableLayout {
+            widths: vec![
+                Constraint::Length(3),
+                Constraint::Length(text.model),
+                Constraint::Length(text.provider),
+                Constraint::Length(text.source),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(8),
+                Constraint::Length(10),
+                Constraint::Length(10),
+            ],
+            model_width: text.model as usize,
+        }
     }
 }
 
@@ -133,7 +357,33 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let rows: Vec<Row> = models[start..end]
+    let model_content_width = models
+        .iter()
+        .map(|model| display_width(&model.model))
+        .max()
+        .unwrap_or(MODEL_MIN_WIDTH);
+    let provider_content_width = models
+        .iter()
+        .map(|model| display_width(&get_provider_display_name(&model.provider)))
+        .max()
+        .unwrap_or(PROVIDER_MIN_WIDTH);
+    let source_content_width = models
+        .iter()
+        .map(|model| display_width(&get_client_display_name(&model.client)))
+        .max()
+        .unwrap_or(SOURCE_MIN_WIDTH);
+    let visible_models = &models[start..end];
+    let table_layout = models_table_layout(
+        inner.width,
+        &group_by,
+        is_narrow,
+        is_very_narrow,
+        model_content_width,
+        provider_content_width,
+        source_content_width,
+    );
+
+    let rows: Vec<Row> = visible_models
         .iter()
         .enumerate()
         .map(|(i, model)| {
@@ -146,12 +396,14 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
-                    Cell::from(truncate(&display_name, 15)).style(Style::default().fg(model_color)),
+                    Cell::from(truncate(&display_name, table_layout.model_width))
+                        .style(Style::default().fg(model_color)),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else if is_narrow {
                 vec![
-                    Cell::from(truncate(&display_name, 25)).style(Style::default().fg(model_color)),
+                    Cell::from(truncate(&display_name, table_layout.model_width))
+                        .style(Style::default().fg(model_color)),
                     Cell::from(format_tokens(model.tokens.total())),
                     Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
                 ]
@@ -163,7 +415,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                             .fg(theme_accent)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(truncate(&model.model, 24)).style(
+                    Cell::from(truncate(&model.model, table_layout.model_width)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -185,7 +437,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(&model.model, 30)).style(
+                    Cell::from(truncate(&model.model, table_layout.model_width)).style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
@@ -224,43 +476,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(70), Constraint::Percentage(30)]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ]
-    } else if group_by == GroupBy::WorkspaceModel {
-        vec![
-            Constraint::Length(3),
-            Constraint::Length(18),
-            Constraint::Min(20),
-            Constraint::Length(16),
-            Constraint::Length(14),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Min(20),
-            Constraint::Length(18),
-            Constraint::Length(14),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
-    };
+    let widths = table_layout.widths;
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -286,17 +502,163 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
+fn truncate(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
         return String::new();
     }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars <= 3 {
-        s.chars().take(max_chars).collect()
-    } else {
-        let head: String = s.chars().take(max_chars - 3).collect();
-        format!("{}...", head)
+
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_width = ellipsis.width();
+    if max_width <= ellipsis_width {
+        return s
+            .chars()
+            .scan(0usize, |width, ch| {
+                let next_width = *width + char_display_width(ch);
+                if next_width > max_width {
+                    None
+                } else {
+                    *width = next_width;
+                    Some(ch)
+                }
+            })
+            .collect();
+    }
+
+    let head_width = max_width - ellipsis_width;
+    let head: String = s
+        .chars()
+        .scan(0usize, |width, ch| {
+            let next_width = *width + char_display_width(ch);
+            if next_width > head_width {
+                None
+            } else {
+                *width = next_width;
+                Some(ch)
+            }
+        })
+        .collect();
+    format!("{}{}", head, ellipsis)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn length_at(widths: &[Constraint], index: usize) -> u16 {
+        match widths[index] {
+            Constraint::Length(width) => width,
+            other => panic!("expected Length at index {index}, got {other:?}"),
+        }
+    }
+
+    fn model_layout(table_width: u16, model: u16, provider: u16, source: u16) -> ModelsTableLayout {
+        models_table_layout(
+            table_width,
+            &GroupBy::Model,
+            false,
+            false,
+            model,
+            provider,
+            source,
+        )
+    }
+
+    fn workspace_model_layout(
+        table_width: u16,
+        model: u16,
+        provider: u16,
+        source: u16,
+    ) -> ModelsTableLayout {
+        models_table_layout(
+            table_width,
+            &GroupBy::WorkspaceModel,
+            false,
+            false,
+            model,
+            provider,
+            source,
+        )
+    }
+
+    #[test]
+    fn wide_model_layout_shares_extra_width_with_provider_and_source() {
+        let base = model_layout(140, 28, 42, 34);
+        let wide = model_layout(180, 28, 42, 34);
+
+        assert_eq!(length_at(&wide.widths, 1) as usize, wide.model_width);
+        assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
+        assert!(length_at(&wide.widths, 2) > length_at(&base.widths, 2));
+        assert!(length_at(&wide.widths, 3) > length_at(&base.widths, 3));
+        assert_eq!(length_at(&wide.widths, 3), 34);
+    }
+
+    #[test]
+    fn wide_workspace_model_layout_shares_extra_width_with_provider_and_source() {
+        let base = workspace_model_layout(160, 28, 42, 34);
+        let wide = workspace_model_layout(200, 28, 42, 34);
+
+        assert_eq!(length_at(&wide.widths, 2) as usize, wide.model_width);
+        assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
+        assert!(length_at(&wide.widths, 3) > length_at(&base.widths, 3));
+        assert!(length_at(&wide.widths, 4) > length_at(&base.widths, 4));
+        assert_eq!(length_at(&wide.widths, 4), 34);
+    }
+
+    #[test]
+    fn display_width_uses_terminal_columns_for_unicode() {
+        assert_eq!(display_width("模型"), 4);
+        assert_eq!(display_width("e\u{301}"), 1);
+    }
+
+    #[test]
+    fn truncate_uses_terminal_columns_for_unicode() {
+        assert_eq!(truncate("模型abc", 5), "模...");
+        assert_eq!(truncate("模型abc", 7), "模型abc");
+    }
+
+    #[test]
+    fn full_model_list_controls_layout_width_not_visible_page() {
+        let visible_only = model_layout(180, 28, 28, 26);
+        let full_dataset = model_layout(180, 28, 56, 26);
+
+        assert_eq!(
+            length_at(&visible_only.widths, 3),
+            length_at(&full_dataset.widths, 3)
+        );
+        assert!(length_at(&full_dataset.widths, 2) > length_at(&visible_only.widths, 2));
+    }
+
+    #[test]
+    fn model_column_stays_capped_on_very_wide_tables() {
+        let layout = model_layout(260, 80, 120, 120);
+
+        assert_eq!(length_at(&layout.widths, 1), MODEL_MAX_WIDTH);
+        assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
+        assert_eq!(length_at(&layout.widths, 2), PROVIDER_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 3), SOURCE_MAX_WIDTH);
+    }
+
+    #[test]
+    fn source_column_stops_growing_after_visible_content_fits() {
+        let fit = model_layout(180, 28, 56, 26);
+        let wider = model_layout(220, 28, 56, 26);
+
+        assert_eq!(length_at(&fit.widths, 3), 26);
+        assert_eq!(length_at(&wider.widths, 3), 26);
+        assert!(length_at(&wider.widths, 2) > length_at(&fit.widths, 2));
+    }
+
+    #[test]
+    fn leftover_width_is_not_forced_into_text_columns_after_content_fits() {
+        let fit = model_layout(180, 28, 32, 26);
+        let wider = model_layout(260, 28, 32, 26);
+
+        assert_eq!(length_at(&wider.widths, 1), length_at(&fit.widths, 1));
+        assert_eq!(length_at(&wider.widths, 2), length_at(&fit.widths, 2));
+        assert_eq!(length_at(&wider.widths, 3), length_at(&fit.widths, 3));
     }
 }
