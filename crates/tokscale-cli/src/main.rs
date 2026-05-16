@@ -5,7 +5,7 @@ mod cursor;
 mod paths;
 mod tui;
 
-use crate::tui::client_ui;
+use crate::tui::{client_ui, get_client_display_name, get_provider_display_name};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, IsTerminal, Write};
@@ -1574,16 +1574,13 @@ fn run_models_report(
 
                     for entry in &report.entries {
                         let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
-                        let capitalized_clients = clients_str
-                            .split(", ")
-                            .map(capitalize_client)
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                        let display_clients = get_client_display_name(clients_str);
                         let total_tokens =
                             entry.input + entry.output + entry.cache_read + entry.cache_write;
                         table.add_row(vec![
-                            Cell::new(capitalized_clients),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(display_clients),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
@@ -1635,8 +1632,9 @@ fn run_models_report(
                         let total_tokens =
                             entry.input + entry.output + entry.cache_read + entry.cache_write;
                         table.add_row(vec![
-                            Cell::new(capitalize_client(&entry.client)),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(get_client_display_name(&entry.client)),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
@@ -1721,14 +1719,11 @@ fn run_models_report(
                             entry.input + entry.output + entry.cache_write + entry.cache_read;
 
                         let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
-                        let capitalized_clients = clients_str
-                            .split(", ")
-                            .map(capitalize_client)
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                        let display_clients = get_client_display_name(clients_str);
                         table.add_row(vec![
-                            Cell::new(capitalized_clients),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(display_clients),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
@@ -1800,8 +1795,9 @@ fn run_models_report(
                             entry.input + entry.output + entry.cache_write + entry.cache_read;
 
                         table.add_row(vec![
-                            Cell::new(capitalize_client(&entry.client)),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(get_client_display_name(&entry.client)),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(&entry.model),
                             Cell::new(format_model_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
@@ -1873,16 +1869,13 @@ fn run_models_report(
                         let total =
                             entry.input + entry.output + entry.cache_write + entry.cache_read;
                         let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
-                        let capitalized_clients = clients_str
-                            .split(", ")
-                            .map(capitalize_client)
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                        let display_clients = get_client_display_name(clients_str);
 
                         table.add_row(vec![
                             Cell::new(workspace_name(entry.workspace_label.as_deref())),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
-                            Cell::new(capitalized_clients),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
+                            Cell::new(display_clients),
                             Cell::new(&entry.model),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
@@ -2400,8 +2393,11 @@ fn run_hourly_report(
 
             for entry in &report.entries {
                 let clients_col = {
-                    let mut c: Vec<String> =
-                        entry.clients.iter().map(|s| capitalize_client(s)).collect();
+                    let mut c: Vec<String> = entry
+                        .clients
+                        .iter()
+                        .map(|s| get_client_display_name(s))
+                        .collect();
                     c.sort();
                     c.join(", ")
                 };
@@ -2446,8 +2442,11 @@ fn run_hourly_report(
 
             for entry in &report.entries {
                 let clients_col = {
-                    let mut c: Vec<String> =
-                        entry.clients.iter().map(|s| capitalize_client(s)).collect();
+                    let mut c: Vec<String> = entry
+                        .clients
+                        .iter()
+                        .map(|s| get_client_display_name(s))
+                        .collect();
                     c.sort();
                     c.join(", ")
                 };
@@ -2818,25 +2817,6 @@ fn format_model_name(model: &str) -> String {
         }
     }
     name.to_string()
-}
-
-fn capitalize_client(client: &str) -> String {
-    match client {
-        "opencode" => "OpenCode".to_string(),
-        "claude" => "Claude".to_string(),
-        "codex" => "Codex".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "amp" => "Amp".to_string(),
-        "codebuff" => "Codebuff".to_string(),
-        "droid" => "Droid".to_string(),
-        "crush" => "Crush".to_string(),
-        "openclaw" => "openclaw".to_string(),
-        "hermes" => "Hermes Agent".to_string(),
-        "goose" => "Goose".to_string(),
-        "pi" => "Pi".to_string(),
-        other => other.to_string(),
-    }
 }
 
 fn run_clients_command(json: bool) -> Result<()> {
@@ -5356,71 +5336,6 @@ mod tests {
     fn test_format_currency_rounds() {
         assert_eq!(format_currency(12.345), "$12.35");
         assert_eq!(format_currency(12.344), "$12.34");
-    }
-
-    #[test]
-    fn test_capitalize_client_opencode() {
-        assert_eq!(capitalize_client("opencode"), "OpenCode");
-    }
-
-    #[test]
-    fn test_capitalize_client_claude() {
-        assert_eq!(capitalize_client("claude"), "Claude");
-    }
-
-    #[test]
-    fn test_capitalize_client_codex() {
-        assert_eq!(capitalize_client("codex"), "Codex");
-    }
-
-    #[test]
-    fn test_capitalize_client_cursor() {
-        assert_eq!(capitalize_client("cursor"), "Cursor");
-    }
-
-    #[test]
-    fn test_capitalize_client_gemini() {
-        assert_eq!(capitalize_client("gemini"), "Gemini");
-    }
-
-    #[test]
-    fn test_capitalize_client_amp() {
-        assert_eq!(capitalize_client("amp"), "Amp");
-    }
-
-    #[test]
-    fn test_capitalize_client_droid() {
-        assert_eq!(capitalize_client("droid"), "Droid");
-    }
-
-    #[test]
-    fn test_capitalize_client_crush() {
-        assert_eq!(capitalize_client("crush"), "Crush");
-    }
-
-    #[test]
-    fn test_capitalize_client_openclaw() {
-        assert_eq!(capitalize_client("openclaw"), "openclaw");
-    }
-
-    #[test]
-    fn test_capitalize_client_hermes() {
-        assert_eq!(capitalize_client("hermes"), "Hermes Agent");
-    }
-
-    #[test]
-    fn test_capitalize_client_codebuff() {
-        assert_eq!(capitalize_client("codebuff"), "Codebuff");
-    }
-
-    #[test]
-    fn test_capitalize_client_pi() {
-        assert_eq!(capitalize_client("pi"), "Pi");
-    }
-
-    #[test]
-    fn test_capitalize_client_unknown() {
-        assert_eq!(capitalize_client("unknown"), "unknown");
     }
 
     #[test]
