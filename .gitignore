@@ -29,3 +29,9 @@ ai-todolist.md
 *.tgz
 .sisyphus
 crates/tokscale-cli/tokscale-export-*.json
+
+# Beads / Dolt files (added by bd init)
+.beads/
+.dolt/
+*.db
+.beads-credential-key
