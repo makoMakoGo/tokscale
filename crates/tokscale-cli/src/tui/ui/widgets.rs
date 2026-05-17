@@ -280,6 +280,13 @@ fn get_single_provider_display_name(provider: &str) -> String {
         "google" => "Google".to_string(),
         "cursor" => "Cursor".to_string(),
         "deepseek" => "DeepSeek".to_string(),
+        s if s.starts_with("zai") || s.starts_with("zhipu") => "Z.AI".to_string(),
+        s if s.starts_with("xiaomi") => "XiaoMi".to_string(),
+        s if s.starts_with("minimax") => "MiniMax".to_string(),
+        s if s == "kimi-code" || s == "kimi-for-coding" => "Kimi".to_string(),
+        s if s.starts_with("doubao") => "Doubao".to_string(),
+        s if s.starts_with("alibaba") => "Alibaba".to_string(),
+        s if s.starts_with("tencent") || s.starts_with("tecent") => "Tencent".to_string(),
         "xai" => "xAI".to_string(),
         "meta" => "Meta".to_string(),
         "mistral" => "Mistral".to_string(),
@@ -363,6 +370,31 @@ mod tests {
             get_provider_display_name("openai, openai-codex, amazon-bedrock"),
             "OpenAI, openai-codex, amazon-bedrock"
         );
+    }
+
+    #[test]
+    fn provider_display_formats_coding_plan_aliases() {
+        let cases = [
+            ("zai", "Z.AI"),
+            ("zai-coding-plan", "Z.AI"),
+            ("zai-coding-pln", "Z.AI"),
+            ("zhipuai-coding-plan", "Z.AI"),
+            ("zhipu", "Z.AI"),
+            ("xiaomi-token-plan-cn", "XiaoMi"),
+            ("xiaomi-token-plan-sgp", "XiaoMi"),
+            ("minimax-code-cn", "MiniMax"),
+            ("minimax-cn-coding-plan", "MiniMax"),
+            ("kimi-code", "Kimi"),
+            ("kimi-for-coding", "Kimi"),
+            ("doubao-coding-plan", "Doubao"),
+            ("alibaba-coding-plan-cn", "Alibaba"),
+            ("tencent-coding-plan", "Tencent"),
+            ("tecent-coding-plan", "Tencent"),
+        ];
+
+        for (provider, expected) in cases {
+            assert_eq!(get_provider_display_name(provider), expected);
+        }
     }
 
     #[test]
