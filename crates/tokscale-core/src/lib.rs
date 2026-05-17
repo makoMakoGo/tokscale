@@ -64,6 +64,7 @@ const GROUPING_NOISE_SUFFIXES: &[&str] = &[
 ];
 
 const CLAUDE_GROUPING_NOISE_SUFFIXES: &[&str] = &[
+    "-sub2api-pro",
     "-thinking",
     "-minimal",
     "-low",
@@ -245,7 +246,7 @@ fn strip_grouping_noise_tail(mut tail: &str) -> &str {
 }
 
 fn normalize_claude_model_for_grouping(name: &str) -> Option<String> {
-    let stripped_name = strip_claude_grouping_noise_tail(name);
+    let stripped_name = normalize_claude_grouping_tail(name);
     let rest = stripped_name.strip_prefix("claude-")?;
     let (family, version) = rest.split_once('-')?;
     if !matches!(family, "opus" | "sonnet" | "haiku") {
@@ -272,6 +273,22 @@ fn normalize_claude_model_for_grouping(name: &str) -> Option<String> {
     }
 
     Some(format!("claude-{family}-{major}.{minor}"))
+}
+
+fn normalize_claude_grouping_tail(mut name: &str) -> &str {
+    loop {
+        let previous = name;
+        name = strip_trailing_free_marker(name);
+        if let Some(base_model) = strip_parenthesized_reasoning_tier(name) {
+            name = base_model;
+        }
+        name = strip_trailing_date_suffix(name);
+        name = strip_claude_grouping_noise_tail(name);
+
+        if name == previous {
+            return name;
+        }
+    }
 }
 
 fn strip_claude_grouping_noise_tail(mut tail: &str) -> &str {
@@ -2695,6 +2712,18 @@ mod tests {
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-thinking-high"),
             "claude-opus-4.5"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("claude-opus-4-5-sub2api-pro"),
+            "claude-opus-4.5"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("claude-opus-4-5-20251101-sub2api-pro"),
+            "claude-opus-4.5"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("claude-sonnet-4-5-20250929-thinking"),
+            "claude-sonnet-4"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-high"),
