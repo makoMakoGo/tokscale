@@ -99,7 +99,7 @@ fn column_width(
         ModelsColumn::Source => source_width,
         ModelsColumn::Provider => provider_width,
         ModelsColumn::Input | ModelsColumn::Output => DETAIL_NUMERIC_WIDTH,
-        ModelsColumn::CacheRate => 8,
+        ModelsColumn::CacheRate => DETAIL_NUMERIC_WIDTH,
         ModelsColumn::CacheRead | ModelsColumn::CacheWrite => DETAIL_NUMERIC_WIDTH,
     }
 }
@@ -142,8 +142,6 @@ fn density_for_columns(columns: &[ModelsColumn]) -> ModelsTableDensity {
 
 fn models_table_layout(
     table_width: u16,
-    _group_by: &GroupBy,
-    _is_narrow: bool,
     is_very_narrow: bool,
     model_content_width: u16,
     provider_content_width: u16,
@@ -288,7 +286,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = inner.height.saturating_sub(1) as usize;
     app.set_max_visible_items(visible_height);
 
-    let is_narrow = app.is_narrow();
     let is_very_narrow = app.is_very_narrow();
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
@@ -347,8 +344,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_models = &models[start..end];
     let table_layout = models_table_layout(
         inner.width,
-        &group_by,
-        is_narrow,
         is_very_narrow,
         model_content_width,
         provider_content_width,
@@ -515,15 +510,7 @@ mod tests {
     }
 
     fn model_layout(table_width: u16, model: u16, provider: u16, source: u16) -> ModelsTableLayout {
-        models_table_layout(
-            table_width,
-            &GroupBy::Model,
-            false,
-            false,
-            model,
-            provider,
-            source,
-        )
+        models_table_layout(table_width, false, model, provider, source)
     }
 
     fn workspace_model_layout(
@@ -532,15 +519,7 @@ mod tests {
         provider: u16,
         source: u16,
     ) -> ModelsTableLayout {
-        models_table_layout(
-            table_width,
-            &GroupBy::WorkspaceModel,
-            false,
-            false,
-            model,
-            provider,
-            source,
-        )
+        models_table_layout(table_width, false, model, provider, source)
     }
 
     #[test]
@@ -568,7 +547,7 @@ mod tests {
 
     #[test]
     fn narrow_model_layout_keeps_model_tokens_and_cost() {
-        let layout = models_table_layout(74, &GroupBy::Model, true, false, 80, 56, 40);
+        let layout = models_table_layout(74, false, 80, 56, 40);
 
         assert_eq!(
             layout.columns,
@@ -584,7 +563,7 @@ mod tests {
 
     #[test]
     fn very_narrow_model_layout_still_keeps_tokens_before_cache_details() {
-        let layout = models_table_layout(54, &GroupBy::Model, true, true, 80, 56, 40);
+        let layout = models_table_layout(54, true, 80, 56, 40);
 
         assert_eq!(layout.density, ModelsTableDensity::VeryCompact);
         assert_eq!(
