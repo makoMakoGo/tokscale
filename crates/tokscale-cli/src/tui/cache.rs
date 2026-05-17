@@ -21,7 +21,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 7;
+const CACHE_SCHEMA_VERSION: u32 = 8;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -1224,7 +1224,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
@@ -1254,10 +1254,10 @@ mod tests {
           },
           "cost": 1.25,
           "models": [[
-            "claude-sonnet-4-5",
+            "claude-sonnet-4",
             {
               "provider": "anthropic",
-              "displayName": "claude-sonnet-4-5",
+              "displayName": "claude-sonnet-4",
               "colorKey": "claude-sonnet-4-5",
               "tokens": {
                 "input": 10,
@@ -1282,10 +1282,10 @@ mod tests {
           },
           "cost": 2.0,
           "models": [[
-            "claude-sonnet-4-5",
+            "claude-sonnet-4",
             {
               "provider": "anthropic",
-              "displayName": "claude-sonnet-4-5",
+              "displayName": "claude-sonnet-4",
               "colorKey": "claude-sonnet-4-5",
               "tokens": {
                 "input": 20,
@@ -1315,7 +1315,7 @@ mod tests {
             CacheResult::Fresh(data) => {
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
                 let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
-                let model = cursor.models.get("claude-sonnet-4-5").unwrap();
+                let model = cursor.models.get("claude-sonnet-4").unwrap();
                 assert_eq!(model.provider, "anthropic");
                 assert_eq!(model.tokens.total(), 30);
             }
@@ -1506,7 +1506,7 @@ mod tests {
         fs::write(
             &legacy_path,
             r#"{
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,

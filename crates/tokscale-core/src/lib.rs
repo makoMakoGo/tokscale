@@ -59,7 +59,26 @@ const GROUPING_NOISE_SUFFIXES: &[&str] = &[
     "-auto",
     "-none",
     "-fast",
+    "-free",
     "-0",
+];
+
+const CLAUDE_GROUPING_NOISE_SUFFIXES: &[&str] = &[
+    "-thinking",
+    "-minimal",
+    "-low",
+    "-medium",
+    "-high",
+    "-xhigh",
+    "-auto",
+    "-none",
+    "-fast",
+    "-free",
+    "-0",
+];
+
+const FREE_MARKER_TRAILING_SUFFIXES: &[&str] = &[
+    "-minimal", "-low", "-medium", "-high", "-xhigh", "-auto", "-none", "-fast", "-0",
 ];
 
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
@@ -70,18 +89,22 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
         name = strip_custom_model_prefix(segment);
     }
 
+    name = strip_trailing_free_marker(name);
+
     if let Some(base_model) = strip_parenthesized_reasoning_tier(name) {
         name = base_model;
     }
 
+    name = strip_trailing_free_marker(name);
     name = strip_trailing_date_suffix(name);
+    name = strip_trailing_free_marker(name);
 
     if let Some(normalized) = normalize_gpt_model_for_grouping(name) {
         return normalized;
     }
 
-    if name.contains("claude") {
-        return normalize_claude_version_dots(name);
+    if let Some(normalized) = normalize_claude_model_for_grouping(name) {
+        return normalized;
     }
 
     name.to_string()
@@ -111,6 +134,55 @@ fn strip_trailing_date_suffix(name: &str) -> &str {
     }
 
     name
+}
+
+fn strip_trailing_free_marker(mut name: &str) -> &str {
+    loop {
+        let trimmed = name.trim_end();
+        if trimmed.len() != name.len() {
+            name = trimmed;
+            continue;
+        }
+
+        if let Some(value) = strip_direct_free_marker(name) {
+            if !value.is_empty() {
+                name = value.trim_end();
+                continue;
+            }
+        }
+
+        let mut probe = name;
+        let mut exposed_free = None;
+        while let Some(stripped_probe) = strip_suffix_once(probe, FREE_MARKER_TRAILING_SUFFIXES) {
+            probe = stripped_probe.trim_end();
+            if let Some(value) = strip_direct_free_marker(probe) {
+                exposed_free = Some(value.trim_end());
+                break;
+            }
+        }
+
+        match exposed_free {
+            Some(value) if !value.is_empty() => name = value,
+            _ => return name,
+        }
+    }
+}
+
+fn strip_direct_free_marker(name: &str) -> Option<&str> {
+    name.strip_suffix("-free")
+        .or_else(|| name.strip_suffix(":free"))
+        .or_else(|| name.strip_suffix(" (free)"))
+        .or_else(|| name.strip_suffix("(free)"))
+}
+
+fn strip_suffix_once<'a>(value: &'a str, suffixes: &[&str]) -> Option<&'a str> {
+    for suffix in suffixes {
+        if let Some(stripped) = value.strip_suffix(suffix) {
+            return Some(stripped);
+        }
+    }
+
+    None
 }
 
 fn normalize_gpt_model_for_grouping(name: &str) -> Option<String> {
@@ -148,12 +220,9 @@ fn split_leading_ascii_digits(value: &str) -> Option<(&str, &str)> {
 fn strip_grouping_noise_tail(mut tail: &str) -> &str {
     loop {
         let mut changed = false;
-        for suffix in GROUPING_NOISE_SUFFIXES {
-            if let Some(stripped) = tail.strip_suffix(suffix) {
-                tail = stripped;
-                changed = true;
-                break;
-            }
+        if let Some(stripped) = strip_suffix_once(tail, GROUPING_NOISE_SUFFIXES) {
+            tail = stripped;
+            changed = true;
         }
 
         if !changed {
@@ -162,22 +231,46 @@ fn strip_grouping_noise_tail(mut tail: &str) -> &str {
     }
 }
 
-fn normalize_claude_version_dots(name: &str) -> String {
-    let mut result = String::with_capacity(name.len());
-    let mut chars = name.chars().peekable();
-    let mut prev_was_digit = false;
-
-    while let Some(ch) = chars.next() {
-        if ch == '.' && prev_was_digit && chars.peek().is_some_and(|next| next.is_ascii_digit()) {
-            result.push('-');
-            prev_was_digit = false;
-        } else {
-            result.push(ch);
-            prev_was_digit = ch.is_ascii_digit();
-        }
+fn normalize_claude_model_for_grouping(name: &str) -> Option<String> {
+    let stripped_name = strip_claude_grouping_noise_tail(name);
+    let rest = stripped_name.strip_prefix("claude-")?;
+    let (family, version) = rest.split_once('-')?;
+    if !matches!(family, "opus" | "sonnet" | "haiku") {
+        return None;
     }
 
-    result
+    let (major, after_major) = split_leading_ascii_digits(version)?;
+    if after_major.is_empty() {
+        return Some(format!("claude-{family}-{major}"));
+    }
+
+    let after_separator = after_major
+        .strip_prefix('.')
+        .or_else(|| after_major.strip_prefix('-'))?;
+    let (minor, tail) = split_leading_ascii_digits(after_separator)?;
+    if !tail.is_empty() {
+        return None;
+    }
+
+    if major == "4" && matches!(family, "sonnet" | "haiku") {
+        return Some(format!("claude-{family}-4"));
+    }
+
+    Some(format!("claude-{family}-{major}.{minor}"))
+}
+
+fn strip_claude_grouping_noise_tail(mut tail: &str) -> &str {
+    loop {
+        let mut changed = false;
+        if let Some(stripped) = strip_suffix_once(tail, CLAUDE_GROUPING_NOISE_SUFFIXES) {
+            tail = stripped;
+            changed = true;
+        }
+
+        if !changed {
+            return tail;
+        }
+    }
 }
 
 fn retain_for_requested_clients(
@@ -2521,11 +2614,11 @@ mod tests {
     fn test_normalize_model_for_grouping() {
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-20251101"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-20250929"),
-            "claude-sonnet-4-5"
+            "claude-sonnet-4"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-20250514"),
@@ -2534,15 +2627,27 @@ mod tests {
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.5"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4.5"),
-            "claude-sonnet-4-5"
+            "claude-sonnet-4"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.6"),
-            "claude-opus-4-6"
+            "claude-opus-4.6"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("claude-opus-4-6"),
+            "claude-opus-4.6"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("claude-opus-4-7"),
+            "claude-opus-4.7"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("claude-sonnet-4-6"),
+            "claude-sonnet-4"
         );
 
         assert_eq!(normalize_model_for_grouping("gpt-5.2"), "gpt-5.2");
@@ -2557,7 +2662,7 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4.5(high)"),
-            "claude-sonnet-4-5"
+            "claude-sonnet-4"
         );
         assert_eq!(
             normalize_model_for_grouping("gemini-3-pro(auto)"),
@@ -2570,15 +2675,15 @@ mod tests {
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-high"),
-            "claude-opus-4-5-high"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-thinking-high"),
-            "claude-opus-4-5-thinking-high"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-high"),
-            "claude-sonnet-4-5-high"
+            "claude-sonnet-4"
         );
 
         assert_eq!(
@@ -2595,8 +2700,32 @@ mod tests {
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.5-20251101"),
-            "claude-opus-4-5"
+            "claude-opus-4.5"
         );
+
+        assert_eq!(normalize_model_for_grouping("glm-4.7-free"), "glm-4.7");
+        assert_eq!(normalize_model_for_grouping("glm-4.7 (free)"), "glm-4.7");
+        assert_eq!(normalize_model_for_grouping("glm-4.7:free"), "glm-4.7");
+        assert_eq!(normalize_model_for_grouping("glm-4.7-free-high"), "glm-4.7");
+        assert_eq!(normalize_model_for_grouping("glm-4.7:free-fast"), "glm-4.7");
+        assert_eq!(
+            normalize_model_for_grouping("glm-4.7 (free)-medium"),
+            "glm-4.7"
+        );
+        assert_eq!(normalize_model_for_grouping("glm-5.1"), "glm-5.1");
+        assert_eq!(
+            normalize_model_for_grouping("gemini-2.5-pro-free"),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gemini-2.5-pro-free-xhigh"),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("deepseek-v4 (free)"),
+            "deepseek-v4"
+        );
+        assert_eq!(normalize_model_for_grouping("kimi-k2.5:free"), "kimi-k2.5");
 
         assert_eq!(
             normalize_model_for_grouping("custom:gpt-5.5-xhigh-sub2api-pro"),
@@ -2731,7 +2860,7 @@ mod tests {
         );
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].model, "claude-sonnet-4-5");
+        assert_eq!(entries[0].model, "claude-sonnet-4");
         assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
         assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
         assert_eq!(entries[0].cost, 4.0);
