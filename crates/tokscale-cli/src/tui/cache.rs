@@ -1258,7 +1258,7 @@ mod tests {
             {
               "provider": "anthropic",
               "displayName": "claude-sonnet-4",
-              "colorKey": "claude-sonnet-4-5",
+              "colorKey": "claude-sonnet-4",
               "tokens": {
                 "input": 10,
                 "output": 5,
@@ -1286,7 +1286,7 @@ mod tests {
             {
               "provider": "anthropic",
               "displayName": "claude-sonnet-4",
-              "colorKey": "claude-sonnet-4-5",
+              "colorKey": "claude-sonnet-4",
               "tokens": {
                 "input": 20,
                 "output": 10,

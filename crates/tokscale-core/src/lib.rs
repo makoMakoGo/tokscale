@@ -78,7 +78,17 @@ const CLAUDE_GROUPING_NOISE_SUFFIXES: &[&str] = &[
 ];
 
 const FREE_MARKER_TRAILING_SUFFIXES: &[&str] = &[
-    "-minimal", "-low", "-medium", "-high", "-xhigh", "-auto", "-none", "-fast", "-0",
+    "-thinking",
+    "-sub2api-pro",
+    "-minimal",
+    "-low",
+    "-medium",
+    "-high",
+    "-xhigh",
+    "-auto",
+    "-none",
+    "-fast",
+    "-0",
 ];
 
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
@@ -2707,6 +2717,10 @@ mod tests {
         assert_eq!(normalize_model_for_grouping("glm-4.7 (free)"), "glm-4.7");
         assert_eq!(normalize_model_for_grouping("glm-4.7:free"), "glm-4.7");
         assert_eq!(normalize_model_for_grouping("glm-4.7-free-high"), "glm-4.7");
+        assert_eq!(
+            normalize_model_for_grouping("glm-4.7-free-sub2api-pro"),
+            "glm-4.7"
+        );
         assert_eq!(normalize_model_for_grouping("glm-4.7:free-fast"), "glm-4.7");
         assert_eq!(
             normalize_model_for_grouping("glm-4.7 (free)-medium"),
@@ -2720,6 +2734,10 @@ mod tests {
         assert_eq!(
             normalize_model_for_grouping("gemini-2.5-pro-free-xhigh"),
             "gemini-2.5-pro"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("claude-sonnet-4-free-thinking"),
+            "claude-sonnet-4"
         );
         assert_eq!(
             normalize_model_for_grouping("deepseek-v4 (free)"),
