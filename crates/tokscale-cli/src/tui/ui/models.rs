@@ -27,25 +27,17 @@ fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) 
 }
 
 const TABLE_COLUMN_SPACING: u16 = 1;
-const WIDE_MODEL_COLUMNS: u16 = 11;
 
 const MODEL_MIN_WIDTH: u16 = 20;
-const MODEL_MAX_WIDTH: u16 = 32;
-const MODEL_COMPACT_MAX_WIDTH: u16 = 48;
-const PROVIDER_MIN_WIDTH: u16 = 18;
+const MODEL_MAX_WIDTH: u16 = 40;
 const PROVIDER_MAX_WIDTH: u16 = 56;
-const SOURCE_MIN_WIDTH: u16 = 18;
 const SOURCE_MAX_WIDTH: u16 = 40;
 
-const RANK_WIDTH: u16 = 3;
-const WORKSPACE_WIDTH: u16 = 18;
 const DETAIL_PROVIDER_WIDTH: u16 = 8;
 const DETAIL_SOURCE_WIDTH: u16 = 12;
 const DETAIL_NUMERIC_WIDTH: u16 = 8;
 const DETAIL_TOTAL_WIDTH: u16 = 9;
 const DETAIL_COST_WIDTH: u16 = 9;
-const CORE_TOTAL_WIDTH: u16 = 10;
-const CORE_COST_WIDTH: u16 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelsTableDensity {
@@ -57,32 +49,16 @@ enum ModelsTableDensity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelsColumn {
-    Rank,
-    Workspace,
     Model,
-    Provider,
     Source,
+    Provider,
     Input,
     Output,
+    CacheRate,
     CacheRead,
     CacheWrite,
-    CacheRate,
     Total,
     Cost,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TextColumnSpec {
-    min: u16,
-    ideal: u16,
-    weight: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TextColumnWidths {
-    model: u16,
-    provider: u16,
-    source: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,13 +67,6 @@ struct ModelsTableLayout {
     widths: Vec<Constraint>,
     model_width: usize,
     density: ModelsTableDensity,
-}
-
-fn available_text_width(table_width: u16, fixed_width: u16, column_count: u16) -> u16 {
-    let spacing = TABLE_COLUMN_SPACING.saturating_mul(column_count.saturating_sub(1));
-    table_width
-        .saturating_sub(fixed_width)
-        .saturating_sub(spacing)
 }
 
 fn display_width(s: &str) -> u16 {
@@ -112,312 +81,162 @@ fn clamped_content_width(content_width: u16, min: u16, max: u16) -> u16 {
     content_width.clamp(min, max)
 }
 
-fn distribute_remaining_width(widths: &mut [u16], specs: &[TextColumnSpec], mut remaining: u16) {
-    while remaining > 0 {
-        let mut advanced = false;
-
-        for (index, spec) in specs.iter().enumerate() {
-            if widths[index] >= spec.ideal {
-                continue;
-            }
-
-            let grow_by = remaining
-                .min(spec.weight)
-                .min(spec.ideal.saturating_sub(widths[index]));
-            if grow_by == 0 {
-                continue;
-            }
-
-            widths[index] += grow_by;
-            remaining -= grow_by;
-            advanced = true;
-
-            if remaining == 0 {
-                return;
-            }
-        }
-
-        if !advanced {
-            return;
-        }
-    }
-}
-
-fn allocate_text_column_widths(budget: u16, specs: [TextColumnSpec; 3]) -> TextColumnWidths {
-    let min_total = specs.iter().map(|spec| spec.min).sum::<u16>();
-
-    if budget < min_total {
-        let budget = u32::from(budget);
-        let min_total = u32::from(min_total);
-        let model = (budget * u32::from(specs[0].min) / min_total) as u16;
-        let provider = (budget * u32::from(specs[1].min) / min_total) as u16;
-        let source = (budget as u16)
-            .saturating_sub(model)
-            .saturating_sub(provider);
-
-        return TextColumnWidths {
-            model,
-            provider,
-            source,
-        };
-    }
-
-    let mut widths = [specs[0].min, specs[1].min, specs[2].min];
-    distribute_remaining_width(&mut widths, &specs, budget - min_total);
-
-    TextColumnWidths {
-        model: widths[0],
-        provider: widths[1],
-        source: widths[2],
-    }
-}
-
 fn spaced_width(widths: &[u16]) -> u16 {
     let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
     widths.iter().copied().sum::<u16>().saturating_add(spacing)
 }
 
-fn text_column_specs(
-    model_content_width: u16,
-    provider_content_width: u16,
-    source_content_width: u16,
-) -> [TextColumnSpec; 3] {
-    [
-        TextColumnSpec {
-            min: MODEL_MIN_WIDTH,
-            ideal: clamped_content_width(model_content_width, MODEL_MIN_WIDTH, MODEL_MAX_WIDTH),
-            weight: 1,
-        },
-        TextColumnSpec {
-            min: PROVIDER_MIN_WIDTH,
-            ideal: clamped_content_width(
-                provider_content_width,
-                PROVIDER_MIN_WIDTH,
-                PROVIDER_MAX_WIDTH,
-            ),
-            weight: 1,
-        },
-        TextColumnSpec {
-            min: SOURCE_MIN_WIDTH,
-            ideal: clamped_content_width(source_content_width, SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH),
-            weight: 2,
-        },
-    ]
+fn column_width(
+    column: ModelsColumn,
+    model_width: u16,
+    provider_width: u16,
+    source_width: u16,
+) -> u16 {
+    match column {
+        ModelsColumn::Model => model_width,
+        ModelsColumn::Total => DETAIL_TOTAL_WIDTH,
+        ModelsColumn::Cost => DETAIL_COST_WIDTH,
+        ModelsColumn::Source => source_width,
+        ModelsColumn::Provider => provider_width,
+        ModelsColumn::Input | ModelsColumn::Output => DETAIL_NUMERIC_WIDTH,
+        ModelsColumn::CacheRate => 8,
+        ModelsColumn::CacheRead | ModelsColumn::CacheWrite => DETAIL_NUMERIC_WIDTH,
+    }
 }
 
-fn full_model_fixed_width(group_by: &GroupBy) -> u16 {
-    if *group_by == GroupBy::WorkspaceModel {
-        RANK_WIDTH + WORKSPACE_WIDTH + 10 + 10 + 12 + 12 + 10 + 10
+fn layout_width(
+    columns: &[ModelsColumn],
+    model_width: u16,
+    provider_width: u16,
+    source_width: u16,
+) -> u16 {
+    let widths: Vec<u16> = columns
+        .iter()
+        .map(|column| column_width(*column, model_width, provider_width, source_width))
+        .collect();
+
+    spaced_width(&widths)
+}
+
+fn density_for_columns(columns: &[ModelsColumn]) -> ModelsTableDensity {
+    if columns.contains(&ModelsColumn::CacheWrite) {
+        ModelsTableDensity::Full
+    } else if columns.iter().any(|column| {
+        matches!(
+            column,
+            ModelsColumn::Source
+                | ModelsColumn::Provider
+                | ModelsColumn::Input
+                | ModelsColumn::Output
+                | ModelsColumn::CacheRate
+                | ModelsColumn::CacheRead
+        )
+    }) {
+        ModelsTableDensity::Detail
+    } else if columns.len() == 3 {
+        ModelsTableDensity::Core
     } else {
-        RANK_WIDTH + 10 + 10 + 10 + 10 + 8 + 10 + 10
-    }
-}
-
-fn can_fit_full_model_layout(table_width: u16, group_by: &GroupBy) -> bool {
-    let min_text_width = MODEL_MIN_WIDTH + PROVIDER_MIN_WIDTH + SOURCE_MIN_WIDTH;
-    available_text_width(
-        table_width,
-        full_model_fixed_width(group_by),
-        WIDE_MODEL_COLUMNS,
-    ) >= min_text_width
-}
-
-fn compact_model_width(table_width: u16, fixed_width: u16, column_count: u16) -> u16 {
-    table_width
-        .saturating_sub(fixed_width)
-        .saturating_sub(TABLE_COLUMN_SPACING.saturating_mul(column_count.saturating_sub(1)))
-        .clamp(1, MODEL_COMPACT_MAX_WIDTH)
-}
-
-fn very_compact_model_layout(table_width: u16) -> ModelsTableLayout {
-    let columns = vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost];
-    let fixed_width = CORE_TOTAL_WIDTH + CORE_COST_WIDTH;
-    let model_width = compact_model_width(table_width, fixed_width, columns.len() as u16);
-
-    ModelsTableLayout {
-        columns,
-        widths: vec![
-            Constraint::Length(model_width),
-            Constraint::Length(CORE_TOTAL_WIDTH),
-            Constraint::Length(CORE_COST_WIDTH),
-        ],
-        model_width: model_width as usize,
-        density: ModelsTableDensity::VeryCompact,
-    }
-}
-
-fn core_model_layout(table_width: u16) -> ModelsTableLayout {
-    let columns = vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost];
-    let fixed_width = CORE_TOTAL_WIDTH + CORE_COST_WIDTH;
-    let model_width = compact_model_width(table_width, fixed_width, columns.len() as u16);
-
-    ModelsTableLayout {
-        columns,
-        widths: vec![
-            Constraint::Length(model_width),
-            Constraint::Length(CORE_TOTAL_WIDTH),
-            Constraint::Length(CORE_COST_WIDTH),
-        ],
-        model_width: model_width as usize,
-        density: ModelsTableDensity::Core,
-    }
-}
-
-fn detail_model_min_width() -> u16 {
-    spaced_width(&[
-        MODEL_MIN_WIDTH,
-        DETAIL_PROVIDER_WIDTH,
-        DETAIL_SOURCE_WIDTH,
-        DETAIL_NUMERIC_WIDTH,
-        DETAIL_NUMERIC_WIDTH,
-        DETAIL_TOTAL_WIDTH,
-        DETAIL_COST_WIDTH,
-    ])
-}
-
-fn detail_model_layout(table_width: u16) -> ModelsTableLayout {
-    let columns = vec![
-        ModelsColumn::Model,
-        ModelsColumn::Provider,
-        ModelsColumn::Source,
-        ModelsColumn::Input,
-        ModelsColumn::Output,
-        ModelsColumn::Total,
-        ModelsColumn::Cost,
-    ];
-    let fixed_width = DETAIL_PROVIDER_WIDTH
-        + DETAIL_SOURCE_WIDTH
-        + DETAIL_NUMERIC_WIDTH
-        + DETAIL_NUMERIC_WIDTH
-        + DETAIL_TOTAL_WIDTH
-        + DETAIL_COST_WIDTH;
-    let model_width = compact_model_width(table_width, fixed_width, columns.len() as u16);
-
-    ModelsTableLayout {
-        columns,
-        widths: vec![
-            Constraint::Length(model_width),
-            Constraint::Length(DETAIL_PROVIDER_WIDTH),
-            Constraint::Length(DETAIL_SOURCE_WIDTH),
-            Constraint::Length(DETAIL_NUMERIC_WIDTH),
-            Constraint::Length(DETAIL_NUMERIC_WIDTH),
-            Constraint::Length(DETAIL_TOTAL_WIDTH),
-            Constraint::Length(DETAIL_COST_WIDTH),
-        ],
-        model_width: model_width as usize,
-        density: ModelsTableDensity::Detail,
+        ModelsTableDensity::VeryCompact
     }
 }
 
 fn models_table_layout(
     table_width: u16,
-    group_by: &GroupBy,
-    is_narrow: bool,
+    _group_by: &GroupBy,
+    _is_narrow: bool,
     is_very_narrow: bool,
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
 ) -> ModelsTableLayout {
+    let model_width = clamped_content_width(model_content_width, MODEL_MIN_WIDTH, MODEL_MAX_WIDTH);
+    let mut provider_width = DETAIL_PROVIDER_WIDTH;
+    let mut source_width = DETAIL_SOURCE_WIDTH;
+    let required_columns = vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost];
+    let optional_columns = [
+        ModelsColumn::Source,
+        ModelsColumn::Provider,
+        ModelsColumn::Input,
+        ModelsColumn::Output,
+        ModelsColumn::CacheRate,
+        ModelsColumn::CacheRead,
+        ModelsColumn::CacheWrite,
+    ];
+    let mut columns = required_columns;
+
     if is_very_narrow {
-        return very_compact_model_layout(table_width);
-    }
+        let widths = columns
+            .iter()
+            .map(|column| {
+                Constraint::Length(column_width(
+                    *column,
+                    model_width,
+                    provider_width,
+                    source_width,
+                ))
+            })
+            .collect();
 
-    if !is_narrow && can_fit_full_model_layout(table_width, group_by) {
-        return if *group_by == GroupBy::WorkspaceModel {
-            let text = allocate_text_column_widths(
-                available_text_width(
-                    table_width,
-                    full_model_fixed_width(group_by),
-                    WIDE_MODEL_COLUMNS,
-                ),
-                text_column_specs(
-                    model_content_width,
-                    provider_content_width,
-                    source_content_width,
-                ),
-            );
-
-            ModelsTableLayout {
-                columns: vec![
-                    ModelsColumn::Rank,
-                    ModelsColumn::Workspace,
-                    ModelsColumn::Model,
-                    ModelsColumn::Provider,
-                    ModelsColumn::Source,
-                    ModelsColumn::Input,
-                    ModelsColumn::Output,
-                    ModelsColumn::CacheRead,
-                    ModelsColumn::CacheWrite,
-                    ModelsColumn::Total,
-                    ModelsColumn::Cost,
-                ],
-                widths: vec![
-                    Constraint::Length(RANK_WIDTH),
-                    Constraint::Length(WORKSPACE_WIDTH),
-                    Constraint::Length(text.model),
-                    Constraint::Length(text.provider),
-                    Constraint::Length(text.source),
-                    Constraint::Length(10),
-                    Constraint::Length(10),
-                    Constraint::Length(12),
-                    Constraint::Length(12),
-                    Constraint::Length(10),
-                    Constraint::Length(10),
-                ],
-                model_width: text.model as usize,
-                density: ModelsTableDensity::Full,
-            }
-        } else {
-            let text = allocate_text_column_widths(
-                available_text_width(
-                    table_width,
-                    full_model_fixed_width(group_by),
-                    WIDE_MODEL_COLUMNS,
-                ),
-                text_column_specs(
-                    model_content_width,
-                    provider_content_width,
-                    source_content_width,
-                ),
-            );
-
-            ModelsTableLayout {
-                columns: vec![
-                    ModelsColumn::Rank,
-                    ModelsColumn::Model,
-                    ModelsColumn::Provider,
-                    ModelsColumn::Source,
-                    ModelsColumn::Input,
-                    ModelsColumn::Output,
-                    ModelsColumn::CacheRead,
-                    ModelsColumn::CacheWrite,
-                    ModelsColumn::CacheRate,
-                    ModelsColumn::Total,
-                    ModelsColumn::Cost,
-                ],
-                widths: vec![
-                    Constraint::Length(RANK_WIDTH),
-                    Constraint::Length(text.model),
-                    Constraint::Length(text.provider),
-                    Constraint::Length(text.source),
-                    Constraint::Length(10),
-                    Constraint::Length(10),
-                    Constraint::Length(10),
-                    Constraint::Length(10),
-                    Constraint::Length(8),
-                    Constraint::Length(10),
-                    Constraint::Length(10),
-                ],
-                model_width: text.model as usize,
-                density: ModelsTableDensity::Full,
-            }
+        return ModelsTableLayout {
+            columns,
+            widths,
+            model_width: model_width as usize,
+            density: ModelsTableDensity::VeryCompact,
         };
     }
 
-    if !is_narrow && table_width >= detail_model_min_width() {
-        detail_model_layout(table_width)
-    } else {
-        core_model_layout(table_width)
+    for column in optional_columns {
+        let mut candidate = columns.clone();
+        let insert_at = candidate
+            .iter()
+            .position(|existing| matches!(existing, ModelsColumn::Total | ModelsColumn::Cost))
+            .unwrap_or(candidate.len());
+        candidate.insert(insert_at, column);
+
+        if layout_width(&candidate, model_width, provider_width, source_width) <= table_width {
+            columns = candidate;
+        }
+    }
+
+    let mut used_width = layout_width(&columns, model_width, provider_width, source_width);
+    if columns.contains(&ModelsColumn::Source) {
+        let ideal =
+            clamped_content_width(source_content_width, DETAIL_SOURCE_WIDTH, SOURCE_MAX_WIDTH);
+        let grow_by = table_width
+            .saturating_sub(used_width)
+            .min(ideal.saturating_sub(source_width));
+        source_width += grow_by;
+        used_width += grow_by;
+    }
+    if columns.contains(&ModelsColumn::Provider) {
+        let ideal = clamped_content_width(
+            provider_content_width,
+            DETAIL_PROVIDER_WIDTH,
+            PROVIDER_MAX_WIDTH,
+        );
+        let grow_by = table_width
+            .saturating_sub(used_width)
+            .min(ideal.saturating_sub(provider_width));
+        provider_width += grow_by;
+    }
+
+    let widths = columns
+        .iter()
+        .map(|column| {
+            Constraint::Length(column_width(
+                *column,
+                model_width,
+                provider_width,
+                source_width,
+            ))
+        })
+        .collect();
+
+    ModelsTableLayout {
+        density: density_for_columns(&columns),
+        columns,
+        widths,
+        model_width: model_width as usize,
     }
 }
 
@@ -427,8 +246,6 @@ fn model_column_header(
     density: ModelsTableDensity,
 ) -> &'static str {
     match column {
-        ModelsColumn::Rank => "#",
-        ModelsColumn::Workspace => "Workspace",
         ModelsColumn::Model => "Model",
         ModelsColumn::Provider => "Provider",
         ModelsColumn::Source => "Source",
@@ -521,12 +338,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|model| display_width(&get_provider_display_name(&model.provider)))
         .max()
-        .unwrap_or(PROVIDER_MIN_WIDTH);
+        .unwrap_or(DETAIL_PROVIDER_WIDTH);
     let source_content_width = models
         .iter()
         .map(|model| display_width(&get_client_display_name(&model.client)))
         .max()
-        .unwrap_or(SOURCE_MIN_WIDTH);
+        .unwrap_or(DETAIL_SOURCE_WIDTH);
     let visible_models = &models[start..end];
     let table_layout = models_table_layout(
         inner.width,
@@ -569,25 +386,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let display_name = model_display_name(model, &group_by);
             let cell_for_column = |column: ModelsColumn| -> Cell {
                 match column {
-                    ModelsColumn::Rank => {
-                        Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted))
-                    }
-                    ModelsColumn::Workspace => Cell::from(truncate(workspace_label(model), 18))
-                        .style(
-                            Style::default()
-                                .fg(theme_accent)
-                                .add_modifier(Modifier::BOLD),
-                        ),
                     ModelsColumn::Model => {
-                        let text = if table_layout.density == ModelsTableDensity::Full
-                            && group_by == GroupBy::WorkspaceModel
-                        {
-                            truncate(&model.model, table_layout.model_width)
-                        } else {
-                            truncate(&display_name, table_layout.model_width)
-                        };
-
-                        Cell::from(text).style(
+                        Cell::from(truncate(&display_name, table_layout.model_width)).style(
                             Style::default()
                                 .fg(model_color)
                                 .add_modifier(Modifier::BOLD),
@@ -752,17 +552,17 @@ mod tests {
             layout.columns,
             vec![
                 ModelsColumn::Model,
-                ModelsColumn::Provider,
                 ModelsColumn::Source,
+                ModelsColumn::Provider,
                 ModelsColumn::Input,
                 ModelsColumn::Output,
+                ModelsColumn::CacheRate,
                 ModelsColumn::Total,
                 ModelsColumn::Cost,
             ]
         );
         assert!(!layout.columns.contains(&ModelsColumn::CacheRead));
         assert!(!layout.columns.contains(&ModelsColumn::CacheWrite));
-        assert!(!layout.columns.contains(&ModelsColumn::CacheRate));
         assert!(layout.model_width >= MODEL_MIN_WIDTH as usize);
     }
 
@@ -770,12 +570,16 @@ mod tests {
     fn narrow_model_layout_keeps_model_tokens_and_cost() {
         let layout = models_table_layout(74, &GroupBy::Model, true, false, 80, 56, 40);
 
-        assert_eq!(layout.density, ModelsTableDensity::Core);
         assert_eq!(
             layout.columns,
-            vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost]
+            vec![
+                ModelsColumn::Model,
+                ModelsColumn::Source,
+                ModelsColumn::Total,
+                ModelsColumn::Cost,
+            ]
         );
-        assert!(layout.model_width >= 40);
+        assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
     }
 
     #[test]
@@ -807,11 +611,12 @@ mod tests {
         let base = model_layout(140, 28, 42, 34);
         let wide = model_layout(180, 28, 42, 34);
 
-        assert_eq!(length_at(&wide.widths, 1) as usize, wide.model_width);
+        assert_eq!(length_at(&wide.widths, 0) as usize, wide.model_width);
         assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
+        assert!(wide.columns.contains(&ModelsColumn::Source));
+        assert!(wide.columns.contains(&ModelsColumn::Provider));
         assert!(length_at(&wide.widths, 2) > length_at(&base.widths, 2));
-        assert!(length_at(&wide.widths, 3) > length_at(&base.widths, 3));
-        assert_eq!(length_at(&wide.widths, 3), 34);
+        assert_eq!(length_at(&wide.widths, 1), 34);
     }
 
     #[test]
@@ -819,11 +624,12 @@ mod tests {
         let base = workspace_model_layout(160, 28, 42, 34);
         let wide = workspace_model_layout(200, 28, 42, 34);
 
-        assert_eq!(length_at(&wide.widths, 2) as usize, wide.model_width);
+        assert_eq!(length_at(&wide.widths, 0) as usize, wide.model_width);
         assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
-        assert!(length_at(&wide.widths, 3) > length_at(&base.widths, 3));
-        assert!(length_at(&wide.widths, 4) > length_at(&base.widths, 4));
-        assert_eq!(length_at(&wide.widths, 4), 34);
+        assert!(wide.columns.contains(&ModelsColumn::Source));
+        assert!(wide.columns.contains(&ModelsColumn::Provider));
+        assert!(length_at(&wide.widths, 2) > length_at(&base.widths, 2));
+        assert_eq!(length_at(&wide.widths, 1), 34);
     }
 
     #[test]
@@ -843,10 +649,7 @@ mod tests {
         let visible_only = model_layout(180, 28, 28, 26);
         let full_dataset = model_layout(180, 28, 56, 26);
 
-        assert_eq!(
-            length_at(&visible_only.widths, 3),
-            length_at(&full_dataset.widths, 3)
-        );
+        assert_eq!(visible_only.columns, full_dataset.columns);
         assert!(length_at(&full_dataset.widths, 2) > length_at(&visible_only.widths, 2));
     }
 
@@ -854,10 +657,10 @@ mod tests {
     fn model_column_stays_capped_on_very_wide_tables() {
         let layout = model_layout(260, 80, 120, 120);
 
-        assert_eq!(length_at(&layout.widths, 1), MODEL_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 0), MODEL_MAX_WIDTH);
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
         assert_eq!(length_at(&layout.widths, 2), PROVIDER_MAX_WIDTH);
-        assert_eq!(length_at(&layout.widths, 3), SOURCE_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 1), SOURCE_MAX_WIDTH);
     }
 
     #[test]
@@ -865,9 +668,9 @@ mod tests {
         let fit = model_layout(180, 28, 56, 26);
         let wider = model_layout(220, 28, 56, 26);
 
-        assert_eq!(length_at(&fit.widths, 3), 26);
-        assert_eq!(length_at(&wider.widths, 3), 26);
-        assert!(length_at(&wider.widths, 2) > length_at(&fit.widths, 2));
+        assert_eq!(length_at(&fit.widths, 1), 26);
+        assert_eq!(length_at(&wider.widths, 1), 26);
+        assert_eq!(length_at(&wider.widths, 2), length_at(&fit.widths, 2));
     }
 
     #[test]
@@ -875,8 +678,8 @@ mod tests {
         let fit = model_layout(180, 28, 32, 26);
         let wider = model_layout(260, 28, 32, 26);
 
+        assert_eq!(length_at(&wider.widths, 0), length_at(&fit.widths, 0));
         assert_eq!(length_at(&wider.widths, 1), length_at(&fit.widths, 1));
         assert_eq!(length_at(&wider.widths, 2), length_at(&fit.widths, 2));
-        assert_eq!(length_at(&wider.widths, 3), length_at(&fit.widths, 3));
     }
 }
