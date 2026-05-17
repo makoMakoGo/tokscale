@@ -148,12 +148,14 @@ fn strip_trailing_date_suffix(name: &str) -> &str {
 
 fn strip_trailing_free_marker(mut name: &str) -> &str {
     loop {
+        // Repeat until stable so stacked markers like `model-free-high` collapse fully.
         let trimmed = name.trim_end();
         if trimmed.len() != name.len() {
             name = trimmed;
             continue;
         }
 
+        // Strip direct free markers while guarding against returning an empty model name.
         if let Some(value) = strip_direct_free_marker(name) {
             if !value.is_empty() {
                 name = value.trim_end();
@@ -161,6 +163,7 @@ fn strip_trailing_free_marker(mut name: &str) -> &str {
             }
         }
 
+        // Peel trailing noise suffixes to expose hidden free markers.
         let mut probe = name;
         let mut exposed_free = None;
         while let Some(stripped_probe) = strip_suffix_once(probe, FREE_MARKER_TRAILING_SUFFIXES) {
@@ -262,6 +265,8 @@ fn normalize_claude_model_for_grouping(name: &str) -> Option<String> {
         return None;
     }
 
+    // Claude Sonnet/Haiku 4.x usage should group under the base 4 line, while
+    // Opus 4.x preserves its minor version; revisit this if future major lines differ.
     if major == "4" && matches!(family, "sonnet" | "haiku") {
         return Some(format!("claude-{family}-4"));
     }
