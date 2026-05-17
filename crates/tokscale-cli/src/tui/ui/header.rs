@@ -1,7 +1,12 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Tabs};
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::{App, ClickAction, Tab};
+
+const TAB_PADDING_LEFT: &str = " ";
+const TAB_PADDING_RIGHT: &str = " ";
+const TAB_DIVIDER: &str = " │ ";
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_very_narrow = app.is_very_narrow();
@@ -30,8 +35,26 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .position(|t| *t == app.current_tab)
         .unwrap_or(0);
 
-    let is_narrow = app.is_narrow();
+    let block = header_block(app);
+    let tabs_area = block.inner(area);
 
+    let tabs = Tabs::new(titles)
+        .block(block)
+        .select(selected)
+        .highlight_style(
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(TAB_PADDING_LEFT, TAB_PADDING_RIGHT)
+        .divider(tab_divider(app));
+
+    frame.render_widget(tabs, area);
+
+    register_tab_click_areas(app, tabs_area);
+}
+
+fn header_block(app: &App) -> Block<'static> {
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -44,7 +67,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .title_alignment(Alignment::Left)
         .style(Style::default().bg(app.theme.background));
 
-    if !is_narrow {
+    if !app.is_narrow() {
         block = block.title_top(
             Line::from(vec![
                 Span::styled(" | ", Style::default().fg(Color::Rgb(102, 102, 102))),
@@ -54,35 +77,352 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    let tabs = Tabs::new(titles)
-        .block(block)
-        .select(selected)
-        .highlight_style(
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(Span::styled(" │ ", Style::default().fg(app.theme.border)));
-
-    frame.render_widget(tabs, area);
-
-    register_tab_click_areas(app, area);
+    block
 }
 
-fn register_tab_click_areas(app: &mut App, area: Rect) {
-    let is_very_narrow = app.is_very_narrow();
-    let inner_x = area.x + 12;
-    let y = area.y + 1;
-    let mut x = inner_x;
+fn tab_divider(app: &App) -> Span<'static> {
+    Span::styled(TAB_DIVIDER, Style::default().fg(app.theme.border))
+}
 
-    for tab in Tab::all() {
-        let name_len = if is_very_narrow {
-            tab.short_name().len()
+fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
+    let Some(tab_row) = renderable_tab_row(tabs_area) else {
+        return Vec::new();
+    };
+
+    let is_very_narrow = app.is_very_narrow();
+    let mut areas = Vec::with_capacity(Tab::all().len());
+    let mut x = tab_row.x;
+    let right = tab_row.right();
+
+    let left_padding_width = TAB_PADDING_LEFT.width() as u16;
+    let right_padding_width = TAB_PADDING_RIGHT.width() as u16;
+    let divider_width = TAB_DIVIDER.width() as u16;
+
+    for (index, tab) in Tab::all().iter().enumerate() {
+        let tab_start = x;
+        let remaining_width = right.saturating_sub(x);
+        if remaining_width == 0 {
+            break;
+        }
+        x = x.saturating_add(left_padding_width.min(remaining_width));
+
+        let remaining_width = right.saturating_sub(x);
+        if remaining_width == 0 {
+            break;
+        }
+
+        let name = if is_very_narrow {
+            tab.short_name()
         } else {
-            tab.as_str().len()
+            tab.as_str()
         };
-        let width = name_len as u16 + 3;
-        app.add_click_area(Rect::new(x, y, width, 1), ClickAction::Tab(*tab));
-        x += width;
+        let width = (name.width() as u16).min(remaining_width);
+        if width == 0 {
+            break;
+        }
+        x = x.saturating_add(width);
+
+        let remaining_width = right.saturating_sub(x);
+        x = x.saturating_add(right_padding_width.min(remaining_width));
+
+        let tab_width = x.saturating_sub(tab_start);
+        if tab_width > 0 {
+            areas.push((
+                Rect::new(tab_start, tab_row.y, tab_width, tab_row.height),
+                *tab,
+            ));
+        }
+
+        let remaining_width = right.saturating_sub(x);
+        if remaining_width == 0 || index + 1 == Tab::all().len() {
+            break;
+        }
+        x = x.saturating_add(divider_width.min(remaining_width));
+    }
+
+    areas
+}
+
+fn renderable_tab_row(tabs_area: Rect) -> Option<Rect> {
+    // Ratatui's Tabs render tab content on the first row of the block inner area.
+    // If that inner area is empty, no tab content is renderable and therefore no
+    // click hitboxes should exist.
+    if tabs_area.is_empty() {
+        return None;
+    }
+
+    Some(Rect::new(tabs_area.x, tabs_area.y, tabs_area.width, 1))
+}
+
+fn register_tab_click_areas(app: &mut App, tabs_area: Rect) {
+    for (rect, tab) in tab_click_areas(app, tabs_area) {
+        app.add_click_area(rect, ClickAction::Tab(tab));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use crate::tui::TuiConfig;
+
+    fn make_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.handle_resize(width, 24);
+        app
+    }
+
+    fn registered_tab_areas(app: &App) -> Vec<(Rect, Tab)> {
+        app.click_areas
+            .iter()
+            .filter_map(|area| match &area.action {
+                ClickAction::Tab(tab) => Some((area.rect, *tab)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn expected_normal_tab_areas() -> Vec<(Rect, Tab)> {
+        vec![
+            (Rect::new(21, 5, 10, 1), Tab::Overview),
+            (Rect::new(34, 5, 8, 1), Tab::Models),
+            (Rect::new(45, 5, 7, 1), Tab::Daily),
+            (Rect::new(55, 5, 8, 1), Tab::Hourly),
+            (Rect::new(66, 5, 7, 1), Tab::Stats),
+            (Rect::new(76, 5, 8, 1), Tab::Agents),
+        ]
+    }
+
+    fn expected_very_narrow_tab_areas() -> Vec<(Rect, Tab)> {
+        vec![
+            (Rect::new(8, 3, 5, 1), Tab::Overview),
+            (Rect::new(16, 3, 5, 1), Tab::Models),
+            (Rect::new(24, 3, 5, 1), Tab::Daily),
+            (Rect::new(32, 3, 4, 1), Tab::Hourly),
+            (Rect::new(39, 3, 5, 1), Tab::Stats),
+            (Rect::new(47, 3, 5, 1), Tab::Agents),
+        ]
+    }
+
+    fn render_header_symbols(
+        app: &mut App,
+        area: Rect,
+        width: u16,
+        height: u16,
+    ) -> Vec<Vec<String>> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let frame = terminal
+            .draw(|frame| {
+                render(frame, app, area);
+            })
+            .unwrap();
+
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| frame.buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn symbols_at(lines: &[Vec<String>], y: u16, x: u16, width: u16) -> String {
+        lines[y as usize][x as usize..(x + width) as usize].join("")
+    }
+
+    fn assert_clicks_select_tabs(app: &mut App, expected: &[(Rect, Tab)]) {
+        for (rect, tab) in expected {
+            for column in rect.x..rect.x + rect.width {
+                app.current_tab = if *tab == Tab::Overview {
+                    Tab::Agents
+                } else {
+                    Tab::Overview
+                };
+
+                app.handle_mouse_event(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+
+                assert_eq!(
+                    app.current_tab, *tab,
+                    "clicking column {column} on {tab:?} hitbox should select {tab:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_clicks_do_not_switch_tabs(app: &mut App, dividers: &[Rect]) {
+        for rect in dividers {
+            for column in rect.x..rect.x + rect.width {
+                app.current_tab = Tab::Agents;
+
+                app.handle_mouse_event(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+
+                assert_eq!(
+                    app.current_tab,
+                    Tab::Agents,
+                    "clicking divider column {column} should not switch tabs"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_click_areas_are_empty_without_renderable_tab_row() {
+        let app = make_app(120);
+
+        for area in [
+            Rect::new(21, 5, 78, 0),
+            Rect::new(21, 5, 0, 1),
+            Rect::new(21, 5, 0, 0),
+        ] {
+            assert!(
+                tab_click_areas(&app, area).is_empty(),
+                "non-renderable tabs area {area} should not produce click hitboxes"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_click_areas_match_normal_renderable_tab_segments() {
+        let app = make_app(120);
+
+        assert_eq!(
+            tab_click_areas(&app, Rect::new(21, 5, 78, 1)),
+            expected_normal_tab_areas()
+        );
+    }
+
+    #[test]
+    fn tab_click_areas_match_very_narrow_renderable_tab_segments() {
+        let app = make_app(50);
+
+        assert_eq!(
+            tab_click_areas(&app, Rect::new(8, 3, 50, 1)),
+            expected_very_narrow_tab_areas()
+        );
+    }
+
+    #[test]
+    fn rendered_normal_tabs_match_click_area_geometry_for_offset_area() {
+        let mut app = make_app(120);
+        let area = Rect::new(20, 4, 80, 3);
+
+        let lines = render_header_symbols(&mut app, area, 120, 8);
+
+        assert_eq!(symbols_at(&lines, 5, 21, 10), " Overview ");
+        assert_eq!(symbols_at(&lines, 5, 34, 8), " Models ");
+        assert_eq!(symbols_at(&lines, 5, 45, 7), " Daily ");
+        assert_eq!(symbols_at(&lines, 5, 55, 8), " Hourly ");
+        assert_eq!(symbols_at(&lines, 5, 66, 7), " Stats ");
+        assert_eq!(symbols_at(&lines, 5, 76, 8), " Agents ");
+        assert_eq!(registered_tab_areas(&app), expected_normal_tab_areas());
+    }
+
+    #[test]
+    fn rendered_very_narrow_tabs_match_click_area_geometry() {
+        let mut app = make_app(50);
+        let area = Rect::new(7, 2, 52, 3);
+
+        let lines = render_header_symbols(&mut app, area, 65, 6);
+
+        assert_eq!(symbols_at(&lines, 3, 8, 5), " Ovw ");
+        assert_eq!(symbols_at(&lines, 3, 16, 5), " Mod ");
+        assert_eq!(symbols_at(&lines, 3, 24, 5), " Day ");
+        assert_eq!(symbols_at(&lines, 3, 32, 4), " Hr ");
+        assert_eq!(symbols_at(&lines, 3, 39, 5), " Sta ");
+        assert_eq!(symbols_at(&lines, 3, 47, 5), " Agt ");
+        assert_eq!(registered_tab_areas(&app), expected_very_narrow_tab_areas());
+    }
+
+    #[test]
+    fn clicks_on_tab_dividers_do_not_switch_tabs() {
+        let mut app = make_app(120);
+        let area = Rect::new(20, 4, 80, 3);
+
+        let lines = render_header_symbols(&mut app, area, 120, 8);
+
+        assert_eq!(symbols_at(&lines, 5, 31, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 42, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 52, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 63, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 73, 3), TAB_DIVIDER);
+
+        assert_clicks_do_not_switch_tabs(
+            &mut app,
+            &[
+                Rect::new(31, 5, 3, 1),
+                Rect::new(42, 5, 3, 1),
+                Rect::new(52, 5, 3, 1),
+                Rect::new(63, 5, 3, 1),
+                Rect::new(73, 5, 3, 1),
+            ],
+        );
+    }
+
+    #[test]
+    fn clicks_on_very_narrow_tab_dividers_do_not_switch_tabs() {
+        let mut app = make_app(50);
+        let area = Rect::new(7, 2, 52, 3);
+
+        let lines = render_header_symbols(&mut app, area, 65, 6);
+
+        assert_eq!(symbols_at(&lines, 3, 13, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 21, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 29, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 36, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 44, 3), TAB_DIVIDER);
+
+        assert_clicks_do_not_switch_tabs(
+            &mut app,
+            &[
+                Rect::new(13, 3, 3, 1),
+                Rect::new(21, 3, 3, 1),
+                Rect::new(29, 3, 3, 1),
+                Rect::new(36, 3, 3, 1),
+                Rect::new(44, 3, 3, 1),
+            ],
+        );
+    }
+
+    #[test]
+    fn clicks_on_rendered_tab_labels_and_padding_select_matching_tabs() {
+        let mut app = make_app(120);
+        let area = Rect::new(20, 4, 80, 3);
+
+        render_header_symbols(&mut app, area, 120, 8);
+
+        assert_clicks_select_tabs(&mut app, &expected_normal_tab_areas());
+    }
+
+    #[test]
+    fn clicks_on_very_narrow_rendered_tab_labels_and_padding_select_matching_tabs() {
+        let mut app = make_app(50);
+        let area = Rect::new(7, 2, 52, 3);
+
+        render_header_symbols(&mut app, area, 65, 6);
+
+        assert_clicks_select_tabs(&mut app, &expected_very_narrow_tab_areas());
     }
 }
