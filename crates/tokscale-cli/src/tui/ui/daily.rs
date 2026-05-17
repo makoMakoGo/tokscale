@@ -7,6 +7,297 @@ use ratatui::widgets::{
 use super::widgets::{format_cache_hit_rate, format_cost, format_tokens};
 use crate::tui::app::{App, SortDirection, SortField};
 
+const TABLE_COLUMN_SPACING: u16 = 1;
+const DATE_WIDTH: u16 = 12;
+const TURN_WIDTH: u16 = 6;
+const MSGS_WIDTH: u16 = 6;
+const NUMERIC_WIDTH: u16 = 10;
+const CACHE_RATE_WIDTH: u16 = 8;
+const COST_WIDTH: u16 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DailyTableDensity {
+    VeryCompact,
+    Core,
+    Detail,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DailyColumn {
+    Date,
+    Turn,
+    Messages,
+    Input,
+    Output,
+    CacheRead,
+    CacheWrite,
+    CacheRate,
+    Total,
+    Cost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DailyTableLayout {
+    columns: Vec<DailyColumn>,
+    widths: Vec<Constraint>,
+    density: DailyTableDensity,
+}
+
+fn spaced_width(widths: &[u16]) -> u16 {
+    let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
+    widths.iter().copied().sum::<u16>().saturating_add(spacing)
+}
+
+fn daily_detail_min_width(has_turn_data: bool) -> u16 {
+    let mut widths = vec![
+        DATE_WIDTH,
+        MSGS_WIDTH,
+        NUMERIC_WIDTH,
+        NUMERIC_WIDTH,
+        NUMERIC_WIDTH,
+        COST_WIDTH,
+    ];
+    if has_turn_data {
+        widths.insert(1, TURN_WIDTH);
+    }
+
+    spaced_width(&widths)
+}
+
+fn daily_full_min_width(has_turn_data: bool) -> u16 {
+    let mut widths = vec![
+        DATE_WIDTH,
+        MSGS_WIDTH,
+        NUMERIC_WIDTH,
+        NUMERIC_WIDTH,
+        NUMERIC_WIDTH,
+        NUMERIC_WIDTH,
+        CACHE_RATE_WIDTH,
+        NUMERIC_WIDTH,
+        COST_WIDTH,
+    ];
+    if has_turn_data {
+        widths.insert(1, TURN_WIDTH);
+    }
+
+    spaced_width(&widths)
+}
+
+fn daily_table_layout(
+    table_width: u16,
+    is_narrow: bool,
+    is_very_narrow: bool,
+    has_turn_data: bool,
+) -> DailyTableLayout {
+    if is_very_narrow {
+        return DailyTableLayout {
+            columns: vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost],
+            widths: vec![
+                Constraint::Length(DATE_WIDTH),
+                Constraint::Length(NUMERIC_WIDTH),
+                Constraint::Length(COST_WIDTH),
+            ],
+            density: DailyTableDensity::VeryCompact,
+        };
+    }
+
+    if !is_narrow && table_width >= daily_full_min_width(has_turn_data) {
+        let mut columns = vec![DailyColumn::Date];
+        let mut widths = vec![Constraint::Length(DATE_WIDTH)];
+        if has_turn_data {
+            columns.push(DailyColumn::Turn);
+            widths.push(Constraint::Length(TURN_WIDTH));
+        }
+        columns.extend([
+            DailyColumn::Messages,
+            DailyColumn::Input,
+            DailyColumn::Output,
+            DailyColumn::CacheRead,
+            DailyColumn::CacheWrite,
+            DailyColumn::CacheRate,
+            DailyColumn::Total,
+            DailyColumn::Cost,
+        ]);
+        widths.extend([
+            Constraint::Length(MSGS_WIDTH),
+            Constraint::Length(NUMERIC_WIDTH),
+            Constraint::Length(NUMERIC_WIDTH),
+            Constraint::Length(NUMERIC_WIDTH),
+            Constraint::Length(NUMERIC_WIDTH),
+            Constraint::Length(CACHE_RATE_WIDTH),
+            Constraint::Length(NUMERIC_WIDTH),
+            Constraint::Length(COST_WIDTH),
+        ]);
+
+        return DailyTableLayout {
+            columns,
+            widths,
+            density: DailyTableDensity::Full,
+        };
+    }
+
+    if !is_narrow && table_width >= daily_detail_min_width(has_turn_data) {
+        let mut columns = vec![DailyColumn::Date];
+        let mut widths = vec![Constraint::Length(DATE_WIDTH)];
+        if has_turn_data {
+            columns.push(DailyColumn::Turn);
+            widths.push(Constraint::Length(TURN_WIDTH));
+        }
+        columns.extend([
+            DailyColumn::Messages,
+            DailyColumn::Input,
+            DailyColumn::Output,
+            DailyColumn::Total,
+            DailyColumn::Cost,
+        ]);
+        widths.extend([
+            Constraint::Length(MSGS_WIDTH),
+            Constraint::Length(NUMERIC_WIDTH),
+            Constraint::Length(NUMERIC_WIDTH),
+            Constraint::Length(NUMERIC_WIDTH),
+            Constraint::Length(COST_WIDTH),
+        ]);
+
+        return DailyTableLayout {
+            columns,
+            widths,
+            density: DailyTableDensity::Detail,
+        };
+    }
+
+    let mut columns = vec![DailyColumn::Date];
+    let mut widths = vec![Constraint::Length(DATE_WIDTH)];
+    if has_turn_data {
+        columns.push(DailyColumn::Turn);
+        widths.push(Constraint::Length(TURN_WIDTH));
+    }
+    columns.extend([DailyColumn::Messages, DailyColumn::Total, DailyColumn::Cost]);
+    widths.extend([
+        Constraint::Length(MSGS_WIDTH),
+        Constraint::Length(NUMERIC_WIDTH),
+        Constraint::Length(COST_WIDTH),
+    ]);
+
+    DailyTableLayout {
+        columns,
+        widths,
+        density: DailyTableDensity::Core,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrow_daily_layout_keeps_date_tokens_and_cost_without_cache_columns() {
+        let layout = daily_table_layout(74, true, false, false);
+
+        assert_eq!(layout.density, DailyTableDensity::Core);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyColumn::Date,
+                DailyColumn::Messages,
+                DailyColumn::Total,
+                DailyColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&DailyColumn::CacheRead));
+        assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
+        assert!(!layout.columns.contains(&DailyColumn::CacheRate));
+        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
+    }
+
+    #[test]
+    fn narrow_daily_layout_preserves_turn_after_date_when_available() {
+        let layout = daily_table_layout(74, true, false, true);
+
+        assert_eq!(layout.density, DailyTableDensity::Core);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyColumn::Date,
+                DailyColumn::Turn,
+                DailyColumn::Messages,
+                DailyColumn::Total,
+                DailyColumn::Cost,
+            ]
+        );
+    }
+
+    #[test]
+    fn portrait_daily_layout_drops_cache_before_input_output() {
+        let layout = daily_table_layout(74, false, false, false);
+
+        assert_eq!(layout.density, DailyTableDensity::Detail);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyColumn::Date,
+                DailyColumn::Messages,
+                DailyColumn::Input,
+                DailyColumn::Output,
+                DailyColumn::Total,
+                DailyColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&DailyColumn::CacheRead));
+        assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
+        assert!(!layout.columns.contains(&DailyColumn::CacheRate));
+    }
+
+    #[test]
+    fn very_narrow_daily_layout_keeps_date_tokens_and_cost() {
+        let layout = daily_table_layout(54, true, true, true);
+
+        assert_eq!(layout.density, DailyTableDensity::VeryCompact);
+        assert_eq!(
+            layout.columns,
+            vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost]
+        );
+        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
+    }
+
+    #[test]
+    fn cache_columns_only_appear_in_full_daily_layout() {
+        let detail = daily_table_layout(74, false, false, false);
+        let full = daily_table_layout(120, false, false, false);
+
+        assert_eq!(detail.density, DailyTableDensity::Detail);
+        assert_eq!(full.density, DailyTableDensity::Full);
+        assert!(full.columns.contains(&DailyColumn::CacheRead));
+        assert!(full.columns.contains(&DailyColumn::CacheWrite));
+        assert!(full.columns.contains(&DailyColumn::CacheRate));
+    }
+}
+
+fn daily_column_header(column: DailyColumn, density: DailyTableDensity) -> &'static str {
+    match column {
+        DailyColumn::Date => "Date",
+        DailyColumn::Turn => "Turn",
+        DailyColumn::Messages => "Msgs",
+        DailyColumn::Input => "Input",
+        DailyColumn::Output => "Output",
+        DailyColumn::CacheRead => "Cache R",
+        DailyColumn::CacheWrite => "Cache W",
+        DailyColumn::CacheRate => "Cache×",
+        DailyColumn::Total if density == DailyTableDensity::Full => "Total",
+        DailyColumn::Total => "Tokens",
+        DailyColumn::Cost => "Cost",
+    }
+}
+
+fn daily_column_sort_field(column: DailyColumn) -> Option<SortField> {
+    match column {
+        DailyColumn::Date => Some(SortField::Date),
+        DailyColumn::Total => Some(SortField::Tokens),
+        DailyColumn::Cost => Some(SortField::Cost),
+        _ => None,
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -44,25 +335,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_selection = app.theme.selection;
     let today = Local::now().date_naive();
-
-    let header_cells = if is_very_narrow {
-        vec!["Date", "Cost"]
-    } else if is_narrow {
-        if has_turn_data {
-            vec!["Date", "Turn", "Msgs", "Tokens", "Cost"]
-        } else {
-            vec!["Date", "Msgs", "Tokens", "Cost"]
-        }
-    } else if has_turn_data {
-        vec![
-            "Date", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
-            "Cost",
-        ]
-    } else {
-        vec![
-            "Date", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total", "Cost",
-        ]
-    };
+    let table_layout = daily_table_layout(inner.width, is_narrow, is_very_narrow, has_turn_data);
+    let columns = table_layout.columns.clone();
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -76,23 +350,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let header = Row::new(
-        header_cells
+        columns
             .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let indicator = match (i, is_narrow, is_very_narrow) {
-                    (0, _, _) => sort_indicator(SortField::Date),
-                    (8, false, false) if has_turn_data => sort_indicator(SortField::Tokens),
-                    (7, false, false) if !has_turn_data => sort_indicator(SortField::Tokens),
-                    (3, true, false) if has_turn_data => sort_indicator(SortField::Tokens),
-                    (2, true, false) if !has_turn_data => sort_indicator(SortField::Tokens),
-                    (9, false, false) if has_turn_data => sort_indicator(SortField::Cost),
-                    (8, false, false) if !has_turn_data => sort_indicator(SortField::Cost),
-                    (4, true, false) if has_turn_data => sort_indicator(SortField::Cost),
-                    (3, true, false) if !has_turn_data => sort_indicator(SortField::Cost),
-                    (1, _, true) => sort_indicator(SortField::Cost),
-                    _ => "",
-                };
+            .map(|column| {
+                let h = daily_column_header(*column, table_layout.density);
+                let indicator = daily_column_sort_field(*column)
+                    .map(sort_indicator)
+                    .unwrap_or("");
                 Cell::from(format!("{}{}", h, indicator))
             })
             .collect::<Vec<_>>(),
@@ -121,79 +385,50 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_striped = idx % 2 == 1;
             let is_today = day.date == today;
 
-            let cells: Vec<Cell> =
-                if is_very_narrow {
-                    vec![
-                        Cell::from(day.date.format("%m/%d").to_string()).style(if is_today {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        }),
-                        Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
-                    ]
-                } else if is_narrow {
-                    let mut cells = vec![Cell::from(day.date.format("%Y-%m-%d").to_string())
-                        .style(if is_today {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        })];
-                    if has_turn_data {
-                        let turn_str = if day.turn_count > 0 {
-                            day.turn_count.to_string()
-                        } else {
-                            "\u{2014}".to_string()
-                        };
-                        cells.push(Cell::from(turn_str));
+            let date_text = day.date.format("%Y-%m-%d").to_string();
+            let date_style = if is_today {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else if table_layout.density == DailyTableDensity::Full {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let turn_str = if day.turn_count > 0 {
+                day.turn_count.to_string()
+            } else {
+                "\u{2014}".to_string()
+            };
+            let cell_for_column = |column: DailyColumn| -> Cell {
+                match column {
+                    DailyColumn::Date => Cell::from(date_text.clone()).style(date_style),
+                    DailyColumn::Turn => Cell::from(turn_str.clone()),
+                    DailyColumn::Messages => Cell::from(day.message_count.to_string()),
+                    DailyColumn::Input => Cell::from(format_tokens(day.tokens.input))
+                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
+                    DailyColumn::Output => Cell::from(format_tokens(day.tokens.output))
+                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
+                    DailyColumn::CacheRead => Cell::from(format_tokens(day.tokens.cache_read))
+                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
+                    DailyColumn::CacheWrite => Cell::from(format_tokens(day.tokens.cache_write))
+                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
+                    DailyColumn::CacheRate => Cell::from(format_cache_hit_rate(
+                        day.tokens.cache_read,
+                        day.tokens.input,
+                        day.tokens.cache_write,
+                    ))
+                    .style(Style::default().fg(Color::Cyan)),
+                    DailyColumn::Total => Cell::from(format_tokens(day.tokens.total())),
+                    DailyColumn::Cost => {
+                        Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green))
                     }
-                    cells.extend([
-                        Cell::from(day.message_count.to_string()),
-                        Cell::from(format_tokens(day.tokens.total())),
-                        Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
-                    ]);
-                    cells
-                } else {
-                    let mut cells = vec![Cell::from(day.date.format("%Y-%m-%d").to_string())
-                        .style(if is_today {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().add_modifier(Modifier::BOLD)
-                        })];
-                    if has_turn_data {
-                        let turn_str = if day.turn_count > 0 {
-                            day.turn_count.to_string()
-                        } else {
-                            "\u{2014}".to_string()
-                        };
-                        cells.push(Cell::from(turn_str));
-                    }
-                    cells.extend([
-                        Cell::from(day.message_count.to_string()),
-                        Cell::from(format_tokens(day.tokens.input))
-                            .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                        Cell::from(format_tokens(day.tokens.output))
-                            .style(Style::default().fg(Color::Rgb(200, 100, 100))),
-                        Cell::from(format_tokens(day.tokens.cache_read))
-                            .style(Style::default().fg(Color::Rgb(100, 150, 200))),
-                        Cell::from(format_tokens(day.tokens.cache_write))
-                            .style(Style::default().fg(Color::Rgb(200, 150, 100))),
-                        Cell::from(format_cache_hit_rate(
-                            day.tokens.cache_read,
-                            day.tokens.input,
-                            day.tokens.cache_write,
-                        ))
-                        .style(Style::default().fg(Color::Cyan)),
-                        Cell::from(format_tokens(day.tokens.total())),
-                        Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
-                    ]);
-                    cells
-                };
+                }
+            };
+            let cells: Vec<Cell> = columns
+                .iter()
+                .map(|column| cell_for_column(*column))
+                .collect();
 
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
@@ -208,50 +443,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Row::new(cells).style(row_style).height(1)
         })
         .collect();
-
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(60), Constraint::Percentage(40)]
-    } else if is_narrow && has_turn_data {
-        vec![
-            Constraint::Percentage(30),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-        ]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(35),
-            Constraint::Percentage(20),
-            Constraint::Percentage(25),
-            Constraint::Percentage(20),
-        ]
-    } else if has_turn_data {
-        vec![
-            Constraint::Length(12),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
-    } else {
-        vec![
-            Constraint::Length(12),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
-    };
+    let widths = table_layout.widths;
 
     let table = Table::new(rows, widths)
         .header(header)

@@ -31,10 +31,45 @@ const WIDE_MODEL_COLUMNS: u16 = 11;
 
 const MODEL_MIN_WIDTH: u16 = 20;
 const MODEL_MAX_WIDTH: u16 = 32;
+const MODEL_COMPACT_MAX_WIDTH: u16 = 48;
 const PROVIDER_MIN_WIDTH: u16 = 18;
 const PROVIDER_MAX_WIDTH: u16 = 56;
 const SOURCE_MIN_WIDTH: u16 = 18;
 const SOURCE_MAX_WIDTH: u16 = 40;
+
+const RANK_WIDTH: u16 = 3;
+const WORKSPACE_WIDTH: u16 = 18;
+const DETAIL_PROVIDER_WIDTH: u16 = 8;
+const DETAIL_SOURCE_WIDTH: u16 = 12;
+const DETAIL_NUMERIC_WIDTH: u16 = 8;
+const DETAIL_TOTAL_WIDTH: u16 = 9;
+const DETAIL_COST_WIDTH: u16 = 9;
+const CORE_TOTAL_WIDTH: u16 = 10;
+const CORE_COST_WIDTH: u16 = 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelsTableDensity {
+    VeryCompact,
+    Core,
+    Detail,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelsColumn {
+    Rank,
+    Workspace,
+    Model,
+    Provider,
+    Source,
+    Input,
+    Output,
+    CacheRead,
+    CacheWrite,
+    CacheRate,
+    Total,
+    Cost,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TextColumnSpec {
@@ -52,8 +87,10 @@ struct TextColumnWidths {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelsTableLayout {
+    columns: Vec<ModelsColumn>,
     widths: Vec<Constraint>,
     model_width: usize,
+    density: ModelsTableDensity,
 }
 
 fn available_text_width(table_width: u16, fixed_width: u16, column_count: u16) -> u16 {
@@ -135,6 +172,11 @@ fn allocate_text_column_widths(budget: u16, specs: [TextColumnSpec; 3]) -> TextC
     }
 }
 
+fn spaced_width(widths: &[u16]) -> u16 {
+    let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
+    widths.iter().copied().sum::<u16>().saturating_add(spacing)
+}
+
 fn text_column_specs(
     model_content_width: u16,
     provider_content_width: u16,
@@ -163,6 +205,110 @@ fn text_column_specs(
     ]
 }
 
+fn full_model_fixed_width(group_by: &GroupBy) -> u16 {
+    if *group_by == GroupBy::WorkspaceModel {
+        RANK_WIDTH + WORKSPACE_WIDTH + 10 + 10 + 12 + 12 + 10 + 10
+    } else {
+        RANK_WIDTH + 10 + 10 + 10 + 10 + 8 + 10 + 10
+    }
+}
+
+fn can_fit_full_model_layout(table_width: u16, group_by: &GroupBy) -> bool {
+    let min_text_width = MODEL_MIN_WIDTH + PROVIDER_MIN_WIDTH + SOURCE_MIN_WIDTH;
+    available_text_width(
+        table_width,
+        full_model_fixed_width(group_by),
+        WIDE_MODEL_COLUMNS,
+    ) >= min_text_width
+}
+
+fn compact_model_width(table_width: u16, fixed_width: u16, column_count: u16) -> u16 {
+    table_width
+        .saturating_sub(fixed_width)
+        .saturating_sub(TABLE_COLUMN_SPACING.saturating_mul(column_count.saturating_sub(1)))
+        .clamp(1, MODEL_COMPACT_MAX_WIDTH)
+}
+
+fn very_compact_model_layout(table_width: u16) -> ModelsTableLayout {
+    let columns = vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost];
+    let fixed_width = CORE_TOTAL_WIDTH + CORE_COST_WIDTH;
+    let model_width = compact_model_width(table_width, fixed_width, columns.len() as u16);
+
+    ModelsTableLayout {
+        columns,
+        widths: vec![
+            Constraint::Length(model_width),
+            Constraint::Length(CORE_TOTAL_WIDTH),
+            Constraint::Length(CORE_COST_WIDTH),
+        ],
+        model_width: model_width as usize,
+        density: ModelsTableDensity::VeryCompact,
+    }
+}
+
+fn core_model_layout(table_width: u16) -> ModelsTableLayout {
+    let columns = vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost];
+    let fixed_width = CORE_TOTAL_WIDTH + CORE_COST_WIDTH;
+    let model_width = compact_model_width(table_width, fixed_width, columns.len() as u16);
+
+    ModelsTableLayout {
+        columns,
+        widths: vec![
+            Constraint::Length(model_width),
+            Constraint::Length(CORE_TOTAL_WIDTH),
+            Constraint::Length(CORE_COST_WIDTH),
+        ],
+        model_width: model_width as usize,
+        density: ModelsTableDensity::Core,
+    }
+}
+
+fn detail_model_min_width() -> u16 {
+    spaced_width(&[
+        MODEL_MIN_WIDTH,
+        DETAIL_PROVIDER_WIDTH,
+        DETAIL_SOURCE_WIDTH,
+        DETAIL_NUMERIC_WIDTH,
+        DETAIL_NUMERIC_WIDTH,
+        DETAIL_TOTAL_WIDTH,
+        DETAIL_COST_WIDTH,
+    ])
+}
+
+fn detail_model_layout(table_width: u16) -> ModelsTableLayout {
+    let columns = vec![
+        ModelsColumn::Model,
+        ModelsColumn::Provider,
+        ModelsColumn::Source,
+        ModelsColumn::Input,
+        ModelsColumn::Output,
+        ModelsColumn::Total,
+        ModelsColumn::Cost,
+    ];
+    let fixed_width = DETAIL_PROVIDER_WIDTH
+        + DETAIL_SOURCE_WIDTH
+        + DETAIL_NUMERIC_WIDTH
+        + DETAIL_NUMERIC_WIDTH
+        + DETAIL_TOTAL_WIDTH
+        + DETAIL_COST_WIDTH;
+    let model_width = compact_model_width(table_width, fixed_width, columns.len() as u16);
+
+    ModelsTableLayout {
+        columns,
+        widths: vec![
+            Constraint::Length(model_width),
+            Constraint::Length(DETAIL_PROVIDER_WIDTH),
+            Constraint::Length(DETAIL_SOURCE_WIDTH),
+            Constraint::Length(DETAIL_NUMERIC_WIDTH),
+            Constraint::Length(DETAIL_NUMERIC_WIDTH),
+            Constraint::Length(DETAIL_TOTAL_WIDTH),
+            Constraint::Length(DETAIL_COST_WIDTH),
+        ],
+        model_width: model_width as usize,
+        density: ModelsTableDensity::Detail,
+    }
+}
+
 fn models_table_layout(
     table_width: u16,
     group_by: &GroupBy,
@@ -173,79 +319,137 @@ fn models_table_layout(
     source_content_width: u16,
 ) -> ModelsTableLayout {
     if is_very_narrow {
-        ModelsTableLayout {
-            widths: vec![Constraint::Percentage(70), Constraint::Percentage(30)],
-            model_width: 15,
-        }
-    } else if is_narrow {
-        ModelsTableLayout {
-            widths: vec![
-                Constraint::Percentage(50),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ],
-            model_width: 25,
-        }
-    } else if *group_by == GroupBy::WorkspaceModel {
-        let text = allocate_text_column_widths(
-            available_text_width(
-                table_width,
-                3 + 18 + 10 + 10 + 12 + 12 + 10 + 10,
-                WIDE_MODEL_COLUMNS,
-            ),
-            text_column_specs(
-                model_content_width,
-                provider_content_width,
-                source_content_width,
-            ),
-        );
+        return very_compact_model_layout(table_width);
+    }
 
-        ModelsTableLayout {
-            widths: vec![
-                Constraint::Length(3),
-                Constraint::Length(18),
-                Constraint::Length(text.model),
-                Constraint::Length(text.provider),
-                Constraint::Length(text.source),
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Length(12),
-                Constraint::Length(12),
-                Constraint::Length(10),
-                Constraint::Length(10),
-            ],
-            model_width: text.model as usize,
-        }
+    if !is_narrow && can_fit_full_model_layout(table_width, group_by) {
+        return if *group_by == GroupBy::WorkspaceModel {
+            let text = allocate_text_column_widths(
+                available_text_width(
+                    table_width,
+                    full_model_fixed_width(group_by),
+                    WIDE_MODEL_COLUMNS,
+                ),
+                text_column_specs(
+                    model_content_width,
+                    provider_content_width,
+                    source_content_width,
+                ),
+            );
+
+            ModelsTableLayout {
+                columns: vec![
+                    ModelsColumn::Rank,
+                    ModelsColumn::Workspace,
+                    ModelsColumn::Model,
+                    ModelsColumn::Provider,
+                    ModelsColumn::Source,
+                    ModelsColumn::Input,
+                    ModelsColumn::Output,
+                    ModelsColumn::CacheRead,
+                    ModelsColumn::CacheWrite,
+                    ModelsColumn::Total,
+                    ModelsColumn::Cost,
+                ],
+                widths: vec![
+                    Constraint::Length(RANK_WIDTH),
+                    Constraint::Length(WORKSPACE_WIDTH),
+                    Constraint::Length(text.model),
+                    Constraint::Length(text.provider),
+                    Constraint::Length(text.source),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                    Constraint::Length(12),
+                    Constraint::Length(12),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                ],
+                model_width: text.model as usize,
+                density: ModelsTableDensity::Full,
+            }
+        } else {
+            let text = allocate_text_column_widths(
+                available_text_width(
+                    table_width,
+                    full_model_fixed_width(group_by),
+                    WIDE_MODEL_COLUMNS,
+                ),
+                text_column_specs(
+                    model_content_width,
+                    provider_content_width,
+                    source_content_width,
+                ),
+            );
+
+            ModelsTableLayout {
+                columns: vec![
+                    ModelsColumn::Rank,
+                    ModelsColumn::Model,
+                    ModelsColumn::Provider,
+                    ModelsColumn::Source,
+                    ModelsColumn::Input,
+                    ModelsColumn::Output,
+                    ModelsColumn::CacheRead,
+                    ModelsColumn::CacheWrite,
+                    ModelsColumn::CacheRate,
+                    ModelsColumn::Total,
+                    ModelsColumn::Cost,
+                ],
+                widths: vec![
+                    Constraint::Length(RANK_WIDTH),
+                    Constraint::Length(text.model),
+                    Constraint::Length(text.provider),
+                    Constraint::Length(text.source),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                    Constraint::Length(8),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                ],
+                model_width: text.model as usize,
+                density: ModelsTableDensity::Full,
+            }
+        };
+    }
+
+    if !is_narrow && table_width >= detail_model_min_width() {
+        detail_model_layout(table_width)
     } else {
-        let text = allocate_text_column_widths(
-            available_text_width(
-                table_width,
-                3 + 10 + 10 + 10 + 10 + 8 + 10 + 10,
-                WIDE_MODEL_COLUMNS,
-            ),
-            text_column_specs(
-                model_content_width,
-                provider_content_width,
-                source_content_width,
-            ),
-        );
+        core_model_layout(table_width)
+    }
+}
 
-        ModelsTableLayout {
-            widths: vec![
-                Constraint::Length(3),
-                Constraint::Length(text.model),
-                Constraint::Length(text.provider),
-                Constraint::Length(text.source),
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Length(8),
-                Constraint::Length(10),
-                Constraint::Length(10),
-            ],
-            model_width: text.model as usize,
-        }
+fn model_column_header(
+    column: ModelsColumn,
+    group_by: &GroupBy,
+    density: ModelsTableDensity,
+) -> &'static str {
+    match column {
+        ModelsColumn::Rank => "#",
+        ModelsColumn::Workspace => "Workspace",
+        ModelsColumn::Model => "Model",
+        ModelsColumn::Provider => "Provider",
+        ModelsColumn::Source => "Source",
+        ModelsColumn::Input => "Input",
+        ModelsColumn::Output => "Output",
+        ModelsColumn::CacheRead if *group_by == GroupBy::WorkspaceModel => "Cache Read",
+        ModelsColumn::CacheRead => "Cache R",
+        ModelsColumn::CacheWrite if *group_by == GroupBy::WorkspaceModel => "Cache Write",
+        ModelsColumn::CacheWrite => "Cache W",
+        ModelsColumn::CacheRate => "Cache×",
+        ModelsColumn::Total if density == ModelsTableDensity::Full => "Total",
+        ModelsColumn::Total => "Tokens",
+        ModelsColumn::Cost => "Cost",
+    }
+}
+
+fn model_column_sort_field(column: ModelsColumn) -> Option<SortField> {
+    match column {
+        ModelsColumn::Total => Some(SortField::Tokens),
+        ModelsColumn::Cost => Some(SortField::Cost),
+        _ => None,
     }
 }
 
@@ -289,31 +493,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let header_cells = if is_very_narrow {
-        vec!["Model", "Cost"]
-    } else if is_narrow {
-        vec!["Model", "Tokens", "Cost"]
-    } else if group_by == GroupBy::WorkspaceModel {
-        vec![
-            "#",
-            "Workspace",
-            "Model",
-            "Provider",
-            "Source",
-            "Input",
-            "Output",
-            "Cache Read",
-            "Cache Write",
-            "Total",
-            "Cost",
-        ]
-    } else {
-        vec![
-            "#", "Model", "Provider", "Source", "Input", "Output", "Cache R", "Cache W", "Cache×",
-            "Total", "Cost",
-        ]
-    };
-
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
@@ -324,30 +503,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             ""
         }
     };
-
-    let header = Row::new(
-        header_cells
-            .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let indicator = match i {
-                    9 if !is_narrow => sort_indicator(SortField::Tokens),
-                    10 if !is_narrow => sort_indicator(SortField::Cost),
-                    1 if is_very_narrow => sort_indicator(SortField::Cost),
-                    2 if is_narrow && !is_very_narrow => sort_indicator(SortField::Cost),
-                    1 if is_narrow && !is_very_narrow => sort_indicator(SortField::Tokens),
-                    _ => "",
-                };
-                Cell::from(format!("{}{}", h, indicator))
-            })
-            .collect::<Vec<_>>(),
-    )
-    .style(
-        Style::default()
-            .fg(theme_accent)
-            .add_modifier(Modifier::BOLD),
-    )
-    .height(1);
 
     let models_len = models.len();
     let start = scroll_offset.min(models_len.saturating_sub(1));
@@ -382,6 +537,25 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         provider_content_width,
         source_content_width,
     );
+    let columns = table_layout.columns.clone();
+    let header = Row::new(
+        columns
+            .iter()
+            .map(|column| {
+                let h = model_column_header(*column, &group_by, table_layout.density);
+                let indicator = model_column_sort_field(*column)
+                    .map(sort_indicator)
+                    .unwrap_or("");
+                Cell::from(format!("{}{}", h, indicator))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .style(
+        Style::default()
+            .fg(theme_accent)
+            .add_modifier(Modifier::BOLD),
+    )
+    .height(1);
 
     let rows: Vec<Row> = visible_models
         .iter()
@@ -393,76 +567,61 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let model_color = app.model_color_for(&model.provider, &model.model);
             let display_name = model_display_name(model, &group_by);
+            let cell_for_column = |column: ModelsColumn| -> Cell {
+                match column {
+                    ModelsColumn::Rank => {
+                        Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted))
+                    }
+                    ModelsColumn::Workspace => Cell::from(truncate(workspace_label(model), 18))
+                        .style(
+                            Style::default()
+                                .fg(theme_accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ModelsColumn::Model => {
+                        let text = if table_layout.density == ModelsTableDensity::Full
+                            && group_by == GroupBy::WorkspaceModel
+                        {
+                            truncate(&model.model, table_layout.model_width)
+                        } else {
+                            truncate(&display_name, table_layout.model_width)
+                        };
 
-            let cells: Vec<Cell> = if is_very_narrow {
-                vec![
-                    Cell::from(truncate(&display_name, table_layout.model_width))
-                        .style(Style::default().fg(model_color)),
-                    Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else if is_narrow {
-                vec![
-                    Cell::from(truncate(&display_name, table_layout.model_width))
-                        .style(Style::default().fg(model_color)),
-                    Cell::from(format_tokens(model.tokens.total())),
-                    Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else if group_by == GroupBy::WorkspaceModel {
-                vec![
-                    Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(workspace_label(model), 18)).style(
-                        Style::default()
-                            .fg(theme_accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Cell::from(truncate(&model.model, table_layout.model_width)).style(
-                        Style::default()
-                            .fg(model_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Cell::from(get_provider_display_name(&model.provider)),
-                    Cell::from(get_client_display_name(&model.client))
+                        Cell::from(text).style(
+                            Style::default()
+                                .fg(model_color)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    }
+                    ModelsColumn::Provider => {
+                        Cell::from(get_provider_display_name(&model.provider))
+                    }
+                    ModelsColumn::Source => Cell::from(get_client_display_name(&model.client))
                         .style(Style::default().fg(theme_muted)),
-                    Cell::from(format_tokens(model.tokens.input))
+                    ModelsColumn::Input => Cell::from(format_tokens(model.tokens.input))
                         .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    Cell::from(format_tokens(model.tokens.output))
+                    ModelsColumn::Output => Cell::from(format_tokens(model.tokens.output))
                         .style(Style::default().fg(Color::Rgb(200, 100, 100))),
-                    Cell::from(format_tokens(model.tokens.cache_read))
+                    ModelsColumn::CacheRead => Cell::from(format_tokens(model.tokens.cache_read))
                         .style(Style::default().fg(Color::Rgb(100, 150, 200))),
-                    Cell::from(format_tokens(model.tokens.cache_write))
+                    ModelsColumn::CacheWrite => Cell::from(format_tokens(model.tokens.cache_write))
                         .style(Style::default().fg(Color::Rgb(200, 150, 100))),
-                    Cell::from(format_tokens(model.tokens.total())),
-                    Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else {
-                vec![
-                    Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(&model.model, table_layout.model_width)).style(
-                        Style::default()
-                            .fg(model_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Cell::from(get_provider_display_name(&model.provider)),
-                    Cell::from(get_client_display_name(&model.client))
-                        .style(Style::default().fg(theme_muted)),
-                    Cell::from(format_tokens(model.tokens.input))
-                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    Cell::from(format_tokens(model.tokens.output))
-                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
-                    Cell::from(format_tokens(model.tokens.cache_read))
-                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
-                    Cell::from(format_tokens(model.tokens.cache_write))
-                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
-                    Cell::from(format_cache_hit_rate(
+                    ModelsColumn::CacheRate => Cell::from(format_cache_hit_rate(
                         model.tokens.cache_read,
                         model.tokens.input,
                         model.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(model.tokens.total())),
-                    Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green)),
-                ]
+                    ModelsColumn::Total => Cell::from(format_tokens(model.tokens.total())),
+                    ModelsColumn::Cost => {
+                        Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green))
+                    }
+                }
             };
+            let cells: Vec<Cell> = columns
+                .iter()
+                .map(|column| cell_for_column(*column))
+                .collect();
 
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
@@ -582,6 +741,65 @@ mod tests {
             provider,
             source,
         )
+    }
+
+    #[test]
+    fn portrait_model_layout_keeps_core_columns_before_cache_details() {
+        let layout = model_layout(100, 28, 42, 34);
+
+        assert_eq!(layout.density, ModelsTableDensity::Detail);
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelsColumn::Model,
+                ModelsColumn::Provider,
+                ModelsColumn::Source,
+                ModelsColumn::Input,
+                ModelsColumn::Output,
+                ModelsColumn::Total,
+                ModelsColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&ModelsColumn::CacheRead));
+        assert!(!layout.columns.contains(&ModelsColumn::CacheWrite));
+        assert!(!layout.columns.contains(&ModelsColumn::CacheRate));
+        assert!(layout.model_width >= MODEL_MIN_WIDTH as usize);
+    }
+
+    #[test]
+    fn narrow_model_layout_keeps_model_tokens_and_cost() {
+        let layout = models_table_layout(74, &GroupBy::Model, true, false, 80, 56, 40);
+
+        assert_eq!(layout.density, ModelsTableDensity::Core);
+        assert_eq!(
+            layout.columns,
+            vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost]
+        );
+        assert!(layout.model_width >= 40);
+    }
+
+    #[test]
+    fn very_narrow_model_layout_still_keeps_tokens_before_cache_details() {
+        let layout = models_table_layout(54, &GroupBy::Model, true, true, 80, 56, 40);
+
+        assert_eq!(layout.density, ModelsTableDensity::VeryCompact);
+        assert_eq!(
+            layout.columns,
+            vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost]
+        );
+        assert!(!layout.columns.contains(&ModelsColumn::CacheRead));
+    }
+
+    #[test]
+    fn wide_model_layout_is_required_before_cache_columns_are_shown() {
+        let portrait = model_layout(100, 28, 42, 34);
+        let wide = model_layout(140, 28, 42, 34);
+
+        assert_eq!(portrait.density, ModelsTableDensity::Detail);
+        assert_eq!(wide.density, ModelsTableDensity::Full);
+        assert!(wide.columns.contains(&ModelsColumn::CacheRead));
+        assert!(wide.columns.contains(&ModelsColumn::CacheWrite));
+        assert!(wide.columns.contains(&ModelsColumn::CacheRate));
     }
 
     #[test]
