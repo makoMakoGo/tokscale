@@ -1,5 +1,5 @@
 use super::UnifiedMessage;
-use crate::{pricing, provider_identity, TokenBreakdown};
+use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
 
@@ -59,7 +59,7 @@ fn parse_usage_row(value: &Value, fallback_model: Option<&str>) -> Option<Unifie
         .map(|text| text.to_string())
         .or_else(|| fallback_model.map(|text| text.to_string()))
         .unwrap_or_else(|| "unknown".to_string());
-    let model_id = pricing::aliases::resolve_alias(&model_id)
+    let model_id = resolve_antigravity_placeholder(&model_id)
         .unwrap_or(model_id.as_str())
         .to_string();
 
@@ -107,6 +107,17 @@ fn infer_provider(model: &str) -> &'static str {
     provider_identity::inferred_provider_from_model(model).unwrap_or("antigravity")
 }
 
+fn resolve_antigravity_placeholder(model_id: &str) -> Option<&'static str> {
+    match model_id.to_lowercase().as_str() {
+        "model_placeholder_m26" => Some("claude-opus-4-6"),
+        "model_placeholder_m35" => Some("claude-sonnet-4-6"),
+        "model_placeholder_m36" | "model_placeholder_m37" => Some("gemini-3.1-pro"),
+        "model_placeholder_m47" => Some("gemini-3-flash-preview"),
+        "model_openai_gpt_oss_120b_medium" => Some("gpt-oss-120b-medium"),
+        _ => None,
+    }
+}
+
 fn to_safe_i64(value: Option<&Value>) -> i64 {
     value
         .and_then(|inner| {
@@ -135,7 +146,7 @@ mod tests {
         let messages = parse_antigravity_file(path.path());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "antigravity");
-        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].model_id, "claude-sonnet-4.6");
         assert_eq!(messages[0].tokens.input, 12);
         assert_eq!(messages[0].tokens.reasoning, 1);
         assert_eq!(messages[0].dedup_key.as_deref(), Some("resp-1"));
@@ -153,5 +164,18 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "claude-opus-4-6");
         assert_eq!(messages[0].provider_id, "anthropic");
+    }
+
+    #[test]
+    fn parse_usage_row_preserves_real_model_alias_candidates() {
+        let input = r#"{"type":"usage","sessionId":"abc","modelId":"gemini-3-flash-c","timestamp":1711200000000,"input":12,"output":4}
+"#;
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path.path(), input).unwrap();
+
+        let messages = parse_antigravity_file(path.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3-flash-c");
     }
 }

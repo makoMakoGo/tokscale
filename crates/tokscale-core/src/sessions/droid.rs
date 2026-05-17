@@ -35,9 +35,9 @@ pub struct DroidTokenUsage {
     pub thinking_tokens: Option<i64>,
 }
 
-/// Normalize model name from Droid's custom format
-/// e.g., "custom:Claude-Opus-4.5-Thinking-[Anthropic]-0" -> "claude-opus-4-5-thinking-0"
-/// e.g., "gemini-2.5-pro" -> "gemini-2-5-pro"
+/// Normalize model name from Droid's custom format while preserving version dots.
+/// e.g., "custom:Claude-Opus-4.5-Thinking-[Anthropic]-0" -> "claude-opus-4.5-thinking-0"
+/// e.g., "gemini-2.5-pro" -> "gemini-2.5-pro"
 /// e.g., "Claude-Sonnet-4-[Anthropic]" -> "claude-sonnet-4"
 fn normalize_model_name(model: &str) -> String {
     // Remove "custom:" prefix if present
@@ -65,9 +65,6 @@ fn normalize_model_name(model: &str) -> String {
 
     // Convert to lowercase (like TypeScript's .toLowerCase())
     normalized = normalized.to_lowercase();
-
-    // Replace dots with hyphens (like TypeScript's .replace(/\./g, "-"))
-    normalized = normalized.replace('.', "-");
 
     // Collapse multiple consecutive hyphens into one (like TypeScript's .replace(/-+/g, "-"))
     let mut collapsed = String::new();
@@ -236,17 +233,18 @@ mod tests {
 
     #[test]
     fn test_normalize_model_name_custom_prefix() {
-        // TypeScript keeps trailing digits: "claude-opus-4-5-thinking-0"
+        // Keep version dots in the parsed model id; grouping/pricing can normalize later.
         assert_eq!(
             normalize_model_name("custom:Claude-Opus-4.5-Thinking-[Anthropic]-0"),
-            "claude-opus-4-5-thinking-0"
+            "claude-opus-4.5-thinking-0"
         );
     }
 
     #[test]
     fn test_normalize_model_name_simple() {
-        // Dots become hyphens: "gemini-2.5-pro" -> "gemini-2-5-pro"
-        assert_eq!(normalize_model_name("gemini-2.5-pro"), "gemini-2-5-pro");
+        assert_eq!(normalize_model_name("gemini-2.5-pro"), "gemini-2.5-pro");
+        assert_eq!(normalize_model_name("custom:glm-5.1"), "glm-5.1");
+        assert_eq!(normalize_model_name("custom:qwen3.5-plus"), "qwen3.5-plus");
     }
 
     #[test]
