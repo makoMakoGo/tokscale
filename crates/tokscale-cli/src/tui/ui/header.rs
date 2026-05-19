@@ -11,7 +11,13 @@ const TAB_DIVIDER: &str = " │ ";
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_very_narrow = app.is_very_narrow();
 
-    let titles: Vec<Line> = Tab::all()
+    let visible_tabs: Vec<Tab> = Tab::all()
+        .iter()
+        .copied()
+        .filter(|t| app.is_tab_visible(*t))
+        .collect();
+
+    let titles: Vec<Line> = visible_tabs
         .iter()
         .map(|t| {
             let name = if is_very_narrow {
@@ -30,7 +36,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let selected = Tab::all()
+    let selected = visible_tabs
         .iter()
         .position(|t| *t == app.current_tab)
         .unwrap_or(0);
@@ -90,7 +96,12 @@ fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
     };
 
     let is_very_narrow = app.is_very_narrow();
-    let mut areas = Vec::with_capacity(Tab::all().len());
+    let visible_tabs: Vec<Tab> = Tab::all()
+        .iter()
+        .copied()
+        .filter(|t| app.is_tab_visible(*t))
+        .collect();
+    let mut areas = Vec::with_capacity(visible_tabs.len());
     let mut x = tab_row.x;
     let right = tab_row.right();
 
@@ -98,7 +109,7 @@ fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
     let right_padding_width = TAB_PADDING_RIGHT.width() as u16;
     let divider_width = TAB_DIVIDER.width() as u16;
 
-    for (index, tab) in Tab::all().iter().enumerate() {
+    for (index, tab) in visible_tabs.iter().enumerate() {
         let tab_start = x;
         let remaining_width = right.saturating_sub(x);
         if remaining_width == 0 {
@@ -134,7 +145,7 @@ fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
         }
 
         let remaining_width = right.saturating_sub(x);
-        if remaining_width == 0 || index + 1 == Tab::all().len() {
+        if remaining_width == 0 || index + 1 == visible_tabs.len() {
             break;
         }
         x = x.saturating_add(divider_width.min(remaining_width));
@@ -181,7 +192,14 @@ mod tests {
             initial_tab: None,
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.settings.minutely_tab_enabled = false;
         app.handle_resize(width, 24);
+        app
+    }
+
+    fn make_app_with_minutely(width: u16) -> App {
+        let mut app = make_app(width);
+        app.settings.minutely_tab_enabled = true;
         app
     }
 
@@ -203,6 +221,18 @@ mod tests {
             (Rect::new(55, 5, 8, 1), Tab::Hourly),
             (Rect::new(66, 5, 7, 1), Tab::Stats),
             (Rect::new(76, 5, 8, 1), Tab::Agents),
+        ]
+    }
+
+    fn expected_normal_tab_areas_with_minutely() -> Vec<(Rect, Tab)> {
+        vec![
+            (Rect::new(21, 5, 10, 1), Tab::Overview),
+            (Rect::new(34, 5, 8, 1), Tab::Models),
+            (Rect::new(45, 5, 7, 1), Tab::Daily),
+            (Rect::new(55, 5, 8, 1), Tab::Hourly),
+            (Rect::new(66, 5, 10, 1), Tab::Minutely),
+            (Rect::new(79, 5, 7, 1), Tab::Stats),
+            (Rect::new(89, 5, 8, 1), Tab::Agents),
         ]
     }
 
@@ -315,6 +345,16 @@ mod tests {
     }
 
     #[test]
+    fn tab_click_areas_include_minutely_when_enabled() {
+        let app = make_app_with_minutely(120);
+
+        assert_eq!(
+            tab_click_areas(&app, Rect::new(21, 5, 78, 1)),
+            expected_normal_tab_areas_with_minutely()
+        );
+    }
+
+    #[test]
     fn tab_click_areas_match_very_narrow_renderable_tab_segments() {
         let app = make_app(50);
 
@@ -338,6 +378,20 @@ mod tests {
         assert_eq!(symbols_at(&lines, 5, 66, 7), " Stats ");
         assert_eq!(symbols_at(&lines, 5, 76, 8), " Agents ");
         assert_eq!(registered_tab_areas(&app), expected_normal_tab_areas());
+    }
+
+    #[test]
+    fn rendered_minutely_tab_matches_click_area_geometry_when_enabled() {
+        let mut app = make_app_with_minutely(120);
+        let area = Rect::new(20, 4, 80, 3);
+
+        let lines = render_header_symbols(&mut app, area, 120, 8);
+
+        assert_eq!(symbols_at(&lines, 5, 66, 10), " Minutely ");
+        assert_eq!(
+            registered_tab_areas(&app),
+            expected_normal_tab_areas_with_minutely()
+        );
     }
 
     #[test]
