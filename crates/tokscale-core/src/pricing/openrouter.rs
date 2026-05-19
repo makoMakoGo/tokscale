@@ -80,6 +80,7 @@ fn get_author_provider_name(model_id: &str) -> Option<&'static str> {
         "cohere" => Some("Cohere"),
         "perplexity" => Some("Perplexity"),
         "moonshotai" => Some("Moonshot AI"),
+        "xiaomi" => Some("Xiaomi"),
         _ => None,
     }
 }
@@ -317,4 +318,17 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
 
 pub async fn fetch_all_mapped() -> HashMap<String, ModelPricing> {
     fetch_all_models().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_author_provider_name;
+
+    #[test]
+    fn maps_xiaomi_models_to_openrouter_author_provider() {
+        assert_eq!(
+            get_author_provider_name("xiaomi/mimo-v2.5-pro"),
+            Some("Xiaomi")
+        );
+    }
 }
