@@ -1795,6 +1795,16 @@ mod tests {
             },
         );
         m.insert(
+            "moonshotai/kimi-k2.6".into(),
+            ModelPricing {
+                input_cost_per_token: Some(9.5e-7),
+                output_cost_per_token: Some(0.000004),
+                cache_read_input_token_cost: None,
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        m.insert(
             "moonshotai/kimi-k2-thinking".into(),
             ModelPricing {
                 input_cost_per_token: Some(4e-7),
@@ -2043,6 +2053,26 @@ mod tests {
         let result = lookup.lookup("kimi-k2.5-free").unwrap();
         assert_eq!(result.matched_key, "moonshotai/kimi-k2.5");
         assert_eq!(result.source, "OpenRouter");
+    }
+
+    #[test]
+    fn test_opencode_zen_kimi_coding_plan_short_aliases() {
+        let lookup = create_lookup();
+
+        let cases = [
+            ("k2p5", "moonshotai/kimi-k2.5"),
+            ("k2-p5", "moonshotai/kimi-k2.5"),
+            ("kimi-for-coding/k2p5", "moonshotai/kimi-k2.5"),
+            ("k2p6", "moonshotai/kimi-k2.6"),
+            ("k2-p6", "moonshotai/kimi-k2.6"),
+            ("kimi-for-coding/k2p6", "moonshotai/kimi-k2.6"),
+        ];
+
+        for (alias, expected_key) in cases {
+            let result = lookup.lookup(alias).unwrap();
+            assert_eq!(result.matched_key, expected_key, "alias {alias}");
+            assert_eq!(result.source, "OpenRouter", "alias {alias}");
+        }
     }
 
     // =========================================================================

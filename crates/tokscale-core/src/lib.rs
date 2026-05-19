@@ -110,6 +110,10 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
     name = strip_trailing_date_suffix(name);
     name = strip_trailing_free_marker(name);
 
+    if let Some(normalized) = normalize_kimi_coding_plan_alias_for_grouping(name) {
+        return normalized.into();
+    }
+
     if let Some(normalized) = normalize_gpt_model_for_grouping(name) {
         return normalized;
     }
@@ -197,6 +201,14 @@ fn strip_suffix_once<'a>(value: &'a str, suffixes: &[&str]) -> Option<&'a str> {
     }
 
     None
+}
+
+fn normalize_kimi_coding_plan_alias_for_grouping(name: &str) -> Option<&'static str> {
+    match name {
+        "k2p5" | "k2-p5" => Some("kimi-k2.5"),
+        "k2p6" | "k2-p6" => Some("kimi-k2.6"),
+        _ => None,
+    }
 }
 
 fn normalize_gpt_model_for_grouping(name: &str) -> Option<String> {
@@ -2778,6 +2790,18 @@ mod tests {
             "deepseek-v4"
         );
         assert_eq!(normalize_model_for_grouping("kimi-k2.5:free"), "kimi-k2.5");
+        assert_eq!(normalize_model_for_grouping("k2p5"), "kimi-k2.5");
+        assert_eq!(normalize_model_for_grouping("k2-p5"), "kimi-k2.5");
+        assert_eq!(normalize_model_for_grouping("k2p6"), "kimi-k2.6");
+        assert_eq!(normalize_model_for_grouping("k2-p6"), "kimi-k2.6");
+        assert_eq!(
+            normalize_model_for_grouping("kimi-for-coding/k2p5"),
+            "kimi-k2.5"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("kimi-for-coding/k2p6"),
+            "kimi-k2.6"
+        );
 
         assert_eq!(
             normalize_model_for_grouping("custom:gpt-5.5-xhigh-sub2api-pro"),
