@@ -11,6 +11,7 @@ mod models;
 mod overview;
 pub mod spinner;
 mod stats;
+mod time_table;
 pub(crate) mod widgets;
 
 use ratatui::prelude::*;

@@ -4,7 +4,8 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
-use super::widgets::{format_cache_hit_rate, format_cost, format_tokens};
+use super::time_table::{display_width, full_time_table_widths};
+use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, SortDirection, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -37,6 +38,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_narrow = app.is_narrow();
     let is_very_narrow = app.is_very_narrow();
     let has_turn_data = minutely.iter().any(|m| m.turn_count > 0);
+    let source_content_width = minutely
+        .iter()
+        .map(|minute| display_width(&minutely_source_text(minute.clients.iter())))
+        .max()
+        .unwrap_or(0);
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
@@ -126,10 +132,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_striped = idx % 2 == 1;
             let is_current = minute.datetime == current_minute;
 
-            let clients_str: String = {
-                let c: Vec<&str> = minute.clients.iter().map(String::as_str).collect();
-                c.join(", ")
-            };
+            let clients_str = minutely_source_text(minute.clients.iter());
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
@@ -248,32 +251,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Percentage(15),
         ]
     } else if has_turn_data {
-        vec![
-            Constraint::Length(18),
-            Constraint::Length(14),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
+        full_time_table_widths(inner.width, true, source_content_width)
     } else {
-        vec![
-            Constraint::Length(18),
-            Constraint::Length(14),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
+        full_time_table_widths(inner.width, false, source_content_width)
     };
 
     let table = Table::new(rows, widths)
@@ -296,6 +276,33 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 vertical: 1,
             }),
             &mut scrollbar_state,
+        );
+    }
+}
+
+fn minutely_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
+    let mut labels: Vec<String> = clients
+        .map(|client| get_client_display_name(client))
+        .collect();
+    labels.sort();
+    labels.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minutely_source_text_formats_client_display_names() {
+        let clients = [
+            "opencode".to_string(),
+            "codex".to_string(),
+            "unknown-client".to_string(),
+        ];
+
+        assert_eq!(
+            minutely_source_text(clients.iter()),
+            "Codex, OpenCode, unknown-client"
         );
     }
 }
