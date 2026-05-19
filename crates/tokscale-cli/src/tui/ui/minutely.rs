@@ -5,7 +5,7 @@ use ratatui::widgets::{
 };
 
 use super::time_table::{display_width, full_time_table_widths};
-use super::widgets::{format_cache_hit_rate, format_cost, format_tokens};
+use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, SortDirection, SortField};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -281,6 +281,28 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn minutely_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
-    let c: Vec<&str> = clients.map(String::as_str).collect();
-    c.join(", ")
+    let mut labels: Vec<String> = clients
+        .map(|client| get_client_display_name(client))
+        .collect();
+    labels.sort();
+    labels.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minutely_source_text_formats_client_display_names() {
+        let clients = [
+            "opencode".to_string(),
+            "codex".to_string(),
+            "unknown-client".to_string(),
+        ];
+
+        assert_eq!(
+            minutely_source_text(clients.iter()),
+            "Codex, OpenCode, unknown-client"
+        );
+    }
 }
