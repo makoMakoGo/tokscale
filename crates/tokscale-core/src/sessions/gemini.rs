@@ -523,6 +523,9 @@ fn extract_gemini_usage_from_value(model: String, value: &Value) -> Option<Gemin
         output,
         cached,
         reasoning,
+        // prompt_input and wrapper_input are cache-inclusive. If net_input is
+        // missing, treat the zero input fallback as cache-inclusive too; the
+        // normalization is then a no-op.
         input_includes_cache: prompt_input.is_some()
             || wrapper_input.is_some()
             || net_input.is_none(),

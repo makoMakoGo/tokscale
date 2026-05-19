@@ -218,6 +218,14 @@ pub struct App {
 impl App {
     pub fn new_with_cached_data(config: TuiConfig, cached_data: Option<UsageData>) -> Result<Self> {
         let settings = Settings::load();
+        Self::new_with_cached_data_and_settings(config, cached_data, settings)
+    }
+
+    fn new_with_cached_data_and_settings(
+        config: TuiConfig,
+        cached_data: Option<UsageData>,
+        settings: Settings,
+    ) -> Result<Self> {
         let theme_name: ThemeName = config
             .theme
             .parse()
@@ -1651,7 +1659,7 @@ mod tests {
             year: None,
             initial_tab: None,
         };
-        App::new_with_cached_data(config, None).unwrap()
+        App::new_with_cached_data_and_settings(config, None, Settings::default()).unwrap()
     }
 
     #[test]
@@ -1848,7 +1856,12 @@ mod tests {
             year: None,
             initial_tab: Some(Tab::Minutely),
         };
-        let app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
+        let app = App::new_with_cached_data_and_settings(
+            config,
+            Some(UsageData::default()),
+            Settings::default(),
+        )
+        .unwrap();
         assert_eq!(app.current_tab, Tab::Overview);
     }
 

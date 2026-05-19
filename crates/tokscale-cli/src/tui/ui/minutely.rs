@@ -127,8 +127,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_current = minute.datetime == current_minute;
 
             let clients_str: String = {
-                let mut c: Vec<&str> = minute.clients.iter().map(String::as_str).collect();
-                c.sort();
+                let c: Vec<&str> = minute.clients.iter().map(String::as_str).collect();
                 c.join(", ")
             };
 
