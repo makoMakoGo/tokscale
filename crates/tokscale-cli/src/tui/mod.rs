@@ -96,8 +96,13 @@ pub fn run(
 
     // Single file read: load cache and check freshness in one pass.
     let initial_group_by = tokscale_core::GroupBy::Model;
-    let (cached_data, needs_background_load) =
-        decide_initial_data(load_cache(&enabled_clients, &initial_group_by));
+    let settings = settings::Settings::load();
+    let minutely_enabled = settings.minutely_tab_enabled;
+    let (cached_data, needs_background_load) = decide_initial_data(load_cache(
+        &enabled_clients,
+        &initial_group_by,
+        minutely_enabled,
+    ));
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -154,9 +159,10 @@ pub fn run(
         let bg_year = year.clone();
         let bg_enabled_clients = enabled_clients.clone();
         let bg_group_by = app.group_by.borrow().clone();
+        let bg_minutely_enabled = app.data_loader.minutely_enabled;
 
         thread::spawn(move || {
-            let loader = DataLoader::with_filters(None, bg_since, bg_until, bg_year);
+            let loader = background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
             let result = loader.load(&bg_clients, &bg_group_by, bg_include_synthetic);
 
             if let Ok(ref data) = result {
@@ -271,9 +277,10 @@ fn run_loop_with_background(
             let year = app.data_loader.year.clone();
             let enabled_clients = app.enabled_clients.borrow().clone();
             let group_by = app.group_by.borrow().clone();
+            let minutely_enabled = app.data_loader.minutely_enabled;
 
             thread::spawn(move || {
-                let loader = DataLoader::with_filters(None, since, until, year);
+                let loader = background_data_loader(since, until, year, minutely_enabled);
                 let result = loader.load(&clients, &group_by, include_synthetic);
                 if let Ok(ref data) = result {
                     save_cached_data(data, &enabled_clients, &group_by);
@@ -304,6 +311,15 @@ fn run_loop_with_background(
         }
     }
     Ok(())
+}
+
+fn background_data_loader(
+    since: Option<String>,
+    until: Option<String>,
+    year: Option<String>,
+    minutely_enabled: bool,
+) -> DataLoader {
+    DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
 }
 
 pub fn test_data_loading() -> Result<()> {
@@ -372,5 +388,20 @@ mod tests {
 
         assert!(cached_data.is_none());
         assert!(needs_background_load);
+    }
+
+    #[test]
+    fn background_loader_preserves_minutely_setting() {
+        let loader = background_data_loader(
+            Some("2026-05-01".to_string()),
+            Some("2026-05-19".to_string()),
+            Some("2026".to_string()),
+            true,
+        );
+
+        assert!(loader.minutely_enabled);
+        assert_eq!(loader.since.as_deref(), Some("2026-05-01"));
+        assert_eq!(loader.until.as_deref(), Some("2026-05-19"));
+        assert_eq!(loader.year.as_deref(), Some("2026"));
     }
 }

@@ -589,6 +589,11 @@ impl TryFrom<CachedUsageData> for UsageData {
             agents: normalize_cached_agents(u.agents),
             daily: daily?,
             hourly: hourly?,
+            // Minutely data is recomputed on each load (high cardinality,
+            // not worth round-tripping through the on-disk cache); the
+            // first background or foreground refresh after cache hit will
+            // populate it when the tab is enabled.
+            minutely: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,
@@ -683,7 +688,11 @@ enum ClientMatch {
 /// `(enabled_clients: Vec<String>, include_synthetic: bool)` shape so
 /// existing user caches keep working across upgrades — projection
 /// happens here.
-pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -> CacheResult {
+pub fn load_cache(
+    enabled_clients: &HashSet<ClientFilter>,
+    group_by: &GroupBy,
+    minutely_enabled: bool,
+) -> CacheResult {
     let Some(cache_path) = cache_file() else {
         return CacheResult::Miss;
     };
@@ -737,6 +746,9 @@ pub fn load_cache(enabled_clients: &HashSet<ClientFilter>, group_by: &GroupBy) -
     };
 
     if schema_outdated || client_match == ClientMatch::Subset {
+        return CacheResult::Stale(data);
+    }
+    if minutely_enabled && data.minutely.is_empty() {
         return CacheResult::Stale(data);
     }
 
@@ -1079,7 +1091,7 @@ mod tests {
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, &GroupBy::Model),
+            load_cache(&clients, &GroupBy::Model, false),
             CacheResult::Miss
         ));
 
@@ -1123,7 +1135,7 @@ mod tests {
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, &GroupBy::WorkspaceModel),
+            load_cache(&clients, &GroupBy::WorkspaceModel, false),
             CacheResult::Miss
         ));
 
@@ -1191,7 +1203,7 @@ mod tests {
         .unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude], false);
-        match load_cache(&clients, &GroupBy::Model) {
+        match load_cache(&clients, &GroupBy::Model, false) {
             CacheResult::Stale(data) => {
                 let source = data.daily[0].source_breakdown.get("claude").unwrap();
                 let daily_model = source.models.get("claude-sonnet-4-5").unwrap();
@@ -1311,7 +1323,7 @@ mod tests {
         .unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude, ClientFilter::Cursor], false);
-        match load_cache(&clients, &GroupBy::Model) {
+        match load_cache(&clients, &GroupBy::Model, false) {
             CacheResult::Fresh(data) => {
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
                 let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
@@ -1321,6 +1333,34 @@ mod tests {
             }
             other => panic!(
                 "expected fresh current-schema cache, got {:?}",
+                other_variant_name(&other)
+            ),
+        }
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_is_stale_when_minutely_enabled() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        save_cached_data(&UsageData::default(), &clients, &GroupBy::Model);
+
+        match load_cache(&clients, &GroupBy::Model, true) {
+            CacheResult::Stale(data) => {
+                assert!(data.minutely.is_empty());
+            }
+            other => panic!(
+                "expected stale cache when minutely is enabled, got {:?}",
                 other_variant_name(&other)
             ),
         }
@@ -1392,7 +1432,7 @@ mod tests {
         .unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude], false);
-        match load_cache(&clients, &GroupBy::Model) {
+        match load_cache(&clients, &GroupBy::Model, false) {
             CacheResult::Fresh(data) | CacheResult::Stale(data) => {
                 let hourly_model = data.hourly[0].models.get("claude-sonnet-4-5").unwrap();
                 assert_eq!(hourly_model.display_name, "claude-sonnet-4-5");
@@ -1465,7 +1505,7 @@ mod tests {
         .unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude], false);
-        match load_cache(&clients, &GroupBy::Model) {
+        match load_cache(&clients, &GroupBy::Model, false) {
             CacheResult::Stale(data) => {
                 assert!(
                     data.daily[0].source_breakdown.contains_key("unknown"),
@@ -1528,7 +1568,7 @@ mod tests {
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, &GroupBy::Model),
+            load_cache(&clients, &GroupBy::Model, false),
             CacheResult::Fresh(_)
         ));
 
@@ -1585,7 +1625,7 @@ mod tests {
 
         let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
-            load_cache(&clients, &GroupBy::Model),
+            load_cache(&clients, &GroupBy::Model, false),
             CacheResult::Miss
         ));
 
