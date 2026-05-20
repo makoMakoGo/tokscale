@@ -4,8 +4,8 @@
 
 use crate::sessions::UnifiedMessage;
 use crate::{
-    ClientContribution, DailyContribution, DailyTotals, DataSummary, GraphMeta, GraphResult,
-    TokenBreakdown, YearSummary,
+    normalize_provider_for_grouping, ClientContribution, DailyContribution, DailyTotals,
+    DataSummary, GraphMeta, GraphResult, TokenBreakdown, YearSummary,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -232,13 +232,14 @@ impl DayAccumulator {
             msg.client,
             crate::normalize_model_for_grouping(&msg.model_id)
         );
+        let provider_id = normalize_provider_for_grouping(&msg.provider_id);
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
                 client: msg.client.clone(),
                 model_id: crate::normalize_model_for_grouping(&msg.model_id),
-                provider_id: msg.provider_id.clone(),
+                provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 messages: 0,
@@ -248,9 +249,9 @@ impl DayAccumulator {
         if !client_entry
             .provider_id
             .split(", ")
-            .any(|p| p == msg.provider_id)
+            .any(|p| p == provider_id)
         {
-            client_entry.provider_id = format!("{}, {}", client_entry.provider_id, msg.provider_id);
+            client_entry.provider_id = format!("{}, {}", client_entry.provider_id, provider_id);
         }
 
         client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
@@ -495,6 +496,23 @@ mod tests {
         assert_eq!(result[0].totals.tokens, 1000);
         assert_eq!(result[0].totals.cost, 0.05);
         assert_eq!(result[0].totals.messages, 1);
+    }
+
+    #[test]
+    fn test_aggregate_by_date_normalizes_provider_display_aliases() {
+        let mut first =
+            mock_unified_message("2024-01-01", 1000, 0.05, "xiaomi/mimo-v2.5-pro", "opencode");
+        first.provider_id = "xiaomi".to_string();
+        let mut second =
+            mock_unified_message("2024-01-01", 2000, 0.10, "xiaomi/mimo-v2.5-pro", "opencode");
+        second.provider_id = "xiaomi-token-plan-cn".to_string();
+
+        let result = aggregate_by_date(vec![first, second]);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].clients.len(), 1);
+        assert_eq!(result[0].clients[0].provider_id, "xiaomi");
+        assert_eq!(result[0].clients[0].tokens.total(), 3000);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod sessions;
 pub use aggregator::*;
 pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
 pub use parser::*;
+pub use provider_identity::normalize_provider_for_grouping;
 pub use scanner::*;
 pub use sessions::UnifiedMessage;
 
@@ -1500,14 +1501,14 @@ fn aggregate_model_usage_entries(
 
     for msg in messages {
         let normalized = normalize_model_for_grouping(&msg.model_id);
+        let provider = normalize_provider_for_grouping(&msg.provider_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
         let (key, merge_clients) = match group_by {
             GroupBy::Model => (normalized.clone(), true),
             GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized), false),
-            GroupBy::ClientProviderModel => (
-                format!("{}:{}:{}", msg.client, msg.provider_id, normalized),
-                false,
-            ),
+            GroupBy::ClientProviderModel => {
+                (format!("{}:{}:{}", msg.client, provider, normalized), false)
+            }
             GroupBy::WorkspaceModel => (format!("{}:{}", workspace_group_key, normalized), true),
         };
         let entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
@@ -1528,7 +1529,7 @@ fn aggregate_model_usage_entries(
                 None
             },
             model: normalized.clone(),
-            provider: msg.provider_id.clone(),
+            provider: provider.clone(),
             input: 0,
             output: 0,
             cache_read: 0,
@@ -1553,9 +1554,9 @@ fn aggregate_model_usage_entries(
         }
 
         if *group_by != GroupBy::ClientProviderModel
-            && !entry.provider.split(", ").any(|p| p == msg.provider_id)
+            && !entry.provider.split(", ").any(|p| p == provider)
         {
-            entry.provider = format!("{}, {}", entry.provider, msg.provider_id);
+            entry.provider = format!("{}, {}", entry.provider, provider);
         }
 
         entry.input += msg.tokens.input;
@@ -2966,6 +2967,72 @@ mod tests {
         assert_eq!(entries[0].model, "gpt-5.5");
         assert_eq!(entries[0].cost, 5.0);
         assert_eq!(entries[0].message_count, 2);
+    }
+
+    #[test]
+    fn test_model_grouping_normalizes_provider_display_aliases() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "opencode",
+                    "xiaomi/mimo-v2.5-pro",
+                    "xiaomi",
+                    "session-1",
+                    1.0,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "opencode",
+                    "xiaomi/mimo-v2.5-pro",
+                    "xiaomi-token-plan-cn",
+                    "session-2",
+                    2.0,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::Model,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "mimo-v2.5-pro");
+        assert_eq!(entries[0].provider, "xiaomi");
+        assert_eq!(entries[0].cost, 3.0);
+        assert_eq!(entries[0].message_count, 2);
+    }
+
+    #[test]
+    fn test_client_provider_model_grouping_normalizes_provider_display_aliases() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "opencode",
+                    "xiaomi/mimo-v2.5-pro",
+                    "xiaomi",
+                    "session-1",
+                    1.0,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "opencode",
+                    "xiaomi/mimo-v2.5-pro",
+                    "xiaomi-token-plan-cn",
+                    "session-2",
+                    2.0,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::ClientProviderModel,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].client, "opencode");
+        assert_eq!(entries[0].provider, "xiaomi");
+        assert_eq!(entries[0].model, "mimo-v2.5-pro");
+        assert_eq!(entries[0].cost, 3.0);
     }
 
     #[test]

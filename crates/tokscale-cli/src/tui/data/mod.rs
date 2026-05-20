@@ -7,8 +7,8 @@ use tokio::runtime::{Handle, Runtime};
 
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
-    normalize_model_for_grouping, parse_local_unified_messages, sessions, ClientId, GroupBy,
-    LocalParseOptions,
+    normalize_model_for_grouping, normalize_provider_for_grouping, parse_local_unified_messages,
+    sessions, ClientId, GroupBy, LocalParseOptions,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -423,12 +423,13 @@ impl DataLoader {
 
         for msg in &messages {
             let normalized_model = normalize_model_for_grouping(&msg.model_id);
+            let provider = normalize_provider_for_grouping(&msg.provider_id);
             let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
             let (key, merge_clients) = match group_by {
                 GroupBy::Model => (normalized_model.clone(), true),
                 GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized_model), false),
                 GroupBy::ClientProviderModel => (
-                    format!("{}:{}:{}", msg.client, msg.provider_id, normalized_model),
+                    format!("{}:{}:{}", msg.client, provider, normalized_model),
                     false,
                 ),
                 GroupBy::WorkspaceModel => (
@@ -439,7 +440,7 @@ impl DataLoader {
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
-                provider: msg.provider_id.clone(),
+                provider: provider.clone(),
                 client: msg.client.clone(),
                 workspace_key: if *group_by == GroupBy::WorkspaceModel {
                     workspace_key.clone()
@@ -471,12 +472,9 @@ impl DataLoader {
             }
 
             if *group_by != GroupBy::ClientProviderModel
-                && !model_entry
-                    .provider
-                    .split(", ")
-                    .any(|p| p == msg.provider_id)
+                && !model_entry.provider.split(", ").any(|p| p == provider)
             {
-                model_entry.provider = format!("{}, {}", model_entry.provider, msg.provider_id);
+                model_entry.provider = format!("{}, {}", model_entry.provider, provider);
             }
 
             model_entry.tokens.input = model_entry
@@ -634,7 +632,7 @@ impl DataLoader {
                 let daily_model_key = daily_source_model_key(
                     group_by,
                     &workspace_group_key,
-                    &msg.provider_id,
+                    &provider,
                     &normalized_model,
                 );
 
@@ -642,14 +640,14 @@ impl DataLoader {
                     .models
                     .entry(daily_model_key)
                     .or_insert_with(|| DailyModelInfo {
-                        provider: msg.provider_id.clone(),
+                        provider: provider.clone(),
                         display_name: daily_source_model_display_name(
                             group_by,
                             &workspace_label,
-                            &msg.provider_id,
+                            &provider,
                             &normalized_model,
                         ),
-                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
+                        color_key: model_color_key(group_by, &provider, &normalized_model),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                         messages: 0,
@@ -727,19 +725,18 @@ impl DataLoader {
                 }
                 hourly_entry.clients.insert(msg.client.clone());
 
-                let hourly_model_key =
-                    hourly_model_key(group_by, &msg.provider_id, &normalized_model);
+                let hourly_model_key = hourly_model_key(group_by, &provider, &normalized_model);
                 let h_model = hourly_entry
                     .models
                     .entry(hourly_model_key)
                     .or_insert_with(|| HourlyModelInfo {
-                        provider: msg.provider_id.clone(),
+                        provider: provider.clone(),
                         display_name: hourly_model_display_name(
                             group_by,
-                            &msg.provider_id,
+                            &provider,
                             &normalized_model,
                         ),
-                        color_key: model_color_key(group_by, &msg.provider_id, &normalized_model),
+                        color_key: model_color_key(group_by, &provider, &normalized_model),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                     });
@@ -821,23 +818,19 @@ impl DataLoader {
                 }
                 minutely_entry.clients.insert(msg.client.clone());
 
-                let m_model_key = hourly_model_key(group_by, &msg.provider_id, &normalized_model);
+                let m_model_key = hourly_model_key(group_by, &provider, &normalized_model);
                 let m_model =
                     minutely_entry
                         .models
                         .entry(m_model_key)
                         .or_insert_with(|| HourlyModelInfo {
-                            provider: msg.provider_id.clone(),
+                            provider: provider.clone(),
                             display_name: hourly_model_display_name(
                                 group_by,
-                                &msg.provider_id,
+                                &provider,
                                 &normalized_model,
                             ),
-                            color_key: model_color_key(
-                                group_by,
-                                &msg.provider_id,
-                                &normalized_model,
-                            ),
+                            color_key: model_color_key(group_by, &provider, &normalized_model),
                             tokens: TokenBreakdown::default(),
                             cost: 0.0,
                         });
@@ -1371,6 +1364,81 @@ mod tests {
             },
             0.0,
         )
+    }
+
+    #[test]
+    fn test_aggregate_messages_model_grouping_normalizes_provider_display_aliases() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "opencode",
+                        "xiaomi/mimo-v2.5-pro",
+                        "xiaomi",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "opencode",
+                        "xiaomi/mimo-v2.5-pro",
+                        "xiaomi-token-plan-cn",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].model, "mimo-v2.5-pro");
+        assert_eq!(usage.models[0].provider, "xiaomi");
+        assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_client_provider_model_normalizes_provider_display_aliases() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "opencode",
+                        "xiaomi/mimo-v2.5-pro",
+                        "xiaomi",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "opencode",
+                        "xiaomi/mimo-v2.5-pro",
+                        "xiaomi-token-plan-cn",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].provider, "xiaomi");
+        assert_eq!(usage.models[0].cost, 3.0);
+
+        let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
+        assert_eq!(daily_models.len(), 1);
+        let daily_model = daily_models.values().next().unwrap();
+        assert_eq!(daily_model.provider, "xiaomi");
+        assert_eq!(daily_model.display_name, "xiaomi / mimo-v2.5-pro");
     }
 
     #[test]

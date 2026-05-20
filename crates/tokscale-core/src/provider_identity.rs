@@ -33,6 +33,23 @@ pub fn canonical_provider(raw: &str) -> Option<String> {
     provider_tags(raw).into_iter().next()
 }
 
+pub fn normalize_provider_for_grouping(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let normalized = trimmed.to_lowercase().replace('-', "_");
+
+    match normalized.as_str() {
+        s if s.starts_with("zai") || s.starts_with("zhipu") => "zai".to_string(),
+        s if s.starts_with("xiaomi") => "xiaomi".to_string(),
+        s if s.starts_with("minimax") => "minimax".to_string(),
+        "kimi_code" | "kimi_for_coding" | "kimi" => "kimi".to_string(),
+        s if s.starts_with("doubao") => "doubao".to_string(),
+        s if s.starts_with("alibaba") => "alibaba".to_string(),
+        s if s.starts_with("tencent") || s.starts_with("tecent") => "tencent".to_string(),
+        s if s.starts_with("github_cop") || s.contains("copilot") => "github-copilot".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
 pub fn provider_tags(raw: &str) -> Vec<String> {
     let mut tags = Vec::new();
     let mut push = |segment: &str| {
@@ -194,6 +211,25 @@ mod tests {
             Some("openrouter".into())
         );
         assert_eq!(canonical_provider("unknown"), None);
+    }
+
+    #[test]
+    fn test_normalize_provider_for_grouping_collapses_display_aliases() {
+        let cases = [
+            ("zai", "zai"),
+            ("zhipuai-coding-plan", "zai"),
+            ("xiaomi-token-plan-cn", "xiaomi"),
+            ("minimax-code-cn", "minimax"),
+            ("kimi-for-coding", "kimi"),
+            ("doubao-coding-plan", "doubao"),
+            ("alibaba-coding-plan-cn", "alibaba"),
+            ("tecent-coding-plan", "tencent"),
+            ("copilot-chat", "github-copilot"),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(normalize_provider_for_grouping(raw), expected);
+        }
     }
 
     #[test]

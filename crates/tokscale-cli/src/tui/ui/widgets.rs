@@ -283,7 +283,7 @@ fn get_single_provider_display_name(provider: &str) -> String {
         s if s.starts_with("zai") || s.starts_with("zhipu") => "Z.AI".to_string(),
         s if s.starts_with("xiaomi") => "XiaoMi".to_string(),
         s if s.starts_with("minimax") => "MiniMax".to_string(),
-        s if s == "kimi-code" || s == "kimi-for-coding" => "Kimi".to_string(),
+        s if s == "kimi" || s == "kimi-code" || s == "kimi-for-coding" => "Kimi".to_string(),
         s if s.starts_with("doubao") => "Doubao".to_string(),
         s if s.starts_with("alibaba") => "Alibaba".to_string(),
         s if s.starts_with("tencent") || s.starts_with("tecent") => "Tencent".to_string(),
@@ -305,11 +305,15 @@ where
         return format_segment(value);
     }
 
-    value
-        .split(',')
-        .map(|segment| format_segment(segment.trim()))
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut labels = Vec::new();
+    for segment in value.split(',') {
+        let label = format_segment(segment.trim());
+        if !labels.iter().any(|existing| existing == &label) {
+            labels.push(label);
+        }
+    }
+
+    labels.join(", ")
 }
 
 #[cfg(test)]
@@ -384,6 +388,7 @@ mod tests {
             ("xiaomi-token-plan-sgp", "XiaoMi"),
             ("minimax-code-cn", "MiniMax"),
             ("minimax-cn-coding-plan", "MiniMax"),
+            ("kimi", "Kimi"),
             ("kimi-code", "Kimi"),
             ("kimi-for-coding", "Kimi"),
             ("doubao-coding-plan", "Doubao"),
@@ -395,6 +400,18 @@ mod tests {
         for (provider, expected) in cases {
             assert_eq!(get_provider_display_name(provider), expected);
         }
+    }
+
+    #[test]
+    fn provider_display_dedups_after_formatting_merged_aliases() {
+        assert_eq!(
+            get_provider_display_name("xiaomi, xiaomi-token-plan-cn, xiaomi-token-plan-sgp"),
+            "XiaoMi"
+        );
+        assert_eq!(
+            get_provider_display_name("zai, zhipuai-coding-plan, minimax-code-cn"),
+            "Z.AI, MiniMax"
+        );
     }
 
     #[test]
