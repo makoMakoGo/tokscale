@@ -80,6 +80,7 @@ fn get_author_provider_name(model_id: &str) -> Option<&'static str> {
         "cohere" => Some("Cohere"),
         "perplexity" => Some("Perplexity"),
         "moonshotai" => Some("Moonshot AI"),
+        "xiaomi" => Some("Xiaomi"),
         _ => None,
     }
 }
@@ -174,6 +175,15 @@ async fn fetch_author_pricing(
     };
 
     Some((model_id, pricing))
+}
+
+fn select_models_for_pricing_resolution(
+    models_with_fallback: Vec<(String, Option<ModelPricing>)>,
+) -> Vec<(String, Option<ModelPricing>)> {
+    models_with_fallback
+        .into_iter()
+        .filter(|(id, fallback)| get_author_provider_name(id).is_some() || fallback.is_some())
+        .collect()
 }
 
 /// Fetch all models and get author pricing for each
@@ -272,16 +282,13 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
         return HashMap::new();
     }
 
-    let models_with_authors: Vec<(String, Option<ModelPricing>)> = models_with_fallback
-        .into_iter()
-        .filter(|(id, _)| get_author_provider_name(id).is_some())
-        .collect();
+    let models_for_pricing_resolution = select_models_for_pricing_resolution(models_with_fallback);
 
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
 
-    let mut handles = Vec::with_capacity(models_with_authors.len());
+    let mut handles = Vec::with_capacity(models_for_pricing_resolution.len());
 
-    for (model_id, fallback) in models_with_authors {
+    for (model_id, fallback) in models_for_pricing_resolution {
         let client = Arc::clone(&client);
         let sem = Arc::clone(&semaphore);
 
@@ -317,4 +324,38 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
 
 pub async fn fetch_all_mapped() -> HashMap<String, ModelPricing> {
     fetch_all_models().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_author_provider_name, select_models_for_pricing_resolution, ModelPricing};
+
+    #[test]
+    fn maps_xiaomi_models_to_openrouter_author_provider() {
+        assert_eq!(
+            get_author_provider_name("xiaomi/mimo-v2.5-pro"),
+            Some("Xiaomi")
+        );
+    }
+
+    #[test]
+    fn keeps_unknown_author_models_with_model_list_fallback_pricing() {
+        let fallback = ModelPricing {
+            input_cost_per_token: Some(0.00000085),
+            output_cost_per_token: Some(0.00000125),
+            ..Default::default()
+        };
+
+        let selected = select_models_for_pricing_resolution(vec![
+            ("relace/relace-apply-3".to_string(), Some(fallback)),
+            ("unknown/no-price".to_string(), None),
+            ("openai/gpt-5".to_string(), None),
+        ]);
+
+        let selected_ids: Vec<&str> = selected.iter().map(|(id, _)| id.as_str()).collect();
+
+        assert!(selected_ids.contains(&"relace/relace-apply-3"));
+        assert!(selected_ids.contains(&"openai/gpt-5"));
+        assert!(!selected_ids.contains(&"unknown/no-price"));
+    }
 }

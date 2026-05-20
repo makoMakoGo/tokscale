@@ -6,8 +6,14 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("big-pickle", "glm-4.7");
     m.insert("big pickle", "glm-4.7");
     m.insert("bigpickle", "glm-4.7");
-    m.insert("k2p5", "kimi-k2-thinking");
-    m.insert("k2-p5", "kimi-k2-thinking");
+    m.insert("k2p5", "kimi-k2.5");
+    m.insert("k2-p5", "kimi-k2.5");
+    m.insert("k2p6", "kimi-k2.6");
+    m.insert("k2-p6", "kimi-k2.6");
+    m.insert("kimi-for-coding/k2p5", "kimi-k2.5");
+    m.insert("kimi-for-coding/k2-p5", "kimi-k2.5");
+    m.insert("kimi-for-coding/k2p6", "kimi-k2.6");
+    m.insert("kimi-for-coding/k2-p6", "kimi-k2.6");
     m.insert("kimi-k2.5-thinking", "kimi-k2-thinking");
     m.insert("kimi-for-coding", "kimi-k2.5");
 
@@ -70,5 +76,15 @@ mod tests {
             resolve_alias("claude-opus-4.6-thinking"),
             Some("claude-opus-4-6")
         );
+    }
+
+    #[test]
+    fn resolves_kimi_coding_plan_model_aliases() {
+        assert_eq!(resolve_alias("k2p5"), Some("kimi-k2.5"));
+        assert_eq!(resolve_alias("k2-p5"), Some("kimi-k2.5"));
+        assert_eq!(resolve_alias("k2p6"), Some("kimi-k2.6"));
+        assert_eq!(resolve_alias("k2-p6"), Some("kimi-k2.6"));
+        assert_eq!(resolve_alias("kimi-for-coding/k2p5"), Some("kimi-k2.5"));
+        assert_eq!(resolve_alias("kimi-for-coding/k2p6"), Some("kimi-k2.6"));
     }
 }
