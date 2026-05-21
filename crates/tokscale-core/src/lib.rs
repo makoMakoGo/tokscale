@@ -643,7 +643,7 @@ fn parse_all_messages_with_pricing(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
-) -> Vec<UnifiedMessage> {
+) -> Result<Vec<UnifiedMessage>, String> {
     parse_all_messages_with_pricing_with_env_strategy(
         home_dir,
         clients,
@@ -659,7 +659,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     pricing: Option<&pricing::PricingService>,
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
-) -> Vec<UnifiedMessage> {
+) -> Result<Vec<UnifiedMessage>, String> {
     #[derive(Debug)]
     struct CachedParseOutcome {
         messages: Vec<UnifiedMessage>,
@@ -986,6 +986,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
+    let include_amp = include_all || clients.iter().any(|c| c == ClientId::Amp.as_str());
 
     // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
     // suppress legacy JSON overlap by message identity.
@@ -1154,20 +1155,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let amp_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Amp)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::amp::parse_amp_file(path)
-            })
-        })
-        .collect();
-    for outcome in amp_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
+    if include_amp && should_collect_amp_cli_source(home_dir, use_env_roots) {
+        let mut amp_messages =
+            sessions::amp::parse_amp_threads_from_cli().map_err(|err| err.to_string())?;
+        apply_pricing_to_messages(&mut amp_messages, pricing);
+        all_messages.extend(amp_messages);
     }
 
     let codebuff_outcomes: Vec<CachedParseOutcome> = scan_result
@@ -1449,7 +1441,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
     source_cache.save_if_dirty();
 
-    all_messages
+    Ok(all_messages)
 }
 
 fn filter_unified_messages(
@@ -1620,7 +1612,7 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         pricing.as_deref(),
         options.use_env_roots,
         &options.scanner_settings,
-    );
+    )?;
 
     let filtered = filter_messages_for_report(all_messages, &options);
     let entries = aggregate_model_usage_entries(filtered, &options.group_by);
@@ -1676,7 +1668,7 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         pricing.as_deref(),
         options.use_env_roots,
         &options.scanner_settings,
-    );
+    )?;
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1762,7 +1754,7 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     });
 
     let pricing = pricing::PricingService::get_or_init().await?;
-    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing));
+    let all_messages = parse_all_messages_with_pricing(&home_dir, &clients, Some(&pricing))?;
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1856,7 +1848,7 @@ async fn generate_graph_with_loaded_pricing(
         pricing,
         options.use_env_roots,
         &options.scanner_settings,
-    );
+    )?;
 
     let filtered = filter_messages_for_report(all_messages, &options);
 
@@ -1908,6 +1900,15 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     if is_headless && message.agent.is_none() {
         message.agent = Some("headless".to_string());
     }
+}
+
+fn should_collect_amp_cli_source(home_dir: &str, use_env_roots: bool) -> bool {
+    let home_path = Path::new(home_dir);
+    use_env_roots
+        && dirs::home_dir()
+            .map(|current_home| current_home == home_path)
+            .unwrap_or(false)
+        && home_path.join(".local/share/amp/session.json").is_file()
 }
 
 fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
@@ -2005,7 +2006,7 @@ fn parse_local_unified_messages_resolved(
         pricing,
         options.use_env_roots,
         &options.scanner_settings,
-    );
+    )?;
     Ok(filter_unified_messages(messages, &options))
 }
 pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
@@ -2023,6 +2024,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     });
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
+    let include_amp = include_all || clients.iter().any(|c| c == ClientId::Amp.as_str());
 
     let scan_result = scanner::scan_all_clients_with_scanner_settings(
         &home_dir,
@@ -2163,16 +2165,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Gemini, gemini_count);
     messages.extend(gemini_msgs);
 
-    let amp_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Amp)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::amp::parse_amp_file(path)
+    let amp_msgs: Vec<ParsedMessage> =
+        if include_amp && should_collect_amp_cli_source(&home_dir, options.use_env_roots) {
+            sessions::amp::parse_amp_threads_from_cli()
+                .map_err(|err| err.to_string())?
                 .into_iter()
                 .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
     let amp_count = amp_msgs.len() as i32;
     counts.set(ClientId::Amp, amp_count);
     messages.extend(amp_msgs);
@@ -3337,7 +3339,8 @@ mod tests {
             temp_dir.path().to_str().unwrap(),
             &["cursor".to_string()],
             Some(&pricing),
-        );
+        )
+        .unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "cursor");
@@ -3397,7 +3400,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(messages.len(), 1);
             assert_ne!(messages[0].date, "1900-01-01");
@@ -3459,7 +3463,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert!(first_messages.is_empty());
 
             let cache = message_cache::SourceMessageCache::load();
@@ -3473,7 +3478,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(second_messages.len(), 1);
         }
 
@@ -3518,7 +3524,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(messages.len(), 1);
 
             let loaded = message_cache::SourceMessageCache::load();
@@ -3585,7 +3592,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(first_messages.len(), 1);
 
             conn.execute(
@@ -3599,7 +3607,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(refreshed_messages.len(), 2);
         }
 
@@ -3693,7 +3702,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(
                 messages.len(),
                 3,
@@ -3711,7 +3721,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(
                 messages_warm.len(),
                 3,
@@ -3789,7 +3800,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["opencode".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(messages.len(), 3);
             assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 600);
@@ -3932,7 +3944,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(messages.len(), 2);
             assert_eq!(
@@ -4003,7 +4016,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(
                 messages.len(),
@@ -4124,7 +4138,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(initial_messages.len(), 1);
             assert_eq!(initial_messages[0].model_id, "gpt-5.4");
             assert!(message_cache::SourceMessageCache::load()
@@ -4150,13 +4165,15 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             std::env::set_var("HOME", fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(warm_messages, fresh_messages);
             assert_eq!(warm_messages.len(), 2);
@@ -4199,7 +4216,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(first_messages.len(), 1);
 
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -4221,13 +4239,15 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             std::env::set_var("HOME", fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(warm_messages, fresh_messages);
         }
@@ -4268,7 +4288,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(initial_messages.len(), 1);
 
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -4290,7 +4311,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert!(message_cache::SourceMessageCache::load()
                 .get(&path)
                 .is_none());
@@ -4300,7 +4322,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(warm_messages, fresh_messages);
         }
@@ -4356,7 +4379,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(messages, expected);
         }
@@ -4392,7 +4416,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(initial_messages.len(), 1);
 
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -4402,14 +4427,16 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             std::env::set_var("HOME", fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(warm_messages, fresh_messages);
             assert_ne!(warm_messages[0].timestamp, initial_messages[0].timestamp);
@@ -4452,7 +4479,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].model_id, "gpt-5.4");
 
@@ -4494,7 +4522,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(initial_messages.len(), 1);
             assert_eq!(initial_messages[0].model_id, "unknown");
             assert!(message_cache::SourceMessageCache::load()
@@ -4520,14 +4549,16 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             std::env::set_var("HOME", fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(resumed_messages, fresh_messages);
             assert_eq!(resumed_messages.len(), 1);
@@ -4572,7 +4603,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(initial_messages.len(), 1);
             assert!(message_cache::SourceMessageCache::load()
                 .get(&path)
@@ -4598,14 +4630,16 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             std::env::set_var("HOME", fresh_cache_home.path());
             let fresh_messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
                 &["codex".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(warm_messages, fresh_messages);
             assert_eq!(warm_messages.len(), 2);
@@ -4648,7 +4682,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["cursor".to_string()],
                 Some(&pricing),
-            );
+            )
+            .unwrap();
             assert_eq!(repriced_messages.len(), 1);
             assert!(repriced_messages[0].cost > 0.0);
 
@@ -4656,7 +4691,8 @@ mod tests {
                 source_home.path().to_str().unwrap(),
                 &["cursor".to_string()],
                 None,
-            );
+            )
+            .unwrap();
 
             assert_eq!(cached_messages.len(), 1);
             assert_eq!(cached_messages[0].cost, 0.0);
@@ -5198,7 +5234,8 @@ mod tests {
             temp_dir.path().to_str().unwrap(),
             &["synthetic".to_string()],
             Some(&pricing),
-        );
+        )
+        .unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "opencode");
@@ -5255,7 +5292,8 @@ mod tests {
             temp_dir.path().to_str().unwrap(),
             &["synthetic".to_string()],
             Some(&pricing),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             messages.len(),
@@ -5521,59 +5559,29 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_local_clients_amp_partial_ledger_recovers_message_fallback_day() {
-        use chrono::TimeZone;
-
+    fn test_parse_local_clients_amp_ignores_legacy_thread_files() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let amp_dir = temp_dir.path().join(".local/share/amp/threads");
         std::fs::create_dir_all(&amp_dir).unwrap();
-
-        let thread_created = chrono::DateTime::parse_from_rfc3339("2026-04-04T12:00:00Z")
-            .unwrap()
-            .timestamp_millis();
-        let ledger_timestamp = chrono::DateTime::parse_from_rfc3339("2026-04-08T12:00:00Z")
-            .unwrap()
-            .timestamp_millis();
-
-        let thread = format!(
-            r#"{{
-                "id": "thread-amp-gap",
-                "created": {thread_created},
-                "usageLedger": {{
-                    "events": [
-                        {{
-                            "timestamp": "2026-04-08T12:00:00Z",
-                            "model": "claude-sonnet-4-0",
-                            "credits": 0.75,
-                            "tokens": {{ "input": 100, "output": 20 }}
-                        }}
-                    ]
-                }},
+        std::fs::write(
+            amp_dir.join("T-legacy.json"),
+            r#"{
+                "id": "legacy-thread",
                 "messages": [
-                    {{
+                    {
                         "role": "assistant",
                         "messageId": 1,
-                        "usage": {{
-                            "model": "claude-sonnet-4-0",
-                            "inputTokens": 100,
-                            "outputTokens": 20,
-                            "credits": 0.75
-                        }}
-                    }},
-                    {{
-                        "role": "assistant",
-                        "messageId": 2,
-                        "usage": {{
-                            "model": "claude-sonnet-4-0",
-                            "inputTokens": 50,
-                            "outputTokens": 10,
-                            "credits": 0.40
-                        }}
-                    }}
+                        "usage": {
+                            "timestamp": "2026-05-21T04:00:00Z",
+                            "model": "claude-opus-4-7",
+                            "inputTokens": 10,
+                            "outputTokens": 2
+                        }
+                    }
                 ]
-            }}"#
-        );
-        std::fs::write(amp_dir.join("T-thread-amp-gap.json"), thread).unwrap();
+            }"#,
+        )
+        .unwrap();
 
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5586,19 +5594,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(parsed.counts.get(ClientId::Amp), 2);
-        assert_eq!(parsed.messages.len(), 2);
-
-        let dates: HashSet<String> = parsed.messages.iter().map(|msg| msg.date.clone()).collect();
-        let local_date = |timestamp_ms: i64| {
-            chrono::Local
-                .timestamp_millis_opt(timestamp_ms)
-                .single()
-                .unwrap()
-                .format("%Y-%m-%d")
-                .to_string()
-        };
-        assert!(dates.contains(&local_date(thread_created + 2000)));
-        assert!(dates.contains(&local_date(ledger_timestamp)));
+        assert_eq!(parsed.counts.get(ClientId::Amp), 0);
+        assert!(parsed.messages.is_empty());
     }
 }

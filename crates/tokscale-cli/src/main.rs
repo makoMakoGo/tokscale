@@ -2916,8 +2916,16 @@ fn run_clients_command(json: bool) -> Result<()> {
     let clients: Vec<ClientRow> =
         ClientId::iter()
             .map(|client| {
-                let sessions_path = client.data().resolve_path(&home_dir.to_string_lossy());
-                let sessions_path_exists = Path::new(&sessions_path).exists();
+                let (sessions_path, sessions_path_exists) = if client == ClientId::Amp {
+                    (
+                        tokscale_core::sessions::amp::amp_source_label().to_string(),
+                        tokscale_core::sessions::amp::amp_cli_available(),
+                    )
+                } else {
+                    let sessions_path = client.data().resolve_path(&home_dir.to_string_lossy());
+                    let sessions_path_exists = Path::new(&sessions_path).exists();
+                    (sessions_path, sessions_path_exists)
+                };
                 let additional_paths: Vec<AdditionalPath> = built_in_extra_paths
                     .iter()
                     .filter(|(c, _)| *c == client)
@@ -3059,10 +3067,16 @@ fn run_clients_command(json: bool) -> Result<()> {
 
         for row in clients {
             println!("  {}", row.label.white());
+            let source_label = if row.client == "amp" {
+                "source"
+            } else {
+                "sessions"
+            };
             println!(
                 "  {}",
                 format!(
-                    "sessions: {}",
+                    "{}: {}",
+                    source_label,
                     describe_path(&row.sessions_path, row.sessions_path_exists)
                 )
                 .bright_black()
