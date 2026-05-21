@@ -215,9 +215,9 @@ define_clients!(
     },
     Amp = 5 => {
         id: "amp",
-        root: PathRoot::XdgData,
-        relative: "amp/threads",
-        pattern: "T-*.json",
+        root: PathRoot::Home,
+        relative: ".local/bin/amp",
+        pattern: "",
         headless: false,
         parse_local: true,
         submit_default: true
