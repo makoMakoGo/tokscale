@@ -215,6 +215,8 @@ define_clients!(
     },
     Amp = 5 => {
         id: "amp",
+        // Amp usage is collected through `amp threads list/export`; this path
+        // is only the local CLI marker used to decide whether Amp is present.
         root: PathRoot::Home,
         relative: ".local/bin/amp",
         pattern: "",

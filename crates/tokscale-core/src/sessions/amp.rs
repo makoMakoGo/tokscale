@@ -6,12 +6,17 @@
 
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::fmt;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const AMP_COMMAND: &str = "amp";
 const AMP_SOURCE_LABEL: &str = "amp threads list/export";
+static AMP_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub struct AmpCliError {
@@ -68,7 +73,7 @@ pub fn amp_source_label() -> &'static str {
 }
 
 pub fn amp_cli_available() -> bool {
-    run_amp(["--version"]).is_ok()
+    run_amp(&["--version"]).is_ok()
 }
 
 /// Get provider from model name.
@@ -83,20 +88,53 @@ fn parse_amp_timestamp(timestamp: Option<&str>) -> Option<i64> {
         .filter(|timestamp| *timestamp != 0)
 }
 
-fn run_amp<const N: usize>(args: [&str; N]) -> Result<Vec<u8>, AmpCliError> {
-    let log_file = std::env::temp_dir().join(format!("tokscale-amp-{}.log", std::process::id()));
+fn amp_log_file_path(args: &[&str]) -> PathBuf {
+    let sequence = AMP_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let command = args
+        .iter()
+        .map(|arg| {
+            arg.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    std::env::temp_dir().join(format!(
+        "tokscale-amp-{}-{}-{}.log",
+        std::process::id(),
+        sequence,
+        command
+    ))
+}
+
+fn remove_amp_log_file(path: &Path) -> Result<(), AmpCliError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(AmpCliError::new(format!(
+            "failed to remove amp log file {}: {err}",
+            path.display()
+        ))),
+    }
+}
+
+fn run_amp(args: &[&str]) -> Result<Vec<u8>, AmpCliError> {
+    let log_file = amp_log_file_path(args);
     let output = Command::new(AMP_COMMAND)
         .env("TERM", "xterm-256color")
         .arg("--no-color")
         .arg("--no-notifications")
         .arg("--no-ide")
         .arg("--log-file")
-        .arg(log_file)
+        .arg(&log_file)
         .args(args)
         .output()
         .map_err(|err| AmpCliError::new(format!("failed to run amp: {err}")))?;
+    let cleanup_result = remove_amp_log_file(&log_file);
 
     if output.status.success() {
+        cleanup_result?;
         return Ok(output.stdout);
     }
 
@@ -108,7 +146,7 @@ fn run_amp<const N: usize>(args: [&str; N]) -> Result<Vec<u8>, AmpCliError> {
     } else {
         detail
     };
-    Err(AmpCliError::new(format!(
+    let command_error = format!(
         "amp {} failed{}",
         args.join(" "),
         if detail.is_empty() {
@@ -116,7 +154,13 @@ fn run_amp<const N: usize>(args: [&str; N]) -> Result<Vec<u8>, AmpCliError> {
         } else {
             format!(": {detail}")
         }
-    )))
+    );
+    if let Err(cleanup_err) = cleanup_result {
+        return Err(AmpCliError::new(format!(
+            "{command_error}; additionally, {cleanup_err}"
+        )));
+    }
+    Err(AmpCliError::new(command_error))
 }
 
 fn is_amp_thread_id(value: &str) -> bool {
@@ -196,18 +240,24 @@ fn parse_amp_export(thread: AmpThreadExport) -> Vec<UnifiedMessage> {
 }
 
 pub fn parse_amp_threads_from_cli() -> Result<Vec<UnifiedMessage>, AmpCliError> {
-    let list_output = run_amp(["threads", "--include-archived", "list"])?;
+    let list_output = run_amp(&["threads", "--include-archived", "list"])?;
     let list_text = String::from_utf8(list_output).map_err(|err| {
         AmpCliError::new(format!("amp threads list returned invalid UTF-8: {err}"))
     })?;
     let thread_ids = parse_amp_thread_ids(&list_text);
 
+    let thread_messages: Vec<Vec<UnifiedMessage>> = thread_ids
+        .par_iter()
+        .map(|thread_id| {
+            let mut export = run_amp(&["threads", "export", thread_id.as_str()])?;
+            parse_amp_export_bytes(&mut export)
+        })
+        .collect::<Result<Vec<_>, AmpCliError>>()?;
+
     let mut messages = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
-    for thread_id in thread_ids {
-        let mut export = run_amp(["threads", "export", thread_id.as_str()])?;
-        let thread_messages = parse_amp_export_bytes(&mut export)?;
-        messages.extend(thread_messages.into_iter().filter(|message| {
+    for thread in thread_messages {
+        messages.extend(thread.into_iter().filter(|message| {
             message
                 .dedup_key
                 .as_ref()
