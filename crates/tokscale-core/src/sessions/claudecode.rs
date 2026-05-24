@@ -9,7 +9,7 @@ use super::utils::{
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
 };
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -37,6 +37,9 @@ pub struct ClaudeEntry {
     /// Parent session UUID (present on every sidechain line)
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
+    /// Optional billing or routing provider emitted by wrappers around Claude Code.
+    #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
+    pub provider_id: Option<String>,
 }
 
 /// Meta sidecar written next to nested-layout sidechain transcripts.
@@ -53,6 +56,9 @@ pub struct ClaudeMessage {
     pub usage: Option<ClaudeUsage>,
     /// Message ID for deduplication (used with requestId)
     pub id: Option<String>,
+    /// Optional billing or routing provider emitted by wrappers around Claude Code.
+    #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
+    pub provider_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,6 +331,7 @@ pub fn parse_claude_file_with_cache(
 
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
+    let mut provider_confidences: Vec<u8> = Vec::with_capacity(64);
     // Maps dedup_key to the index in `messages` of the first occurrence.
     // CC's streaming API writes the same messageId:requestId multiple times as the
     // response streams in; later entries often carry more complete token counts.
@@ -336,6 +343,7 @@ pub fn parse_claude_file_with_cache(
     // Tracks whether the previous entry was a user message,
     // so the next assistant message can be marked as a turn start.
     let mut pending_turn_start = false;
+    let mut pending_request_start_timestamp_ms: Option<i64> = None;
     // Sidechain detection state (resolved lazily on first parseable entry)
     let mut sidechain_agent: Option<String> = None;
     let mut sidechain_detected = false;
@@ -374,6 +382,10 @@ pub fn parse_claude_file_with_cache(
             }
 
             if entry.entry_type == "user" {
+                if let Some(timestamp_ms) = parse_claude_entry_timestamp(entry.timestamp.as_deref())
+                {
+                    pending_request_start_timestamp_ms = Some(timestamp_ms);
+                }
                 // Distinguish real human input from tool results / system messages.
                 // Tool results have content as a JSON array (e.g. [{"type":"tool_result",...}]).
                 // System messages have XML-tagged content (e.g. <local-command-stdout>).
@@ -396,6 +408,14 @@ pub fn parse_claude_file_with_cache(
                     None => continue,
                 };
 
+                let duplicate_provider_choice = claude_provider_choice_from_parts(
+                    message.model.as_deref(),
+                    message
+                        .provider_id
+                        .as_deref()
+                        .or(entry.provider_id.as_deref()),
+                );
+
                 // Build dedup key for global deduplication (messageId:requestId composite).
                 // For streaming responses, merge using per-field max to capture the most
                 // complete token counts across all duplicate entries.
@@ -403,16 +423,39 @@ pub fn parse_claude_file_with_cache(
                     (Some(msg_id), Some(req_id)) => {
                         let hash = format!("{}:{}", msg_id, req_id);
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
-                            // Per-field max merge: each token field is updated independently
-                            let t = &mut messages[existing_idx].tokens;
-                            t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
-                            t.output = t.output.max(usage.output_tokens.unwrap_or(0).max(0));
-                            t.cache_read = t
-                                .cache_read
-                                .max(usage.cache_read_input_tokens.unwrap_or(0).max(0));
-                            t.cache_write = t
-                                .cache_write
-                                .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
+                            merge_claude_duplicate(
+                                &mut messages[existing_idx],
+                                &usage,
+                                parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                                pending_request_start_timestamp_ms,
+                            );
+                            if let Some(choice) = duplicate_provider_choice {
+                                update_claude_provider_id(
+                                    &mut messages[existing_idx].provider_id,
+                                    &mut provider_confidences[existing_idx],
+                                    choice,
+                                );
+                            }
+                            continue;
+                        }
+                        Some(hash)
+                    }
+                    (Some(msg_id), None) => {
+                        let hash = format!("message:{}", msg_id);
+                        if let Some(&existing_idx) = processed_hashes.get(&hash) {
+                            merge_claude_duplicate(
+                                &mut messages[existing_idx],
+                                &usage,
+                                parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                                pending_request_start_timestamp_ms,
+                            );
+                            if let Some(choice) = duplicate_provider_choice {
+                                update_claude_provider_id(
+                                    &mut messages[existing_idx].provider_id,
+                                    &mut provider_confidences[existing_idx],
+                                    choice,
+                                );
+                            }
                             continue;
                         }
                         Some(hash)
@@ -424,12 +467,19 @@ pub fn parse_claude_file_with_cache(
                     Some(m) => m,
                     None => continue,
                 };
+                let provider_choice = claude_provider_choice(
+                    &model,
+                    message
+                        .provider_id
+                        .as_deref()
+                        .or(entry.provider_id.as_deref()),
+                );
+                let provider_confidence = provider_choice.confidence;
 
-                let timestamp = entry
-                    .timestamp
-                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-                    .map(|dt| dt.timestamp_millis())
-                    .unwrap_or(fallback_timestamp);
+                let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
+                let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
+                let duration_ms =
+                    duration_between_ms(pending_request_start_timestamp_ms, parsed_timestamp);
 
                 // Insert dedup index only after all checks pass, right before push
                 let dedup_key = pending_hash.inspect(|hash| {
@@ -439,7 +489,7 @@ pub fn parse_claude_file_with_cache(
                 let mut unified = UnifiedMessage::new_with_dedup(
                     "claude",
                     model,
-                    "anthropic",
+                    provider_choice.id,
                     session_id.clone(),
                     timestamp,
                     TokenBreakdown {
@@ -452,6 +502,7 @@ pub fn parse_claude_file_with_cache(
                     0.0,
                     dedup_key,
                 );
+                unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent.clone();
                 unified.set_workspace(workspace_key.clone(), workspace_label.clone());
                 // Mark the first assistant response after a user message as a turn start
@@ -460,6 +511,14 @@ pub fn parse_claude_file_with_cache(
                     pending_turn_start = false;
                 }
                 messages.push(unified);
+                provider_confidences.push(provider_confidence);
+                // Consume the pending request-start timestamp so a back-to-back
+                // assistant message with no intervening user entry doesn't reuse
+                // it and report an inflated duration. Streaming duplicates of
+                // this same message have already been captured in the dedup map
+                // above, so they merge via merge_claude_duplicate without needing
+                // the global pending value again.
+                pending_request_start_timestamp_ms = None;
                 handled = true;
             }
         }
@@ -476,7 +535,9 @@ pub fn parse_claude_file_with_cache(
         ) {
             let mut message = message;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
+            let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
             messages.push(message);
+            provider_confidences.push(provider_confidence);
         }
     }
 
@@ -485,7 +546,9 @@ pub fn parse_claude_file_with_cache(
     {
         let mut message = message;
         message.set_workspace(workspace_key, workspace_label);
+        let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
         messages.push(message);
+        provider_confidences.push(provider_confidence);
     }
 
     messages
@@ -508,9 +571,60 @@ fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
+fn parse_claude_entry_timestamp(timestamp: Option<&str>) -> Option<i64> {
+    timestamp
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
+    let duration = end_ms?.saturating_sub(start_ms?);
+    (duration > 0).then_some(duration)
+}
+
+fn merge_claude_duplicate(
+    existing: &mut UnifiedMessage,
+    usage: &ClaudeUsage,
+    parsed_timestamp: Option<i64>,
+    request_start_timestamp_ms: Option<i64>,
+) {
+    // Per-field max merge: each token field is updated independently.
+    let t = &mut existing.tokens;
+    t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
+    t.output = t.output.max(usage.output_tokens.unwrap_or(0).max(0));
+    t.cache_read = t
+        .cache_read
+        .max(usage.cache_read_input_tokens.unwrap_or(0).max(0));
+    t.cache_write = t
+        .cache_write
+        .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
+
+    if let Some(timestamp_ms) = parsed_timestamp {
+        if timestamp_ms >= existing.timestamp {
+            // Recover the original request-start timestamp from the existing
+            // message's recorded duration. The parent loop clears
+            // `pending_request_start_timestamp_ms` after the first chunk of a
+            // message commits (so a NEW message with no preceding user doesn't
+            // inflate by reusing a stale start), which would otherwise blank
+            // out streaming duplicates' duration. Recovering from
+            // `existing.timestamp - existing.duration_ms` keeps the duration
+            // honest for late chunks of the same logical message.
+            let recovered_start = existing
+                .duration_ms
+                .map(|d| existing.timestamp - d)
+                .or(request_start_timestamp_ms);
+            existing.set_timestamp(timestamp_ms);
+            if let Some(new_duration) = duration_between_ms(recovered_start, Some(timestamp_ms)) {
+                existing.duration_ms = Some(new_duration);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct ClaudeHeadlessState {
     model: Option<String>,
+    provider_id: Option<String>,
     input: i64,
     output: i64,
     cache_read: i64,
@@ -562,6 +676,7 @@ fn process_claude_headless_line(
             completed_message = finalize_headless_state(state, session_id, fallback_timestamp);
 
             state.model = extract_claude_model(&value);
+            state.provider_id = extract_claude_provider(&value);
             state.timestamp_ms = extract_claude_timestamp(&value).or(state.timestamp_ms);
             if let Some(usage) = value
                 .get("message")
@@ -603,12 +718,13 @@ fn extract_claude_headless_message(
         .get("usage")
         .or_else(|| value.get("message").and_then(|msg| msg.get("usage")))?;
     let model = extract_claude_model(value)?;
+    let provider_id = claude_provider_id(&model, extract_claude_provider(value).as_deref());
     let timestamp = extract_claude_timestamp(value).unwrap_or(fallback_timestamp);
 
     Some(UnifiedMessage::new(
         "claude",
         model,
-        "anthropic",
+        provider_id,
         session_id.to_string(),
         timestamp,
         TokenBreakdown {
@@ -671,6 +787,126 @@ fn extract_claude_model(value: &Value) -> Option<String> {
     })
 }
 
+fn extract_claude_provider(value: &Value) -> Option<String> {
+    extract_string(value.get("providerId"))
+        .or_else(|| extract_string(value.get("provider_id")))
+        .or_else(|| extract_string(value.get("provider")))
+        .or_else(|| {
+            value.get("message").and_then(|msg| {
+                extract_string(msg.get("providerId"))
+                    .or_else(|| extract_string(msg.get("provider_id")))
+                    .or_else(|| extract_string(msg.get("provider")))
+            })
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeProviderChoice {
+    id: String,
+    confidence: u8,
+}
+
+impl ClaudeProviderChoice {
+    fn new(id: impl Into<String>, confidence: u8) -> Self {
+        Self {
+            id: id.into(),
+            confidence,
+        }
+    }
+}
+
+const CLAUDE_PROVIDER_DEFAULT_CONFIDENCE: u8 = 1;
+const CLAUDE_PROVIDER_INFERRED_CONFIDENCE: u8 = 2;
+const CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE: u8 = 3;
+
+fn claude_provider_id(model: &str, provider_hint: Option<&str>) -> String {
+    claude_provider_choice(model, provider_hint).id
+}
+
+fn claude_provider_choice_from_parts(
+    model: Option<&str>,
+    provider_hint: Option<&str>,
+) -> Option<ClaudeProviderChoice> {
+    match model {
+        Some(model) => Some(claude_provider_choice(model, provider_hint)),
+        None => claude_provider_choice_from_hint(None, provider_hint),
+    }
+}
+
+fn claude_provider_choice(model: &str, provider_hint: Option<&str>) -> ClaudeProviderChoice {
+    if let Some(choice) = claude_provider_choice_from_hint(Some(model), provider_hint) {
+        return choice;
+    }
+
+    let inferred = provider_identity::inferred_provider_from_model(model);
+
+    if let Some(provider) = provider_from_model_prefix(model) {
+        return ClaudeProviderChoice::new(provider, CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE);
+    }
+
+    if let Some(provider) = inferred {
+        return ClaudeProviderChoice::new(provider, CLAUDE_PROVIDER_INFERRED_CONFIDENCE);
+    }
+
+    ClaudeProviderChoice::new("unknown", 0)
+}
+
+fn claude_provider_choice_from_hint(
+    model: Option<&str>,
+    provider_hint: Option<&str>,
+) -> Option<ClaudeProviderChoice> {
+    let hint = provider_hint.and_then(provider_identity::canonical_provider)?;
+
+    if hint == "anthropic" {
+        if let Some(inferred_provider) =
+            model.and_then(provider_identity::inferred_provider_from_model)
+        {
+            if inferred_provider != "anthropic" {
+                return Some(ClaudeProviderChoice::new(
+                    inferred_provider,
+                    CLAUDE_PROVIDER_INFERRED_CONFIDENCE,
+                ));
+            }
+        }
+        return Some(ClaudeProviderChoice::new(
+            hint,
+            CLAUDE_PROVIDER_DEFAULT_CONFIDENCE,
+        ));
+    }
+
+    Some(ClaudeProviderChoice::new(
+        hint,
+        CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE,
+    ))
+}
+
+fn update_claude_provider_id(
+    existing: &mut String,
+    existing_confidence: &mut u8,
+    candidate: ClaudeProviderChoice,
+) {
+    if candidate.confidence > *existing_confidence {
+        *existing_confidence = candidate.confidence;
+        *existing = candidate.id;
+    }
+}
+
+fn stored_claude_provider_confidence(provider_id: &str) -> u8 {
+    match provider_identity::canonical_provider(provider_id) {
+        None => 0,
+        Some(provider) if provider == "anthropic" => CLAUDE_PROVIDER_DEFAULT_CONFIDENCE,
+        Some(_) => CLAUDE_PROVIDER_INFERRED_CONFIDENCE,
+    }
+}
+
+fn provider_from_model_prefix(model: &str) -> Option<String> {
+    if model.trim().contains('/') {
+        provider_identity::canonical_provider(model)
+    } else {
+        None
+    }
+}
+
 fn extract_claude_timestamp(value: &Value) -> Option<i64> {
     value
         .get("timestamp")
@@ -700,6 +936,7 @@ fn finalize_headless_state(
     fallback_timestamp: i64,
 ) -> Option<UnifiedMessage> {
     let model = state.model.clone()?;
+    let provider_id = claude_provider_id(&model, state.provider_id.as_deref());
     let timestamp = state.timestamp_ms.unwrap_or(fallback_timestamp);
     if state.input == 0 && state.output == 0 && state.cache_read == 0 && state.cache_write == 0 {
         *state = ClaudeHeadlessState::default();
@@ -709,7 +946,7 @@ fn finalize_headless_state(
     let message = UnifiedMessage::new(
         "claude",
         model,
-        "anthropic",
+        provider_id,
         session_id.to_string(),
         timestamp,
         TokenBreakdown {
@@ -877,6 +1114,48 @@ mod tests {
     }
 
     #[test]
+    fn test_deduplication_promotes_provider_hint_from_later_duplicate() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":75}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 75);
+    }
+
+    #[test]
+    fn test_deduplication_promotes_provider_hint_without_later_model() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","provider":"openrouter/anthropic","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":120,"output_tokens":75}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 75);
+    }
+
+    #[test]
+    fn test_deduplication_preserves_explicit_provider_against_later_inference() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":75}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 75);
+    }
+
+    #[test]
     fn test_deduplication_skips_model_none_without_stale_index() {
         // First entry has id+requestId+usage but model=null → skipped, no push.
         // Second entry is a valid duplicate. Must not panic on stale index.
@@ -906,6 +1185,49 @@ mod tests {
             messages.len(),
             2,
             "Different requestId should not be deduplicated"
+        );
+    }
+
+    #[test]
+    fn test_deduplication_uses_message_id_without_request_id_and_keeps_final_duration() {
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"id":"msg_stream","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":25}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:03.500Z","message":{"id":"msg_stream","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":250}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 250);
+        assert_eq!(messages[0].timestamp, 1_733_047_203_500);
+        assert_eq!(messages[0].duration_ms, Some(3500));
+        assert_eq!(messages[0].dedup_key.as_deref(), Some("message:msg_stream"));
+    }
+
+    #[test]
+    fn test_pending_request_start_is_cleared_between_assistant_messages() {
+        // Regression: previously, the user-entry timestamp was set into
+        // `pending_request_start_timestamp_ms` and never cleared after the
+        // first assistant message consumed it. A subsequent assistant message
+        // with no intervening user entry would then reuse the stale start
+        // timestamp and report a wildly inflated duration.
+        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:01:30.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(1_000),
+            "first assistant should report duration vs the user entry (1s)"
+        );
+        assert_eq!(
+            messages[1].duration_ms, None,
+            "second assistant has no preceding user entry; duration must NOT \
+             reuse the stale pending_request_start_timestamp_ms"
         );
     }
 
@@ -1028,6 +1350,49 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_provider_models_infer_provider_from_model() {
+        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:01.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:02.000Z","message":{"model":"gemini-3-flash-preview","usage":{"input_tokens":300,"output_tokens":30}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:03.000Z","message":{"model":"MiniMax-M2.1","usage":{"input_tokens":400,"output_tokens":40}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:04.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":500,"output_tokens":50}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[1].provider_id, "openai");
+        assert_eq!(messages[2].provider_id, "google");
+        assert_eq!(messages[3].provider_id, "minimax");
+        assert_eq!(messages[4].provider_id, "unknown");
+    }
+
+    #[test]
+    fn test_multi_provider_models_prefer_specific_model_over_default_anthropic_hint() {
+        let content = r#"{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.3-codex");
+        assert_eq!(messages[0].provider_id, "openai");
+    }
+
+    #[test]
+    fn test_multi_provider_models_preserve_reseller_provider_hint() {
+        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"provider":"openrouter/anthropic","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":10}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id, "openrouter");
+    }
+
+    #[test]
     fn test_headless_json_output() {
         let content = r#"{"type":"message","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
         let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
@@ -1040,6 +1405,19 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 60);
         assert_eq!(messages[0].tokens.cache_read, 10);
+    }
+
+    #[test]
+    fn test_headless_json_output_infers_subprovider() {
+        let content = r#"{"type":"message","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        std::fs::write(file.path(), content).unwrap();
+
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.3-codex");
+        assert_eq!(messages[0].provider_id, "openai");
     }
 
     #[test]
@@ -1068,6 +1446,21 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 80);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 5);
+    }
+
+    #[test]
+    fn test_headless_stream_output_infers_subprovider() {
+        let content = r#"{"type":"message_start","timestamp":"2026-02-18T10:00:00Z","message":{"id":"msg_1","model":"gemini-3-pro-preview","usage":{"input_tokens":200,"cache_read_input_tokens":20}}}
+{"type":"message_delta","usage":{"output_tokens":80}}
+{"type":"message_stop"}"#;
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gemini-3-pro-preview");
+        assert_eq!(messages[0].provider_id, "google");
+        assert_eq!(messages[0].tokens.input, 200);
+        assert_eq!(messages[0].tokens.output, 80);
     }
 
     #[test]

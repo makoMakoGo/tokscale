@@ -37,6 +37,7 @@ pub struct TuiConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Usage,
     Models,
     Daily,
     Hourly,
@@ -49,6 +50,7 @@ impl Tab {
     pub fn all() -> &'static [Tab] {
         &[
             Tab::Overview,
+            Tab::Usage,
             Tab::Models,
             Tab::Daily,
             Tab::Hourly,
@@ -61,6 +63,7 @@ impl Tab {
     pub fn as_str(&self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Usage => "Usage",
             Tab::Models => "Models",
             Tab::Daily => "Daily",
             Tab::Hourly => "Hourly",
@@ -73,6 +76,7 @@ impl Tab {
     pub fn short_name(&self) -> &'static str {
         match self {
             Tab::Overview => "Ovw",
+            Tab::Usage => "Use",
             Tab::Models => "Mod",
             Tab::Daily => "Day",
             Tab::Hourly => "Hr",
@@ -84,7 +88,8 @@ impl Tab {
 
     pub fn next(self) -> Tab {
         match self {
-            Tab::Overview => Tab::Models,
+            Tab::Overview => Tab::Usage,
+            Tab::Usage => Tab::Models,
             Tab::Models => Tab::Daily,
             Tab::Daily => Tab::Hourly,
             Tab::Hourly => Tab::Minutely,
@@ -97,7 +102,8 @@ impl Tab {
     pub fn prev(self) -> Tab {
         match self {
             Tab::Overview => Tab::Agents,
-            Tab::Models => Tab::Overview,
+            Tab::Usage => Tab::Overview,
+            Tab::Models => Tab::Usage,
             Tab::Daily => Tab::Models,
             Tab::Hourly => Tab::Daily,
             Tab::Minutely => Tab::Hourly,
@@ -157,6 +163,14 @@ pub enum ClickAction {
     GraphCell { week: usize, day: usize },
 }
 
+struct MinutelySortCache {
+    sort_field: SortField,
+    sort_direction: SortDirection,
+    data_version: u64,
+    data_len: usize,
+    indices: Vec<usize>,
+}
+
 pub struct App {
     pub should_quit: bool,
     pub current_tab: Tab,
@@ -213,6 +227,14 @@ pub struct App {
     pub hourly_view_mode: HourlyViewMode,
 
     pub model_shade_map: HashMap<String, Color>,
+
+    pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
+
+    pub usage_fetch_attempted: bool,
+    usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
+
+    data_version: u64,
+    minutely_sort_cache: RefCell<Option<MinutelySortCache>>,
 }
 
 impl App {
@@ -230,7 +252,7 @@ impl App {
             .theme
             .parse()
             .unwrap_or_else(|_| settings.theme_name());
-        let theme = Theme::from_name(theme_name);
+        let theme = Theme::from_name_for_current_terminal(theme_name);
 
         let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = config.clients {
             // CLI-provided filter list. Each entry is the canonical
@@ -320,6 +342,20 @@ impl App {
             dialog_needs_reload,
             hourly_view_mode: HourlyViewMode::default(),
             model_shade_map: HashMap::new(),
+            subscription_usage: {
+                #[cfg(not(test))]
+                {
+                    crate::commands::usage::load_cache().unwrap_or_default()
+                }
+                #[cfg(test)]
+                {
+                    Vec::new()
+                }
+            },
+            usage_fetch_attempted: false,
+            usage_rx: None,
+            data_version: 0,
+            minutely_sort_cache: RefCell::new(None),
         };
         app.build_model_shade_map();
         Ok(app)
@@ -332,8 +368,10 @@ impl App {
 
     pub fn update_data(&mut self, data: UsageData) {
         self.data = data;
+        self.data_version = self.data_version.saturating_add(1);
         self.last_refresh = Instant::now();
         self.build_model_shade_map();
+        self.minutely_sort_cache.borrow_mut().take();
 
         // Exit Daily-detail mode if the refresh dropped the day we were
         // viewing; otherwise `get_sorted_daily_detail_rows()` would return
@@ -408,6 +446,30 @@ impl App {
         if *self.dialog_needs_reload.borrow() {
             *self.dialog_needs_reload.borrow_mut() = false;
             self.needs_reload = true;
+        }
+
+        // Poll background usage fetch
+        if let Some(ref rx) = self.usage_rx {
+            match rx.try_recv() {
+                Ok(results) => {
+                    self.usage_rx = None;
+                    self.subscription_usage = results;
+                    if !self.subscription_usage.is_empty() {
+                        crate::commands::usage::save_cache(&self.subscription_usage);
+                        self.status_message = Some("Usage data loaded".into());
+                    } else {
+                        crate::commands::usage::clear_cache();
+                        self.status_message = Some("No usage data available".into());
+                    }
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.usage_rx = None;
+                    self.status_message = Some("Usage fetch failed".into());
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
         }
     }
 
@@ -485,6 +547,7 @@ impl App {
                     self.set_status("Refresh already in progress");
                 } else {
                     self.needs_reload = true;
+                    self.fetch_subscription_usage();
                 }
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -521,6 +584,9 @@ impl App {
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
             }
+            KeyCode::Char('u') if self.current_tab == Tab::Usage => {
+                self.fetch_subscription_usage();
+            }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
             }
@@ -541,6 +607,25 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    pub fn fetch_subscription_usage(&mut self) {
+        if self.usage_rx.is_some() {
+            return; // already fetching
+        }
+        self.usage_fetch_attempted = true;
+        self.status_message = Some("Fetching usage data...".into());
+        self.status_message_time = Some(std::time::Instant::now());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.usage_rx = Some(rx);
+        std::thread::spawn(move || {
+            let results = crate::commands::usage::fetch_all();
+            let _ = tx.send(results);
+        });
+    }
+
+    pub fn is_fetching_usage(&self) -> bool {
+        self.usage_rx.is_some()
     }
 
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
@@ -822,6 +907,11 @@ impl App {
                     0
                 }
             }
+            Tab::Usage => self
+                .subscription_usage
+                .iter()
+                .map(|u| u.metrics.len())
+                .sum(),
         }
     }
 
@@ -884,7 +974,7 @@ impl App {
 
     fn cycle_theme(&mut self) {
         let new_theme = self.theme.name.next();
-        self.theme = Theme::from_name(new_theme);
+        self.theme = Theme::from_name_for_current_terminal(new_theme);
         self.dialog_stack.set_theme(self.theme.clone());
         self.settings.set_theme(new_theme);
         if let Err(e) = self.settings.save() {
@@ -1083,7 +1173,7 @@ impl App {
                         m.cost
                     )
                 }),
-            Tab::Stats => None,
+            Tab::Stats | Tab::Usage => None,
         };
 
         if let Some(text) = text {
@@ -1329,38 +1419,82 @@ impl App {
     }
 
     pub fn get_sorted_minutely(&self) -> Vec<&MinutelyUsage> {
-        let mut minutely: Vec<&MinutelyUsage> = self.data.minutely.iter().collect();
+        let sort_field = self.sort_field;
+        let sort_direction = self.sort_direction;
+        let data_version = self.data_version;
+        let data_len = self.data.minutely.len();
 
-        match (self.sort_field, self.sort_direction) {
-            (SortField::Cost, SortDirection::Descending) => minutely.sort_by(|a, b| {
-                b.cost
-                    .total_cmp(&a.cost)
-                    .then_with(|| a.datetime.cmp(&b.datetime))
-            }),
-            (SortField::Cost, SortDirection::Ascending) => minutely.sort_by(|a, b| {
-                a.cost
-                    .total_cmp(&b.cost)
-                    .then_with(|| a.datetime.cmp(&b.datetime))
-            }),
-            (SortField::Tokens, SortDirection::Descending) => minutely.sort_by(|a, b| {
-                b.tokens
-                    .total()
-                    .cmp(&a.tokens.total())
-                    .then_with(|| a.datetime.cmp(&b.datetime))
-            }),
-            (SortField::Tokens, SortDirection::Ascending) => minutely.sort_by(|a, b| {
-                a.tokens
-                    .total()
-                    .cmp(&b.tokens.total())
-                    .then_with(|| a.datetime.cmp(&b.datetime))
-            }),
-            (SortField::Date, SortDirection::Descending) => {
-                minutely.sort_by_key(|b| std::cmp::Reverse(b.datetime))
+        let cached_indices = {
+            let cache = self.minutely_sort_cache.borrow();
+            cache
+                .as_ref()
+                .filter(|cache| {
+                    cache.sort_field == sort_field
+                        && cache.sort_direction == sort_direction
+                        && cache.data_version == data_version
+                        && cache.data_len == data_len
+                })
+                .map(|cache| cache.indices.clone())
+        };
+
+        let indices = if let Some(indices) = cached_indices {
+            indices
+        } else {
+            let mut indices: Vec<usize> = (0..data_len).collect();
+
+            match (sort_field, sort_direction) {
+                (SortField::Cost, SortDirection::Descending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    b.cost
+                        .total_cmp(&a.cost)
+                        .then_with(|| a.datetime.cmp(&b.datetime))
+                }),
+                (SortField::Cost, SortDirection::Ascending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    a.cost
+                        .total_cmp(&b.cost)
+                        .then_with(|| a.datetime.cmp(&b.datetime))
+                }),
+                (SortField::Tokens, SortDirection::Descending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    b.tokens
+                        .total()
+                        .cmp(&a.tokens.total())
+                        .then_with(|| a.datetime.cmp(&b.datetime))
+                }),
+                (SortField::Tokens, SortDirection::Ascending) => indices.sort_by(|a, b| {
+                    let a = &self.data.minutely[*a];
+                    let b = &self.data.minutely[*b];
+                    a.tokens
+                        .total()
+                        .cmp(&b.tokens.total())
+                        .then_with(|| a.datetime.cmp(&b.datetime))
+                }),
+                (SortField::Date, SortDirection::Descending) => indices
+                    .sort_by_key(|index| std::cmp::Reverse(self.data.minutely[*index].datetime)),
+                (SortField::Date, SortDirection::Ascending) => {
+                    indices.sort_by_key(|index| self.data.minutely[*index].datetime)
+                }
             }
-            (SortField::Date, SortDirection::Ascending) => minutely.sort_by_key(|a| a.datetime),
-        }
 
-        minutely
+            *self.minutely_sort_cache.borrow_mut() = Some(MinutelySortCache {
+                sort_field,
+                sort_direction,
+                data_version,
+                data_len,
+                indices: indices.clone(),
+            });
+
+            indices
+        };
+
+        indices
+            .into_iter()
+            .map(|index| &self.data.minutely[index])
+            .collect()
     }
 
     pub fn is_narrow(&self) -> bool {
@@ -1377,25 +1511,27 @@ mod tests {
     use super::super::ui::widgets::get_provider_shade;
     use super::*;
     use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
-    use chrono::NaiveDate;
-    use std::collections::BTreeMap;
+    use chrono::{NaiveDate, NaiveDateTime};
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 7);
+        assert_eq!(tabs.len(), 8);
         assert_eq!(tabs[0], Tab::Overview);
-        assert_eq!(tabs[1], Tab::Models);
-        assert_eq!(tabs[2], Tab::Daily);
-        assert_eq!(tabs[3], Tab::Hourly);
-        assert_eq!(tabs[4], Tab::Minutely);
-        assert_eq!(tabs[5], Tab::Stats);
-        assert_eq!(tabs[6], Tab::Agents);
+        assert_eq!(tabs[1], Tab::Usage);
+        assert_eq!(tabs[2], Tab::Models);
+        assert_eq!(tabs[3], Tab::Daily);
+        assert_eq!(tabs[4], Tab::Hourly);
+        assert_eq!(tabs[5], Tab::Minutely);
+        assert_eq!(tabs[6], Tab::Stats);
+        assert_eq!(tabs[7], Tab::Agents);
     }
 
     #[test]
     fn test_tab_next() {
-        assert_eq!(Tab::Overview.next(), Tab::Models);
+        assert_eq!(Tab::Overview.next(), Tab::Usage);
+        assert_eq!(Tab::Usage.next(), Tab::Models);
         assert_eq!(Tab::Models.next(), Tab::Daily);
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
         assert_eq!(Tab::Hourly.next(), Tab::Minutely);
@@ -1407,7 +1543,8 @@ mod tests {
     #[test]
     fn test_tab_prev() {
         assert_eq!(Tab::Overview.prev(), Tab::Agents);
-        assert_eq!(Tab::Models.prev(), Tab::Overview);
+        assert_eq!(Tab::Usage.prev(), Tab::Overview);
+        assert_eq!(Tab::Models.prev(), Tab::Usage);
         assert_eq!(Tab::Daily.prev(), Tab::Models);
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
         assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
@@ -1484,6 +1621,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1494,6 +1632,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1531,6 +1670,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1541,6 +1681,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1577,6 +1718,7 @@ mod tests {
             client: "opencode".to_string(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
+            performance: Default::default(),
             session_count: 1,
             workspace_key: None,
             workspace_label: None,
@@ -1692,6 +1834,7 @@ mod tests {
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: Default::default(),
                 session_count: 1,
                 workspace_key: None,
                 workspace_label: None,
@@ -1751,6 +1894,122 @@ mod tests {
         }
     }
 
+    fn minutely_usage(datetime: &str, input_tokens: u64, cost: f64) -> MinutelyUsage {
+        MinutelyUsage {
+            datetime: NaiveDateTime::parse_from_str(datetime, "%Y-%m-%d %H:%M:%S").unwrap(),
+            tokens: TokenBreakdown {
+                input: input_tokens,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+            clients: BTreeSet::new(),
+            models: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
+    #[test]
+    fn test_get_sorted_minutely_reuses_cached_order_for_same_sort() {
+        let mut app = make_app();
+        app.data.minutely = vec![
+            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
+            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
+        ];
+
+        let first = app
+            .get_sorted_minutely()
+            .iter()
+            .map(|entry| entry.datetime)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first,
+            vec![
+                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ]
+        );
+
+        app.data.minutely.swap(0, 1);
+
+        let second = app
+            .get_sorted_minutely()
+            .iter()
+            .map(|entry| entry.datetime)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            second,
+            vec![
+                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ],
+            "unchanged data should reuse the cached sorted index order"
+        );
+    }
+
+    #[test]
+    fn test_get_sorted_minutely_invalidates_cache_when_sort_changes() {
+        let mut app = make_app();
+        app.data.minutely = vec![
+            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
+            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
+        ];
+        let _ = app.get_sorted_minutely();
+
+        app.data.minutely.swap(0, 1);
+        app.set_sort(SortField::Date);
+
+        let sorted = app
+            .get_sorted_minutely()
+            .iter()
+            .map(|entry| entry.datetime)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted,
+            vec![
+                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ],
+            "changing sort key should rebuild the minutely sorted cache"
+        );
+    }
+
+    #[test]
+    fn test_get_sorted_minutely_invalidates_cache_when_data_updates() {
+        let mut app = make_app();
+        app.data.minutely = vec![
+            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
+            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
+        ];
+        let _ = app.get_sorted_minutely();
+
+        let refreshed = UsageData {
+            minutely: vec![
+                minutely_usage("2026-05-20 10:02:00", 30, 2.0),
+                minutely_usage("2026-05-20 10:03:00", 40, 12.0),
+            ],
+            ..Default::default()
+        };
+        app.update_data(refreshed);
+
+        let sorted = app
+            .get_sorted_minutely()
+            .iter()
+            .map(|entry| entry.datetime)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted,
+            vec![
+                NaiveDateTime::parse_from_str("2026-05-20 10:03:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+                NaiveDateTime::parse_from_str("2026-05-20 10:02:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ],
+            "update_data should clear stale minutely sorted cache entries"
+        );
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -1783,6 +2042,9 @@ mod tests {
     fn test_handle_key_tab_switch() {
         let mut app = make_app();
         assert_eq!(app.current_tab, Tab::Overview);
+
+        app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Usage);
 
         app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Models);
@@ -1822,6 +2084,12 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Models);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Usage);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]
@@ -1831,6 +2099,7 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Overview);
 
         for expected in [
+            Tab::Usage,
             Tab::Models,
             Tab::Daily,
             Tab::Hourly,
@@ -1945,10 +2214,13 @@ mod tests {
     fn test_handle_key_left_right_switch() {
         let mut app = make_app();
         app.handle_key_event(key(KeyCode::Right));
+        assert_eq!(app.current_tab, Tab::Usage);
+
+        app.handle_key_event(key(KeyCode::Right));
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::Left));
-        assert_eq!(app.current_tab, Tab::Overview);
+        assert_eq!(app.current_tab, Tab::Usage);
     }
 
     #[test]
@@ -2075,11 +2347,13 @@ mod tests {
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.is_daily_detail_active());
 
-        let mut refreshed = UsageData::default();
-        refreshed.daily = vec![
-            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
-            daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
-        ];
+        let refreshed = UsageData {
+            daily: vec![
+                daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+                daily_usage("2026-05-18", 3.0, vec![("other-model", "google", 3.0)]),
+            ],
+            ..Default::default()
+        };
         app.update_data(refreshed);
 
         assert!(
@@ -2110,15 +2384,17 @@ mod tests {
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.is_daily_detail_active());
 
-        let mut refreshed = UsageData::default();
-        refreshed.daily = vec![
-            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
-            daily_usage(
-                "2026-05-17",
-                9.0,
-                vec![("target-a", "openai", 7.0), ("target-b", "anthropic", 2.0)],
-            ),
-        ];
+        let refreshed = UsageData {
+            daily: vec![
+                daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+                daily_usage(
+                    "2026-05-17",
+                    9.0,
+                    vec![("target-a", "openai", 7.0), ("target-b", "anthropic", 2.0)],
+                ),
+            ],
+            ..Default::default()
+        };
         app.update_data(refreshed);
 
         assert!(app.is_daily_detail_active());
@@ -2728,6 +3004,7 @@ mod tests {
             workspace_label: workspace.map(String::from),
             tokens: TokenBreakdown::default(),
             cost,
+            performance: Default::default(),
             session_count: 1,
         }
     }
@@ -2877,6 +3154,7 @@ mod tests {
                 workspace_label: None,
                 tokens: TokenBreakdown::default(),
                 cost: 10.0,
+                performance: Default::default(),
                 session_count: 1,
             },
             ModelUsage {
@@ -2887,6 +3165,7 @@ mod tests {
                 workspace_label: None,
                 tokens: TokenBreakdown::default(),
                 cost: 1.0,
+                performance: Default::default(),
                 session_count: 1,
             },
         ];
@@ -2942,6 +3221,7 @@ mod tests {
                 workspace_label: None,
                 tokens: TokenBreakdown::default(),
                 cost: 10.0,
+                performance: Default::default(),
                 session_count: 1,
             },
             ModelUsage {
@@ -2952,6 +3232,7 @@ mod tests {
                 workspace_label: None,
                 tokens: TokenBreakdown::default(),
                 cost: 5.0,
+                performance: Default::default(),
                 session_count: 1,
             },
         ];

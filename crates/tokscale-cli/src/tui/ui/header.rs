@@ -20,11 +20,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let titles: Vec<Line> = visible_tabs
         .iter()
         .map(|t| {
-            let name = if is_very_narrow {
-                t.short_name()
-            } else {
-                t.as_str()
-            };
+            let name = tab_label(*t, is_very_narrow);
             let style = if *t == app.current_tab {
                 Style::default()
                     .fg(app.theme.accent)
@@ -90,6 +86,14 @@ fn tab_divider(app: &App) -> Span<'static> {
     Span::styled(TAB_DIVIDER, Style::default().fg(app.theme.border))
 }
 
+fn tab_label(tab: Tab, is_very_narrow: bool) -> &'static str {
+    if is_very_narrow {
+        tab.short_name()
+    } else {
+        tab.as_str()
+    }
+}
+
 fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
     let Some(tab_row) = renderable_tab_row(tabs_area) else {
         return Vec::new();
@@ -122,11 +126,7 @@ fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
             break;
         }
 
-        let name = if is_very_narrow {
-            tab.short_name()
-        } else {
-            tab.as_str()
-        };
+        let name = tab_label(*tab, is_very_narrow);
         let width = (name.width() as u16).min(remaining_width);
         if width == 0 {
             break;
@@ -175,10 +175,9 @@ fn register_tab_click_areas(app: &mut App, tabs_area: Rect) {
 mod tests {
     use super::*;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
+    use ratatui::{backend::TestBackend, Terminal};
 
-    use crate::tui::TuiConfig;
+    use crate::tui::app::TuiConfig;
 
     fn make_app(width: u16) -> App {
         let config = TuiConfig {
@@ -216,34 +215,37 @@ mod tests {
     fn expected_normal_tab_areas() -> Vec<(Rect, Tab)> {
         vec![
             (Rect::new(21, 5, 10, 1), Tab::Overview),
-            (Rect::new(34, 5, 8, 1), Tab::Models),
-            (Rect::new(45, 5, 7, 1), Tab::Daily),
-            (Rect::new(55, 5, 8, 1), Tab::Hourly),
-            (Rect::new(66, 5, 7, 1), Tab::Stats),
-            (Rect::new(76, 5, 8, 1), Tab::Agents),
+            (Rect::new(34, 5, 7, 1), Tab::Usage),
+            (Rect::new(44, 5, 8, 1), Tab::Models),
+            (Rect::new(55, 5, 7, 1), Tab::Daily),
+            (Rect::new(65, 5, 8, 1), Tab::Hourly),
+            (Rect::new(76, 5, 7, 1), Tab::Stats),
+            (Rect::new(86, 5, 8, 1), Tab::Agents),
         ]
     }
 
     fn expected_normal_tab_areas_with_minutely() -> Vec<(Rect, Tab)> {
         vec![
             (Rect::new(21, 5, 10, 1), Tab::Overview),
-            (Rect::new(34, 5, 8, 1), Tab::Models),
-            (Rect::new(45, 5, 7, 1), Tab::Daily),
-            (Rect::new(55, 5, 8, 1), Tab::Hourly),
-            (Rect::new(66, 5, 10, 1), Tab::Minutely),
-            (Rect::new(79, 5, 7, 1), Tab::Stats),
-            (Rect::new(89, 5, 8, 1), Tab::Agents),
+            (Rect::new(34, 5, 7, 1), Tab::Usage),
+            (Rect::new(44, 5, 8, 1), Tab::Models),
+            (Rect::new(55, 5, 7, 1), Tab::Daily),
+            (Rect::new(65, 5, 8, 1), Tab::Hourly),
+            (Rect::new(76, 5, 10, 1), Tab::Minutely),
+            (Rect::new(89, 5, 7, 1), Tab::Stats),
+            (Rect::new(99, 5, 8, 1), Tab::Agents),
         ]
     }
 
     fn expected_very_narrow_tab_areas() -> Vec<(Rect, Tab)> {
         vec![
             (Rect::new(8, 3, 5, 1), Tab::Overview),
-            (Rect::new(16, 3, 5, 1), Tab::Models),
-            (Rect::new(24, 3, 5, 1), Tab::Daily),
-            (Rect::new(32, 3, 4, 1), Tab::Hourly),
-            (Rect::new(39, 3, 5, 1), Tab::Stats),
-            (Rect::new(47, 3, 5, 1), Tab::Agents),
+            (Rect::new(16, 3, 5, 1), Tab::Usage),
+            (Rect::new(24, 3, 5, 1), Tab::Models),
+            (Rect::new(32, 3, 5, 1), Tab::Daily),
+            (Rect::new(40, 3, 4, 1), Tab::Hourly),
+            (Rect::new(47, 3, 5, 1), Tab::Stats),
+            (Rect::new(55, 3, 5, 1), Tab::Agents),
         ]
     }
 
@@ -349,7 +351,7 @@ mod tests {
         let app = make_app_with_minutely(120);
 
         assert_eq!(
-            tab_click_areas(&app, Rect::new(21, 5, 78, 1)),
+            tab_click_areas(&app, Rect::new(21, 5, 103, 1)),
             expected_normal_tab_areas_with_minutely()
         );
     }
@@ -359,7 +361,7 @@ mod tests {
         let app = make_app(50);
 
         assert_eq!(
-            tab_click_areas(&app, Rect::new(8, 3, 50, 1)),
+            tab_click_areas(&app, Rect::new(8, 3, 65, 1)),
             expected_very_narrow_tab_areas()
         );
     }
@@ -372,22 +374,23 @@ mod tests {
         let lines = render_header_symbols(&mut app, area, 120, 8);
 
         assert_eq!(symbols_at(&lines, 5, 21, 10), " Overview ");
-        assert_eq!(symbols_at(&lines, 5, 34, 8), " Models ");
-        assert_eq!(symbols_at(&lines, 5, 45, 7), " Daily ");
-        assert_eq!(symbols_at(&lines, 5, 55, 8), " Hourly ");
-        assert_eq!(symbols_at(&lines, 5, 66, 7), " Stats ");
-        assert_eq!(symbols_at(&lines, 5, 76, 8), " Agents ");
+        assert_eq!(symbols_at(&lines, 5, 34, 7), " Usage ");
+        assert_eq!(symbols_at(&lines, 5, 44, 8), " Models ");
+        assert_eq!(symbols_at(&lines, 5, 55, 7), " Daily ");
+        assert_eq!(symbols_at(&lines, 5, 65, 8), " Hourly ");
+        assert_eq!(symbols_at(&lines, 5, 76, 7), " Stats ");
+        assert_eq!(symbols_at(&lines, 5, 86, 8), " Agents ");
         assert_eq!(registered_tab_areas(&app), expected_normal_tab_areas());
     }
 
     #[test]
     fn rendered_minutely_tab_matches_click_area_geometry_when_enabled() {
         let mut app = make_app_with_minutely(120);
-        let area = Rect::new(20, 4, 80, 3);
+        let area = Rect::new(20, 4, 105, 3);
 
-        let lines = render_header_symbols(&mut app, area, 120, 8);
+        let lines = render_header_symbols(&mut app, area, 130, 8);
 
-        assert_eq!(symbols_at(&lines, 5, 66, 10), " Minutely ");
+        assert_eq!(symbols_at(&lines, 5, 76, 10), " Minutely ");
         assert_eq!(
             registered_tab_areas(&app),
             expected_normal_tab_areas_with_minutely()
@@ -397,16 +400,17 @@ mod tests {
     #[test]
     fn rendered_very_narrow_tabs_match_click_area_geometry() {
         let mut app = make_app(50);
-        let area = Rect::new(7, 2, 52, 3);
+        let area = Rect::new(7, 2, 65, 3);
 
-        let lines = render_header_symbols(&mut app, area, 65, 6);
+        let lines = render_header_symbols(&mut app, area, 80, 6);
 
         assert_eq!(symbols_at(&lines, 3, 8, 5), " Ovw ");
-        assert_eq!(symbols_at(&lines, 3, 16, 5), " Mod ");
-        assert_eq!(symbols_at(&lines, 3, 24, 5), " Day ");
-        assert_eq!(symbols_at(&lines, 3, 32, 4), " Hr ");
-        assert_eq!(symbols_at(&lines, 3, 39, 5), " Sta ");
-        assert_eq!(symbols_at(&lines, 3, 47, 5), " Agt ");
+        assert_eq!(symbols_at(&lines, 3, 16, 5), " Use ");
+        assert_eq!(symbols_at(&lines, 3, 24, 5), " Mod ");
+        assert_eq!(symbols_at(&lines, 3, 32, 5), " Day ");
+        assert_eq!(symbols_at(&lines, 3, 40, 4), " Hr ");
+        assert_eq!(symbols_at(&lines, 3, 47, 5), " Sta ");
+        assert_eq!(symbols_at(&lines, 3, 55, 5), " Agt ");
         assert_eq!(registered_tab_areas(&app), expected_very_narrow_tab_areas());
     }
 
@@ -418,19 +422,21 @@ mod tests {
         let lines = render_header_symbols(&mut app, area, 120, 8);
 
         assert_eq!(symbols_at(&lines, 5, 31, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 5, 42, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 41, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 5, 52, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 5, 63, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 62, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 5, 73, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 83, 3), TAB_DIVIDER);
 
         assert_clicks_do_not_switch_tabs(
             &mut app,
             &[
                 Rect::new(31, 5, 3, 1),
-                Rect::new(42, 5, 3, 1),
+                Rect::new(41, 5, 3, 1),
                 Rect::new(52, 5, 3, 1),
-                Rect::new(63, 5, 3, 1),
+                Rect::new(62, 5, 3, 1),
                 Rect::new(73, 5, 3, 1),
+                Rect::new(83, 5, 3, 1),
             ],
         );
     }
@@ -438,15 +444,16 @@ mod tests {
     #[test]
     fn clicks_on_very_narrow_tab_dividers_do_not_switch_tabs() {
         let mut app = make_app(50);
-        let area = Rect::new(7, 2, 52, 3);
+        let area = Rect::new(7, 2, 65, 3);
 
-        let lines = render_header_symbols(&mut app, area, 65, 6);
+        let lines = render_header_symbols(&mut app, area, 80, 6);
 
         assert_eq!(symbols_at(&lines, 3, 13, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 3, 21, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 3, 29, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 3, 36, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 37, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 3, 44, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 52, 3), TAB_DIVIDER);
 
         assert_clicks_do_not_switch_tabs(
             &mut app,
@@ -454,8 +461,9 @@ mod tests {
                 Rect::new(13, 3, 3, 1),
                 Rect::new(21, 3, 3, 1),
                 Rect::new(29, 3, 3, 1),
-                Rect::new(36, 3, 3, 1),
+                Rect::new(37, 3, 3, 1),
                 Rect::new(44, 3, 3, 1),
+                Rect::new(52, 3, 3, 1),
             ],
         );
     }
@@ -473,9 +481,9 @@ mod tests {
     #[test]
     fn clicks_on_very_narrow_rendered_tab_labels_and_padding_select_matching_tabs() {
         let mut app = make_app(50);
-        let area = Rect::new(7, 2, 52, 3);
+        let area = Rect::new(7, 2, 65, 3);
 
-        render_header_symbols(&mut app, area, 65, 6);
+        render_header_symbols(&mut app, area, 80, 6);
 
         assert_clicks_select_tabs(&mut app, &expected_very_narrow_tab_areas());
     }

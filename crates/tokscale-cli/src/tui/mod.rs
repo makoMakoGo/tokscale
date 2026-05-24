@@ -52,6 +52,15 @@ fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
     (cached_data, true)
 }
 
+fn background_data_loader(
+    since: Option<String>,
+    until: Option<String>,
+    year: Option<String>,
+    minutely_enabled: bool,
+) -> DataLoader {
+    DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     theme: &str,
@@ -159,7 +168,7 @@ pub fn run(
         let bg_year = year.clone();
         let bg_enabled_clients = enabled_clients.clone();
         let bg_group_by = app.group_by.borrow().clone();
-        let bg_minutely_enabled = app.data_loader.minutely_enabled;
+        let bg_minutely_enabled = app.settings.minutely_tab_enabled;
 
         thread::spawn(move || {
             let loader = background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
@@ -277,7 +286,7 @@ fn run_loop_with_background(
             let year = app.data_loader.year.clone();
             let enabled_clients = app.enabled_clients.borrow().clone();
             let group_by = app.group_by.borrow().clone();
-            let minutely_enabled = app.data_loader.minutely_enabled;
+            let minutely_enabled = app.settings.minutely_tab_enabled;
 
             thread::spawn(move || {
                 let loader = background_data_loader(since, until, year, minutely_enabled);
@@ -311,15 +320,6 @@ fn run_loop_with_background(
         }
     }
     Ok(())
-}
-
-fn background_data_loader(
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
-    minutely_enabled: bool,
-) -> DataLoader {
-    DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
 }
 
 pub fn test_data_loading() -> Result<()> {
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn background_loader_preserves_minutely_setting() {
+    fn background_loader_preserves_filters_and_minutely_toggle() {
         let loader = background_data_loader(
             Some("2026-05-01".to_string()),
             Some("2026-05-19".to_string()),
@@ -403,5 +403,8 @@ mod tests {
         assert_eq!(loader.since.as_deref(), Some("2026-05-01"));
         assert_eq!(loader.until.as_deref(), Some("2026-05-19"));
         assert_eq!(loader.year.as_deref(), Some("2026"));
+
+        let disabled = background_data_loader(None, None, None, false);
+        assert!(!disabled.minutely_enabled);
     }
 }

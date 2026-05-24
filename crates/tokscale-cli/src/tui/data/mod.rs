@@ -8,7 +8,7 @@ use tokio::runtime::{Handle, Runtime};
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
     normalize_model_for_grouping, normalize_provider_for_grouping, parse_local_unified_messages,
-    sessions, ClientId, GroupBy, LocalParseOptions,
+    sessions, ClientId, GroupBy, LocalParseOptions, ModelPerformance,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -82,6 +82,7 @@ pub struct ModelUsage {
     pub workspace_label: Option<String>,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    pub performance: ModelPerformance,
     pub session_count: u32,
 }
 
@@ -216,6 +217,14 @@ fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     }
 }
 
+fn positive_unified_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
+    tokens.input.max(0)
+        + tokens.output.max(0)
+        + tokens.cache_read.max(0)
+        + tokens.cache_write.max(0)
+        + tokens.reasoning.max(0)
+}
+
 fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
     format!("{workspace_label} / {model}")
 }
@@ -236,7 +245,9 @@ fn daily_source_model_key(
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_daily_key(workspace_group_key, model),
         GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
+            model.to_string()
+        }
     }
 }
 
@@ -249,28 +260,42 @@ fn daily_source_model_display_name(
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_display_label(workspace_label, model),
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
-        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
+            model.to_string()
+        }
     }
 }
 
 fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => model.to_string(),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
 fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
 fn hourly_model_display_name(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
@@ -436,6 +461,11 @@ impl DataLoader {
                     format!("{}:{}", workspace_group_key, normalized_model),
                     true,
                 ),
+                GroupBy::Session => (format!("{}:{}", msg.session_id, normalized_model), false),
+                GroupBy::ClientSession => (
+                    format!("{}:{}:{}", msg.client, msg.session_id, normalized_model),
+                    false,
+                ),
             };
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
@@ -454,6 +484,7 @@ impl DataLoader {
                 },
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
+                performance: ModelPerformance::default(),
                 session_count: 0,
             });
 
@@ -503,6 +534,9 @@ impl DataLoader {
                 0.0
             };
             model_entry.cost += msg_cost;
+            model_entry
+                .performance
+                .record_message(positive_unified_token_total(&msg.tokens), msg.duration_ms);
 
             let session_key = format!("{}:{}", msg.client, msg.session_id);
             let model_sessions = model_session_ids.entry(key).or_default();
@@ -864,6 +898,7 @@ impl DataLoader {
                 if let Some(client_totals) = client_totals_by_model.get(&key) {
                     model.client = ordered_clients_by_token_contribution(client_totals);
                 }
+                model.performance.finalize(model.tokens.total() as i64);
                 model
             })
             .collect();
@@ -1444,7 +1479,7 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 23);
+        assert_eq!(clients.len(), 24);
         assert_eq!(clients[0], ClientId::OpenCode);
         assert_eq!(clients[1], ClientId::Claude);
         assert_eq!(clients[2], ClientId::Codex);
@@ -1468,6 +1503,7 @@ mod tests {
         assert_eq!(clients[20], ClientId::Antigravity);
         assert_eq!(clients[21], ClientId::Zed);
         assert_eq!(clients[22], ClientId::Kiro);
+        assert_eq!(clients[23], ClientId::Trae);
     }
 
     #[test]
@@ -1541,6 +1577,8 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::Zed),
             "Zed Agent"
         );
+        assert_eq!(crate::tui::client_ui::display_name(ClientId::Kiro), "Kiro");
+        assert_eq!(crate::tui::client_ui::display_name(ClientId::Trae), "Trae");
     }
 
     #[test]
@@ -1566,6 +1604,8 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codebuff), 'b');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Antigravity), 'a');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zed), 'z');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), 'i');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), 'y');
     }
 
     #[test]
@@ -1642,6 +1682,14 @@ mod tests {
             Some(ClientId::Antigravity)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('z'), Some(ClientId::Zed));
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('i'),
+            Some(ClientId::Kiro)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('y'),
+            Some(ClientId::Trae)
+        );
     }
 
     #[test]

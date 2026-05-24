@@ -158,7 +158,7 @@ fn current_count_label(app: &App) -> String {
         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
         Tab::Minutely => format!(" ({} minutes)", app.data.minutely.len()),
-        Tab::Stats => String::new(),
+        Tab::Stats | Tab::Usage => String::new(),
     }
 }
 

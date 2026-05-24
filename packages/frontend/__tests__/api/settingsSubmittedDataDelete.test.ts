@@ -5,6 +5,7 @@ const mockState = vi.hoisted(() => {
   const authenticatePersonalToken = vi.fn();
   const revalidateTag = vi.fn();
   const revalidatePath = vi.fn();
+  const revalidateUserGroupLeaderboards = vi.fn();
   const revalidateUsernamePaths = vi.fn((username: string) => {
     const lower = username.toLowerCase();
     const variants = username === lower ? [username] : [username, lower];
@@ -31,10 +32,24 @@ const mockState = vi.hoisted(() => {
   let deletedRows: Array<{ id: string }> = [];
   let deleteError: Error | null = null;
 
+  const deleteFromTable = vi.fn(() => ({
+    where,
+  }));
   const db = {
-    delete: vi.fn(() => ({
-      where,
-    })),
+    delete: deleteFromTable,
+    transaction: vi.fn(async (callback: (tx: { delete: typeof deleteFromTable }) => Promise<unknown>) =>
+      callback(db)
+    ),
+  };
+
+  const tables = {
+    submissions: {
+      id: "submissions.id",
+      userId: "submissions.userId",
+    },
+    submittedDevices: {
+      userId: "submittedDevices.userId",
+    },
   };
 
   return {
@@ -42,18 +57,22 @@ const mockState = vi.hoisted(() => {
     authenticatePersonalToken,
     revalidateTag,
     revalidatePath,
+    revalidateUserGroupLeaderboards,
     revalidateUsernamePaths,
     eq,
     db,
+    tables,
     where,
     reset() {
       getSession.mockReset();
       authenticatePersonalToken.mockReset();
       revalidateTag.mockReset();
       revalidatePath.mockReset();
+      revalidateUserGroupLeaderboards.mockReset();
       revalidateUsernamePaths.mockReset();
       eq.mockClear();
       db.delete.mockClear();
+      db.transaction.mockClear();
       where.mockClear();
       returning.mockClear();
       deletedRows = [];
@@ -87,15 +106,17 @@ vi.mock("@/lib/auth/personalTokens", () => ({
 
 vi.mock("@/lib/db", () => ({
   db: mockState.db,
-  submissions: {
-    id: "submissions.id",
-    userId: "submissions.userId",
-  },
+  submissions: mockState.tables.submissions,
+  submittedDevices: mockState.tables.submittedDevices,
 }));
 
 vi.mock("@/lib/db/usernameLookup", () => ({
   normalizeUsernameCacheKey: (username: string) => username.toLowerCase(),
   revalidateUsernamePaths: mockState.revalidateUsernamePaths,
+}));
+
+vi.mock("@/lib/groups/cache", () => ({
+  revalidateUserGroupLeaderboards: mockState.revalidateUserGroupLeaderboards,
 }));
 
 type ModuleExports = typeof import("../../src/app/api/settings/submitted-data/route");
@@ -131,6 +152,7 @@ describe("DELETE /api/settings/submitted-data", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "Not authenticated" });
     expect(mockState.db.delete).not.toHaveBeenCalled();
+    expect(mockState.db.transaction).not.toHaveBeenCalled();
   });
 
   it("deletes submitted data and revalidates public caches", async () => {
@@ -142,6 +164,9 @@ describe("DELETE /api/settings/submitted-data", () => {
       isAdmin: false,
     });
     mockState.setDeletedRows([{ id: "submission-1" }]);
+    mockState.revalidateUserGroupLeaderboards.mockRejectedValueOnce(
+      new Error("group cache unavailable")
+    );
 
     const response = await DELETE(createRequest());
 
@@ -151,14 +176,19 @@ describe("DELETE /api/settings/submitted-data", () => {
       deleted: true,
       deletedSubmissions: 1,
     });
-    expect(mockState.db.delete).toHaveBeenCalledTimes(1);
-    expect(mockState.eq).toHaveBeenCalledWith("submissions.userId", "user-1");
+    expect(mockState.db.delete).toHaveBeenCalledTimes(2);
+    expect(mockState.db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockState.db.delete).toHaveBeenNthCalledWith(1, mockState.tables.submissions);
+    expect(mockState.db.delete).toHaveBeenNthCalledWith(2, mockState.tables.submittedDevices);
+    expect(mockState.eq).toHaveBeenNthCalledWith(1, "submissions.userId", "user-1");
+    expect(mockState.eq).toHaveBeenNthCalledWith(2, "submittedDevices.userId", "user-1");
     expect(mockState.where).toHaveBeenCalledWith({
       kind: "eq",
       left: "submissions.userId",
       right: "user-1",
     });
     expect(mockState.revalidateTag).toHaveBeenCalledTimes(7);
+    expect(mockState.revalidateUserGroupLeaderboards).toHaveBeenCalledWith("user-1");
     expect(mockState.revalidateUsernamePaths).toHaveBeenCalledTimes(1);
     expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("Alice");
     expect(mockState.revalidatePath).toHaveBeenCalledTimes(8);

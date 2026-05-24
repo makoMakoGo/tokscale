@@ -35,3 +35,7 @@ crates/tokscale-cli/tokscale-export-*.json
 .dolt/
 *.db
 .beads-credential-key
+
+self-host/tokscale-key.pem
+self-host/
+.next/

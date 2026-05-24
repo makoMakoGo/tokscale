@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokscale_core::{sessions, GroupBy};
+use tokscale_core::{sessions, GroupBy, ModelPerformance};
 
 use crate::ClientFilter;
 
@@ -98,6 +98,8 @@ struct CachedModelUsage {
     workspace_label: Option<String>,
     tokens: CachedTokenBreakdown,
     cost: f64,
+    #[serde(default)]
+    performance: ModelPerformance,
     session_count: u32,
 }
 
@@ -230,6 +232,7 @@ impl From<&ModelUsage> for CachedModelUsage {
             workspace_label: m.workspace_label.clone(),
             tokens: (&m.tokens).into(),
             cost: m.cost,
+            performance: m.performance.clone(),
             session_count: m.session_count,
         }
     }
@@ -245,6 +248,7 @@ impl From<CachedModelUsage> for ModelUsage {
             workspace_label: m.workspace_label,
             tokens: m.tokens.into(),
             cost: m.cost,
+            performance: m.performance,
             session_count: m.session_count,
         }
     }

@@ -4,7 +4,7 @@ use ratatui::widgets::{
 };
 
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
+    format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
     get_provider_display_name,
 };
 use crate::tui::app::{App, SortDirection, SortField};
@@ -37,6 +37,7 @@ const DETAIL_PROVIDER_WIDTH: u16 = 8;
 const DETAIL_SOURCE_WIDTH: u16 = 12;
 const DETAIL_NUMERIC_WIDTH: u16 = 8;
 const DETAIL_TOTAL_WIDTH: u16 = 9;
+const DETAIL_PERFORMANCE_WIDTH: u16 = 10;
 const DETAIL_COST_WIDTH: u16 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +59,7 @@ enum ModelsColumn {
     CacheRead,
     CacheWrite,
     Total,
+    Performance,
     Cost,
 }
 
@@ -95,6 +97,7 @@ fn column_width(
     match column {
         ModelsColumn::Model => model_width,
         ModelsColumn::Total => DETAIL_TOTAL_WIDTH,
+        ModelsColumn::Performance => DETAIL_PERFORMANCE_WIDTH,
         ModelsColumn::Cost => DETAIL_COST_WIDTH,
         ModelsColumn::Source => source_width,
         ModelsColumn::Provider => provider_width,
@@ -159,6 +162,7 @@ fn models_table_layout(
         ModelsColumn::CacheRate,
         ModelsColumn::CacheRead,
         ModelsColumn::CacheWrite,
+        ModelsColumn::Performance,
     ];
     let mut columns = required_columns;
 
@@ -185,10 +189,17 @@ fn models_table_layout(
 
     for column in optional_columns {
         let mut candidate = columns.clone();
-        let insert_at = candidate
-            .iter()
-            .position(|existing| matches!(existing, ModelsColumn::Total | ModelsColumn::Cost))
-            .unwrap_or(candidate.len());
+        let insert_at = if column == ModelsColumn::Performance {
+            candidate
+                .iter()
+                .position(|existing| *existing == ModelsColumn::Cost)
+                .unwrap_or(candidate.len())
+        } else {
+            candidate
+                .iter()
+                .position(|existing| matches!(existing, ModelsColumn::Total | ModelsColumn::Cost))
+                .unwrap_or(candidate.len())
+        };
         candidate.insert(insert_at, column);
 
         if layout_width(&candidate, model_width, provider_width, source_width) <= table_width {
@@ -256,6 +267,7 @@ fn model_column_header(
         ModelsColumn::CacheRate => "Cache×",
         ModelsColumn::Total if density == ModelsTableDensity::Full => "Total",
         ModelsColumn::Total => "Tokens",
+        ModelsColumn::Performance => "ms/1K",
         ModelsColumn::Cost => "Cost",
     }
 }
@@ -408,6 +420,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ))
                     .style(Style::default().fg(Color::Cyan)),
                     ModelsColumn::Total => Cell::from(format_tokens(model.tokens.total())),
+                    ModelsColumn::Performance => {
+                        Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
+                            .style(Style::default().fg(Color::Yellow))
+                    }
                     ModelsColumn::Cost => {
                         Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green))
                     }
@@ -644,8 +660,8 @@ mod tests {
 
     #[test]
     fn source_column_stops_growing_after_visible_content_fits() {
-        let fit = model_layout(180, 28, 56, 26);
-        let wider = model_layout(220, 28, 56, 26);
+        let fit = model_layout(220, 28, 56, 26);
+        let wider = model_layout(260, 28, 56, 26);
 
         assert_eq!(length_at(&fit.widths, 1), 26);
         assert_eq!(length_at(&wider.widths, 1), 26);
