@@ -26,7 +26,7 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
 
-    let periodParam = searchParams.get("period") || "all";
+    const periodParam = searchParams.get("period") || "all";
     let period: Period = VALID_PERIODS.includes(periodParam as Period)
       ? (periodParam as Period)
       : "all";

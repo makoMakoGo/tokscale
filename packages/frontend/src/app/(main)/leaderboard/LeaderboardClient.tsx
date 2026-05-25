@@ -1077,7 +1077,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   const { leaderboardSortBy, setLeaderboardSort, mounted } = useSettings();
 
-  const initialSortByRef = useRef(urlSortBy);
+  const [initialUrlSortBy] = useState<LeaderboardSortBy | null>(() => urlSortBy);
   // Precedence for the active sort column:
   //   1. URL `?sortBy=` on first paint wins (preserves shareable links), but
   //   2. the moment the user clicks a SortOption, their choice takes over and
@@ -1085,9 +1085,9 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
   // `userHasToggledSort` is the boolean that flips us from rule 1 to rule 2.
   // Each SortOption.onClick must set this to true; do not remove that line
   // when refactoring or the URL param will silently override every click.
-  const userHasToggledSort = useRef(false);
-  const effectiveSortBy = (!userHasToggledSort.current && initialSortByRef.current)
-    ? initialSortByRef.current
+  const [userHasToggledSort, setUserHasToggledSort] = useState(false);
+  const effectiveSortBy = (!userHasToggledSort && initialUrlSortBy)
+    ? initialUrlSortBy
     : (mounted ? leaderboardSortBy : initialSortBy);
   const requestedPage = data.pagination.totalPages > 0
     ? Math.min(page, data.pagination.totalPages)
@@ -1405,7 +1405,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <SortOption
               $active={effectiveSortBy === 'tokens'}
               onClick={() => {
-                userHasToggledSort.current = true;
+                setUserHasToggledSort(true);
                 setLeaderboardSort('tokens');
               }}
             >
@@ -1414,7 +1414,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <SortOption
               $active={effectiveSortBy === 'cost'}
               onClick={() => {
-                userHasToggledSort.current = true;
+                setUserHasToggledSort(true);
                 setLeaderboardSort('cost');
               }}
             >
@@ -1423,7 +1423,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <SortOption
               $active={effectiveSortBy === 'time'}
               onClick={() => {
-                userHasToggledSort.current = true;
+                setUserHasToggledSort(true);
                 setLeaderboardSort('time');
               }}
             >
