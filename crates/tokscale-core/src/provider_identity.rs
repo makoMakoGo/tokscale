@@ -24,6 +24,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "openai" | "openai_codex" => "openai",
         "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
+        "pandora_deepseek" => "deepseek",
         "ai21" => "ai21",
         // For unknown segments, reject if they contain digits — those are
         // almost certainly model-name fragments (e.g., "gpt-4", "claude-3")
@@ -49,6 +50,7 @@ pub fn normalize_provider_for_grouping(raw: &str) -> String {
         s if s.starts_with("minimax") => "minimax".to_string(),
         s if s.starts_with("moonshot") => "kimi".to_string(),
         "kimi_code" | "kimi_for_coding" | "kimi" => "kimi".to_string(),
+        "pandora_deepseek" => "deepseek".to_string(),
         s if s.starts_with("qwen") => "qwen".to_string(),
         s if s.starts_with("meituan") || s.starts_with("longcat") => "meituan".to_string(),
         s if s.starts_with("doubao") => "doubao".to_string(),
@@ -143,8 +145,43 @@ fn contains_delimited(haystack: &str, needle: &str) -> bool {
     false
 }
 
+pub(crate) fn provider_override_from_model(model: &str) -> Option<&'static str> {
+    let lower = model.trim().to_lowercase();
+    let model_part = lower
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(&lower);
+
+    match model_part {
+        "model1" | "model2" => Some("deepseek"),
+        _ => None,
+    }
+}
+
+pub(crate) fn provider_override_from_model_and_provider(
+    model: &str,
+    provider: &str,
+) -> Option<&'static str> {
+    if let Some(provider) = provider_override_from_model(model) {
+        return Some(provider);
+    }
+
+    if canonical_provider(provider).as_deref() == Some("anthropic") && !is_anthropic_model(model) {
+        return inferred_provider_from_model(model)
+            .filter(|provider| *provider != "anthropic")
+            .or(Some("unknown"));
+    }
+
+    None
+}
+
 pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     let lower = model.to_lowercase();
+
+    if let Some(provider) = provider_override_from_model(model) {
+        return Some(provider);
+    }
 
     if lower.contains("glm")
         || lower.contains("zhipu")
@@ -187,8 +224,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("xai");
     }
 
-    let model_part = lower.split('/').next_back().unwrap_or(&lower);
-    if model_part == "model1" || model_part == "model2" || lower.contains("deepseek") {
+    if lower.contains("deepseek") {
         return Some("deepseek");
     }
 
@@ -258,6 +294,10 @@ mod tests {
             canonical_provider("openrouter/google"),
             Some("openrouter".into())
         );
+        assert_eq!(
+            canonical_provider("pandora-deepseek"),
+            Some("deepseek".into())
+        );
         assert_eq!(canonical_provider("<synthetic>"), None);
         assert_eq!(canonical_provider("unknown"), None);
     }
@@ -272,6 +312,7 @@ mod tests {
             ("moonshotai", "kimi"),
             ("moonshot-coding-plan", "kimi"),
             ("kimi-for-coding", "kimi"),
+            ("pandora-deepseek", "deepseek"),
             ("qwen-coding-plan", "qwen"),
             ("meituan", "meituan"),
             ("longcat-coding-plan", "meituan"),
@@ -380,6 +421,49 @@ mod tests {
         assert_eq!(inferred_provider_from_model("llama-3"), Some("meta"));
         assert_eq!(inferred_provider_from_model("qwen3-coder"), Some("qwen"));
         assert_eq!(inferred_provider_from_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn test_provider_override_from_exact_historical_model_aliases() {
+        assert_eq!(provider_override_from_model("model1"), Some("deepseek"));
+        assert_eq!(
+            provider_override_from_model("deepseek/model2"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            provider_override_from_model("anthropic/model1"),
+            Some("deepseek")
+        );
+        assert_eq!(provider_override_from_model("model10"), None);
+        assert_eq!(provider_override_from_model("my-model1"), None);
+    }
+
+    #[test]
+    fn test_provider_override_rejects_anthropic_for_non_anthropic_models() {
+        assert_eq!(
+            provider_override_from_model_and_provider("glm-5.1", "anthropic"),
+            Some("zai")
+        );
+        assert_eq!(
+            provider_override_from_model_and_provider("mimo-v2.5-pro", "anthropic"),
+            Some("xiaomi")
+        );
+        assert_eq!(
+            provider_override_from_model_and_provider("model1", "some-reseller"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            provider_override_from_model_and_provider("unknown-model", "anthropic"),
+            Some("unknown")
+        );
+        assert_eq!(
+            provider_override_from_model_and_provider("claude-opus-4.5", "anthropic"),
+            None
+        );
+        assert_eq!(
+            provider_override_from_model_and_provider("glm-5.1", "openrouter"),
+            None
+        );
     }
 
     #[test]

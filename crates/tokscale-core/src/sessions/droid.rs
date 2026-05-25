@@ -100,9 +100,20 @@ fn normalize_model_name(model: &str) -> String {
     }
 }
 
-fn get_provider_from_model(model: &str) -> &'static str {
-    let normalized = normalize_model_name(model);
-    provider_identity::inferred_provider_from_model(&normalized).unwrap_or("unknown")
+fn get_provider_from_model_and_lock(model: &str, provider_lock: Option<&str>) -> String {
+    let inferred = provider_identity::inferred_provider_from_model(model);
+    let provider_lock = provider_lock
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
+
+    match provider_lock {
+        Some(provider) => {
+            provider_identity::provider_override_from_model_and_provider(model, provider)
+                .unwrap_or(provider)
+                .to_string()
+        }
+        None => inferred.unwrap_or("unknown").to_string(),
+    }
 }
 
 /// Get default model name based on provider when model field is missing
@@ -185,12 +196,10 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         .replace(".settings", "");
 
     // Get model and provider
-    let provider = settings.provider_lock.clone().unwrap_or_else(|| {
-        get_provider_from_model(settings.model.as_deref().unwrap_or("")).to_string()
-    });
-
-    let model = if let Some(m) = settings.model {
-        normalize_model_name(&m)
+    let provider_lock = settings.provider_lock.as_deref();
+    let missing_model_provider = provider_lock.unwrap_or("unknown");
+    let model = if let Some(m) = settings.model.as_deref() {
+        normalize_model_name(m)
     } else {
         // Try to extract from JSONL file
         let jsonl_path = path
@@ -200,11 +209,12 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
 
         if let Some(ref jsonl) = jsonl_path {
             extract_model_from_jsonl(jsonl)
-                .unwrap_or_else(|| get_default_model_from_provider(&provider))
+                .unwrap_or_else(|| get_default_model_from_provider(missing_model_provider))
         } else {
-            get_default_model_from_provider(&provider)
+            get_default_model_from_provider(missing_model_provider)
         }
     };
+    let provider = get_provider_from_model_and_lock(&model, provider_lock);
 
     // Get timestamp from providerLockTimestamp or file mtime
     let timestamp = settings
@@ -294,17 +304,40 @@ mod tests {
 
     #[test]
     fn test_get_provider_from_model() {
-        assert_eq!(get_provider_from_model("claude-3-sonnet"), "anthropic");
-        assert_eq!(get_provider_from_model("opus-4"), "anthropic");
-        assert_eq!(get_provider_from_model("custom:opus-4.5"), "anthropic");
-        assert_eq!(get_provider_from_model("sonnet-4"), "anthropic");
-        assert_eq!(get_provider_from_model("haiku-3"), "anthropic");
-        assert_eq!(get_provider_from_model("gpt-4o"), "openai");
-        assert_eq!(get_provider_from_model("o1-preview"), "openai");
-        assert_eq!(get_provider_from_model("o3-mini"), "openai");
-        assert_eq!(get_provider_from_model("gemini-pro"), "google");
-        assert_eq!(get_provider_from_model("grok-2"), "xai");
-        assert_eq!(get_provider_from_model("unknown-model"), "unknown");
+        let provider =
+            |model: &str| get_provider_from_model_and_lock(&normalize_model_name(model), None);
+
+        assert_eq!(provider("claude-3-sonnet"), "anthropic");
+        assert_eq!(provider("opus-4"), "anthropic");
+        assert_eq!(provider("custom:opus-4.5"), "anthropic");
+        assert_eq!(provider("sonnet-4"), "anthropic");
+        assert_eq!(provider("haiku-3"), "anthropic");
+        assert_eq!(provider("gpt-4o"), "openai");
+        assert_eq!(provider("o1-preview"), "openai");
+        assert_eq!(provider("o3-mini"), "openai");
+        assert_eq!(provider("gemini-pro"), "google");
+        assert_eq!(provider("grok-2"), "xai");
+        assert_eq!(provider("unknown-model"), "unknown");
+    }
+
+    #[test]
+    fn test_get_provider_from_model_and_lock_rejects_anthropic_for_non_claude_model() {
+        assert_eq!(
+            get_provider_from_model_and_lock("glm-5.1", Some("anthropic")),
+            "zai"
+        );
+        assert_eq!(
+            get_provider_from_model_and_lock("mimo-v2.5-pro", Some("anthropic")),
+            "xiaomi"
+        );
+        assert_eq!(
+            get_provider_from_model_and_lock("claude-opus-4.5", Some("anthropic")),
+            "anthropic"
+        );
+        assert_eq!(
+            get_provider_from_model_and_lock("model1", Some("some-reseller")),
+            "deepseek"
+        );
     }
 
     #[test]
@@ -374,5 +407,30 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "claude-opus-4.5");
         assert_eq!(messages[0].provider_id, "anthropic");
+    }
+
+    #[test]
+    fn test_parse_droid_file_uses_model_provider_over_anthropic_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "custom:glm-5.1",
+                "providerLock": "anthropic",
+                "providerLockTimestamp": "2024-12-26T12:00:00Z",
+                "tokenUsage": {
+                    "inputTokens": 1234,
+                    "outputTokens": 567
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_droid_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5.1");
+        assert_eq!(messages[0].provider_id, "zai");
     }
 }

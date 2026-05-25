@@ -820,6 +820,7 @@ impl ClaudeProviderChoice {
 const CLAUDE_PROVIDER_DEFAULT_CONFIDENCE: u8 = 1;
 const CLAUDE_PROVIDER_INFERRED_CONFIDENCE: u8 = 2;
 const CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE: u8 = 3;
+const CLAUDE_PROVIDER_MODEL_OVERRIDE_CONFIDENCE: u8 = 4;
 
 fn claude_provider_id(model: &str, provider_hint: Option<&str>) -> String {
     claude_provider_choice(model, provider_hint).id
@@ -857,6 +858,13 @@ fn claude_provider_choice_from_hint(
     model: Option<&str>,
     provider_hint: Option<&str>,
 ) -> Option<ClaudeProviderChoice> {
+    if let Some(provider) = model.and_then(provider_identity::provider_override_from_model) {
+        return Some(ClaudeProviderChoice::new(
+            provider,
+            CLAUDE_PROVIDER_MODEL_OVERRIDE_CONFIDENCE,
+        ));
+    }
+
     let hint = provider_hint.and_then(provider_identity::canonical_provider)?;
 
     if hint == "anthropic" {
@@ -1416,6 +1424,19 @@ mod tests {
                 .all(|message| message.provider_id != "anthropic"),
             "non-Claude models must never be attributed to Anthropic"
         );
+    }
+
+    #[test]
+    fn test_historical_model_aliases_override_provider_hint() {
+        let content = r#"{"type":"assistant","provider":"pandora-deepseek","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"model1","usage":{"input_tokens":700,"output_tokens":70}}}
+{"type":"assistant","provider":"some-reseller","timestamp":"2026-02-18T10:00:01.000Z","message":{"model":"model2","usage":{"input_tokens":800,"output_tokens":80}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].provider_id, "deepseek");
+        assert_eq!(messages[1].provider_id, "deepseek");
     }
 
     #[test]

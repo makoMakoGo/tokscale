@@ -306,6 +306,12 @@ impl UnifiedMessage {
 
     pub(crate) fn refresh_derived_fields(&mut self) {
         self.date = timestamp_to_date(self.timestamp);
+        if let Some(provider) = crate::provider_identity::provider_override_from_model_and_provider(
+            &self.model_id,
+            &self.provider_id,
+        ) {
+            self.provider_id = provider.to_string();
+        }
     }
 
     pub(crate) fn set_timestamp(&mut self, timestamp: i64) {
@@ -426,6 +432,52 @@ mod tests {
         assert_eq!(msg.agent, None);
         assert_eq!(msg.workspace_key, None);
         assert_eq!(msg.workspace_label, None);
+    }
+
+    #[test]
+    fn test_refresh_derived_fields_overrides_historical_model_provider() {
+        let tokens = TokenBreakdown::default();
+        let mut msg = UnifiedMessage::new(
+            "pi",
+            "model1",
+            "pandora-deepseek",
+            "test-session-id",
+            1733011200000,
+            tokens,
+            0.05,
+        );
+
+        msg.refresh_derived_fields();
+
+        assert_eq!(msg.provider_id, "deepseek");
+
+        let mut non_alias = UnifiedMessage::new(
+            "pi",
+            "model10",
+            "pandora-deepseek",
+            "test-session-id",
+            1733011200000,
+            TokenBreakdown::default(),
+            0.05,
+        );
+
+        non_alias.refresh_derived_fields();
+
+        assert_eq!(non_alias.provider_id, "pandora-deepseek");
+
+        let mut non_claude = UnifiedMessage::new(
+            "droid",
+            "glm-5.1",
+            "anthropic",
+            "test-session-id",
+            1733011200000,
+            TokenBreakdown::default(),
+            0.05,
+        );
+
+        non_claude.refresh_derived_fields();
+
+        assert_eq!(non_claude.provider_id, "zai");
     }
 
     #[test]

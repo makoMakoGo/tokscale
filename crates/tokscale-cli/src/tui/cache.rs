@@ -21,7 +21,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 8;
+const CACHE_SCHEMA_VERSION: u32 = 10;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -721,6 +721,9 @@ pub fn load_cache(
         return CacheResult::Miss;
     }
     let schema_outdated = cached.schema_version < CACHE_SCHEMA_VERSION;
+    if schema_outdated && cached.schema_version >= 8 {
+        return CacheResult::Miss;
+    }
     let cached_group_by = cached
         .group_by
         .as_deref()
@@ -1151,6 +1154,65 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_load_cache_misses_schema_8_provider_groups() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 8,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": false,
+  "groupBy": "model",
+  "data": {
+    "models": [{
+      "model": "glm-5.1",
+      "provider": "zai, anthropic",
+      "client": "claude",
+      "tokens": {
+        "input": 10,
+        "output": 5,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0
+      },
+      "cost": 1.25,
+      "sessionCount": 1
+    }],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 15,
+    "totalCost": 1.25,
+    "currentStreak": 1,
+    "longestStreak": 1
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, false),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_load_cache_stale_legacy_daily_models_without_display_fields() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
@@ -1240,7 +1302,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 8,
+  "schemaVersion": 10,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
@@ -1550,7 +1612,7 @@ mod tests {
         fs::write(
             &legacy_path,
             r#"{
-  "schemaVersion": 8,
+  "schemaVersion": 10,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,
