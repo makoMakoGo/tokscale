@@ -296,7 +296,15 @@ fn get_single_provider_display_name(provider: &str) -> String {
         s if s.starts_with("zai") || s.starts_with("zhipu") => "Z.AI".to_string(),
         s if s.starts_with("xiaomi") => "XiaoMi".to_string(),
         s if s.starts_with("minimax") => "MiniMax".to_string(),
-        s if s == "kimi" || s == "kimi-code" || s == "kimi-for-coding" => "Kimi".to_string(),
+        s if s.starts_with("moonshot")
+            || s == "kimi"
+            || s == "kimi-code"
+            || s == "kimi-for-coding" =>
+        {
+            "Kimi".to_string()
+        }
+        s if s.starts_with("qwen") => "Qwen".to_string(),
+        s if s.starts_with("meituan") || s.starts_with("longcat") => "Meituan".to_string(),
         s if s.starts_with("doubao") => "Doubao".to_string(),
         s if s.starts_with("alibaba") => "Alibaba".to_string(),
         s if s.starts_with("tencent") || s.starts_with("tecent") => "Tencent".to_string(),
@@ -401,9 +409,15 @@ mod tests {
             ("xiaomi-token-plan-sgp", "XiaoMi"),
             ("minimax-code-cn", "MiniMax"),
             ("minimax-cn-coding-plan", "MiniMax"),
+            ("moonshotai", "Kimi"),
+            ("moonshot-coding-plan", "Kimi"),
             ("kimi", "Kimi"),
             ("kimi-code", "Kimi"),
             ("kimi-for-coding", "Kimi"),
+            ("qwen", "Qwen"),
+            ("qwen-coding-plan", "Qwen"),
+            ("meituan", "Meituan"),
+            ("longcat-coding-plan", "Meituan"),
             ("doubao-coding-plan", "Doubao"),
             ("alibaba-coding-plan-cn", "Alibaba"),
             ("tencent-coding-plan", "Tencent"),
@@ -424,6 +438,10 @@ mod tests {
         assert_eq!(
             get_provider_display_name("zai, zhipuai-coding-plan, minimax-code-cn"),
             "Z.AI, MiniMax"
+        );
+        assert_eq!(
+            get_provider_display_name("moonshotai, kimi-for-coding"),
+            "Kimi"
         );
     }
 

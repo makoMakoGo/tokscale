@@ -1477,6 +1477,40 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_messages_normalizes_moonshot_provider_to_kimi() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "kimi-for-coding",
+                        "moonshotai",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "kimi-for-coding",
+                        "kimi-for-coding",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].provider, "kimi");
+        assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
         assert_eq!(clients.len(), 24);
