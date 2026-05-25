@@ -408,13 +408,7 @@ pub fn parse_claude_file_with_cache(
                     None => continue,
                 };
 
-                let duplicate_provider_choice = claude_provider_choice_from_parts(
-                    message.model.as_deref(),
-                    message
-                        .provider_id
-                        .as_deref()
-                        .or(entry.provider_id.as_deref()),
-                );
+                let provider_hint = message.provider_id.clone().or(entry.provider_id.clone());
 
                 // Build dedup key for global deduplication (messageId:requestId composite).
                 // For streaming responses, merge using per-field max to capture the most
@@ -423,6 +417,13 @@ pub fn parse_claude_file_with_cache(
                     (Some(msg_id), Some(req_id)) => {
                         let hash = format!("{}:{}", msg_id, req_id);
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
+                            let duplicate_provider_choice = claude_provider_choice_from_parts(
+                                message
+                                    .model
+                                    .as_deref()
+                                    .or(Some(messages[existing_idx].model_id.as_str())),
+                                provider_hint.as_deref(),
+                            );
                             merge_claude_duplicate(
                                 &mut messages[existing_idx],
                                 &usage,
@@ -443,6 +444,13 @@ pub fn parse_claude_file_with_cache(
                     (Some(msg_id), None) => {
                         let hash = format!("message:{}", msg_id);
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
+                            let duplicate_provider_choice = claude_provider_choice_from_parts(
+                                message
+                                    .model
+                                    .as_deref()
+                                    .or(Some(messages[existing_idx].model_id.as_str())),
+                                provider_hint.as_deref(),
+                            );
                             merge_claude_duplicate(
                                 &mut messages[existing_idx],
                                 &usage,
@@ -467,13 +475,7 @@ pub fn parse_claude_file_with_cache(
                     Some(m) => m,
                     None => continue,
                 };
-                let provider_choice = claude_provider_choice(
-                    &model,
-                    message
-                        .provider_id
-                        .as_deref()
-                        .or(entry.provider_id.as_deref()),
-                );
+                let provider_choice = claude_provider_choice(&model, provider_hint.as_deref());
                 let provider_confidence = provider_choice.confidence;
 
                 let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
@@ -868,6 +870,9 @@ fn claude_provider_choice_from_hint(
                 ));
             }
         }
+        if model.is_some_and(|model| !provider_identity::is_anthropic_model(model)) {
+            return Some(ClaudeProviderChoice::new("unknown", 0));
+        }
         return Some(ClaudeProviderChoice::new(
             hint,
             CLAUDE_PROVIDER_DEFAULT_CONFIDENCE,
@@ -900,10 +905,16 @@ fn stored_claude_provider_confidence(provider_id: &str) -> u8 {
 }
 
 fn provider_from_model_prefix(model: &str) -> Option<String> {
-    if model.trim().contains('/') {
-        provider_identity::canonical_provider(model)
-    } else {
+    let provider = model
+        .trim()
+        .contains('/')
+        .then(|| provider_identity::canonical_provider(model))
+        .flatten()?;
+
+    if provider == "anthropic" && !provider_identity::is_anthropic_model(model) {
         None
+    } else {
+        Some(provider)
     }
 }
 
@@ -1355,29 +1366,68 @@ mod tests {
 {"type":"assistant","timestamp":"2026-02-18T10:00:01.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}
 {"type":"assistant","timestamp":"2026-02-18T10:00:02.000Z","message":{"model":"gemini-3-flash-preview","usage":{"input_tokens":300,"output_tokens":30}}}
 {"type":"assistant","timestamp":"2026-02-18T10:00:03.000Z","message":{"model":"MiniMax-M2.1","usage":{"input_tokens":400,"output_tokens":40}}}
-{"type":"assistant","timestamp":"2026-02-18T10:00:04.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":500,"output_tokens":50}}}"#;
+{"type":"assistant","timestamp":"2026-02-18T10:00:04.000Z","message":{"model":"glm-5.1","usage":{"input_tokens":500,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:05.000Z","message":{"model":"mimo-v2.5-pro","usage":{"input_tokens":600,"output_tokens":60}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:06.000Z","message":{"model":"kimi-for-coding","usage":{"input_tokens":700,"output_tokens":70}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:07.000Z","message":{"model":"longcat-flash-thinking","usage":{"input_tokens":800,"output_tokens":80}}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:08.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":900,"output_tokens":90}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 9);
         assert_eq!(messages[0].provider_id, "anthropic");
         assert_eq!(messages[1].provider_id, "openai");
         assert_eq!(messages[2].provider_id, "google");
         assert_eq!(messages[3].provider_id, "minimax");
-        assert_eq!(messages[4].provider_id, "unknown");
+        assert_eq!(messages[4].provider_id, "zai");
+        assert_eq!(messages[5].provider_id, "xiaomi");
+        assert_eq!(messages[6].provider_id, "moonshotai");
+        assert_eq!(messages[7].provider_id, "meituan");
+        assert_eq!(messages[8].provider_id, "unknown");
     }
 
     #[test]
     fn test_multi_provider_models_prefer_specific_model_over_default_anthropic_hint() {
-        let content = r#"{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}"#;
+        let content = r#"{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}
+{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:01.000Z","message":{"model":"glm-5.1","usage":{"input_tokens":300,"output_tokens":30}}}
+{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:02.000Z","message":{"model":"mimo-v2.5-pro","usage":{"input_tokens":400,"output_tokens":40}}}
+{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:03.000Z","message":{"model":"kimi-for-coding","usage":{"input_tokens":500,"output_tokens":50}}}
+{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:04.000Z","message":{"model":"longcat-flash-thinking","usage":{"input_tokens":600,"output_tokens":60}}}
+{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:05.000Z","message":{"model":"model1","usage":{"input_tokens":700,"output_tokens":70}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[0].model_id, "gpt-5.3-codex");
+        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[1].provider_id, "zai");
+        assert_eq!(messages[2].provider_id, "xiaomi");
+        assert_eq!(messages[3].provider_id, "moonshotai");
+        assert_eq!(messages[4].provider_id, "meituan");
+        assert_eq!(messages[5].provider_id, "unknown");
+        assert!(
+            messages
+                .iter()
+                .filter(|message| !provider_identity::is_anthropic_model(&message.model_id))
+                .all(|message| message.provider_id != "anthropic"),
+            "non-Claude models must never be attributed to Anthropic"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_hint_without_later_model_does_not_override_non_claude_duplicate() {
+        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"glm-5.1","usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":120,"output_tokens":15}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.3-codex");
-        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 15);
     }
 
     #[test]

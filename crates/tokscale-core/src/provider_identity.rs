@@ -11,8 +11,10 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
     let canonical = match normalized.as_str() {
         "" | "unknown" => return None,
         "x_ai" | "xai" => "xai",
-        "z_ai" | "zai" => "zai",
-        "moonshot" | "moonshotai" => "moonshotai",
+        "z_ai" | "zai" | "zhipu" | "zhipuai" => "zai",
+        "moonshot" | "moonshotai" | "kimi" | "kimi_for_coding" => "moonshotai",
+        "xiaomi" | "mimo" => "xiaomi",
+        "meituan" | "longcat" => "meituan",
         "meta" | "meta_llama" => "meta_llama",
         "azure" | "azure_ai" => "azure_ai",
         "anthropic" | "vertex" | "vertex_ai" => "anthropic",
@@ -141,12 +143,27 @@ fn contains_delimited(haystack: &str, needle: &str) -> bool {
 pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     let lower = model.to_lowercase();
 
-    if lower.contains("claude")
-        || lower.contains("anthropic")
-        || contains_delimited(&lower, "opus")
-        || contains_delimited(&lower, "sonnet")
-        || contains_delimited(&lower, "haiku")
+    if lower.contains("glm")
+        || lower.contains("zhipu")
+        || lower.contains("z-ai")
+        || lower.contains("z.ai")
     {
+        return Some("zai");
+    }
+
+    if lower.contains("mimo") || lower.contains("xiaomi") {
+        return Some("xiaomi");
+    }
+
+    if lower.contains("kimi") || lower.contains("moonshot") {
+        return Some("moonshotai");
+    }
+
+    if lower.contains("longcat") || lower.contains("meituan") {
+        return Some("meituan");
+    }
+
+    if is_anthropic_model(model) {
         return Some("anthropic");
     }
 
@@ -190,6 +207,20 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     None
 }
 
+pub fn is_anthropic_model(model: &str) -> bool {
+    let lower = model.trim().to_lowercase();
+    let model_part = lower
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(&lower);
+
+    model_part.starts_with("claude-")
+        || model_part.starts_with("opus-")
+        || model_part.starts_with("sonnet-")
+        || model_part.starts_with("haiku-")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +234,10 @@ mod tests {
             ("azure", vec!["azure_ai"]),
             ("fireworks", vec!["fireworks_ai"]),
             ("MiniMax", vec!["minimax"]),
+            ("Kimi", vec!["moonshotai"]),
+            ("kimi-for-coding", vec!["moonshotai"]),
+            ("Xiaomi", vec!["xiaomi"]),
+            ("LongCat", vec!["meituan"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
         ];
@@ -278,6 +313,9 @@ mod tests {
             inferred_provider_from_model("claude-sonnet-4"),
             Some("anthropic")
         );
+        assert_eq!(inferred_provider_from_model("opus-4.5"), Some("anthropic"));
+        assert_eq!(inferred_provider_from_model("sonnet-4"), Some("anthropic"));
+        assert_eq!(inferred_provider_from_model("haiku-3"), Some("anthropic"));
         assert_eq!(inferred_provider_from_model("gpt-5.2"), Some("openai"));
         assert_eq!(inferred_provider_from_model("gpt-5.5"), Some("openai"));
         assert_eq!(
@@ -291,6 +329,27 @@ mod tests {
         assert_eq!(
             inferred_provider_from_model("deepseek-v3"),
             Some("deepseek")
+        );
+        assert_eq!(inferred_provider_from_model("glm-5.1"), Some("zai"));
+        assert_eq!(
+            inferred_provider_from_model("anthropic/glm-5.1"),
+            Some("zai")
+        );
+        assert_eq!(
+            inferred_provider_from_model("mimo-v2.5-pro"),
+            Some("xiaomi")
+        );
+        assert_eq!(
+            inferred_provider_from_model("xiaomi/mimo-v2.5-pro"),
+            Some("xiaomi")
+        );
+        assert_eq!(
+            inferred_provider_from_model("kimi-for-coding"),
+            Some("moonshotai")
+        );
+        assert_eq!(
+            inferred_provider_from_model("longcat-flash-thinking"),
+            Some("meituan")
         );
         assert_eq!(
             inferred_provider_from_model("MiniMax-M2.1"),

@@ -36,7 +36,8 @@ pub struct DroidTokenUsage {
 }
 
 /// Normalize model name from Droid's custom format while preserving version dots.
-/// e.g., "custom:Claude-Opus-4.5-Thinking-[Anthropic]-0" -> "claude-opus-4.5-thinking-0"
+/// e.g., "custom:Claude-Opus-4.5-Thinking-[Anthropic]-0" -> "claude-opus-4.5"
+/// e.g., "opus-4.5" -> "claude-opus-4.5"
 /// e.g., "gemini-2.5-pro" -> "gemini-2.5-pro"
 /// e.g., "Claude-Sonnet-4-[Anthropic]" -> "claude-sonnet-4"
 fn normalize_model_name(model: &str) -> String {
@@ -66,13 +67,13 @@ fn normalize_model_name(model: &str) -> String {
     // Convert to lowercase (like TypeScript's .toLowerCase())
     normalized = normalized.to_lowercase();
 
-    // Collapse multiple consecutive hyphens into one (like TypeScript's .replace(/-+/g, "-"))
+    // Convert whitespace to hyphens and collapse consecutive hyphens.
     let mut collapsed = String::new();
     let mut last_was_hyphen = false;
     for ch in normalized.chars() {
-        if ch == '-' {
+        if ch == '-' || ch.is_whitespace() {
             if !last_was_hyphen {
-                collapsed.push(ch);
+                collapsed.push('-');
             }
             last_was_hyphen = true;
         } else {
@@ -81,11 +82,70 @@ fn normalize_model_name(model: &str) -> String {
         }
     }
 
-    collapsed
+    let collapsed = collapsed.trim_matches('-').to_string();
+
+    let claude_prefixed = if collapsed.starts_with("opus-")
+        || collapsed.starts_with("sonnet-")
+        || collapsed.starts_with("haiku-")
+    {
+        format!("claude-{collapsed}")
+    } else {
+        collapsed
+    };
+
+    if let Some(canonical_claude_model) = canonical_claude_family_model(&claude_prefixed) {
+        canonical_claude_model
+    } else {
+        claude_prefixed
+    }
+}
+
+fn canonical_claude_family_model(model: &str) -> Option<String> {
+    for family in ["opus", "sonnet", "haiku"] {
+        let prefix = format!("claude-{family}-");
+        let Some(rest) = model.strip_prefix(&prefix) else {
+            continue;
+        };
+        let mut segments = rest.split('-');
+        let Some(major) = segments
+            .next()
+            .filter(|segment| is_version_segment(segment))
+        else {
+            continue;
+        };
+        let mut version = major.to_string();
+
+        if !version.contains('.') {
+            if let Some(minor) = segments.next().filter(|segment| {
+                segment.len() <= 2 && segment.chars().all(|ch| ch.is_ascii_digit())
+            }) {
+                version.push('.');
+                version.push_str(minor);
+            }
+        }
+
+        return Some(format!("{prefix}{version}"));
+    }
+
+    None
+}
+
+fn is_version_segment(segment: &str) -> bool {
+    let mut digit_seen = false;
+
+    for part in segment.split('.') {
+        if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        digit_seen = true;
+    }
+
+    digit_seen
 }
 
 fn get_provider_from_model(model: &str) -> &'static str {
-    provider_identity::inferred_provider_from_model(model).unwrap_or("unknown")
+    let normalized = normalize_model_name(model);
+    provider_identity::inferred_provider_from_model(&normalized).unwrap_or("unknown")
 }
 
 /// Get default model name based on provider when model field is missing
@@ -233,10 +293,9 @@ mod tests {
 
     #[test]
     fn test_normalize_model_name_custom_prefix() {
-        // Keep version dots in the parsed model id; grouping/pricing can normalize later.
         assert_eq!(
             normalize_model_name("custom:Claude-Opus-4.5-Thinking-[Anthropic]-0"),
-            "claude-opus-4.5-thinking-0"
+            "claude-opus-4.5"
         );
     }
 
@@ -245,6 +304,26 @@ mod tests {
         assert_eq!(normalize_model_name("gemini-2.5-pro"), "gemini-2.5-pro");
         assert_eq!(normalize_model_name("custom:glm-5.1"), "glm-5.1");
         assert_eq!(normalize_model_name("custom:qwen3.5-plus"), "qwen3.5-plus");
+        assert_eq!(
+            normalize_model_name("Claude Opus 4.5 Thinking [Anthropic]"),
+            "claude-opus-4.5"
+        );
+        assert_eq!(
+            normalize_model_name("custom:Claude-Opus-4.6-Thinking-[Anthropic]-0"),
+            "claude-opus-4.6"
+        );
+        assert_eq!(
+            normalize_model_name("custom:Claude-Opus-4-7-Thinking-[Anthropic]-0"),
+            "claude-opus-4.7"
+        );
+        assert_eq!(
+            normalize_model_name("Claude Sonnet 5 Thinking [Anthropic]"),
+            "claude-sonnet-5"
+        );
+        assert_eq!(normalize_model_name("opus-4.5"), "claude-opus-4.5");
+        assert_eq!(normalize_model_name("custom:sonnet-4"), "claude-sonnet-4");
+        assert_eq!(normalize_model_name("haiku-3"), "claude-haiku-3");
+        assert_eq!(normalize_model_name("haiku-3-20250514"), "claude-haiku-3");
     }
 
     #[test]
@@ -260,6 +339,7 @@ mod tests {
     fn test_get_provider_from_model() {
         assert_eq!(get_provider_from_model("claude-3-sonnet"), "anthropic");
         assert_eq!(get_provider_from_model("opus-4"), "anthropic");
+        assert_eq!(get_provider_from_model("custom:opus-4.5"), "anthropic");
         assert_eq!(get_provider_from_model("sonnet-4"), "anthropic");
         assert_eq!(get_provider_from_model("haiku-3"), "anthropic");
         assert_eq!(get_provider_from_model("gpt-4o"), "openai");
@@ -312,5 +392,30 @@ mod tests {
         assert_eq!(usage.cache_creation_tokens, Some(89));
         assert_eq!(usage.cache_read_tokens, Some(12));
         assert_eq!(usage.thinking_tokens, Some(34));
+    }
+
+    #[test]
+    fn test_parse_droid_file_canonicalizes_claude_family_model() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "custom:Claude-Opus-4.5-Thinking-[Anthropic]-0",
+                "providerLock": "anthropic",
+                "providerLockTimestamp": "2024-12-26T12:00:00Z",
+                "tokenUsage": {
+                    "inputTokens": 1234,
+                    "outputTokens": 567
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_droid_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-opus-4.5");
+        assert_eq!(messages[0].provider_id, "anthropic");
     }
 }

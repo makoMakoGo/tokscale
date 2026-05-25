@@ -11,7 +11,11 @@ const PROVIDER_PREFIXES: &[&str] = &[
     "mistralai/",
     "minimax/",
     "deepseek/",
+    "z-ai/",
     "qwen/",
+    "moonshotai/",
+    "xiaomi/",
+    "meituan/",
     "cohere/",
     "perplexity/",
     "x-ai/",
@@ -29,9 +33,11 @@ const ORIGINAL_PROVIDER_PREFIXES: &[&str] = &[
     "deepseek/",
     "z-ai/",
     "qwen/",
+    "moonshotai/",
+    "xiaomi/",
+    "meituan/",
     "cohere/",
     "perplexity/",
-    "moonshotai/",
 ];
 
 const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
