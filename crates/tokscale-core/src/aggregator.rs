@@ -508,14 +508,15 @@ impl SessionAccumulator {
 
         // Track tightest (client, provider, model) by cost contribution.
         let normalized_model = crate::normalize_model_for_grouping(&msg.model_id);
-        let key = format!("{}:{}:{}", msg.client, msg.provider_id, normalized_model);
+        let provider_id = normalize_provider_for_grouping(&msg.provider_id);
+        let key = format!("{}:{}:{}", msg.client, provider_id, normalized_model);
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
                 client: msg.client.clone(),
                 model_id: normalized_model.clone(),
-                provider_id: msg.provider_id.clone(),
+                provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 messages: 0,
@@ -806,6 +807,27 @@ mod tests {
         let result = aggregate_by_date(vec![first, second]);
 
         assert_eq!(result.len(), 1);
+        assert_eq!(result[0].clients.len(), 1);
+        assert_eq!(result[0].clients[0].provider_id, "xiaomi");
+        assert_eq!(result[0].clients[0].tokens.total(), 3000);
+    }
+
+    #[test]
+    fn test_aggregate_by_session_normalizes_provider_display_aliases() {
+        let mut first =
+            mock_unified_message("2024-01-01", 1000, 0.05, "xiaomi/mimo-v2.5-pro", "opencode");
+        first.provider_id = "xiaomi".to_string();
+        first.session_id = "session-shared".to_string();
+
+        let mut second =
+            mock_unified_message("2024-01-01", 2000, 0.10, "xiaomi/mimo-v2.5-pro", "opencode");
+        second.provider_id = "xiaomi-token-plan-cn".to_string();
+        second.session_id = "session-shared".to_string();
+
+        let result = aggregate_by_session(vec![first, second]);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].provider, "xiaomi");
         assert_eq!(result[0].clients.len(), 1);
         assert_eq!(result[0].clients[0].provider_id, "xiaomi");
         assert_eq!(result[0].clients[0].tokens.total(), 3000);

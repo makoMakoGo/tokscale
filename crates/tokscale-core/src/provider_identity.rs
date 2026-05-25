@@ -57,7 +57,21 @@ pub fn normalize_provider_for_grouping(raw: &str) -> String {
         s if s.starts_with("alibaba") => "alibaba".to_string(),
         s if s.starts_with("tencent") || s.starts_with("tecent") => "tencent".to_string(),
         s if s.starts_with("github_cop") || s.contains("copilot") => "github-copilot".to_string(),
-        _ => trimmed.to_string(),
+        _ => canonical_provider(trimmed)
+            .map(|provider| provider_group_from_canonical(&provider).to_string())
+            .unwrap_or(normalized),
+    }
+}
+
+fn provider_group_from_canonical(provider: &str) -> &str {
+    match provider {
+        "moonshotai" => "kimi",
+        "mistralai" => "mistral",
+        "meta_llama" => "meta",
+        "fireworks_ai" => "fireworks",
+        "together_ai" => "together",
+        "azure_ai" => "azure",
+        other => other,
     }
 }
 
@@ -320,6 +334,13 @@ mod tests {
             ("alibaba-coding-plan-cn", "alibaba"),
             ("tecent-coding-plan", "tencent"),
             ("copilot-chat", "github-copilot"),
+            ("Anthropic", "anthropic"),
+            ("OpenAI-Codex", "openai"),
+            ("Gemini", "google"),
+            ("MistralAI", "mistral"),
+            ("Meta-Llama", "meta"),
+            ("fireworks-ai", "fireworks"),
+            ("together_ai", "together"),
         ];
 
         for (raw, expected) in cases {

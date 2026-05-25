@@ -4712,14 +4712,16 @@ fn spawn_warm_tui_cache_detached() {
 
     let exe = match std::env::current_exe() {
         Ok(p) => p,
-        Err(_) => return,
+        Err(err) => {
+            eprintln!("tokscale: failed to resolve executable for TUI cache warm: {err}");
+            return;
+        }
     };
 
     let mut cmd = Command::new(exe);
     cmd.arg("warm-tui-cache")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::null());
 
     #[cfg(unix)]
     {
@@ -4729,7 +4731,9 @@ fn spawn_warm_tui_cache_detached() {
         cmd.process_group(0);
     }
 
-    let _ = cmd.spawn();
+    if let Err(err) = cmd.spawn() {
+        eprintln!("tokscale: failed to spawn TUI cache warm process: {err}");
+    }
 }
 
 /// Resolve the filter set used by a no-`--client`-flag TUI launch.
@@ -4831,14 +4835,19 @@ fn write_light_cache(
     // None into `with_filters` matches what the TUI itself does on
     // launch — keeps the cache key derivation byte-identical.
     //
-    // Cache writes are best-effort: the report has already been flushed
-    // to stdout by the time we reach here, so a scan failure from the
-    // background loader must NOT propagate up and turn a successful
-    // user-visible report into a non-zero exit code. Mirrors the
-    // pattern in `run_warm_tui_cache` below.
+    // The report has already been flushed to stdout by the time we reach
+    // here. Keep the report exit code stable, but expose cache scan/write
+    // failures instead of swallowing them.
     let loader = DataLoader::with_filters(None, None, None, None);
-    if let Ok(data) = loader.load(&scan_clients, group_by, include_synthetic) {
-        save_cached_data(&data, &enabled_set, group_by);
+    match loader.load(&scan_clients, group_by, include_synthetic) {
+        Ok(data) => {
+            if let Err(err) = save_cached_data(&data, &enabled_set, group_by) {
+                eprintln!("tokscale: --write-cache failed to save TUI cache: {err}");
+            }
+        }
+        Err(err) => {
+            eprintln!("tokscale: --write-cache failed to scan TUI data: {err}");
+        }
     }
 }
 
@@ -4860,9 +4869,8 @@ fn run_warm_tui_cache() -> Result<()> {
         .collect();
     let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
     let loader = DataLoader::with_filters(None, None, None, None);
-    if let Ok(data) = loader.load(&scan_clients, &GroupBy::default(), include_synthetic) {
-        save_cached_data(&data, &enabled_set, &GroupBy::default());
-    }
+    let data = loader.load(&scan_clients, &GroupBy::default(), include_synthetic)?;
+    save_cached_data(&data, &enabled_set, &GroupBy::default())?;
     Ok(())
 }
 

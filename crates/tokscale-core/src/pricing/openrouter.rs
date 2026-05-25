@@ -100,43 +100,47 @@ fn parse_price(s: &str) -> Option<f64> {
         .filter(|v| v.is_finite() && *v >= 0.0)
 }
 
+fn parse_model_list_pricing(pricing: ModelListPricing) -> Option<ModelPricing> {
+    let input = parse_price(&pricing.prompt)?;
+    let output = parse_price(&pricing.completion)?;
+    Some(ModelPricing {
+        input_cost_per_token: Some(input),
+        output_cost_per_token: Some(output),
+        cache_read_input_token_cost: None,
+        cache_creation_input_token_cost: None,
+        ..Default::default()
+    })
+}
+
 async fn fetch_author_pricing(
     client: Arc<reqwest::Client>,
     model_id: String,
     semaphore: Arc<Semaphore>,
-    fallback_pricing: Option<ModelPricing>,
-) -> Option<(String, ModelPricing)> {
-    let _permit = semaphore.acquire().await.ok()?;
-
-    let author_name = match get_author_provider_name(&model_id) {
-        Some(name) => name,
-        None => return fallback_pricing.map(|p| (model_id, p)),
-    };
+    author_name: &'static str,
+) -> Result<(String, Option<ModelPricing>), String> {
+    let _permit = semaphore
+        .acquire()
+        .await
+        .expect("OpenRouter pricing semaphore should not be closed");
 
     let url = format!("https://openrouter.ai/api/v1/models/{}/endpoints", model_id);
 
-    let response = match client
+    let response = client
         .get(&url)
         .header("Content-Type", "application/json")
         .send()
         .await
-    {
-        Ok(r) => r,
-        Err(_) => {
-            return fallback_pricing.map(|p| (model_id, p));
-        }
-    };
+        .map_err(|err| format!("{model_id}: endpoints request failed: {err}"))?;
 
-    if !response.status().is_success() {
-        return fallback_pricing.map(|p| (model_id, p));
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("{model_id}: endpoints API returned {status}"));
     }
 
-    let data: EndpointsResponse = match response.json().await {
-        Ok(d) => d,
-        Err(_) => {
-            return fallback_pricing.map(|p| (model_id, p));
-        }
-    };
+    let data: EndpointsResponse = response
+        .json()
+        .await
+        .map_err(|err| format!("{model_id}: endpoints JSON parse failed: {err}"))?;
 
     // Find the endpoint from the author provider
     let author_endpoint = match data
@@ -146,21 +150,17 @@ async fn fetch_author_pricing(
         .find(|e| e.provider_name == author_name)
     {
         Some(ep) => ep,
-        None => {
-            return fallback_pricing.map(|p| (model_id, p));
-        }
+        None => return Ok((model_id, None)),
     };
 
-    let input_cost = parse_price(&author_endpoint.pricing.prompt);
-    let output_cost = parse_price(&author_endpoint.pricing.completion);
-
-    if input_cost.is_none() || output_cost.is_none() {
-        return fallback_pricing.map(|p| (model_id, p));
-    }
+    let input_cost = parse_price(&author_endpoint.pricing.prompt)
+        .ok_or_else(|| format!("{model_id}: author endpoint has invalid prompt price"))?;
+    let output_cost = parse_price(&author_endpoint.pricing.completion)
+        .ok_or_else(|| format!("{model_id}: author endpoint has invalid completion price"))?;
 
     let pricing = ModelPricing {
-        input_cost_per_token: input_cost,
-        output_cost_per_token: output_cost,
+        input_cost_per_token: Some(input_cost),
+        output_cost_per_token: Some(output_cost),
         cache_read_input_token_cost: author_endpoint
             .pricing
             .input_cache_read
@@ -174,15 +174,13 @@ async fn fetch_author_pricing(
         ..Default::default()
     };
 
-    Some((model_id, pricing))
+    Ok((model_id, Some(pricing)))
 }
 
-fn select_models_for_pricing_resolution(
-    models_with_fallback: Vec<(String, Option<ModelPricing>)>,
-) -> Vec<(String, Option<ModelPricing>)> {
-    models_with_fallback
+fn select_models_for_author_pricing(model_ids: Vec<String>) -> Vec<(String, &'static str)> {
+    model_ids
         .into_iter()
-        .filter(|(id, fallback)| get_author_provider_name(id).is_some() || fallback.is_some())
+        .filter_map(|id| get_author_provider_name(&id).map(|author| (id, author)))
         .collect()
 }
 
@@ -197,12 +195,12 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_default(),
+            .expect("valid OpenRouter HTTP client configuration"),
     );
 
     let mut last_error: Option<String> = None;
 
-    let models_with_fallback: Vec<(String, Option<ModelPricing>)> = 'retry: {
+    let model_items: Vec<ModelListItem> = 'retry: {
         for attempt in 0..MAX_RETRIES {
             let response = match client
                 .get(MODELS_URL)
@@ -249,24 +247,7 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
                 }
             };
 
-            break 'retry data
-                .data
-                .into_iter()
-                .map(|m| {
-                    let fallback = m.pricing.and_then(|p| {
-                        let input = parse_price(&p.prompt)?;
-                        let output = parse_price(&p.completion)?;
-                        Some(ModelPricing {
-                            input_cost_per_token: Some(input),
-                            output_cost_per_token: Some(output),
-                            cache_read_input_token_cost: None,
-                            cache_creation_input_token_cost: None,
-                            ..Default::default()
-                        })
-                    });
-                    (m.id, fallback)
-                })
-                .collect();
+            break 'retry data.data;
         }
 
         if let Some(err) = &last_error {
@@ -278,34 +259,45 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
         Vec::new()
     };
 
-    if models_with_fallback.is_empty() {
+    if model_items.is_empty() {
         return HashMap::new();
     }
 
-    let models_for_pricing_resolution = select_models_for_pricing_resolution(models_with_fallback);
+    let mut result = HashMap::new();
+    let mut model_ids = Vec::with_capacity(model_items.len());
+    for model in model_items {
+        if let Some(pricing) = model.pricing.and_then(parse_model_list_pricing) {
+            result.insert(model.id.clone(), pricing);
+        }
+        model_ids.push(model.id);
+    }
+
+    let models_for_author_pricing = select_models_for_author_pricing(model_ids);
 
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
 
-    let mut handles = Vec::with_capacity(models_for_pricing_resolution.len());
+    let mut handles = Vec::with_capacity(models_for_author_pricing.len());
 
-    for (model_id, fallback) in models_for_pricing_resolution {
+    for (model_id, author_name) in models_for_author_pricing {
         let client = Arc::clone(&client);
         let sem = Arc::clone(&semaphore);
 
         let handle =
             tokio::spawn(
-                async move { fetch_author_pricing(client, model_id, sem, fallback).await },
+                async move { fetch_author_pricing(client, model_id, sem, author_name).await },
             );
 
         handles.push(handle);
     }
 
-    // Collect results
-    let mut result = HashMap::new();
-
     for handle in handles {
-        if let Ok(Some((model_id, pricing))) = handle.await {
-            result.insert(model_id, pricing);
+        match handle.await {
+            Ok(Ok((model_id, Some(pricing)))) => {
+                result.insert(model_id, pricing);
+            }
+            Ok(Ok((_model_id, None))) => {}
+            Ok(Err(err)) => eprintln!("[tokscale] OpenRouter author pricing skipped: {err}"),
+            Err(err) => eprintln!("[tokscale] OpenRouter author pricing task failed: {err}"),
         }
     }
 
@@ -328,7 +320,10 @@ pub async fn fetch_all_mapped() -> HashMap<String, ModelPricing> {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_author_provider_name, select_models_for_pricing_resolution, ModelPricing};
+    use super::{
+        get_author_provider_name, parse_model_list_pricing, select_models_for_author_pricing,
+        ModelListPricing,
+    };
 
     #[test]
     fn maps_xiaomi_models_to_openrouter_author_provider() {
@@ -339,23 +334,29 @@ mod tests {
     }
 
     #[test]
-    fn keeps_unknown_author_models_with_model_list_fallback_pricing() {
-        let fallback = ModelPricing {
-            input_cost_per_token: Some(0.00000085),
-            output_cost_per_token: Some(0.00000125),
-            ..Default::default()
-        };
-
-        let selected = select_models_for_pricing_resolution(vec![
-            ("relace/relace-apply-3".to_string(), Some(fallback)),
-            ("unknown/no-price".to_string(), None),
-            ("openai/gpt-5".to_string(), None),
+    fn selects_only_models_with_author_provider_for_endpoint_enrichment() {
+        let selected = select_models_for_author_pricing(vec![
+            "relace/relace-apply-3".to_string(),
+            "unknown/no-price".to_string(),
+            "openai/gpt-5".to_string(),
         ]);
 
         let selected_ids: Vec<&str> = selected.iter().map(|(id, _)| id.as_str()).collect();
 
-        assert!(selected_ids.contains(&"relace/relace-apply-3"));
         assert!(selected_ids.contains(&"openai/gpt-5"));
+        assert!(!selected_ids.contains(&"relace/relace-apply-3"));
         assert!(!selected_ids.contains(&"unknown/no-price"));
+    }
+
+    #[test]
+    fn parses_model_list_pricing_as_baseline_pricing() {
+        let pricing = parse_model_list_pricing(ModelListPricing {
+            prompt: "0.00000085".to_string(),
+            completion: "0.00000125".to_string(),
+        })
+        .expect("valid model list pricing");
+
+        assert_eq!(pricing.input_cost_per_token, Some(0.00000085));
+        assert_eq!(pricing.output_cost_per_token, Some(0.00000125));
     }
 }

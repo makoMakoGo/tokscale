@@ -1043,79 +1043,62 @@ fn test_models_json_output() {
 }
 
 #[test]
-fn test_models_json_offline_without_pricing_cache_still_succeeds() {
+fn test_models_json_offline_without_pricing_cache_fails() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
         .args(["models", "--json", "--opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "models should fail without a pricing source; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["totalInput"].as_i64().unwrap(), 2400);
-    assert_eq!(json["totalOutput"].as_i64().unwrap(), 1000);
-    assert_eq!(json["totalMessages"].as_i64().unwrap(), 3);
-    assert_eq!(json["entries"].as_array().unwrap().len(), 2);
-    // Without pricing, embedded source costs are preserved (0.05 + 0.03 + 0.02)
-    let total_cost = json["totalCost"].as_f64().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        (total_cost - 0.10).abs() < 1e-9,
-        "unexpected totalCost without pricing: {total_cost}"
+        stderr.to_lowercase().contains("error"),
+        "stderr: {}",
+        stderr
     );
 }
 
 #[test]
-fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
+fn test_monthly_json_offline_without_pricing_cache_fails() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
         .args(["monthly", "--json", "--opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "monthly should fail without a pricing source; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0]["month"].as_str().unwrap(), "2024-06");
-    assert_eq!(entries[1]["month"].as_str().unwrap(), "2025-01");
-    // Without pricing, embedded source costs are preserved
-    let total_cost = json["totalCost"].as_f64().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        (total_cost - 0.10).abs() < 1e-9,
-        "unexpected totalCost without pricing: {total_cost}"
+        stderr.to_lowercase().contains("error"),
+        "stderr: {}",
+        stderr
     );
 }
 
 #[test]
-fn test_graph_offline_without_pricing_cache_still_succeeds() {
+fn test_graph_offline_without_pricing_cache_fails() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
         .args(["graph", "--opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "graph should fail without a pricing source; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["summary"]["totalTokens"].as_i64().unwrap(), 3950);
-    assert_eq!(json["summary"]["activeDays"].as_i64().unwrap(), 2);
-    assert_eq!(json["contributions"].as_array().unwrap().len(), 2);
-    // Without pricing, embedded source costs are preserved
-    let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        (total_cost - 0.10).abs() < 1e-9,
-        "unexpected totalCost without pricing: {total_cost}"
+        stderr.to_lowercase().contains("error"),
+        "stderr: {}",
+        stderr
     );
 }
 
@@ -1125,6 +1108,7 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     write_pricing_cache(tmp.path(), 1);
 
     let output = offline_cmd_with_home(tmp.path())
+        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
         .args(["models", "--json", "--opencode", "--no-spinner"])
         .output()
         .unwrap();
@@ -1148,6 +1132,7 @@ fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
     write_pricing_cache(tmp.path(), 1);
 
     let output = offline_cmd_with_home(tmp.path())
+        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
         .args(["monthly", "--json", "--opencode", "--no-spinner"])
         .output()
         .unwrap();
@@ -1171,6 +1156,7 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
     write_pricing_cache(tmp.path(), 1);
 
     let output = offline_cmd_with_home(tmp.path())
+        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
         .args(["graph", "--opencode", "--no-spinner"])
         .output()
         .unwrap();

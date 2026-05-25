@@ -7,8 +7,9 @@ use tokio::runtime::{Handle, Runtime};
 
 use tokscale_core::sessions::UnifiedMessage;
 use tokscale_core::{
-    normalize_model_for_grouping, normalize_provider_for_grouping, parse_local_unified_messages,
-    sessions, ClientId, GroupBy, LocalParseOptions, ModelPerformance,
+    normalize_model_for_grouping, normalize_provider_for_grouping,
+    ordered_clients_by_token_contribution, parse_local_unified_messages, sessions,
+    ClientContributionOrder, ClientId, GroupBy, LocalParseOptions, ModelPerformance,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -43,34 +44,6 @@ impl TokenBreakdown {
             .saturating_add(self.cache_write)
             .saturating_add(self.reasoning)
     }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct ClientContributionTotals {
-    first_seen: usize,
-    total_tokens: u64,
-}
-
-fn ordered_clients_by_token_contribution(
-    client_totals: &HashMap<String, ClientContributionTotals>,
-) -> String {
-    let mut clients: Vec<(&str, ClientContributionTotals)> = client_totals
-        .iter()
-        .map(|(client, totals)| (client.as_str(), *totals))
-        .collect();
-    clients.sort_by(|(left_client, left), (right_client, right)| {
-        right
-            .total_tokens
-            .cmp(&left.total_tokens)
-            .then_with(|| left.first_seen.cmp(&right.first_seen))
-            .then_with(|| left_client.cmp(right_client))
-    });
-
-    clients
-        .into_iter()
-        .map(|(client, _)| client)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[derive(Debug, Clone)]
@@ -443,7 +416,7 @@ impl DataLoader {
         let mut hourly_map: HashMap<NaiveDateTime, HourlyUsage> = HashMap::new();
         let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut client_totals_by_model: HashMap<String, HashMap<String, ClientContributionTotals>> =
+        let mut client_totals_by_model: HashMap<String, HashMap<String, ClientContributionOrder>> =
             HashMap::new();
 
         for msg in &messages {
@@ -492,7 +465,7 @@ impl DataLoader {
                 let client_totals = client_totals_by_model.entry(key.clone()).or_default();
                 let client_count = client_totals.len();
                 let totals = client_totals.entry(msg.client.clone()).or_insert_with(|| {
-                    ClientContributionTotals {
+                    ClientContributionOrder {
                         first_seen: client_count,
                         total_tokens: 0,
                     }

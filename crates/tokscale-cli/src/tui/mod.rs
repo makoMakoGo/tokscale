@@ -61,6 +61,12 @@ fn background_data_loader(
     DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
 }
 
+fn send_background_result(tx: &mpsc::Sender<Result<UsageData>>, result: Result<UsageData>) {
+    if tx.send(result).is_err() {
+        eprintln!("tokscale: dropped TUI background load result because receiver is closed");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     theme: &str,
@@ -175,17 +181,23 @@ pub fn run(
             let result = loader.load(&bg_clients, &bg_group_by, bg_include_synthetic);
 
             if let Ok(ref data) = result {
-                save_cached_data(data, &bg_enabled_clients, &bg_group_by);
+                if let Err(err) = save_cached_data(data, &bg_enabled_clients, &bg_group_by) {
+                    eprintln!("tokscale: failed to save TUI cache: {err}");
+                }
             }
 
-            let _ = tx.send(result);
+            send_background_result(&tx, result);
         });
     }
 
     #[cfg(unix)]
     let sigcont_flag = {
         let flag = Arc::new(AtomicBool::new(false));
-        let _ = signal_hook::flag::register(signal_hook::consts::SIGCONT, Arc::clone(&flag));
+        if let Err(err) =
+            signal_hook::flag::register(signal_hook::consts::SIGCONT, Arc::clone(&flag))
+        {
+            eprintln!("tokscale: failed to register SIGCONT handler: {err}");
+        }
         flag
     };
 
@@ -292,9 +304,11 @@ fn run_loop_with_background(
                 let loader = background_data_loader(since, until, year, minutely_enabled);
                 let result = loader.load(&clients, &group_by, include_synthetic);
                 if let Ok(ref data) = result {
-                    save_cached_data(data, &enabled_clients, &group_by);
+                    if let Err(err) = save_cached_data(data, &enabled_clients, &group_by) {
+                        eprintln!("tokscale: failed to save TUI cache: {err}");
+                    }
                 }
-                let _ = tx.send(result);
+                send_background_result(&tx, result);
             });
         }
 

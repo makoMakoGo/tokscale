@@ -73,12 +73,22 @@ pub fn amp_source_label() -> &'static str {
 }
 
 pub fn amp_cli_available() -> bool {
-    run_amp(&["--version"]).is_ok()
+    command_in_path(AMP_COMMAND)
+}
+
+fn command_in_path(command: &str) -> bool {
+    if command.contains(std::path::MAIN_SEPARATOR) {
+        return Path::new(command).is_file();
+    }
+
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(command).is_file()))
+        .unwrap_or(false)
 }
 
 /// Get provider from model name.
 fn get_provider_from_model(model: &str) -> &'static str {
-    provider_identity::inferred_provider_from_model(model).unwrap_or("anthropic")
+    provider_identity::inferred_provider_from_model(model).unwrap_or("unknown")
 }
 
 fn parse_amp_timestamp(timestamp: Option<&str>) -> Option<i64> {
@@ -353,6 +363,32 @@ Reply only with OK                            46m ago       Private     1       
         assert_eq!(messages[0].dedup_key.as_deref(), Some("amp:T-export:2"));
         assert_eq!(messages[1].tokens.cache_read, 5);
         assert_eq!(messages[1].tokens.cache_write, 7);
+    }
+
+    #[test]
+    fn test_parse_amp_export_does_not_default_unknown_models_to_anthropic() {
+        let mut export = serde_json::json!({
+            "id": "T-export",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "messageId": 2,
+                    "usage": {
+                        "timestamp": "2026-05-21T04:00:00Z",
+                        "model": "internal-preview",
+                        "inputTokens": 10,
+                        "outputTokens": 2
+                    }
+                }
+            ]
+        })
+        .to_string()
+        .into_bytes();
+
+        let messages = parse_amp_export_bytes(&mut export).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "unknown");
     }
 
     #[test]

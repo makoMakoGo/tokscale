@@ -387,7 +387,7 @@ mod tests {
     fn provider_display_formats_each_segment_in_merged_list() {
         assert_eq!(
             get_provider_display_name("openai, openai-codex, amazon-bedrock"),
-            "OpenAI, openai-codex, amazon-bedrock"
+            "OpenAI, amazon-bedrock"
         );
     }
 

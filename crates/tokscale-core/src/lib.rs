@@ -397,15 +397,15 @@ impl std::str::FromStr for GroupBy {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct ClientContributionTotals {
-    first_seen: usize,
-    total_tokens: i64,
+pub struct ClientContributionOrder {
+    pub first_seen: usize,
+    pub total_tokens: u64,
 }
 
-fn ordered_clients_by_token_contribution(
-    client_totals: &HashMap<String, ClientContributionTotals>,
+pub fn ordered_clients_by_token_contribution(
+    client_totals: &HashMap<String, ClientContributionOrder>,
 ) -> String {
-    let mut clients: Vec<(&str, ClientContributionTotals)> = client_totals
+    let mut clients: Vec<(&str, ClientContributionOrder)> = client_totals
         .iter()
         .map(|(client, totals)| (client.as_str(), *totals))
         .collect();
@@ -1091,7 +1091,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
-    let include_amp = include_all || clients.iter().any(|c| c == ClientId::Amp.as_str());
+    let explicit_amp = clients.len() == 1 && clients.iter().any(|c| c == ClientId::Amp.as_str());
 
     // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
     // suppress legacy JSON overlap by message identity.
@@ -1260,11 +1260,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    if include_amp && should_collect_amp_cli_source(home_dir, use_env_roots) {
+    if explicit_amp && should_collect_amp_cli_source(home_dir, use_env_roots) {
         let mut amp_messages =
             sessions::amp::parse_amp_threads_from_cli().map_err(|err| err.to_string())?;
         apply_pricing_to_messages(&mut amp_messages, pricing);
         all_messages.extend(amp_messages);
+    } else if explicit_amp {
+        return Err(
+            "amp client was requested, but the Amp CLI source is unavailable for the selected home"
+                .to_string(),
+        );
     }
 
     let codebuff_outcomes: Vec<CachedParseOutcome> = scan_result
@@ -1601,7 +1606,7 @@ fn aggregate_model_usage_entries(
     group_by: &GroupBy,
 ) -> Vec<ModelUsage> {
     let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
-    let mut client_totals_by_entry: HashMap<String, HashMap<String, ClientContributionTotals>> =
+    let mut client_totals_by_entry: HashMap<String, HashMap<String, ClientContributionOrder>> =
         HashMap::new();
 
     for msg in messages {
@@ -1660,14 +1665,14 @@ fn aggregate_model_usage_entries(
             let client_totals = client_totals_by_entry.entry(key.clone()).or_default();
             let client_count = client_totals.len();
             let totals = client_totals.entry(msg.client.clone()).or_insert_with(|| {
-                ClientContributionTotals {
+                ClientContributionOrder {
                     first_seen: client_count,
                     total_tokens: 0,
                 }
             });
             totals.total_tokens = totals
                 .total_tokens
-                .saturating_add(msg.tokens.total().max(0));
+                .saturating_add(msg.tokens.total().max(0) as u64);
         }
 
         if *group_by != GroupBy::ClientProviderModel
@@ -1747,11 +1752,11 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         clients
     });
 
-    let pricing = load_pricing_for_local_parse().await;
+    let pricing = load_pricing_for_local_parse().await?;
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        pricing.as_deref(),
+        Some(pricing.as_ref()),
         options.use_env_roots,
         &options.scanner_settings,
     )?;
@@ -1803,11 +1808,11 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         clients
     });
 
-    let pricing = load_pricing_for_local_parse().await;
+    let pricing = load_pricing_for_local_parse().await?;
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        pricing.as_deref(),
+        Some(pricing.as_ref()),
         options.use_env_roots,
         &options.scanner_settings,
     )?;
@@ -2059,8 +2064,8 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
 }
 
 pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
-    let pricing = load_pricing_for_local_parse().await;
-    generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
+    let pricing = load_pricing_for_local_parse().await?;
+    generate_graph_with_loaded_pricing(options, Some(pricing.as_ref())).await
 }
 
 fn filter_messages_for_report(
@@ -2101,7 +2106,7 @@ fn should_collect_amp_cli_source(home_dir: &str, use_env_roots: bool) -> bool {
         && dirs::home_dir()
             .map(|current_home| current_home == home_path)
             .unwrap_or(false)
-        && home_path.join(".local/share/amp/session.json").is_file()
+        && sessions::amp::amp_cli_available()
 }
 
 fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
@@ -2145,31 +2150,19 @@ fn apply_pricing_if_available(
     }
 }
 
-fn select_local_parse_pricing<F>(
-    fresh: Result<Arc<pricing::PricingService>, String>,
-    stale: F,
-) -> Option<Arc<pricing::PricingService>>
-where
-    F: FnOnce() -> Option<pricing::PricingService>,
-{
-    fresh.ok().or_else(|| stale().map(Arc::new))
-}
-
-async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
+async fn load_pricing_for_local_parse() -> Result<Arc<pricing::PricingService>, String> {
     if std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
     {
-        return pricing::PricingService::load_cached_any_age().map(Arc::new);
+        return pricing::PricingService::load_cached_any_age()
+            .map(Arc::new)
+            .ok_or_else(|| {
+                "TOKSCALE_PRICING_CACHE_ONLY is set, but no pricing cache is available".to_string()
+            });
     }
 
-    // Interactive/local views should pick up newly released model pricing as soon
-    // as a fresh fetch succeeds, but still remain usable offline by falling back
-    // to any cached dataset when the network path fails.
-    select_local_parse_pricing(
-        pricing::PricingService::get_or_init().await,
-        pricing::PricingService::load_cached_any_age,
-    )
+    pricing::PricingService::get_or_init().await
 }
 
 fn resolve_local_parse_request(
@@ -2217,7 +2210,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     });
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
-    let include_amp = include_all || clients.iter().any(|c| c == ClientId::Amp.as_str());
+    let explicit_amp = clients.len() == 1 && clients.iter().any(|c| c == ClientId::Amp.as_str());
 
     let scan_result = scanner::scan_all_clients_with_scanner_settings(
         &home_dir,
@@ -2359,12 +2352,17 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(gemini_msgs);
 
     let amp_msgs: Vec<ParsedMessage> =
-        if include_amp && should_collect_amp_cli_source(&home_dir, options.use_env_roots) {
+        if explicit_amp && should_collect_amp_cli_source(&home_dir, options.use_env_roots) {
             sessions::amp::parse_amp_threads_from_cli()
                 .map_err(|err| err.to_string())?
                 .into_iter()
                 .map(|msg| unified_to_parsed(&msg))
                 .collect()
+        } else if explicit_amp {
+            return Err(
+            "amp client was requested, but the Amp CLI source is unavailable for the selected home"
+                .to_string(),
+        );
         } else {
             Vec::new()
         };
@@ -2663,8 +2661,8 @@ pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
 ) -> Result<Vec<UnifiedMessage>, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    let pricing = load_pricing_for_local_parse().await;
-    parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing.as_deref())
+    let pricing = load_pricing_for_local_parse().await?;
+    parse_local_unified_messages_resolved(options, &home_dir, &clients, Some(pricing.as_ref()))
 }
 
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
@@ -2755,14 +2753,13 @@ mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, message_cache,
         normalize_model_for_grouping, parse_all_messages_with_pricing, parse_local_clients,
-        parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        parsed_to_unified, pricing, retain_for_requested_clients, scanner, unified_to_parsed,
+        ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::str::FromStr;
-    use std::sync::Arc;
 
     fn make_workspace_message(
         client: &str,
@@ -5730,76 +5727,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select_local_parse_pricing_prefers_fresh_service_for_new_models() {
-        let mut fresh_litellm = HashMap::new();
-        fresh_litellm.insert(
-            "gpt-5.4".into(),
-            pricing::ModelPricing {
-                input_cost_per_token: Some(0.000002),
-                output_cost_per_token: Some(0.00001),
-                ..Default::default()
-            },
-        );
-        let fresh = Arc::new(pricing::PricingService::new(fresh_litellm, HashMap::new()));
-        let stale = pricing::PricingService::new(HashMap::new(), HashMap::new());
-        let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || Some(stale)).unwrap();
-
-        let mut msg = UnifiedMessage::new(
-            "opencode",
-            "gpt-5.4",
-            "openai",
-            "session-1",
-            1_733_011_200_000,
-            TokenBreakdown {
-                input: 10,
-                output: 5,
-                cache_read: 0,
-                cache_write: 0,
-                reasoning: 0,
-            },
-            0.0,
-        );
-
-        apply_pricing_if_available(&mut msg, Some(selected.as_ref()));
-
-        assert!(msg.cost > 0.0);
-    }
-
-    #[test]
-    fn test_select_local_parse_pricing_falls_back_to_stale_cache_on_fetch_error() {
-        let mut stale_litellm = HashMap::new();
-        stale_litellm.insert(
-            "gpt-5.2".into(),
-            pricing::ModelPricing {
-                input_cost_per_token: Some(0.00000175),
-                output_cost_per_token: Some(0.000014),
-                ..Default::default()
-            },
-        );
-        let stale = pricing::PricingService::new(stale_litellm, HashMap::new());
-
-        let selected =
-            select_local_parse_pricing(Err("network failed".to_string()), || Some(stale)).unwrap();
-
-        assert!(selected.lookup_with_source("gpt-5.2", None).is_some());
-    }
-
-    #[test]
-    fn test_select_local_parse_pricing_does_not_evaluate_stale_fallback_on_fresh_success() {
-        let fresh = Arc::new(pricing::PricingService::new(HashMap::new(), HashMap::new()));
-        let mut stale_called = false;
-
-        let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || {
-            stale_called = true;
-            None
-        })
-        .unwrap();
-
-        assert!(Arc::ptr_eq(&selected, &fresh));
-        assert!(!stale_called);
-    }
-
-    #[test]
     fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_synthetic_filter() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let message_dir = temp_dir
@@ -6142,7 +6069,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_local_clients_amp_ignores_legacy_thread_files() {
+    fn test_parse_local_clients_amp_errors_when_cli_source_unavailable() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let amp_dir = temp_dir.path().join(".local/share/amp/threads");
         std::fs::create_dir_all(&amp_dir).unwrap();
@@ -6166,7 +6093,7 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let err = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["amp".to_string()]),
@@ -6175,9 +6102,8 @@ mod tests {
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
         })
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(parsed.counts.get(ClientId::Amp), 0);
-        assert!(parsed.messages.is_empty());
+        assert!(err.contains("amp client was requested"));
     }
 }
