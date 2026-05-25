@@ -12,7 +12,6 @@ import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
   mergeClientBreakdowns,
   recalculateDayTotals,
-  buildModelBreakdown,
   clientContributionToBreakdownData,
   mergeTimestampMs,
   type ClientBreakdownData,
@@ -51,6 +50,13 @@ function normalizeSubmissionData(data: unknown): void {
   }
 }
 
+// Submission schema versions:
+//   0 = legacy CLI: no per-day timestamps, no device metadata.
+//   1 = timestamp-aware CLI (>=v2.1): per-day `timestampMs` set, still no device.
+//   2 = device-aware CLI (>=v2.1.x post-#517): caller sends a `device` object,
+//       so daily_breakdown rows are keyed by submittedDeviceId.
+// The submissions row keeps the GREATEST() of stored vs. incoming so a single
+// device-aware submit cannot regress an account back to v1 hash semantics.
 function getSubmitDevice(data: SubmissionData): { key: string; name: string | null; schemaVersion: number } {
   if (data.device) {
     return {
@@ -195,7 +201,6 @@ export async function POST(request: Request) {
             dateEnd: data.meta.dateRange.end,
             sourcesUsed: [],
             modelsUsed: [],
-            status: "verified",
             cliVersion: data.meta.version,
             submissionHash: generateSubmissionHash(hashData),
           })
@@ -263,7 +268,6 @@ export async function POST(request: Request) {
         timestampMs: number | null;
         activeTimeMs: number | null;
         sourceBreakdown: Record<string, ClientBreakdownData>;
-        modelBreakdown: Record<string, number>;
       }> = [];
 
       const toUpdate: Array<{
@@ -275,7 +279,6 @@ export async function POST(request: Request) {
         timestampMs: number | null;
         activeTimeMs: number | null;
         sourceBreakdown: Record<string, ClientBreakdownData>;
-        modelBreakdown: Record<string, number>;
       }> = [];
 
       for (const incomingDay of data.contributions) {
@@ -323,7 +326,6 @@ export async function POST(request: Request) {
              submittedClients
            );
           const dayTotals = recalculateDayTotals(mergedClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(mergedClientBreakdown);
 
           toUpdate.push({
             id: existingDay.id,
@@ -334,11 +336,9 @@ export async function POST(request: Request) {
             timestampMs: mergeTimestampMs(existingDay.timestampMs, incomingDay.timestampMs ?? null),
             activeTimeMs: incomingDay.activeTimeMs ?? existingDay.activeTimeMs ?? null,
             sourceBreakdown: mergedClientBreakdown,
-            modelBreakdown,
           });
         } else {
           const dayTotals = recalculateDayTotals(incomingClientBreakdown);
-          const modelBreakdown = buildModelBreakdown(incomingClientBreakdown);
 
           toInsert.push({
             submissionId,
@@ -351,7 +351,6 @@ export async function POST(request: Request) {
             timestampMs: incomingDay.timestampMs ?? null,
             activeTimeMs: incomingDay.activeTimeMs ?? null,
             sourceBreakdown: incomingClientBreakdown,
-            modelBreakdown,
           });
         }
       }
@@ -365,7 +364,7 @@ export async function POST(request: Request) {
       if (toUpdate.length > 0) {
         const valuesClauses = toUpdate.map(
           (row) =>
-            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb, ${JSON.stringify(row.modelBreakdown)}::jsonb)`
+            sql`(${row.id}::uuid, ${row.tokens}::bigint, ${row.cost}::numeric(10,4), ${row.inputTokens}::bigint, ${row.outputTokens}::bigint, ${row.timestampMs}::bigint, ${row.activeTimeMs}::bigint, ${JSON.stringify(row.sourceBreakdown)}::jsonb)`
         );
 
         const valuesList = sql.join(valuesClauses, sql`, `);
@@ -378,10 +377,9 @@ export async function POST(request: Request) {
             output_tokens = batch.output_tokens,
             timestamp_ms = batch.timestamp_ms,
             active_time_ms = batch.active_time_ms,
-            source_breakdown = batch.source_breakdown,
-            model_breakdown = batch.model_breakdown
+            source_breakdown = batch.source_breakdown
           FROM (VALUES ${valuesList})
-            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown, model_breakdown)
+            AS batch(id, tokens, cost, input_tokens, output_tokens, timestamp_ms, active_time_ms, source_breakdown)
           WHERE d.id = batch.id
         `);
       }
