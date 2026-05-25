@@ -1944,7 +1944,7 @@ mod tests {
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].workspace_key.as_deref(), Some("/repo-a"));
         assert_eq!(usage.models[0].workspace_label.as_deref(), Some("repo-a"));
-        assert_eq!(usage.models[0].model, "claude-sonnet-4");
+        assert_eq!(usage.models[0].model, "claude-sonnet-4.5");
         assert_eq!(usage.models[0].client, "claude, qwen");
         assert_eq!(usage.models[0].session_count, 2);
         assert_eq!(usage.models[0].cost, 4.0);
@@ -2073,8 +2073,8 @@ mod tests {
         assert_eq!(
             daily_display_names,
             vec![
-                "repo-a / claude-sonnet-4".to_string(),
-                "repo-b / claude-sonnet-4".to_string()
+                "repo-a / claude-sonnet-4.5".to_string(),
+                "repo-b / claude-sonnet-4.5".to_string()
             ]
         );
     }
@@ -2125,8 +2125,8 @@ mod tests {
         assert_eq!(
             display_names,
             vec![
-                "demo / claude-sonnet-4".to_string(),
-                "demo / claude-sonnet-4".to_string()
+                "demo / claude-sonnet-4.5".to_string(),
+                "demo / claude-sonnet-4.5".to_string()
             ]
         );
     }
@@ -2176,10 +2176,13 @@ mod tests {
         let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
         assert_eq!(claude.models.len(), 2);
 
-        let anthropic_key = "anthropic:claude-sonnet-4";
-        let copilot_key = "github-copilot:claude-sonnet-4";
+        let anthropic_key = "anthropic:claude-sonnet-4.5";
+        let copilot_key = "github-copilot:claude-sonnet-4.5";
         let anthropic_model = claude.models.get(anthropic_key).unwrap();
-        assert_eq!(anthropic_model.display_name, "anthropic / claude-sonnet-4");
+        assert_eq!(
+            anthropic_model.display_name,
+            "anthropic / claude-sonnet-4.5"
+        );
         assert_eq!(anthropic_model.provider, "anthropic");
         assert_eq!(anthropic_model.tokens.total(), 15);
         assert_eq!(anthropic_model.messages, 1);
@@ -2187,7 +2190,7 @@ mod tests {
         let copilot_model = claude.models.get(copilot_key).unwrap();
         assert_eq!(
             copilot_model.display_name,
-            "github-copilot / claude-sonnet-4"
+            "github-copilot / claude-sonnet-4.5"
         );
         assert_eq!(copilot_model.provider, "github-copilot");
         assert_eq!(copilot_model.tokens.total(), 30);
@@ -2241,15 +2244,15 @@ mod tests {
         let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
         assert_eq!(claude.cost, 1.0);
         assert_eq!(claude.models.len(), 1);
-        let claude_model = claude.models.get("claude-sonnet-4").unwrap();
-        assert_eq!(claude_model.display_name, "claude-sonnet-4");
+        let claude_model = claude.models.get("claude-sonnet-4.5").unwrap();
+        assert_eq!(claude_model.display_name, "claude-sonnet-4.5");
         assert_eq!(claude_model.tokens.total(), 15);
 
         let cursor = usage.daily[0].source_breakdown.get("cursor").unwrap();
         assert_eq!(cursor.cost, 2.0);
         assert_eq!(cursor.models.len(), 1);
-        let cursor_model = cursor.models.get("claude-sonnet-4").unwrap();
-        assert_eq!(cursor_model.display_name, "claude-sonnet-4");
+        let cursor_model = cursor.models.get("claude-sonnet-4.5").unwrap();
+        assert_eq!(cursor_model.display_name, "claude-sonnet-4.5");
         assert_eq!(cursor_model.tokens.total(), 30);
     }
 

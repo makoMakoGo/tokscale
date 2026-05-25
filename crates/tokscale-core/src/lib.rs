@@ -289,12 +289,6 @@ fn normalize_claude_model_for_grouping(name: &str) -> Option<String> {
         return None;
     }
 
-    // Claude Sonnet/Haiku 4.x usage should group under the base 4 line, while
-    // Opus 4.x preserves its minor version; revisit this if future major lines differ.
-    if major == "4" && matches!(family, "sonnet" | "haiku") {
-        return Some(format!("claude-{family}-4"));
-    }
-
     Some(format!("claude-{family}-{major}.{minor}"))
 }
 
@@ -2880,7 +2874,7 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-20250929"),
-            "claude-sonnet-4"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-20250514"),
@@ -2893,7 +2887,7 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4.5"),
-            "claude-sonnet-4"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.6"),
@@ -2909,15 +2903,15 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-6"),
-            "claude-sonnet-4"
+            "claude-sonnet-4.6"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-6-sonnet"),
-            "claude-sonnet-4"
+            "claude-sonnet-4.6"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-5-haiku"),
-            "claude-haiku-4"
+            "claude-haiku-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-6-opus"),
@@ -2936,7 +2930,7 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4.5(high)"),
-            "claude-sonnet-4"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("gemini-3-pro(auto)"),
@@ -2965,11 +2959,11 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-20250929-thinking"),
-            "claude-sonnet-4"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-high"),
-            "claude-sonnet-4"
+            "claude-sonnet-4.5"
         );
 
         assert_eq!(
@@ -3259,7 +3253,7 @@ mod tests {
         );
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].model, "claude-sonnet-4");
+        assert_eq!(entries[0].model, "claude-sonnet-4.5");
         assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
         assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
         assert_eq!(entries[0].cost, 4.0);
@@ -3318,7 +3312,7 @@ mod tests {
         );
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].model, "claude-sonnet-4");
+        assert_eq!(entries[0].model, "claude-sonnet-4.6");
         assert_eq!(entries[0].input, 20);
         assert_eq!(entries[0].output, 10);
         assert_eq!(entries[0].cost, 4.0);
@@ -3646,7 +3640,7 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].session_id.as_deref(), Some("session-shared"));
-        assert_eq!(entries[0].model, "claude-sonnet-4");
+        assert_eq!(entries[0].model, "claude-sonnet-4.5");
         assert!((entries[0].cost - 4.0).abs() < f64::EPSILON);
         assert_eq!(entries[0].message_count, 2);
         assert!(entries[0].workspace_key.is_none());
