@@ -57,6 +57,7 @@ pub fn clear_cache() {
     }
 }
 
+#[cfg(not(test))]
 pub fn load_cache() -> Option<Vec<UsageOutput>> {
     let path = cache_path()?;
     let content = std::fs::read_to_string(&path).ok()?;

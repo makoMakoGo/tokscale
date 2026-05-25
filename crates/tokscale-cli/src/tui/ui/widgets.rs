@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use tokscale_core::ClientId;
+use tokscale_core::{normalize_provider_for_grouping, ClientId};
 
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
@@ -287,33 +287,27 @@ fn get_single_provider_display_name(provider: &str) -> String {
     if let Some(name) = config.get_provider_display_name(provider) {
         return name.to_string();
     }
-    match provider.to_lowercase().as_str() {
+    match normalize_provider_for_grouping(provider).as_str() {
         "anthropic" => "Anthropic".to_string(),
         "openai" => "OpenAI".to_string(),
         "google" => "Google".to_string(),
         "cursor" => "Cursor".to_string(),
         "deepseek" => "DeepSeek".to_string(),
-        s if s.starts_with("zai") || s.starts_with("zhipu") => "Z.AI".to_string(),
-        s if s.starts_with("xiaomi") => "XiaoMi".to_string(),
-        s if s.starts_with("minimax") => "MiniMax".to_string(),
-        s if s.starts_with("moonshot")
-            || s == "kimi"
-            || s == "kimi-code"
-            || s == "kimi-for-coding" =>
-        {
-            "Kimi".to_string()
-        }
-        s if s.starts_with("qwen") => "Qwen".to_string(),
-        s if s.starts_with("meituan") || s.starts_with("longcat") => "Meituan".to_string(),
-        s if s.starts_with("doubao") => "Doubao".to_string(),
-        s if s.starts_with("alibaba") => "Alibaba".to_string(),
-        s if s.starts_with("tencent") || s.starts_with("tecent") => "Tencent".to_string(),
+        "zai" => "Z.AI".to_string(),
+        "xiaomi" => "XiaoMi".to_string(),
+        "minimax" => "MiniMax".to_string(),
+        "kimi" => "Kimi".to_string(),
+        "qwen" => "Qwen".to_string(),
+        "meituan" => "Meituan".to_string(),
+        "doubao" => "Doubao".to_string(),
+        "alibaba" => "Alibaba".to_string(),
+        "tencent" => "Tencent".to_string(),
         "xai" => "xAI".to_string(),
         "meta" => "Meta".to_string(),
         "mistral" => "Mistral".to_string(),
         "cohere" => "Cohere".to_string(),
         "opencode" => "OpenCode".to_string(),
-        s if s.starts_with("github-cop") || s.contains("copilot") => "GitHub Copilot".to_string(),
+        "github-copilot" => "GitHub Copilot".to_string(),
         _ => provider.to_string(),
     }
 }

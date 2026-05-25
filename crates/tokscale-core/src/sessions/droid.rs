@@ -93,54 +93,11 @@ fn normalize_model_name(model: &str) -> String {
         collapsed
     };
 
-    if let Some(canonical_claude_model) = canonical_claude_family_model(&claude_prefixed) {
-        canonical_claude_model
+    if provider_identity::is_anthropic_model(&claude_prefixed) {
+        crate::normalize_model_for_grouping(&claude_prefixed)
     } else {
         claude_prefixed
     }
-}
-
-fn canonical_claude_family_model(model: &str) -> Option<String> {
-    for family in ["opus", "sonnet", "haiku"] {
-        let prefix = format!("claude-{family}-");
-        let Some(rest) = model.strip_prefix(&prefix) else {
-            continue;
-        };
-        let mut segments = rest.split('-');
-        let Some(major) = segments
-            .next()
-            .filter(|segment| is_version_segment(segment))
-        else {
-            continue;
-        };
-        let mut version = major.to_string();
-
-        if !version.contains('.') {
-            if let Some(minor) = segments.next().filter(|segment| {
-                segment.len() <= 2 && segment.chars().all(|ch| ch.is_ascii_digit())
-            }) {
-                version.push('.');
-                version.push_str(minor);
-            }
-        }
-
-        return Some(format!("{prefix}{version}"));
-    }
-
-    None
-}
-
-fn is_version_segment(segment: &str) -> bool {
-    let mut digit_seen = false;
-
-    for part in segment.split('.') {
-        if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
-            return false;
-        }
-        digit_seen = true;
-    }
-
-    digit_seen
 }
 
 fn get_provider_from_model(model: &str) -> &'static str {

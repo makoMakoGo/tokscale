@@ -1346,10 +1346,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
               setAppliedFrom("");
               setAppliedTo("");
             }
-            if (tab !== "custom") {
-              setAppliedFrom("");
-              setAppliedTo("");
-            }
           }}
         />
       </TabSection>
