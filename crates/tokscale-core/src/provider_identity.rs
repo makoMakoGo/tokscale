@@ -187,7 +187,8 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("xai");
     }
 
-    if lower.contains("deepseek") {
+    let model_part = lower.split('/').next_back().unwrap_or(&lower);
+    if model_part == "model1" || model_part == "model2" || lower.contains("deepseek") {
         return Some("deepseek");
     }
 
@@ -338,6 +339,11 @@ mod tests {
             inferred_provider_from_model("deepseek-v3"),
             Some("deepseek")
         );
+        assert_eq!(inferred_provider_from_model("model1"), Some("deepseek"));
+        assert_eq!(
+            inferred_provider_from_model("deepseek/model2"),
+            Some("deepseek")
+        );
         assert_eq!(inferred_provider_from_model("glm-5.1"), Some("zai"));
         assert_eq!(
             inferred_provider_from_model("anthropic/glm-5.1"),
@@ -383,6 +389,8 @@ mod tests {
         assert_eq!(inferred_provider_from_model("co4pilot-v2"), None);
         assert_eq!(inferred_provider_from_model("metadata-model"), None);
         assert_eq!(inferred_provider_from_model("metamorphic-v1"), None);
+        assert_eq!(inferred_provider_from_model("model10"), None);
+        assert_eq!(inferred_provider_from_model("my-model1"), None);
     }
 
     #[test]

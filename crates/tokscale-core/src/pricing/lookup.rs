@@ -94,7 +94,7 @@ struct ProviderScopedModelPath<'a> {
 pub struct PricingLookup {
     litellm: HashMap<String, ModelPricing>,
     openrouter: HashMap<String, ModelPricing>,
-    cursor: HashMap<String, ModelPricing>,
+    builtin: HashMap<String, ModelPricing>,
     litellm_keys: Vec<String>,
     openrouter_keys: Vec<String>,
     litellm_key_parts: Vec<KeyModelPart>,
@@ -102,7 +102,7 @@ pub struct PricingLookup {
     litellm_lower: HashMap<String, String>,
     openrouter_lower: HashMap<String, String>,
     openrouter_model_part: HashMap<String, String>,
-    cursor_lower: HashMap<String, String>,
+    builtin_lower: HashMap<String, String>,
     lookup_cache: RwLock<HashMap<String, Option<CachedResult>>>,
 }
 
@@ -116,7 +116,7 @@ impl PricingLookup {
     pub fn new(
         litellm: HashMap<String, ModelPricing>,
         openrouter: HashMap<String, ModelPricing>,
-        cursor: HashMap<String, ModelPricing>,
+        builtin: HashMap<String, ModelPricing>,
     ) -> Self {
         let mut litellm_keys: Vec<String> = litellm.keys().cloned().collect();
         litellm_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
@@ -141,9 +141,9 @@ impl PricingLookup {
             }
         }
 
-        let mut cursor_lower = HashMap::with_capacity(cursor.len());
-        for key in cursor.keys() {
-            cursor_lower.insert(key.to_lowercase(), key.clone());
+        let mut builtin_lower = HashMap::with_capacity(builtin.len());
+        for key in builtin.keys() {
+            builtin_lower.insert(key.to_lowercase(), key.clone());
         }
 
         let build_key_parts = |keys: &[String]| -> Vec<KeyModelPart> {
@@ -165,7 +165,7 @@ impl PricingLookup {
         Self {
             litellm,
             openrouter,
-            cursor,
+            builtin,
             litellm_keys,
             openrouter_keys,
             litellm_key_parts,
@@ -173,7 +173,7 @@ impl PricingLookup {
             litellm_lower,
             openrouter_lower,
             openrouter_model_part,
-            cursor_lower,
+            builtin_lower,
             lookup_cache: RwLock::new(HashMap::with_capacity(64)),
         }
     }
@@ -307,6 +307,13 @@ impl PricingLookup {
             return None;
         }
 
+        let model_part = model_id.split('/').next_back().unwrap_or(model_id);
+        if matches!(model_part, "model1" | "model2") {
+            if let Some(result) = self.exact_match_builtin(model_id) {
+                return Some(result);
+            }
+        }
+
         if let Some(stripped) = strip_known_provider_prefix(model_id) {
             let prefix_matches_hint =
                 provider_id.is_none() || model_prefix_matches_provider(model_id, provider_id);
@@ -410,11 +417,11 @@ impl PricingLookup {
             }
         }
 
-        if let Some(result) = self.exact_match_cursor(model_id) {
+        if let Some(result) = self.exact_match_builtin(model_id) {
             return Some(result);
         }
         if let Some(version_normalized) = normalize_version_separator(model_id) {
-            if let Some(result) = self.exact_match_cursor(&version_normalized) {
+            if let Some(result) = self.exact_match_builtin(&version_normalized) {
                 return Some(result);
             }
         }
@@ -681,20 +688,20 @@ impl PricingLookup {
         None
     }
 
-    fn exact_match_cursor(&self, model_id: &str) -> Option<LookupResult> {
-        if let Some(key) = self.cursor_lower.get(model_id) {
+    fn exact_match_builtin(&self, model_id: &str) -> Option<LookupResult> {
+        if let Some(key) = self.builtin_lower.get(model_id) {
             return Some(LookupResult {
-                pricing: self.cursor.get(key).unwrap().clone(),
-                source: "Cursor".into(),
+                pricing: self.builtin.get(key).unwrap().clone(),
+                source: "Builtin".into(),
                 matched_key: key.clone(),
             });
         }
         if let Some(model_part) = model_id.split('/').next_back() {
             if model_part != model_id {
-                if let Some(key) = self.cursor_lower.get(model_part) {
+                if let Some(key) = self.builtin_lower.get(model_part) {
                     return Some(LookupResult {
-                        pricing: self.cursor.get(key).unwrap().clone(),
-                        source: "Cursor".into(),
+                        pricing: self.builtin.get(key).unwrap().clone(),
+                        source: "Builtin".into(),
                         matched_key: key.clone(),
                     });
                 }

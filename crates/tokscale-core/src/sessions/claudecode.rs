@@ -1394,19 +1394,21 @@ mod tests {
 {"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:02.000Z","message":{"model":"mimo-v2.5-pro","usage":{"input_tokens":400,"output_tokens":40}}}
 {"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:03.000Z","message":{"model":"kimi-for-coding","usage":{"input_tokens":500,"output_tokens":50}}}
 {"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:04.000Z","message":{"model":"longcat-flash-thinking","usage":{"input_tokens":600,"output_tokens":60}}}
-{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:05.000Z","message":{"model":"model1","usage":{"input_tokens":700,"output_tokens":70}}}"#;
+{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:05.000Z","message":{"model":"model1","usage":{"input_tokens":700,"output_tokens":70}}}
+{"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:06.000Z","message":{"model":"model2","usage":{"input_tokens":800,"output_tokens":80}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
-        assert_eq!(messages.len(), 6);
+        assert_eq!(messages.len(), 7);
         assert_eq!(messages[0].model_id, "gpt-5.3-codex");
         assert_eq!(messages[0].provider_id, "openai");
         assert_eq!(messages[1].provider_id, "zai");
         assert_eq!(messages[2].provider_id, "xiaomi");
         assert_eq!(messages[3].provider_id, "moonshotai");
         assert_eq!(messages[4].provider_id, "meituan");
-        assert_eq!(messages[5].provider_id, "unknown");
+        assert_eq!(messages[5].provider_id, "deepseek");
+        assert_eq!(messages[6].provider_id, "deepseek");
         assert!(
             messages
                 .iter()
