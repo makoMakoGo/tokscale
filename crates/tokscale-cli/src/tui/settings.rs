@@ -61,6 +61,11 @@ pub struct Settings {
     pub default_clients: Vec<String>,
     #[serde(default)]
     pub light: LightSettings,
+    /// Opt-in toggle for the subscription quota Usage tab. Default is
+    /// `false` so the tab strip stays focused on local token usage unless
+    /// the user explicitly wants subscription usage lookups.
+    #[serde(default)]
+    pub usage_tab_enabled: bool,
     /// Opt-in toggle for the per-minute breakdown tab. Default is `false`
     /// to keep the tab strip focused on the daily/hourly views most users
     /// want and to skip the minute-bucket aggregation cost in DataLoader
@@ -112,6 +117,7 @@ impl Default for Settings {
             scanner: ScannerSettings::default(),
             default_clients: Vec::new(),
             light: LightSettings::default(),
+            usage_tab_enabled: false,
             minutely_tab_enabled: false,
         }
     }
@@ -559,6 +565,28 @@ mod tests {
         let parsed: Settings = serde_json::from_str(json).unwrap();
         assert!(!parsed.minutely_tab_enabled);
         assert!(!Settings::default().minutely_tab_enabled);
+    }
+
+    #[test]
+    fn settings_usage_tab_enabled_defaults_to_false() {
+        let json = r#"{ "colorPalette": "blue" }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(!parsed.usage_tab_enabled);
+        assert!(!Settings::default().usage_tab_enabled);
+    }
+
+    #[test]
+    fn settings_usage_tab_enabled_round_trips_when_set() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "usageTabEnabled": true
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed.usage_tab_enabled);
+
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_trip["usageTabEnabled"], serde_json::Value::Bool(true));
     }
 
     #[test]

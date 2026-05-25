@@ -139,7 +139,7 @@
 ## 功能
 
 - **交互式 TUI 模式** - 由 Ratatui 驱动的精美终端 UI（默认模式）
-  - 6 个交互式视图：概览、模型、每日、每时、统计、代理（可选的 Minutely 视图通过 `minutelyTabEnabled` 启用）
+  - 6 个核心交互式视图：概览、模型、每日、每时、统计、代理（可选的 Usage 与 Minutely 视图通过 `usageTabEnabled` / `minutelyTabEnabled` 启用）
   - 键盘和鼠标导航
   - 9 种颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
@@ -541,6 +541,7 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | `nativeTimeoutMs` | number | `300000` | 原生子进程处理最大时间（5000-3600000ms） |
 | `defaultClients` | string[] | `[]` | 未传递 `--client/-c` 选项时应用的客户端筛选。接受与 `--client` 相同的 ID（例如 `["opencode", "claude", "synthetic"]`）。未知 ID 会被静默丢弃。命令行选项会完全覆盖此列表 — 不会合并。 |
 | `light.writeCache` | boolean | `false` | 为 `true` 时，`tokscale --light` 会在渲染完成后以原子方式覆盖 TUI 缓存。CLI 标志 `--write-cache` / `--no-write-cache` 会按次运行覆盖该设置。 |
+| `usageTabEnabled` | boolean | `false` | 在 TUI 中显示订阅额度 Usage 标签。默认关闭，因为本地 Token 使用统计是主要 TUI 工作流，订阅额度查询是可选功能。 |
 | `minutelyTabEnabled` | boolean | `false` | 在 TUI 中显示按分钟的 Minutely 标签，并在数据加载期间执行分钟级聚合。对大多数用户而言，分钟级粒度是较为小众的诊断视图，而在大数据集上分钟分桶有非平凡的代价，因此默认关闭。 |
 
 #### 启用 Minutely 标签

@@ -281,6 +281,7 @@ impl App {
         };
 
         let auto_refresh = config.refresh > 0 || settings.auto_refresh_enabled;
+        let usage_tab_enabled = settings.usage_tab_enabled;
 
         let data_loader = DataLoader::with_filters(
             config.sessions_path.map(std::path::PathBuf::from),
@@ -342,7 +343,7 @@ impl App {
             dialog_needs_reload,
             hourly_view_mode: HourlyViewMode::default(),
             model_shade_map: HashMap::new(),
-            subscription_usage: {
+            subscription_usage: if usage_tab_enabled {
                 #[cfg(not(test))]
                 {
                     crate::commands::usage::load_cache().unwrap_or_default()
@@ -351,6 +352,8 @@ impl App {
                 {
                     Vec::new()
                 }
+            } else {
+                Vec::new()
             },
             usage_fetch_attempted: false,
             usage_rx: None,
@@ -727,6 +730,10 @@ impl App {
     }
 
     fn switch_tab(&mut self, target: Tab) {
+        if !self.is_tab_visible(target) {
+            return;
+        }
+
         self.persist_current_sort();
 
         self.current_tab = target;
@@ -753,6 +760,7 @@ impl App {
 
     pub(crate) fn tab_visible(settings: &Settings, tab: Tab) -> bool {
         match tab {
+            Tab::Usage => settings.usage_tab_enabled,
             Tab::Minutely => settings.minutely_tab_enabled,
             _ => true,
         }
@@ -1804,6 +1812,22 @@ mod tests {
         App::new_with_cached_data_and_settings(config, None, Settings::default()).unwrap()
     }
 
+    fn make_app_with_usage() -> App {
+        let mut settings = Settings::default();
+        settings.usage_tab_enabled = true;
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        App::new_with_cached_data_and_settings(config, None, settings).unwrap()
+    }
+
     #[test]
     fn test_app_no_filter_default_matches_default_set() {
         // Regression for an Oracle-flagged HIGH bug: the no-filter TUI
@@ -2044,9 +2068,6 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Overview);
 
         app.handle_key_event(key(KeyCode::Tab));
-        assert_eq!(app.current_tab, Tab::Usage);
-
-        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -2086,10 +2107,26 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::BackTab));
-        assert_eq!(app.current_tab, Tab::Usage);
-
-        app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Overview);
+    }
+
+    #[test]
+    fn test_handle_key_tab_switch_with_usage_enabled_includes_usage() {
+        let mut app = make_app_with_usage();
+        assert_eq!(app.current_tab, Tab::Overview);
+
+        for expected in [
+            Tab::Usage,
+            Tab::Models,
+            Tab::Daily,
+            Tab::Hourly,
+            Tab::Stats,
+            Tab::Agents,
+            Tab::Overview,
+        ] {
+            app.handle_key_event(key(KeyCode::Tab));
+            assert_eq!(app.current_tab, expected);
+        }
     }
 
     #[test]
@@ -2099,7 +2136,6 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Overview);
 
         for expected in [
-            Tab::Usage,
             Tab::Models,
             Tab::Daily,
             Tab::Hourly,
@@ -2124,6 +2160,27 @@ mod tests {
             until: None,
             year: None,
             initial_tab: Some(Tab::Minutely),
+        };
+        let app = App::new_with_cached_data_and_settings(
+            config,
+            Some(UsageData::default()),
+            Settings::default(),
+        )
+        .unwrap();
+        assert_eq!(app.current_tab, Tab::Overview);
+    }
+
+    #[test]
+    fn test_initial_usage_tab_clamps_to_overview_when_flag_off() {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Usage),
         };
         let app = App::new_with_cached_data_and_settings(
             config,
@@ -2213,6 +2270,16 @@ mod tests {
     #[test]
     fn test_handle_key_left_right_switch() {
         let mut app = make_app();
+        app.handle_key_event(key(KeyCode::Right));
+        assert_eq!(app.current_tab, Tab::Models);
+
+        app.handle_key_event(key(KeyCode::Left));
+        assert_eq!(app.current_tab, Tab::Overview);
+    }
+
+    #[test]
+    fn test_handle_key_left_right_switch_with_usage_enabled() {
+        let mut app = make_app_with_usage();
         app.handle_key_event(key(KeyCode::Right));
         assert_eq!(app.current_tab, Tab::Usage);
 

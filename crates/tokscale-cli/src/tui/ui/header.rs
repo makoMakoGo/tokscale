@@ -191,8 +191,15 @@ mod tests {
             initial_tab: None,
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.settings.usage_tab_enabled = false;
         app.settings.minutely_tab_enabled = false;
         app.handle_resize(width, 24);
+        app
+    }
+
+    fn make_app_with_usage(width: u16) -> App {
+        let mut app = make_app(width);
+        app.settings.usage_tab_enabled = true;
         app
     }
 
@@ -215,6 +222,17 @@ mod tests {
     fn expected_normal_tab_areas() -> Vec<(Rect, Tab)> {
         vec![
             (Rect::new(21, 5, 10, 1), Tab::Overview),
+            (Rect::new(34, 5, 8, 1), Tab::Models),
+            (Rect::new(45, 5, 7, 1), Tab::Daily),
+            (Rect::new(55, 5, 8, 1), Tab::Hourly),
+            (Rect::new(66, 5, 7, 1), Tab::Stats),
+            (Rect::new(76, 5, 8, 1), Tab::Agents),
+        ]
+    }
+
+    fn expected_normal_tab_areas_with_usage() -> Vec<(Rect, Tab)> {
+        vec![
+            (Rect::new(21, 5, 10, 1), Tab::Overview),
             (Rect::new(34, 5, 7, 1), Tab::Usage),
             (Rect::new(44, 5, 8, 1), Tab::Models),
             (Rect::new(55, 5, 7, 1), Tab::Daily),
@@ -227,25 +245,23 @@ mod tests {
     fn expected_normal_tab_areas_with_minutely() -> Vec<(Rect, Tab)> {
         vec![
             (Rect::new(21, 5, 10, 1), Tab::Overview),
-            (Rect::new(34, 5, 7, 1), Tab::Usage),
-            (Rect::new(44, 5, 8, 1), Tab::Models),
-            (Rect::new(55, 5, 7, 1), Tab::Daily),
-            (Rect::new(65, 5, 8, 1), Tab::Hourly),
-            (Rect::new(76, 5, 10, 1), Tab::Minutely),
-            (Rect::new(89, 5, 7, 1), Tab::Stats),
-            (Rect::new(99, 5, 8, 1), Tab::Agents),
+            (Rect::new(34, 5, 8, 1), Tab::Models),
+            (Rect::new(45, 5, 7, 1), Tab::Daily),
+            (Rect::new(55, 5, 8, 1), Tab::Hourly),
+            (Rect::new(66, 5, 10, 1), Tab::Minutely),
+            (Rect::new(79, 5, 7, 1), Tab::Stats),
+            (Rect::new(89, 5, 8, 1), Tab::Agents),
         ]
     }
 
     fn expected_very_narrow_tab_areas() -> Vec<(Rect, Tab)> {
         vec![
             (Rect::new(8, 3, 5, 1), Tab::Overview),
-            (Rect::new(16, 3, 5, 1), Tab::Usage),
-            (Rect::new(24, 3, 5, 1), Tab::Models),
-            (Rect::new(32, 3, 5, 1), Tab::Daily),
-            (Rect::new(40, 3, 4, 1), Tab::Hourly),
-            (Rect::new(47, 3, 5, 1), Tab::Stats),
-            (Rect::new(55, 3, 5, 1), Tab::Agents),
+            (Rect::new(16, 3, 5, 1), Tab::Models),
+            (Rect::new(24, 3, 5, 1), Tab::Daily),
+            (Rect::new(32, 3, 4, 1), Tab::Hourly),
+            (Rect::new(39, 3, 5, 1), Tab::Stats),
+            (Rect::new(47, 3, 5, 1), Tab::Agents),
         ]
     }
 
@@ -357,6 +373,16 @@ mod tests {
     }
 
     #[test]
+    fn tab_click_areas_include_usage_when_enabled() {
+        let app = make_app_with_usage(120);
+
+        assert_eq!(
+            tab_click_areas(&app, Rect::new(21, 5, 78, 1)),
+            expected_normal_tab_areas_with_usage()
+        );
+    }
+
+    #[test]
     fn tab_click_areas_match_very_narrow_renderable_tab_segments() {
         let app = make_app(50);
 
@@ -374,12 +400,11 @@ mod tests {
         let lines = render_header_symbols(&mut app, area, 120, 8);
 
         assert_eq!(symbols_at(&lines, 5, 21, 10), " Overview ");
-        assert_eq!(symbols_at(&lines, 5, 34, 7), " Usage ");
-        assert_eq!(symbols_at(&lines, 5, 44, 8), " Models ");
-        assert_eq!(symbols_at(&lines, 5, 55, 7), " Daily ");
-        assert_eq!(symbols_at(&lines, 5, 65, 8), " Hourly ");
-        assert_eq!(symbols_at(&lines, 5, 76, 7), " Stats ");
-        assert_eq!(symbols_at(&lines, 5, 86, 8), " Agents ");
+        assert_eq!(symbols_at(&lines, 5, 34, 8), " Models ");
+        assert_eq!(symbols_at(&lines, 5, 45, 7), " Daily ");
+        assert_eq!(symbols_at(&lines, 5, 55, 8), " Hourly ");
+        assert_eq!(symbols_at(&lines, 5, 66, 7), " Stats ");
+        assert_eq!(symbols_at(&lines, 5, 76, 8), " Agents ");
         assert_eq!(registered_tab_areas(&app), expected_normal_tab_areas());
     }
 
@@ -390,7 +415,7 @@ mod tests {
 
         let lines = render_header_symbols(&mut app, area, 130, 8);
 
-        assert_eq!(symbols_at(&lines, 5, 76, 10), " Minutely ");
+        assert_eq!(symbols_at(&lines, 5, 66, 10), " Minutely ");
         assert_eq!(
             registered_tab_areas(&app),
             expected_normal_tab_areas_with_minutely()
@@ -405,12 +430,11 @@ mod tests {
         let lines = render_header_symbols(&mut app, area, 80, 6);
 
         assert_eq!(symbols_at(&lines, 3, 8, 5), " Ovw ");
-        assert_eq!(symbols_at(&lines, 3, 16, 5), " Use ");
-        assert_eq!(symbols_at(&lines, 3, 24, 5), " Mod ");
-        assert_eq!(symbols_at(&lines, 3, 32, 5), " Day ");
-        assert_eq!(symbols_at(&lines, 3, 40, 4), " Hr ");
-        assert_eq!(symbols_at(&lines, 3, 47, 5), " Sta ");
-        assert_eq!(symbols_at(&lines, 3, 55, 5), " Agt ");
+        assert_eq!(symbols_at(&lines, 3, 16, 5), " Mod ");
+        assert_eq!(symbols_at(&lines, 3, 24, 5), " Day ");
+        assert_eq!(symbols_at(&lines, 3, 32, 4), " Hr ");
+        assert_eq!(symbols_at(&lines, 3, 39, 5), " Sta ");
+        assert_eq!(symbols_at(&lines, 3, 47, 5), " Agt ");
         assert_eq!(registered_tab_areas(&app), expected_very_narrow_tab_areas());
     }
 
@@ -422,21 +446,19 @@ mod tests {
         let lines = render_header_symbols(&mut app, area, 120, 8);
 
         assert_eq!(symbols_at(&lines, 5, 31, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 5, 41, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 42, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 5, 52, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 5, 62, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 63, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 5, 73, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 5, 83, 3), TAB_DIVIDER);
 
         assert_clicks_do_not_switch_tabs(
             &mut app,
             &[
                 Rect::new(31, 5, 3, 1),
-                Rect::new(41, 5, 3, 1),
+                Rect::new(42, 5, 3, 1),
                 Rect::new(52, 5, 3, 1),
-                Rect::new(62, 5, 3, 1),
+                Rect::new(63, 5, 3, 1),
                 Rect::new(73, 5, 3, 1),
-                Rect::new(83, 5, 3, 1),
             ],
         );
     }
@@ -451,9 +473,8 @@ mod tests {
         assert_eq!(symbols_at(&lines, 3, 13, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 3, 21, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 3, 29, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 3, 37, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 36, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 3, 44, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 3, 52, 3), TAB_DIVIDER);
 
         assert_clicks_do_not_switch_tabs(
             &mut app,
@@ -461,9 +482,8 @@ mod tests {
                 Rect::new(13, 3, 3, 1),
                 Rect::new(21, 3, 3, 1),
                 Rect::new(29, 3, 3, 1),
-                Rect::new(37, 3, 3, 1),
+                Rect::new(36, 3, 3, 1),
                 Rect::new(44, 3, 3, 1),
-                Rect::new(52, 3, 3, 1),
             ],
         );
     }

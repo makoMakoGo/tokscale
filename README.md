@@ -141,7 +141,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 ## Features
 
 - **Interactive TUI Mode** - Beautiful terminal UI powered by Ratatui (default mode)
-  - 6 interactive views: Overview, Models, Daily, Hourly, Stats, Agents (plus an optional Minutely view, opt-in via `minutelyTabEnabled`)
+  - 6 interactive views: Overview, Models, Daily, Hourly, Stats, Agents (plus optional Usage and Minutely views, opt-in via `usageTabEnabled` / `minutelyTabEnabled`)
   - Keyboard & mouse navigation
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
@@ -249,7 +249,7 @@ tokscale models --json > report.json   # Save to file
 
 The interactive TUI mode provides:
 
-- **8 Views**: Overview (chart + top models), Usage (subscription quotas), Models, Daily, Hourly, Stats (contribution graph), Agents. A per-minute view (Minutely) is hidden by default and can be enabled with `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
+- **6 core views**: Overview (chart + top models), Models, Daily, Hourly, Stats (contribution graph), Agents. Optional Usage (subscription quotas) and Minutely views are hidden by default and can be enabled with `usageTabEnabled` / `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
 - **Keyboard Navigation**:
   - `←/→/Tab/BackTab`: Switch views
   - `↑/↓` or `Home/End`: Navigate lists
@@ -619,7 +619,7 @@ tokscale usage --json
 tokscale usage --light
 ```
 
-In the TUI, navigate to the **Usage** tab to see subscription data. Press `u` or `r` to refresh.
+In the TUI, enable `usageTabEnabled`, then navigate to the **Usage** tab to see subscription data. Press `u` or `r` to refresh.
 
 #### Supported Providers
 
@@ -684,6 +684,7 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `nativeTimeoutMs` | number | `300000` | Maximum time for native subprocess processing (5000-3600000ms) |
 | `defaultClients` | string[] | `[]` | Client filter applied when no `--client/-c` flag is passed. Accepts the same ids as `--client` (e.g. `["opencode", "claude", "synthetic"]`). Unknown ids are silently dropped. CLI flags always override this list completely — no merging. |
 | `light.writeCache` | boolean | `false` | When true, `tokscale --light` overwrites the TUI cache atomically after rendering. CLI flags `--write-cache` / `--no-write-cache` override per-invocation. |
+| `usageTabEnabled` | boolean | `false` | Show the subscription quota Usage tab in the TUI. Default-off because local token usage is the primary TUI workflow and subscription lookups are optional. |
 | `minutelyTabEnabled` | boolean | `false` | Show the per-minute Minutely tab in the TUI and aggregate per-minute usage during data loading. Default-off because minute-granularity is a niche/diagnostic view for most users and the per-minute bucketing has a non-trivial cost on large datasets. |
 | `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
 
