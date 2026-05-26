@@ -756,7 +756,9 @@ impl App {
             Tab::Daily | Tab::Hourly | Tab::Minutely => {
                 (SortField::Date, SortDirection::Descending)
             }
-            _ => (SortField::Cost, SortDirection::Descending),
+            Tab::Overview | Tab::Usage | Tab::Stats | Tab::Agents => {
+                (SortField::Cost, SortDirection::Descending)
+            }
         }
     }
 
