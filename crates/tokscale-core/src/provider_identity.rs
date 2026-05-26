@@ -1,10 +1,7 @@
 fn canonicalize_provider_segment(segment: &str) -> Option<String> {
-    let normalized = segment
-        .trim()
-        .trim_end_matches('/')
-        .to_lowercase()
-        .replace('-', "_");
-    if normalized.starts_with('<') && normalized.ends_with('>') {
+    let lower = segment.trim().trim_end_matches('/').to_lowercase();
+    let normalized = lower.replace('-', "_");
+    if lower.starts_with('<') && lower.ends_with('>') {
         return None;
     }
 
@@ -25,12 +22,13 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
         "pandora_deepseek" => "deepseek",
+        s if s.contains("stepfun") => "stepfun",
         "ai21" => "ai21",
         // For unknown segments, reject if they contain digits — those are
         // almost certainly model-name fragments (e.g., "gpt-4", "claude-3")
         // rather than provider identifiers.
         other if other.chars().any(|ch| ch.is_ascii_digit()) => return None,
-        other => other,
+        _ => lower.as_str(),
     };
 
     Some(canonical.into())
@@ -53,6 +51,7 @@ pub fn normalize_provider_for_grouping(raw: &str) -> String {
         "pandora_deepseek" => "deepseek".to_string(),
         s if s.starts_with("qwen") => "qwen".to_string(),
         s if s.starts_with("meituan") || s.starts_with("longcat") => "meituan".to_string(),
+        s if s.contains("stepfun") => "stepfun".to_string(),
         s if s.starts_with("doubao") => "doubao".to_string(),
         s if s.starts_with("alibaba") => "alibaba".to_string(),
         s if s.starts_with("tencent") || s.starts_with("tecent") => "tencent".to_string(),
@@ -258,6 +257,10 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("qwen");
     }
 
+    if lower.contains("stepfun") {
+        return Some("stepfun");
+    }
+
     None
 }
 
@@ -292,6 +295,8 @@ mod tests {
             ("kimi-for-coding", vec!["moonshotai"]),
             ("Xiaomi", vec!["xiaomi"]),
             ("LongCat", vec!["meituan"]),
+            ("stepfun_ai", vec!["stepfun"]),
+            ("stepfun-coding-plan", vec!["stepfun"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
         ];
@@ -330,6 +335,8 @@ mod tests {
             ("qwen-coding-plan", "qwen"),
             ("meituan", "meituan"),
             ("longcat-coding-plan", "meituan"),
+            ("stepfun_ai", "stepfun"),
+            ("stepfun-coding-plan", "stepfun"),
             ("doubao-coding-plan", "doubao"),
             ("alibaba-coding-plan-cn", "alibaba"),
             ("tecent-coding-plan", "tencent"),
@@ -341,6 +348,8 @@ mod tests {
             ("Meta-Llama", "meta"),
             ("fireworks-ai", "fireworks"),
             ("together_ai", "together"),
+            ("openai-pro", "openai-pro"),
+            ("opencode-go", "opencode-go"),
         ];
 
         for (raw, expected) in cases {
@@ -376,6 +385,11 @@ mod tests {
             Some("fireworks")
         ));
         assert!(!matches_provider_hint("openai/gpt-4", Some("anthropic")));
+    }
+
+    #[test]
+    fn test_inferred_provider_from_model_recognizes_stepfun() {
+        assert_eq!(inferred_provider_from_model("stepfun-v2"), Some("stepfun"));
     }
 
     #[test]
