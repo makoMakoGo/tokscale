@@ -19,6 +19,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "fireworks" | "fireworks_ai" => "fireworks_ai",
         "google" | "gemini" => "google",
         "openai" | "openai_codex" => "openai",
+        s if s == "opencode" || s.starts_with("opencode_") => "opencode",
         "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
         "pandora_deepseek" => "deepseek",
@@ -55,6 +56,7 @@ pub fn normalize_provider_for_grouping(raw: &str) -> String {
         s if s.starts_with("doubao") => "doubao".to_string(),
         s if s.starts_with("alibaba") => "alibaba".to_string(),
         s if s.starts_with("tencent") || s.starts_with("tecent") => "tencent".to_string(),
+        s if s == "opencode" || s.starts_with("opencode_") => "opencode".to_string(),
         s if s.starts_with("github_cop") || s.contains("copilot") => "github-copilot".to_string(),
         _ => canonical_provider(trimmed)
             .map(|provider| provider_group_from_canonical(&provider).to_string())
@@ -297,6 +299,8 @@ mod tests {
             ("LongCat", vec!["meituan"]),
             ("stepfun_ai", vec!["stepfun"]),
             ("stepfun-coding-plan", vec!["stepfun"]),
+            ("opencode-go", vec!["opencode"]),
+            ("opencode-zen", vec!["opencode"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
         ];
@@ -349,7 +353,9 @@ mod tests {
             ("fireworks-ai", "fireworks"),
             ("together_ai", "together"),
             ("openai-pro", "openai-pro"),
-            ("opencode-go", "opencode-go"),
+            ("opencode", "opencode"),
+            ("opencode-go", "opencode"),
+            ("opencode-zen", "opencode"),
         ];
 
         for (raw, expected) in cases {

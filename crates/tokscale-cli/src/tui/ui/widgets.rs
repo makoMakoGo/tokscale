@@ -420,6 +420,9 @@ mod tests {
             ("alibaba-coding-plan-cn", "Alibaba"),
             ("tencent-coding-plan", "Tencent"),
             ("tecent-coding-plan", "Tencent"),
+            ("opencode", "OpenCode"),
+            ("opencode-go", "OpenCode"),
+            ("opencode-zen", "OpenCode"),
         ];
 
         for (provider, expected) in cases {
@@ -440,6 +443,10 @@ mod tests {
         assert_eq!(
             get_provider_display_name("moonshotai, kimi-for-coding"),
             "Kimi"
+        );
+        assert_eq!(
+            get_provider_display_name("opencode, opencode-go, opencode-zen"),
+            "OpenCode"
         );
     }
 
