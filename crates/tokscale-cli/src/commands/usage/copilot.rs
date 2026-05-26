@@ -34,8 +34,7 @@ struct FreeResponse {
 fn read_token_from_keychain() -> Result<String> {
     let raw = read_keychain("gh:github.com")?;
     // go-keyring may base64-encode the value
-    if raw.starts_with("go-keyring-base64:") {
-        let encoded = &raw["go-keyring-base64:".len()..];
+    if let Some(encoded) = raw.strip_prefix("go-keyring-base64:") {
         let decoded = base64_decode(encoded)?;
         Ok(decoded)
     } else {

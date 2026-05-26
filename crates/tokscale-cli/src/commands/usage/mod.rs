@@ -57,7 +57,7 @@ pub fn clear_cache() {
     }
 }
 
-#[cfg(not(test))]
+#[cfg_attr(test, allow(dead_code))]
 pub fn load_cache() -> Option<Vec<UsageOutput>> {
     let path = cache_path()?;
     let content = std::fs::read_to_string(&path).ok()?;
@@ -77,8 +77,10 @@ pub fn load_cache() -> Option<Vec<UsageOutput>> {
 
 // ── Public API ──
 
+type UsageProvider = (&'static str, fn() -> bool, fn() -> Result<UsageOutput>);
+
 pub fn fetch_all() -> Vec<UsageOutput> {
-    let providers: Vec<(&str, fn() -> bool, fn() -> Result<UsageOutput>)> = vec![
+    let providers: Vec<UsageProvider> = vec![
         ("Claude", claude::has_credentials, claude::fetch),
         ("Codex", codex::has_credentials, codex::fetch),
         ("Z.ai", zai::has_credentials, zai::fetch),
@@ -97,12 +99,7 @@ pub fn fetch_all() -> Vec<UsageOutput> {
     std::thread::scope(|s| {
         active
             .into_iter()
-            .map(|(_, _, fetch)| {
-                s.spawn(move || match fetch() {
-                    Ok(o) => Some(o),
-                    Err(_) => None,
-                })
-            })
+            .map(|(_, _, fetch)| s.spawn(move || fetch().ok()))
             .collect::<Vec<_>>()
             .into_iter()
             .filter_map(|h| h.join().ok().flatten())

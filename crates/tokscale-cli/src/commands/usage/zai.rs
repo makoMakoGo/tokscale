@@ -102,7 +102,7 @@ pub fn fetch() -> Result<UsageOutput> {
         let mut weekly_metric = None;
         let mut search_metric = None;
 
-        if let Some(ref limits) = quota.data.as_ref().and_then(|d| d.limits.as_ref()) {
+        if let Some(limits) = quota.data.as_ref().and_then(|d| d.limits.as_ref()) {
             for limit in limits.iter() {
                 let pct = limit.percentage.unwrap_or(0.0).clamp(0.0, 100.0);
 
