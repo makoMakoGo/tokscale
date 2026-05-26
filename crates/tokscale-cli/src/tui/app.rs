@@ -751,10 +751,12 @@ impl App {
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
-        if matches!(tab, Tab::Daily | Tab::Hourly | Tab::Minutely) {
-            (SortField::Date, SortDirection::Descending)
-        } else {
-            (SortField::Cost, SortDirection::Descending)
+        match tab {
+            Tab::Models => (SortField::Tokens, SortDirection::Descending),
+            Tab::Daily | Tab::Hourly | Tab::Minutely => {
+                (SortField::Date, SortDirection::Descending)
+            }
+            _ => (SortField::Cost, SortDirection::Descending),
         }
     }
 
@@ -2517,8 +2519,76 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Descending);
 
         app.switch_tab(Tab::Models);
-        assert_eq!(app.sort_field, SortField::Cost);
+        assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_initial_models_tab_uses_token_sort_default() {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Models),
+        };
+
+        let app =
+            App::new_with_cached_data_and_settings(config, None, Settings::default()).unwrap();
+
+        assert_eq!(app.current_tab, Tab::Models);
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_models_default_sort_shows_highest_tokens_first() {
+        let mut app = make_app();
+        app.data.models = vec![
+            ModelUsage {
+                model: "expensive-low-token".to_string(),
+                provider: "anthropic".to_string(),
+                client: "claude".to_string(),
+                tokens: TokenBreakdown {
+                    input: 10,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 100.0,
+                performance: Default::default(),
+                session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
+            },
+            ModelUsage {
+                model: "cheap-high-token".to_string(),
+                provider: "anthropic".to_string(),
+                client: "claude".to_string(),
+                tokens: TokenBreakdown {
+                    input: 1_000,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 1.0,
+                performance: Default::default(),
+                session_count: 1,
+                workspace_key: None,
+                workspace_label: None,
+            },
+        ];
+
+        app.switch_tab(Tab::Models);
+
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+        assert_eq!(app.get_sorted_models()[0].model, "cheap-high-token");
     }
 
     #[test]
@@ -2586,8 +2656,8 @@ mod tests {
         let mut app = make_app();
         app.switch_tab(Tab::Models);
 
-        app.set_sort(SortField::Tokens);
-        assert_eq!(app.sort_field, SortField::Tokens);
+        app.set_sort(SortField::Cost);
+        assert_eq!(app.sort_field, SortField::Cost);
         assert_eq!(app.sort_direction, SortDirection::Descending);
 
         app.switch_tab(Tab::Daily);
@@ -2595,7 +2665,7 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Descending);
 
         app.switch_tab(Tab::Models);
-        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_field, SortField::Cost);
         assert_eq!(app.sort_direction, SortDirection::Descending);
     }
 
