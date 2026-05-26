@@ -458,12 +458,7 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // registry rather than scanned file paths.
     !matches!(
         client_id,
-        ClientId::Kilo
-            | ClientId::Crush
-            | ClientId::Hermes
-            | ClientId::Goose
-            | ClientId::Zed
-            | ClientId::Amp
+        ClientId::Kilo | ClientId::Crush | ClientId::Hermes | ClientId::Goose | ClientId::Zed
     )
 }
 
@@ -603,7 +598,6 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Goose
                 | ClientId::Zed
                 | ClientId::Crush
-                | ClientId::Amp
                 | ClientId::Codebuff
         ) {
             continue;
@@ -2482,14 +2476,9 @@ mod tests {
 
     #[test]
     fn test_parse_extra_dirs_skips_unsupported_clients() {
-        let enabled: HashSet<ClientId> = [ClientId::Claude, ClientId::Kilo, ClientId::Amp]
-            .iter()
-            .copied()
-            .collect();
-        let dirs = parse_extra_dirs(
-            "claude:/tmp/mac-sessions,kilo:/tmp/kilo,amp:/tmp/amp",
-            &enabled,
-        );
+        let enabled: HashSet<ClientId> =
+            [ClientId::Claude, ClientId::Kilo].iter().copied().collect();
+        let dirs = parse_extra_dirs("claude:/tmp/mac-sessions,kilo:/tmp/kilo", &enabled);
         assert_eq!(dirs.len(), 1);
         assert_eq!(dirs[0].0, ClientId::Claude);
         assert_eq!(dirs[0].1, "/tmp/mac-sessions");
@@ -2541,7 +2530,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_all_clients_does_not_scan_legacy_amp_threads() {
+    fn test_scan_all_clients_scans_upstream_amp_threads() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         let amp_threads = home.join(".local/share/amp/threads");
@@ -2550,7 +2539,7 @@ mod tests {
 
         let result = scan_all_clients(home.to_str().unwrap(), &["amp".to_string()]);
 
-        assert!(result.get(ClientId::Amp).is_empty());
+        assert_eq!(result.get(ClientId::Amp).len(), 1);
     }
 
     fn setup_mock_codebuff_chat(base: &Path, channel: &str, chat_id: &str) -> PathBuf {

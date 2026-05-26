@@ -1091,7 +1091,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
-    let explicit_amp = clients.len() == 1 && clients.iter().any(|c| c == ClientId::Amp.as_str());
 
     // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
     // suppress legacy JSON overlap by message identity.
@@ -1260,16 +1259,20 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    if explicit_amp && should_collect_amp_cli_source(home_dir, use_env_roots) {
-        let mut amp_messages =
-            sessions::amp::parse_amp_threads_from_cli().map_err(|err| err.to_string())?;
-        apply_pricing_to_messages(&mut amp_messages, pricing);
-        all_messages.extend(amp_messages);
-    } else if explicit_amp {
-        return Err(
-            "amp client was requested, but the Amp CLI source is unavailable for the selected home"
-                .to_string(),
-        );
+    let amp_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Amp)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::amp::parse_amp_file(path)
+            })
+        })
+        .collect();
+    for outcome in amp_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
     }
 
     let codebuff_outcomes: Vec<CachedParseOutcome> = scan_result
@@ -2100,15 +2103,6 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     }
 }
 
-fn should_collect_amp_cli_source(home_dir: &str, use_env_roots: bool) -> bool {
-    let home_path = Path::new(home_dir);
-    use_env_roots
-        && dirs::home_dir()
-            .map(|current_home| current_home == home_path)
-            .unwrap_or(false)
-        && sessions::amp::amp_cli_available()
-}
-
 fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
     // Zed bills hosted models at provider list price + 10%.
     // Source: https://zed.dev/docs/ai/plans-and-usage and https://zed.dev/docs/ai/models
@@ -2210,7 +2204,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     });
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
-    let explicit_amp = clients.len() == 1 && clients.iter().any(|c| c == ClientId::Amp.as_str());
 
     let scan_result = scanner::scan_all_clients_with_scanner_settings(
         &home_dir,
@@ -2351,21 +2344,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Gemini, gemini_count);
     messages.extend(gemini_msgs);
 
-    let amp_msgs: Vec<ParsedMessage> =
-        if explicit_amp && should_collect_amp_cli_source(&home_dir, options.use_env_roots) {
-            sessions::amp::parse_amp_threads_from_cli()
-                .map_err(|err| err.to_string())?
+    let amp_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Amp)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::amp::parse_amp_file(path)
                 .into_iter()
                 .map(|msg| unified_to_parsed(&msg))
-                .collect()
-        } else if explicit_amp {
-            return Err(
-            "amp client was requested, but the Amp CLI source is unavailable for the selected home"
-                .to_string(),
-        );
-        } else {
-            Vec::new()
-        };
+                .collect::<Vec<_>>()
+        })
+        .collect();
     let amp_count = amp_msgs.len() as i32;
     counts.set(ClientId::Amp, amp_count);
     messages.extend(amp_msgs);
@@ -6069,7 +6057,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_local_clients_amp_errors_when_cli_source_unavailable() {
+    fn test_parse_local_clients_amp_reads_upstream_thread_files() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let amp_dir = temp_dir.path().join(".local/share/amp/threads");
         std::fs::create_dir_all(&amp_dir).unwrap();
@@ -6093,7 +6081,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = parse_local_clients(LocalParseOptions {
+        let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["amp".to_string()]),
@@ -6102,8 +6090,14 @@ mod tests {
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
         })
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.contains("amp client was requested"));
+        assert_eq!(parsed.counts.get(ClientId::Amp), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "amp");
+        assert_eq!(parsed.messages[0].model_id, "claude-opus-4-7");
+        assert_eq!(parsed.messages[0].provider_id, "anthropic");
+        assert_eq!(parsed.messages[0].input, 10);
+        assert_eq!(parsed.messages[0].output, 2);
     }
 }
