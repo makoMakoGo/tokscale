@@ -751,7 +751,7 @@ impl App {
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
-        if matches!(tab, Tab::Hourly | Tab::Minutely) {
+        if matches!(tab, Tab::Daily | Tab::Hourly | Tab::Minutely) {
             (SortField::Date, SortDirection::Descending)
         } else {
             (SortField::Cost, SortDirection::Descending)
@@ -2542,6 +2542,46 @@ mod tests {
     }
 
     #[test]
+    fn test_switch_tab_uses_daily_date_default() {
+        let mut app = make_app();
+
+        app.switch_tab(Tab::Daily);
+
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn test_daily_default_sort_shows_latest_date_first() {
+        let mut app = make_app();
+        app.data.daily = vec![
+            daily_usage(
+                "2026-05-24",
+                99.0,
+                vec![("older-expensive", "anthropic", 99.0)],
+            ),
+            daily_usage("2026-05-26", 1.0, vec![("newer-cheap", "anthropic", 1.0)]),
+            daily_usage("2026-05-25", 50.0, vec![("middle", "anthropic", 50.0)]),
+        ];
+
+        app.switch_tab(Tab::Daily);
+
+        let dates = app
+            .get_sorted_daily()
+            .iter()
+            .map(|entry| entry.date)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dates,
+            vec![
+                NaiveDate::from_ymd_opt(2026, 5, 26).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 5, 25).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 5, 24).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
     fn test_switch_tab_preserves_user_sort() {
         let mut app = make_app();
         app.switch_tab(Tab::Models);
@@ -2551,7 +2591,8 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Descending);
 
         app.switch_tab(Tab::Daily);
-        assert_eq!(app.sort_field, SortField::Cost);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
 
         app.switch_tab(Tab::Models);
         assert_eq!(app.sort_field, SortField::Tokens);
@@ -2563,8 +2604,8 @@ mod tests {
         let mut app = make_app();
 
         app.switch_tab(Tab::Daily);
-        app.set_sort(SortField::Date);
-        assert_eq!(app.sort_field, SortField::Date);
+        app.set_sort(SortField::Tokens);
+        assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
 
         app.switch_tab(Tab::Hourly);
@@ -2572,7 +2613,7 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Descending);
 
         app.switch_tab(Tab::Daily);
-        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
     }
 
