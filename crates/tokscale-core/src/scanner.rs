@@ -12,6 +12,21 @@ use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Emit a one-time `tracing::warn!` if `path` does not start with the user's
+/// home directory. The scan is NOT blocked — this is a heads-up only.
+fn warn_if_escapes_home(client_id: ClientId, path: &Path) {
+    if let Some(home) = dirs::home_dir() {
+        if !path.starts_with(&home) {
+            tracing::warn!(
+                client = client_id.as_str(),
+                path = %path.display(),
+                home = %home.display(),
+                "extra scan path is outside $HOME — verify this is intentional"
+            );
+        }
+    }
+}
+
 /// User-controlled scanner settings loaded from a config file.
 ///
 /// This is the persistent, declarative counterpart to environment variables
@@ -119,6 +134,35 @@ impl ScanResult {
         }
 
         result
+    }
+
+    /// Return every Hermes SQLite database that should be parsed.
+    ///
+    /// Hermes has a default `state.db` path plus optional profile databases
+    /// discovered through `scanner.extraScanPaths.hermes`. The generic
+    /// `files` bucket carries the extra profile DBs, so this helper gives
+    /// callers a single deduped view without changing older `hermes_db`
+    /// consumers that only expect the default path.
+    pub fn hermes_db_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+
+        let mut push = |path: &Path| {
+            let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            if seen.insert(key) {
+                paths.push(path.to_path_buf());
+            }
+        };
+
+        if let Some(path) = &self.hermes_db {
+            push(path);
+        }
+
+        for path in self.get(ClientId::Hermes) {
+            push(path);
+        }
+
+        paths
     }
 }
 
@@ -233,6 +277,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
+                "state.db" => file_name == "state.db",
                 _ => false,
             }
         })
@@ -453,12 +498,13 @@ fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource>
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
-    // Kilo CLI and Hermes use SQLite database paths, Roo/KiloCode require local + remote
-    // and server task roots, and Crush discovers SQLite DBs via the project
-    // registry rather than scanned file paths.
+    // Roo/KiloCode require local + remote and server task roots, and Crush
+    // discovers SQLite DBs via the project registry rather than scanned file
+    // paths. Hermes profile databases are named `state.db`, so they can use
+    // `extraScanPaths` once `scan_directory` knows that exact filename.
     !matches!(
         client_id,
-        ClientId::Kilo | ClientId::Crush | ClientId::Hermes | ClientId::Goose | ClientId::Zed
+        ClientId::Kilo | ClientId::Crush | ClientId::Goose | ClientId::Zed
     )
 }
 
@@ -609,6 +655,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
+        warn_if_escapes_home(client_id, &path);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
@@ -621,6 +668,7 @@ fn scan_all_clients_with_env_strategy_inner(
     if use_env_roots {
         let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
         for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
+            warn_if_escapes_home(client_id, &PathBuf::from(&path));
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
     }
@@ -1734,6 +1782,78 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_scan_all_clients_with_scanner_settings_merges_hermes_extra_profile_db() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_dir = home.join(".hermes");
+        fs::create_dir_all(&default_dir).unwrap();
+        let default_db = default_dir.join("state.db");
+        File::create(&default_db).unwrap();
+
+        let profile_dir = home.join(".hermes/profiles/director_planning");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        File::create(&profile_db).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "hermes": [
+                    profile_dir,
+                    profile_db
+                ]
+            }
+        }))
+        .unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            true,
+            &settings,
+        );
+
+        assert_eq!(result.hermes_db.as_ref(), Some(&default_db));
+        assert_eq!(result.hermes_db_paths(), vec![default_db, profile_db]);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_with_scanner_settings_respects_hermes_client_filter() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let profile_dir = home.join(".hermes/profiles/director_planning");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        File::create(&profile_db).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "hermes": [profile_dir]
+            }
+        }))
+        .unwrap();
+
+        let claude_only = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["claude".to_string()],
+            true,
+            &settings,
+        );
+        assert!(claude_only.hermes_db_paths().is_empty());
+
+        let hermes_only = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            true,
+            &settings,
+        );
+        assert_eq!(hermes_only.hermes_db_paths(), vec![profile_db]);
+    }
+
+    #[test]
+    #[serial]
     fn test_scan_all_clients_with_scanner_settings_dedups_settings_and_env_extra_paths() {
         let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
         let dir = TempDir::new().unwrap();
@@ -2658,5 +2778,50 @@ mod tests {
         assert_eq!(result.get(ClientId::Claude).len(), 1);
 
         restore_env("TOKSCALE_EXTRA_DIRS", previous);
+    }
+
+    /// Verify that an extra scan path outside $HOME does not abort the scan.
+    /// `warn_if_escapes_home` must only warn, never block.
+    #[test]
+    #[serial]
+    fn test_extra_scan_path_outside_home_does_not_block_scan() {
+        // Use a tempdir that is guaranteed to be outside the real $HOME
+        // (tempfile creates dirs under /tmp on Unix, %TEMP% on Windows).
+        let outside_home = TempDir::new().unwrap();
+        let outside_path = outside_home.path();
+
+        // Ensure it is truly outside home (skip the test if somehow inside).
+        if let Some(home) = dirs::home_dir() {
+            if outside_path.starts_with(&home) {
+                return; // unexpected environment — skip rather than false-fail
+            }
+        }
+
+        // Populate with a valid session file so the scanner has something to find.
+        let session_dir = outside_path.join("sessions");
+        fs::create_dir_all(&session_dir).unwrap();
+        File::create(session_dir.join("session-abc123.json")).unwrap();
+
+        // Set TOKSCALE_EXTRA_DIRS to point claude at the outside path.
+        let previous = std::env::var("TOKSCALE_EXTRA_DIRS").ok();
+        unsafe {
+            std::env::set_var(
+                "TOKSCALE_EXTRA_DIRS",
+                format!("claude:{}", outside_path.to_string_lossy()),
+            )
+        };
+
+        // The scan must complete without panicking.
+        let fake_home = TempDir::new().unwrap();
+        let _result = scan_all_clients_with_env_strategy(
+            fake_home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            true, // use_env_roots = true so TOKSCALE_EXTRA_DIRS is picked up
+        );
+
+        restore_env("TOKSCALE_EXTRA_DIRS", previous);
+        // No assertion on result.get(ClientId::Claude) — the outside dir might
+        // not match the expected file patterns. The test goal is only liveness:
+        // the scan must not panic when an extra path escapes $HOME.
     }
 }

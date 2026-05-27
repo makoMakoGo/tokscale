@@ -43,7 +43,12 @@ pub mod auth {
     //! 4. Decryption fails / no `storage.json` → fall back to
     //!    `trae login --manual` (paste a JWT).
     //!
-    //! Cache path: `~/.config/tokscale/trae-cache/credentials-{solo,ide}.json`
+    //! Cache filenames: `credentials-solo.json` (Solo) and `credentials-ide.json` (Ide).
+    //! These are fixed names, not derived from the report client id (`client_str()`).
+    //! Cache directory: `<tokscale config dir>/trae-cache/`, where the
+    //! config dir is resolved by [`paths::get_config_dir`] and honors
+    //! `TOKSCALE_CONFIG_DIR` plus XDG defaults (typically
+    //! `~/.config/tokscale` on Linux/macOS).
 
     use crate::trae::safestorage;
     use anyhow::{Context, Result};
@@ -978,6 +983,12 @@ pub mod sync {
         merged
     }
 
+    fn manifest_references_artifact(sessions: &[TraeSessionEntry], artifact_path: &str) -> bool {
+        sessions
+            .iter()
+            .any(|entry| entry.artifact_path == artifact_path)
+    }
+
     // ── Manifest ───────────────────────────────────────────────────────────
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1244,13 +1255,15 @@ pub mod sync {
             sessions: manifest.sessions.clone(),
         };
 
-        // Write the whole batch to a single JSON file.
-        let batch_ts = Utc::now().format("%Y%m%dT%H%M%S").to_string();
-        let artifact_filename = format!("usage-{}.json", batch_ts);
+        // Write the whole batch only if at least one fetched session wins the
+        // manifest merge. Repeated overlapping syncs often fetch older copies
+        // of already-seen sessions; writing those losing batches creates a
+        // file that GC immediately removes and can overwrite a still-referenced
+        // artifact if two syncs happen in the same timestamp bucket.
+        let batch_ts = Utc::now().format("%Y%m%dT%H%M%S%.3f").to_string();
+        let artifact_filename = format!("usage-{batch_ts}.json");
         let manifest_session_path = format!("sessions/{artifact_filename}");
         let artifact_path = dir.join(&artifact_filename);
-        let json = serde_json::to_string_pretty(&sessions)?;
-        std::fs::write(&artifact_path, json)?;
 
         let incoming_sessions: Vec<TraeSessionEntry> = sessions
             .iter()
@@ -1269,6 +1282,27 @@ pub mod sync {
             .collect();
 
         next_manifest.sessions = merge_manifest_sessions(next_manifest.sessions, incoming_sessions);
+
+        let batch_wins_manifest =
+            manifest_references_artifact(&next_manifest.sessions, &manifest_session_path);
+
+        if batch_wins_manifest {
+            let json = serde_json::to_string_pretty(&sessions)?;
+            // Atomic write: serialize to a temp file next to the destination,
+            // then rename (POSIX-atomic on the same filesystem).
+            let tmp_path = artifact_path.with_extension(format!(
+                "json.tmp.{}.{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+            ));
+            std::fs::write(&tmp_path, &json)?;
+            std::fs::rename(&tmp_path, &artifact_path).inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp_path);
+            })?;
+        }
 
         let valid_paths: std::collections::HashSet<String> = next_manifest
             .sessions
@@ -1505,6 +1539,46 @@ pub mod sync {
             assert_eq!(merged[0].session_id, "session-dupe");
             assert_eq!(merged[0].usage_time, 1_200);
             assert_eq!(merged[0].artifact_path, "sessions/zzz.json");
+        }
+
+        #[test]
+        fn test_manifest_reference_is_absent_when_batch_loses_merge() {
+            let current_batch = "sessions/current.json";
+            let merged = merge_manifest_sessions(
+                vec![TraeSessionEntry {
+                    session_id: "session-stable".to_string(),
+                    usage_time: 2_000,
+                    artifact_path: "sessions/previous.json".to_string(),
+                }],
+                vec![TraeSessionEntry {
+                    session_id: "session-stable".to_string(),
+                    usage_time: 1_000,
+                    artifact_path: current_batch.to_string(),
+                }],
+            );
+
+            assert!(!manifest_references_artifact(&merged, current_batch));
+            assert_eq!(merged[0].artifact_path, "sessions/previous.json");
+        }
+
+        #[test]
+        fn test_manifest_reference_is_present_when_batch_wins_merge() {
+            let current_batch = "sessions/current.json";
+            let merged = merge_manifest_sessions(
+                vec![TraeSessionEntry {
+                    session_id: "session-stable".to_string(),
+                    usage_time: 1_000,
+                    artifact_path: "sessions/previous.json".to_string(),
+                }],
+                vec![TraeSessionEntry {
+                    session_id: "session-stable".to_string(),
+                    usage_time: 2_000,
+                    artifact_path: current_batch.to_string(),
+                }],
+            );
+
+            assert!(manifest_references_artifact(&merged, current_batch));
+            assert_eq!(merged[0].artifact_path, current_batch);
         }
     }
 }

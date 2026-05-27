@@ -435,13 +435,77 @@ fn write_fake_credentials(base: &Path) {
 }
 
 fn write_settings_json(base: &Path, body: &str) {
-    for dir in [
-        base.join(".config/tokscale"),
-        base.join("Library/Application Support/tokscale"),
-    ] {
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("settings.json"), body).unwrap();
+    let path = settings_json_path(base);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, body).unwrap();
+}
+
+fn settings_json_path(base: &Path) -> std::path::PathBuf {
+    if cfg!(target_os = "windows") {
+        base.join("AppData")
+            .join("Roaming")
+            .join("tokscale")
+            .join("settings.json")
+    } else {
+        base.join(".config").join("tokscale").join("settings.json")
     }
+}
+
+fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, output: i64) {
+    fs::create_dir_all(dir).unwrap();
+    let turn_context = serde_json::json!({
+        "type": "turn_context",
+        "payload": {
+            "model": model
+        }
+    });
+    let token_count = serde_json::json!({
+        "timestamp": "2026-01-01T00:00:01Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": input,
+                    "cached_input_tokens": 0,
+                    "output_tokens": output
+                }
+            }
+        }
+    });
+    fs::write(
+        dir.join(name),
+        format!("{}\n{}\n", turn_context, token_count),
+    )
+    .unwrap();
+}
+
+fn write_cursor_usage_cache(base: &Path) {
+    let cache_dir = base.join(".config/tokscale/cursor-cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("usage.csv"), "Date,Model\n").unwrap();
+}
+
+fn write_cursor_credentials(base: &Path) {
+    let config_dir = base.join(".config/tokscale");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("cursor-credentials.json"),
+        serde_json::json!({
+            "version": 1,
+            "activeAccountId": "active-account",
+            "accounts": {
+                "active-account": {
+                    "sessionToken": "test-session-token",
+                    "userId": "active-account",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "label": "work"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
 }
 
 // ── Existing tests ─────────────────────────────────────────────────────────
@@ -826,16 +890,83 @@ fn test_tui_rejects_home_override() {
 }
 
 #[test]
-fn test_clients_rejects_home_override() {
-    let tmp = TempDir::new().unwrap();
+fn test_clients_home_override_uses_explicit_home_for_json() {
+    let real_home = create_codex_fixture_dir();
+    let conflicting_home = create_conflicting_codex_fixture_dir();
+    write_codex_token_session(
+        &real_home.path().join(".codex/sessions"),
+        "session-2.jsonl",
+        "gpt-4o-mini",
+        80,
+        20,
+    );
 
-    cargo_bin_cmd!("tokscale")
-        .args(["--home", tmp.path().to_str().unwrap(), "clients"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "It is not supported for `clients`",
-        ));
+    let output = cmd_with_conflicting_env(conflicting_home.path())
+        .env("CODEX_HOME", conflicting_home.path().join(".codex"))
+        .args([
+            "--home",
+            real_home.path().to_str().unwrap(),
+            "clients",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let codex = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "codex")
+        .unwrap();
+    assert_eq!(
+        codex["sessionsPath"],
+        serde_json::json!(real_home.path().join(".codex/sessions"))
+    );
+    assert_eq!(codex["messageCount"].as_i64().unwrap(), 2);
+}
+
+#[test]
+fn test_clients_home_override_ignores_copilot_exporter_env() {
+    let real_home = create_empty_fixture_dir();
+    let conflicting_home = create_empty_fixture_dir();
+    let exporter_file = conflicting_home.path().join("copilot-host.jsonl");
+    fs::write(&exporter_file, "{}").unwrap();
+
+    let output = cmd_with_conflicting_env(conflicting_home.path())
+        .env("COPILOT_OTEL_FILE_EXPORTER_PATH", &exporter_file)
+        .args([
+            "--home",
+            real_home.path().to_str().unwrap(),
+            "clients",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let copilot = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "copilot")
+        .unwrap();
+    assert!(
+        copilot.get("exporterStatus").is_none(),
+        "explicit --home diagnostics must not report host COPILOT_OTEL_FILE_EXPORTER_PATH: {copilot:#?}"
+    );
 }
 
 #[test]
@@ -951,6 +1082,212 @@ fn test_models_with_client_filter_multiple() {
         .args(["models", "--json", "--opencode", "--claude", "--no-spinner"])
         .assert()
         .success();
+}
+
+fn assert_cursor_setup_warning(json: &serde_json::Value) {
+    let warnings = json["warnings"]
+        .as_array()
+        .expect("explicit Cursor report should expose setup warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("tokscale cursor login")
+                && text.contains("cursor-cache/usage*.csv"))),
+        "warnings did not explain Cursor setup: {warnings:?}"
+    );
+}
+
+#[test]
+fn test_models_cursor_explicit_missing_cache_reports_setup_warning_json() {
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_cursor_setup_warning(&json);
+}
+
+#[test]
+fn test_monthly_cursor_explicit_missing_cache_reports_setup_warning_json() {
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["monthly", "--json", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_cursor_setup_warning(&json);
+}
+
+#[test]
+fn test_hourly_cursor_explicit_missing_cache_reports_setup_warning_json() {
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["hourly", "--json", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_cursor_setup_warning(&json);
+}
+
+#[test]
+fn test_models_cursor_explicit_home_override_reports_fixture_cache_path() {
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "--home",
+            tmp.path().to_str().unwrap(),
+            "models",
+            "--json",
+            "--client",
+            "cursor",
+            "--no-spinner",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warnings = json["warnings"]
+        .as_array()
+        .expect("explicit Cursor --home report should expose setup warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains(tmp.path().to_str().unwrap())
+                && text.contains("populate that cache")
+                && text.contains("cursor-cache/usage*.csv"))),
+        "warnings did not explain Cursor --home setup: {warnings:?}"
+    );
+}
+
+#[test]
+fn test_models_cursor_explicit_missing_cache_reports_setup_warning_text() {
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .args(["models", "--client", "cursor", "--no-spinner"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cursor usage requires"))
+        .stderr(predicate::str::contains("tokscale cursor login"));
+}
+
+#[test]
+fn test_models_default_missing_cursor_cache_does_not_emit_setup_warning_json() {
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json.get("warnings")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty),
+        "default all-client report should not warn about unrequested Cursor setup"
+    );
+}
+
+#[test]
+fn test_models_cursor_explicit_existing_cache_suppresses_setup_warning_json() {
+    let tmp = create_empty_fixture_dir();
+    write_cursor_usage_cache(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json.get("warnings")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty),
+        "existing Cursor cache should suppress setup warnings"
+    );
+}
+
+#[test]
+fn test_models_cursor_logged_in_missing_cache_suggests_sync_only_json() {
+    let tmp = create_empty_fixture_dir();
+    write_cursor_credentials(tmp.path());
+
+    let output = cmd_with_home(tmp.path())
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9")
+        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warnings = json["warnings"].as_array().unwrap();
+    let warning = warnings[0].as_str().unwrap();
+    assert!(warning.contains("tokscale cursor sync"));
+    assert!(
+        !warning.contains("tokscale cursor login"),
+        "logged-in users with no cache should be told to sync, not log in again: {warning}"
+    );
+}
+
+#[test]
+fn test_time_metrics_cursor_explicit_missing_cache_reports_setup_warning_json() {
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "time-metrics",
+            "--json",
+            "--client",
+            "cursor",
+            "--no-spinner",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_cursor_setup_warning(&json);
+}
+
+#[test]
+fn test_graph_cursor_explicit_missing_cache_reports_setup_warning_text() {
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .args(["graph", "--client", "cursor", "--no-spinner"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cursor usage requires"))
+        .stderr(predicate::str::contains("tokscale cursor login"));
+}
+
+#[test]
+fn test_submit_cursor_explicit_missing_cache_reports_setup_warning_text() {
+    let tmp = create_empty_fixture_dir();
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_TOKEN", "test-token")
+        .args(["submit", "--client", "cursor", "--dry-run"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cursor usage requires"))
+        .stderr(predicate::str::contains("tokscale cursor login"));
 }
 
 #[test]
@@ -1231,6 +1568,60 @@ fn test_monthly_json_output() {
     assert!(first.get("cacheWrite").is_some());
     assert!(first.get("messageCount").is_some());
     assert!(first.get("cost").is_some());
+}
+
+#[test]
+fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
+    let real_home = create_empty_fixture_dir();
+    let conflicting_home = create_conflicting_codex_fixture_dir();
+    let extra_home = TempDir::new().unwrap();
+    let extra_sessions = extra_home.path().join("portable-codex/sessions");
+    write_codex_token_session(
+        &extra_sessions,
+        "settings-session.jsonl",
+        "gpt-4o-mini",
+        210,
+        40,
+    );
+    write_settings_json(
+        real_home.path(),
+        &format!(
+            r#"{{
+                "scanner": {{
+                    "extraScanPaths": {{
+                        "codex": [{}]
+                    }}
+                }}
+            }}"#,
+            serde_json::to_string(extra_sessions.to_str().unwrap()).unwrap()
+        ),
+    );
+
+    let output = cmd_with_conflicting_env(conflicting_home.path())
+        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
+        .env("CODEX_HOME", conflicting_home.path().join(".codex"))
+        .args([
+            "hourly",
+            "--json",
+            "--codex",
+            "--no-spinner",
+            "--home",
+            real_home.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(json["entries"][0]["input"].as_i64().unwrap(), 210);
+    assert_eq!(json["entries"][0]["output"].as_i64().unwrap(), 40);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("gpt-5"));
 }
 
 #[test]
@@ -1799,6 +2190,50 @@ fn test_clients_json_includes_settings_extra_paths() {
         codex["extraPaths"][0]["source"],
         serde_json::json!("settings")
     );
+}
+
+#[test]
+fn test_clients_json_includes_hermes_settings_extra_profile_path() {
+    let tmp = create_empty_fixture_dir();
+    let hermes_profile = tmp.path().join(".hermes/profiles/director_planning");
+    fs::create_dir_all(&hermes_profile).unwrap();
+    let hermes_profile_json = serde_json::to_string(&hermes_profile).unwrap();
+    write_settings_json(
+        tmp.path(),
+        &format!(
+            r#"{{
+            "scanner": {{
+                "extraScanPaths": {{
+                    "hermes": [{hermes_profile_json}]
+                }}
+            }}
+        }}"#
+        ),
+    );
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let hermes = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "hermes")
+        .unwrap();
+
+    assert_eq!(
+        hermes["extraPaths"][0]["path"],
+        serde_json::json!(hermes_profile)
+    );
+    assert_eq!(
+        hermes["extraPaths"][0]["source"],
+        serde_json::json!("settings")
+    );
+    assert_eq!(hermes["extraPaths"][0]["exists"], true);
 }
 
 #[test]

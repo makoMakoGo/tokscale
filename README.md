@@ -62,7 +62,7 @@
 | <img width="48px" src=".github/assets/client-copilot.jpg" alt="Copilot" /> | [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-the-github-copilot-coding-agent-in-cli) | `~/.copilot/otel/*.jsonl` (+ `COPILOT_OTEL_FILE_EXPORTER_PATH`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-hermes.png" alt="Hermes Agent" /> | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `$HERMES_HOME/state.db` (fallback: `~/.hermes/state.db`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-gemini.png" alt="Gemini" /> | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `$GEMINI_CLI_HOME/tmp/*/chats/*.json` (fallback: `~/.gemini/tmp/*/chats/*.json`) | ✅ Yes |
-| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | API sync via `~/.config/tokscale/cursor-cache/` | ✅ Yes |
+| <img width="48px" src=".github/assets/client-cursor.jpg" alt="Cursor" /> | [Cursor IDE](https://cursor.com/) | Cursor API export cached at `~/.config/tokscale/cursor-cache/usage*.csv` (not `~/.cursor`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-amp.png" alt="Amp" /> | [Amp (AmpCode)](https://ampcode.com/) | `~/.local/share/amp/threads/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-codebuff.png" alt="Codebuff" /> | [Codebuff](https://codebuff.com/) | `~/.config/manicode/` (+ `manicode-dev`, `manicode-staging`; override via `CODEBUFF_DATA_DIR`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-droid.png" alt="Droid" /> | [Droid (Factory Droid)](https://factory.ai/) | `~/.factory/sessions/` | ✅ Yes |
@@ -347,7 +347,7 @@ tokscale --client opencode,claude
 # Repeated: same effect, useful with shell aliases
 tokscale -c opencode -c claude
 
-# Cursor IDE requires `tokscale cursor login` first
+# Cursor IDE uses Tokscale's API cache; run login + sync first
 tokscale --client cursor
 
 # Synthetic (synthetic.new) is detected from other agent sessions
@@ -383,6 +383,7 @@ tokscale monthly --month --benchmark
 ```
 
 > **Note**: Date filters use your local timezone. Both `--since` and `--until` are inclusive.
+> **v2.2.0 note**: Session active-time daily buckets also use your local timezone, so users outside UTC may see active-time dates align with local token/cost report days instead of UTC day boundaries.
 
 ### Pricing Lookup
 
@@ -504,7 +505,19 @@ tokscale logout
 
 ### Cursor IDE Commands
 
-Cursor IDE requires separate authentication via session token (different from the social platform login):
+Cursor IDE support uses Cursor's web API export, cached by Tokscale at `~/.config/tokscale/cursor-cache/usage*.csv`. Tokscale does not parse local Cursor Agent CLI state under `~/.cursor`.
+
+Setup:
+
+1. Open https://www.cursor.com/settings in your browser and sign in.
+2. Copy the `WorkosCursorSessionToken` cookie value:
+   - Network tab: make any request to `cursor.com/api/*`, then copy the value after `WorkosCursorSessionToken=` from the `Cookie` request header.
+   - Application tab: open Cookies -> `https://www.cursor.com`, then copy the `WorkosCursorSessionToken` value.
+3. Run `tokscale cursor login --name work` and paste the token.
+4. Run `tokscale cursor sync` to populate `~/.config/tokscale/cursor-cache/usage.csv`.
+5. Run `tokscale --client cursor` or any report command.
+
+Treat the session token like a password. It is stored locally in `~/.config/tokscale/cursor-credentials.json`.
 
 ```bash
 # Login to Cursor (requires session token from browser)
@@ -536,19 +549,9 @@ tokscale cursor logout --all
 tokscale cursor logout --all --purge-cache
 ```
 
-By default, tokscale **aggregates usage across all saved Cursor accounts** (all `cursor-cache/usage*.csv`).
+By default, Tokscale aggregates usage across all saved Cursor accounts by reading `cursor-cache/usage*.csv`. The active account syncs to `usage.csv`; additional accounts sync to `usage.<account>.csv`.
 
-When you log out, tokscale keeps your cached usage history by moving it to `cursor-cache/archive/` (so it won't be aggregated). Use `--purge-cache` if you want to delete the cached usage instead.
-
-**Credentials storage**: Cursor accounts are stored in `~/.config/tokscale/cursor-credentials.json`. Usage data is cached at `~/.config/tokscale/cursor-cache/` (active account uses `usage.csv`, additional accounts use `usage.<account>.csv`).
-
-**To get your Cursor session token:**
-1. Open https://www.cursor.com/settings in your browser
-2. Open Developer Tools (F12)
-3. **Option A - Network tab**: Make any action on the page, find a request to `cursor.com/api/*`, look in the Request Headers for the `Cookie` header, and copy only the value after `WorkosCursorSessionToken=`
-4. **Option B - Application tab**: Go to Application → Cookies → `https://www.cursor.com`, find the `WorkosCursorSessionToken` cookie, and copy its value (not the cookie name)
-
-> ⚠️ **Security Warning**: Treat your session token like a password. Never share it publicly or commit it to version control. The token grants full access to your Cursor account.
+When you log out, Tokscale moves cached usage to `cursor-cache/archive/` so it is no longer aggregated. Use `--purge-cache` to delete cached usage instead.
 
 ### Antigravity Commands
 
@@ -675,6 +678,10 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
       "codex": [
         "/Users/me/workspace/project-a/.codex/sessions",
         "/Users/me/workspace/project-b/.codex/archived_sessions"
+      ],
+      "hermes": [
+        "/Users/me/.hermes/profiles/director_planning",
+        "/Users/me/.hermes/profiles/research/state.db"
       ]
     }
   }
@@ -694,7 +701,7 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `minutelyTabEnabled` | boolean | `false` | Show the per-minute Minutely tab in the TUI and aggregate per-minute usage during data loading. Default-off because minute-granularity is a niche/diagnostic view for most users and the per-minute bucketing has a non-trivial cost on large datasets. |
 | `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
 
-Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories or imported Gemini/OpenClaw histories. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
+Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories, imported Gemini/OpenClaw histories, or Hermes profile databases. Hermes entries may point at a profile directory containing `state.db` or directly at a `state.db` file. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
 
 Use `defaultClients` to pin a personal default — for example, set it to `["opencode", "claude"]` if those are the only clients you use, and `tokscale` (with no flags) will scope every report to them automatically. Pass `--client` on the command line to override for a single run.
 
@@ -1135,7 +1142,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Hermes Agent | `~/.hermes/` | `%USERPROFILE%\.hermes\` | Configurable via `HERMES_HOME` env var ([source](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md)) |
 | Gemini CLI | `~/.gemini/` | `%USERPROFILE%\.gemini\` | Configurable via `GEMINI_CLI_HOME` env var |
 | Amp | `~/.local/share/amp/` | `%USERPROFILE%\.local\share\amp\` | Uses `xdg-basedir` like OpenCode |
-| Cursor | API sync | API sync | Data fetched via API, cached in `%USERPROFILE%\.config\tokscale\cursor-cache\` |
+| Cursor | API sync | API sync | Data fetched from Cursor API and cached as `usage*.csv`; local `~/.cursor` session data is not parsed |
 | Droid | `~/.factory/` | `%USERPROFILE%\.factory\` | Same path on all platforms |
 | Pi | `~/.pi/` and `~/.omp/` | `%USERPROFILE%\.pi\` and `%USERPROFILE%\.omp\` | Same path on all platforms (supports both Pi and [Oh My Pi](https://github.com/can1357/oh-my-pi)) |
 | Kimi CLI | `~/.kimi/` | `%USERPROFILE%\.kimi\` | Same path on all platforms |
@@ -1270,13 +1277,17 @@ If you keep sessions outside Tokscale's default home-root locations, you can als
         "/Users/me/workspace/project-b/.codex/archived_sessions"
       ],
       "gemini": ["/Users/me/imports/imac/gemini/tmp"],
+      "hermes": [
+        "/Users/me/.hermes/profiles/director_planning",
+        "/Users/me/.hermes/profiles/research/state.db"
+      ],
       "openclaw": ["/Users/me/imports/imac/openclaw/agents"]
     }
   }
 }
 ```
 
-This is useful for project-level `.codex` directories and imported histories. Tokscale still scans its default roots, then merges `scanner.extraScanPaths` and `TOKSCALE_EXTRA_DIRS` on top with canonical-path deduplication. It does not auto-discover your whole workspace.
+This is useful for project-level `.codex` directories, imported histories, and Hermes profile databases outside the default `$HERMES_HOME/state.db` or `~/.hermes/state.db` location. Tokscale still scans its default roots, then merges `scanner.extraScanPaths` and `TOKSCALE_EXTRA_DIRS` on top with canonical-path deduplication. It does not auto-discover your whole workspace.
 
 Each message contains:
 ```json
@@ -1364,9 +1375,9 @@ Session files containing message arrays:
 
 ### Cursor IDE
 
-Location: `~/.config/tokscale/cursor-cache/` (synced via Cursor API)
+Location: `~/.config/tokscale/cursor-cache/usage*.csv` (synced via Cursor API)
 
-Cursor data is fetched from the Cursor API using your session token and cached locally. Run `tokscale cursor login` to authenticate. See [Cursor IDE Commands](#cursor-ide-commands) for setup instructions.
+Cursor data is fetched from the Cursor API using your session token and cached locally. Tokscale reads those cache files for reports; it does not parse local `~/.cursor` session data. See [Cursor IDE Commands](#cursor-ide-commands) for setup.
 
 ### Antigravity
 

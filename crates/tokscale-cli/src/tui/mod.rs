@@ -11,7 +11,7 @@ mod themes;
 mod ui;
 
 pub use app::{App, Tab, TuiConfig};
-pub use cache::{load_cache, save_cached_data, CacheResult};
+pub use cache::{load_cache, save_cached_data, CacheResult, TUI_DEFAULT_GROUP_BY};
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
 
@@ -110,7 +110,7 @@ pub fn run(
     };
 
     // Single file read: load cache and check freshness in one pass.
-    let initial_group_by = tokscale_core::GroupBy::Model;
+    let initial_group_by = TUI_DEFAULT_GROUP_BY;
     let settings = settings::Settings::load();
     let minutely_enabled = settings.minutely_tab_enabled;
     let (cached_data, needs_background_load) = decide_initial_data(load_cache(

@@ -4,6 +4,11 @@ import {
   generateSubmissionHash,
   validateSubmission,
 } from "../../src/lib/validation/submission";
+import {
+  deriveClientBreakdownProvenance,
+  mergeClientBreakdownsWithRegressionGuard,
+  type ClientBreakdownData,
+} from "../../src/lib/db/helpers";
 
 /**
  * Test suite for POST /api/submit - Client-Level Merge
@@ -221,6 +226,27 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(result.valid).toBe(false);
       expect(result.errors.some((error) => error.includes('device.id'))).toBe(true);
     });
+
+    it('accepts per-client submit provenance metadata', () => {
+      const payload = createMockSubmissionData({ clients: ['codex'] });
+      const client = payload.contributions[0].clients[0] as {
+        provenance?: { schemaVersion: number; messageCount: number; modelCount: number };
+      };
+      client.provenance = {
+        schemaVersion: 1,
+        messageCount: 7,
+        modelCount: 1,
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.data?.contributions[0].clients[0].provenance).toEqual({
+        schemaVersion: 1,
+        messageCount: 7,
+        modelCount: 1,
+      });
+    });
   });
 
   describe('First Submission (Create Mode)', () => {
@@ -362,6 +388,27 @@ describe('POST /api/submit - Client-Level Merge', () => {
   });
 
   describe("Submission validation guardrails", () => {
+    it("accepts internally consistent high-volume one-day token totals", () => {
+      // Cap is 10B (MAX_DAILY_TOKENS). Use a value just under to confirm the
+      // cap boundary is respected without triggering a rejection.
+      const payload = createValidationPayload({
+        totalTokens: 8_000_000_000,
+        totalCost: 800,
+        tokenBreakdown: {
+          input: 4_800_000_000,
+          output: 2_000_000_000,
+          cacheRead: 800_000_000,
+          cacheWrite: 300_000_000,
+          reasoning: 100_000_000,
+        },
+      });
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
     it("rejects one-day fabricated token totals above the submission cap", () => {
       const payload = createValidationPayload({
         totalTokens: 1_000_000_000_000,
@@ -378,6 +425,28 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(result.valid).toBe(false);
       expect(result.errors.join("\n")).toContain("Daily token total exceeds");
+      expect(result.errors.join("\n")).toContain("10,000,000,000");
+      expect(result.errors.join("\n")).toContain("Client claude");
+    });
+
+    it("keeps structural validation for high-volume payloads", () => {
+      const payload = createValidationPayload({
+        totalTokens: 20_000_000_000,
+        totalCost: 2_000,
+        tokenBreakdown: {
+          input: 12_000_000_000,
+          output: 5_000_000_000,
+          cacheRead: 2_000_000_000,
+          cacheWrite: 750_000_000,
+          reasoning: 250_000_000,
+        },
+      });
+      payload.contributions[0].clients[0].modelId = "";
+
+      const result = validateSubmission(payload);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors.join("\n")).toContain("modelId");
     });
 
     it("rejects submitted cost that is implausible for the reported tokens", () => {
@@ -416,6 +485,432 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(result.valid).toBe(false);
       expect(result.errors.join("\n")).toContain("Cost submitted without tokens");
+    });
+
+    it("includes client/provider/model/cost/tokens detail in tokenless-cost errors", () => {
+      const payload = createValidationPayload({
+        totalTokens: 0,
+        totalCost: 25,
+        tokenBreakdown: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+        },
+      });
+
+      const result = validateSubmission(payload);
+      const errorBlob = result.errors.join("\n");
+
+      expect(result.valid).toBe(false);
+      // Client-level error must name client, provider, modelId, full cost,
+      // and the full token breakdown so an operator can read the failed row
+      // straight from the error output without re-running the CLI in debug mode.
+      expect(errorBlob).toContain("Client claude/claude-sonnet-4-20250514");
+      expect(errorBlob).toContain("(provider=anthropic)");
+      expect(errorBlob).toContain("Cost submitted without tokens");
+      expect(errorBlob).toContain("cost=$25.0000");
+      expect(errorBlob).toContain("tokens={input=0");
+      expect(errorBlob).toContain("output=0");
+      expect(errorBlob).toContain("reasoning=0");
+
+      // Day-level error must include the date, day total cost, and which
+      // clients on that day were responsible (so multi-client days are still
+      // actionable).
+      expect(errorBlob).toContain("Day 2024-12-01: Cost submitted without tokens");
+      expect(errorBlob).toContain("offending clients:");
+    });
+
+    it("allows cursor legacy premium-tool-call rows that lack token attribution", () => {
+      // Cursor's pre-2025-05 usage exports include `premium-tool-call` rows
+      // that are billed per tool invocation and carry no token counts. They
+      // legitimately have cost > 0 and tokens = 0 and must bypass the
+      // cost-without-tokens sanity check; otherwise any user with historical
+      // Cursor data is permanently locked out of `tokscale submit`.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: 2.05,
+          totalDays: 1,
+          activeDays: 0,
+          averagePerDay: 2.05,
+          maxCostInSingleDay: 2.05,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 0,
+            totalCost: 2.05,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 0, cost: 2.05, messages: 44 },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 2.05,
+                messages: 44,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    });
+
+    it("does not extend the cursor legacy bypass to other cursor models", () => {
+      // Only `premium-tool-call` is grandfathered. Any other cursor model with
+      // cost > 0 and tokens = 0 should still be flagged so legitimate parser
+      // regressions remain visible.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-05-18", end: "2025-05-18" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: 0.04,
+          totalDays: 1,
+          activeDays: 0,
+          averagePerDay: 0.04,
+          maxCostInSingleDay: 0.04,
+          clients: ["cursor" as const],
+          models: ["claude-3.5-sonnet"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 0,
+            totalCost: 0.04,
+            range: { start: "2025-05-18", end: "2025-05-18" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-05-18",
+            totals: { tokens: 0, cost: 0.04, messages: 1 },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "claude-3.5-sonnet",
+                providerId: "anthropic",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 0.04,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+      const errorBlob = result.errors.join("\n");
+
+      expect(result.valid).toBe(false);
+      expect(errorBlob).toContain("Client cursor/claude-3.5-sonnet");
+      expect(errorBlob).toContain("(provider=anthropic)");
+      expect(errorBlob).toContain("Cost submitted without tokens");
+      expect(errorBlob).toContain("cost=$0.0400");
+    });
+
+    it("tolerates floating-point residue when subtracting cursor legacy cost", () => {
+      // Regression for PR #612 review (cubic P2): strict `> 0` float
+      // comparison can falsely reject an all-legacy submission when IEEE
+      // 754 summation leaves a tiny positive remainder.
+      //
+      // Concretely: `0.1 + 0.2 === 0.30000000000000004` while the literal
+      // `0.3` is IEEE `0.299999999999999988…`, so `(0.1+0.2) - 0.3 ≈ 5.5e-17`
+      // — a non-zero positive number even though the user truly has $0.30 of
+      // legacy cost and nothing else. Without an epsilon, the
+      // cost-without-tokens check fires on noise.
+      const totalCostWithFpResidue = 0.1 + 0.2; // 0.30000000000000004
+      const legacyClientCost = 0.3; // 0.299999999999999988…
+      expect(totalCostWithFpResidue - legacyClientCost).toBeGreaterThan(0);
+      expect(totalCostWithFpResidue - legacyClientCost).toBeLessThan(1e-10);
+
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: totalCostWithFpResidue,
+          totalDays: 1,
+          activeDays: 0,
+          averagePerDay: totalCostWithFpResidue,
+          maxCostInSingleDay: totalCostWithFpResidue,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 0,
+            totalCost: totalCostWithFpResidue,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: {
+              tokens: 0,
+              cost: totalCostWithFpResidue,
+              messages: 6,
+            },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: legacyClientCost,
+                messages: 6,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    });
+
+    it("excludes cursor legacy cost from the cost-per-million sanity cap", () => {
+      // Regression for PR #612 review (codex P1): when a legacy
+      // `premium-tool-call` row shares a day with a small amount of
+      // token-bearing usage, the day-level branch falls through to the
+      // cost-per-million check because `day.totals.tokens > 0`. If the full
+      // day cost (including the legacy charge) is used as the numerator,
+      // tiny token counts trip the $10k/M ceiling even though the legacy
+      // row is meant to be skipped. The legacy cost must be subtracted
+      // before computing cost-per-million as well.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 100,
+          totalCost: 2.06,
+          totalDays: 1,
+          activeDays: 1,
+          averagePerDay: 2.06,
+          maxCostInSingleDay: 2.06,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call", "claude-3.5-sonnet"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 100,
+            totalCost: 2.06,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 100, cost: 2.06, messages: 45 },
+            intensity: 1 as const,
+            tokenBreakdown: {
+              input: 100,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 2.05,
+                messages: 44,
+              },
+              {
+                client: "cursor" as const,
+                modelId: "claude-3.5-sonnet",
+                providerId: "anthropic",
+                tokens: {
+                  input: 100,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 0.01,
+                messages: 1,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      // Without the legacy-cost subtraction the day-level cost-per-million
+      // would be ($2.06 / 100 tokens) * 1e6 = $20,600/M, well above the
+      // $10,000/M ceiling. After subtracting the legacy $2.05, the
+      // checkable cost is $0.01, which is below the $1 floor in
+      // pushCostPerMillionError and the check is skipped entirely.
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    });
+
+    it("allows cursor legacy rows mixed with normal token-bearing rows", () => {
+      // Same day, two clients: a legacy premium-tool-call entry (cost only)
+      // and a regular cursor call that has both tokens and cost. The day
+      // total has nonzero tokens, so the day-level check does not fire; the
+      // per-client legacy carve-out keeps the premium-tool-call row from
+      // tripping the client-level check.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 1500,
+          totalCost: 3.55,
+          totalDays: 1,
+          activeDays: 1,
+          averagePerDay: 3.55,
+          maxCostInSingleDay: 3.55,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call", "claude-3.5-sonnet"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 1500,
+            totalCost: 3.55,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 1500, cost: 3.55, messages: 50 },
+            intensity: 2 as const,
+            tokenBreakdown: {
+              input: 1000,
+              output: 500,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 2.05,
+                messages: 44,
+              },
+              {
+                client: "cursor" as const,
+                modelId: "claude-3.5-sonnet",
+                providerId: "anthropic",
+                tokens: {
+                  input: 1000,
+                  output: 500,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 1.5,
+                messages: 6,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
     });
 
     it("rejects day cost totals that do not match client costs", () => {
@@ -472,6 +967,128 @@ describe('POST /api/submit - Client-Level Merge', () => {
   });
 
   describe('Client-Level Merge Logic', () => {
+    const breakdown = (
+      tokens: number,
+      messages: number,
+      modelId = 'gpt-5.5'
+    ): ClientBreakdownData => ({
+      tokens,
+      cost: tokens / 1000,
+      input: tokens,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      messages,
+      models: {
+        [modelId]: {
+          tokens,
+          cost: tokens / 1000,
+          input: tokens,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 0,
+          messages,
+        },
+      },
+      provenance: {
+        schemaVersion: 1,
+        messageCount: messages,
+        modelCount: 1,
+      },
+    });
+
+    it('preserves lower same-client resubmits when coverage also drops', () => {
+      const existing = { codex: breakdown(5_000, 30) };
+      const incoming = { codex: breakdown(3_600, 20) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        incoming,
+        new Set(['codex'])
+      );
+
+      expect(result.merged.codex).toEqual(existing.codex);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain('codex');
+      expect(result.warnings[0]).toContain('5,000');
+      expect(result.warnings[0]).toContain('3,600');
+    });
+
+    it('preserves existing on lower token resubmit even when coverage does not regress (A2)', () => {
+      // A token decrease alone signals a parser regression regardless of whether
+      // coverage metrics are equal or higher. The old AND-gate (fewer tokens AND
+      // lower coverage) let equal-coverage regressions slip through — fixed in A2.
+      const existing = { codex: breakdown(5_000, 30) };
+      const incoming = { codex: breakdown(4_800, 32) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        incoming,
+        new Set(['codex'])
+      );
+
+      expect(result.merged.codex.tokens).toBe(5_000);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain('codex');
+    });
+
+    it('preserves a submitted client that disappears from a same-device resubmit', () => {
+      const existing = {
+        codex: breakdown(5_000, 30),
+        claude: breakdown(2_000, 10, 'claude-sonnet-4'),
+      };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        {},
+        new Set(['codex'])
+      );
+
+      expect(result.merged.codex).toEqual(existing.codex);
+      expect(result.merged.claude).toEqual(existing.claude);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain('disappeared');
+    });
+
+    it('adds new clients without warning', () => {
+      const existing = { claude: breakdown(2_000, 10, 'claude-sonnet-4') };
+      const incoming = { codex: breakdown(3_000, 15) };
+
+      const result = mergeClientBreakdownsWithRegressionGuard(
+        existing,
+        incoming,
+        new Set(['codex'])
+      );
+
+      expect(result.merged.claude).toEqual(existing.claude);
+      expect(result.merged.codex).toEqual(incoming.codex);
+      expect(result.warnings).toEqual([]);
+    });
+
+    it('derives provenance from aggregate messages and model keys', () => {
+      const aggregate = {
+        ...breakdown(5_000, 30),
+        messages: 35,
+        models: {
+          'gpt-5.5': breakdown(3_000, 20).models['gpt-5.5'],
+          'gpt-5.5-mini': breakdown(2_000, 15, 'gpt-5.5-mini').models['gpt-5.5-mini'],
+        },
+        provenance: {
+          schemaVersion: 1,
+          messageCount: 30,
+          modelCount: 1,
+        },
+      };
+
+      expect(deriveClientBreakdownProvenance(aggregate)).toEqual({
+        schemaVersion: 1,
+        messageCount: 35,
+        modelCount: 2,
+      });
+    });
+
     it('should preserve clients NOT in submission but delete clients with no day activity', () => {
       const existingClientBreakdown = {
         claude: { tokens: 1000, cost: 10, modelId: 'claude-sonnet-4', input: 600, output: 400, cacheRead: 0, cacheWrite: 0, messages: 5 },

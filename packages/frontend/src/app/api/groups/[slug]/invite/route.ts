@@ -4,7 +4,7 @@ import { revalidateGroupCaches } from "@/lib/groups/cache";
 import { createGroupInvite, GroupInviteError } from "@/lib/groups/invites";
 import { getGroupMembership } from "@/lib/groups/permissions";
 import { getGroupBySlug } from "@/lib/groups/queries";
-import { isGroupRole } from "@/lib/groups/utils";
+import { canManageGroupRole, isGroupRole } from "@/lib/groups/utils";
 import type { GroupRole } from "@/lib/db";
 
 export async function POST(
@@ -44,10 +44,18 @@ export async function POST(
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
     const role = isGroupRole(body.role) ? body.role : "member";
     const invitedUsername = typeof body.invitedUsername === "string"
       ? body.invitedUsername
       : null;
+
+    if (!canManageGroupRole(membership.role, role)) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
 
     const invite = await createGroupInvite({
       groupId: group.id,
@@ -67,7 +75,7 @@ export async function POST(
         invite,
         joinUrl: `/groups/join/${invite.token}`,
       },
-      { status: 201 }
+      { status: 201, headers: { "Cache-Control": "no-store, private" } }
     );
   } catch (error) {
     if (error instanceof GroupInviteError) {
