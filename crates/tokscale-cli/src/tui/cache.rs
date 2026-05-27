@@ -21,7 +21,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 10;
+const CACHE_SCHEMA_VERSION: u32 = 11;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
@@ -957,7 +957,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 10,
+  "schemaVersion": 11,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "includeSynthetic": false,
@@ -1131,7 +1131,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 10,
+  "schemaVersion": 11,
   "timestamp": 9999999999999,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
