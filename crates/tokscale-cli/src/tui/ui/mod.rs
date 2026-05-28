@@ -7,6 +7,7 @@ mod header;
 mod hourly;
 mod hourly_profile;
 mod minutely;
+mod model_usage_layout;
 mod models;
 mod overview;
 pub mod spinner;

@@ -3,13 +3,17 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
+use super::model_usage_layout::{
+    display_width, model_usage_table_layout, ModelUsageColumn as ModelsColumn,
+    ModelUsageTableDensity as ModelsTableDensity, ModelUsageTableLayout as ModelsTableLayout,
+    DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH,
+};
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
-    get_provider_display_name, truncate_model_display_name_to, MODEL_DISPLAY_MAX_WIDTH,
+    get_provider_display_name, truncate_model_display_name_to,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
-use unicode_width::UnicodeWidthStr;
 
 fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
     model
@@ -26,119 +30,6 @@ fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) 
     }
 }
 
-const TABLE_COLUMN_SPACING: u16 = 1;
-
-const MODEL_MIN_WIDTH: u16 = 20;
-const MODEL_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
-const PROVIDER_MAX_WIDTH: u16 = 56;
-const SOURCE_MAX_WIDTH: u16 = 40;
-
-const DETAIL_PROVIDER_WIDTH: u16 = 8;
-const DETAIL_SOURCE_WIDTH: u16 = 12;
-const DETAIL_NUMERIC_WIDTH: u16 = 8;
-const DETAIL_TOTAL_WIDTH: u16 = 9;
-const DETAIL_PERFORMANCE_WIDTH: u16 = 10;
-const DETAIL_COST_WIDTH: u16 = 9;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModelsTableDensity {
-    VeryCompact,
-    Core,
-    Detail,
-    Full,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModelsColumn {
-    Model,
-    Source,
-    Provider,
-    Input,
-    Output,
-    CacheRate,
-    CacheRead,
-    CacheWrite,
-    Total,
-    Performance,
-    Cost,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ModelsTableLayout {
-    columns: Vec<ModelsColumn>,
-    widths: Vec<Constraint>,
-    model_width: usize,
-    density: ModelsTableDensity,
-}
-
-fn display_width(s: &str) -> u16 {
-    s.width().min(usize::from(u16::MAX)) as u16
-}
-
-fn clamped_content_width(content_width: u16, min: u16, max: u16) -> u16 {
-    content_width.clamp(min, max)
-}
-
-fn spaced_width(widths: &[u16]) -> u16 {
-    let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
-    widths.iter().copied().sum::<u16>().saturating_add(spacing)
-}
-
-fn column_width(
-    column: ModelsColumn,
-    model_width: u16,
-    provider_width: u16,
-    source_width: u16,
-) -> u16 {
-    match column {
-        ModelsColumn::Model => model_width,
-        ModelsColumn::Total => DETAIL_TOTAL_WIDTH,
-        ModelsColumn::Performance => DETAIL_PERFORMANCE_WIDTH,
-        ModelsColumn::Cost => DETAIL_COST_WIDTH,
-        ModelsColumn::Source => source_width,
-        ModelsColumn::Provider => provider_width,
-        ModelsColumn::Input | ModelsColumn::Output => DETAIL_NUMERIC_WIDTH,
-        ModelsColumn::CacheRate => DETAIL_NUMERIC_WIDTH,
-        ModelsColumn::CacheRead | ModelsColumn::CacheWrite => DETAIL_NUMERIC_WIDTH,
-    }
-}
-
-fn layout_width(
-    columns: &[ModelsColumn],
-    model_width: u16,
-    provider_width: u16,
-    source_width: u16,
-) -> u16 {
-    let widths: Vec<u16> = columns
-        .iter()
-        .map(|column| column_width(*column, model_width, provider_width, source_width))
-        .collect();
-
-    spaced_width(&widths)
-}
-
-fn density_for_columns(columns: &[ModelsColumn]) -> ModelsTableDensity {
-    if columns.contains(&ModelsColumn::CacheWrite) {
-        ModelsTableDensity::Full
-    } else if columns.iter().any(|column| {
-        matches!(
-            column,
-            ModelsColumn::Source
-                | ModelsColumn::Provider
-                | ModelsColumn::Input
-                | ModelsColumn::Output
-                | ModelsColumn::CacheRate
-                | ModelsColumn::CacheRead
-        )
-    }) {
-        ModelsTableDensity::Detail
-    } else if columns.len() == 3 {
-        ModelsTableDensity::Core
-    } else {
-        ModelsTableDensity::VeryCompact
-    }
-}
-
 fn models_table_layout(
     table_width: u16,
     is_very_narrow: bool,
@@ -146,103 +37,23 @@ fn models_table_layout(
     provider_content_width: u16,
     source_content_width: u16,
 ) -> ModelsTableLayout {
-    let model_width = clamped_content_width(model_content_width, MODEL_MIN_WIDTH, MODEL_MAX_WIDTH);
-    let mut provider_width = DETAIL_PROVIDER_WIDTH;
-    let mut source_width = DETAIL_SOURCE_WIDTH;
-    let required_columns = vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost];
-    let optional_columns = [
-        ModelsColumn::Source,
-        ModelsColumn::Provider,
-        ModelsColumn::Input,
-        ModelsColumn::Output,
-        ModelsColumn::CacheRate,
-        ModelsColumn::CacheRead,
-        ModelsColumn::CacheWrite,
-        ModelsColumn::Performance,
-    ];
-    let mut columns = required_columns;
-
-    if is_very_narrow {
-        let widths = columns
-            .iter()
-            .map(|column| {
-                Constraint::Length(column_width(
-                    *column,
-                    model_width,
-                    provider_width,
-                    source_width,
-                ))
-            })
-            .collect();
-
-        return ModelsTableLayout {
-            columns,
-            widths,
-            model_width: model_width as usize,
-            density: ModelsTableDensity::VeryCompact,
-        };
-    }
-
-    for column in optional_columns {
-        let mut candidate = columns.clone();
-        let insert_at = if column == ModelsColumn::Performance {
-            candidate
-                .iter()
-                .position(|existing| *existing == ModelsColumn::Cost)
-                .unwrap_or(candidate.len())
-        } else {
-            candidate
-                .iter()
-                .position(|existing| matches!(existing, ModelsColumn::Total | ModelsColumn::Cost))
-                .unwrap_or(candidate.len())
-        };
-        candidate.insert(insert_at, column);
-
-        if layout_width(&candidate, model_width, provider_width, source_width) <= table_width {
-            columns = candidate;
-        }
-    }
-
-    let mut used_width = layout_width(&columns, model_width, provider_width, source_width);
-    if columns.contains(&ModelsColumn::Source) {
-        let ideal =
-            clamped_content_width(source_content_width, DETAIL_SOURCE_WIDTH, SOURCE_MAX_WIDTH);
-        let grow_by = table_width
-            .saturating_sub(used_width)
-            .min(ideal.saturating_sub(source_width));
-        source_width += grow_by;
-        used_width += grow_by;
-    }
-    if columns.contains(&ModelsColumn::Provider) {
-        let ideal = clamped_content_width(
-            provider_content_width,
-            DETAIL_PROVIDER_WIDTH,
-            PROVIDER_MAX_WIDTH,
-        );
-        let grow_by = table_width
-            .saturating_sub(used_width)
-            .min(ideal.saturating_sub(provider_width));
-        provider_width += grow_by;
-    }
-
-    let widths = columns
-        .iter()
-        .map(|column| {
-            Constraint::Length(column_width(
-                *column,
-                model_width,
-                provider_width,
-                source_width,
-            ))
-        })
-        .collect();
-
-    ModelsTableLayout {
-        density: density_for_columns(&columns),
-        columns,
-        widths,
-        model_width: model_width as usize,
-    }
+    model_usage_table_layout(
+        table_width,
+        is_very_narrow,
+        model_content_width,
+        provider_content_width,
+        source_content_width,
+        &[
+            ModelsColumn::Source,
+            ModelsColumn::Provider,
+            ModelsColumn::Input,
+            ModelsColumn::Output,
+            ModelsColumn::CacheRate,
+            ModelsColumn::CacheRead,
+            ModelsColumn::CacheWrite,
+            ModelsColumn::Performance,
+        ],
+    )
 }
 
 fn model_column_header(
@@ -252,6 +63,7 @@ fn model_column_header(
 ) -> &'static str {
     match column {
         ModelsColumn::Model => "Model",
+        ModelsColumn::Messages => "Msgs",
         ModelsColumn::Provider => "Provider",
         ModelsColumn::Source => "Source",
         ModelsColumn::Input => "Input",
@@ -401,6 +213,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ModelsColumn::Provider => {
                         Cell::from(get_provider_display_name(&model.provider))
                     }
+                    // models_table_layout never includes Messages; panic if renderer and layout diverge.
+                    ModelsColumn::Messages => unreachable!("models rows do not have message data"),
                     ModelsColumn::Source => Cell::from(get_client_display_name(&model.client))
                         .style(Style::default().fg(theme_muted)),
                     ModelsColumn::Input => Cell::from(format_tokens(model.tokens.input))
@@ -472,6 +286,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::model_usage_layout::{MODEL_MAX_WIDTH, PROVIDER_MAX_WIDTH, SOURCE_MAX_WIDTH};
     use super::*;
 
     fn length_at(widths: &[Constraint], index: usize) -> u16 {
