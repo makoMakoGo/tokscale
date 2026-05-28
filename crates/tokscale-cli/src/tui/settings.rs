@@ -89,6 +89,9 @@ pub struct Settings {
     /// tab and enable its aggregation in subsequent loads.
     #[serde(default)]
     pub minutely_tab_enabled: bool,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub save_path_override: Option<PathBuf>,
 }
 
 /// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
@@ -135,6 +138,8 @@ impl Default for Settings {
             light: LightSettings::default(),
             usage_tab_enabled: false,
             minutely_tab_enabled: false,
+            #[cfg(test)]
+            save_path_override: None,
         }
     }
 }
@@ -261,7 +266,20 @@ impl Settings {
     }
 
     pub fn save(&self) -> Result<()> {
+        #[cfg(test)]
+        let path = self.save_path_override.clone().map_or_else(
+            Self::config_path,
+            |path| -> Result<PathBuf> {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                Ok(path)
+            },
+        )?;
+
+        #[cfg(not(test))]
         let path = Self::config_path()?;
+
         let content = serde_json::to_string_pretty(self)?;
 
         // Atomic write: write to temp file, sync, then rename
@@ -290,6 +308,12 @@ impl Settings {
         }
 
         write_result
+    }
+
+    #[cfg(test)]
+    pub fn with_save_path_override(mut self, path: PathBuf) -> Self {
+        self.save_path_override = Some(path);
+        self
     }
 
     pub fn theme_name(&self) -> ThemeName {
@@ -578,6 +602,22 @@ mod tests {
         assert_eq!(
             round_trip["scanner"]["extraScanPaths"]["gemini"][0],
             serde_json::json!("/tmp/imports/gemini/tmp")
+        );
+    }
+
+    #[test]
+    fn settings_save_uses_test_path_override() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("isolated").join("settings.json");
+
+        Settings::default()
+            .with_save_path_override(path.clone())
+            .save()
+            .unwrap();
+
+        assert!(
+            path.exists(),
+            "unit tests must not write to the real tokscale settings path"
         );
     }
 

@@ -1849,6 +1849,14 @@ mod tests {
 
     // ── Helper ──────────────────────────────────────────────────────
 
+    fn test_settings() -> Settings {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_path_buf();
+        drop(file);
+
+        Settings::default().with_save_path_override(path)
+    }
+
     fn make_app() -> App {
         let config = TuiConfig {
             theme: "blue".to_string(),
@@ -1860,11 +1868,11 @@ mod tests {
             year: None,
             initial_tab: None,
         };
-        App::new_with_cached_data_and_settings(config, None, Settings::default()).unwrap()
+        App::new_with_cached_data_and_settings(config, None, test_settings()).unwrap()
     }
 
     fn make_app_with_usage() -> App {
-        let mut settings = Settings::default();
+        let mut settings = test_settings();
         settings.usage_tab_enabled = true;
         let config = TuiConfig {
             theme: "blue".to_string(),
@@ -2881,9 +2889,14 @@ mod tests {
     fn test_handle_key_theme_cycle() {
         let mut app = make_app();
         let initial_theme = app.theme.name;
+        let settings_path = app.settings.save_path_override.clone().unwrap();
 
         app.handle_key_event(key(KeyCode::Char('p')));
         assert_ne!(app.theme.name, initial_theme);
+        assert!(
+            settings_path.exists(),
+            "theme save must use the isolated test settings file"
+        );
 
         for _ in 0..8 {
             app.handle_key_event(key(KeyCode::Char('p')));
