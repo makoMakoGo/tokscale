@@ -50,6 +50,7 @@ pub struct PiUsage {
     pub output: Option<i64>,
     pub cache_read: Option<i64>,
     pub cache_write: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
     #[allow(dead_code)]
     pub total_tokens: Option<i64>,
 }
@@ -150,7 +151,7 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
                 output: usage.output.unwrap_or(0).max(0),
                 cache_read: usage.cache_read.unwrap_or(0).max(0),
                 cache_write: usage.cache_write.unwrap_or(0).max(0),
-                reasoning: 0,
+                reasoning: usage.reasoning_tokens.unwrap_or(0).max(0),
             },
             0.0,
         );
@@ -196,6 +197,26 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].workspace_key, Some("/tmp".to_string()));
         assert_eq!(messages[0].workspace_label, Some("tmp".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pi_jsonl_preserves_reasoning_tokens() {
+        // given
+        let content = r#"{"type":"session","id":"pi_ses_reasoning","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":190}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_pi_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.cache_read, 10);
+        assert_eq!(messages[0].tokens.cache_write, 5);
+        assert_eq!(messages[0].tokens.reasoning, 25);
+        assert_eq!(messages[0].tokens.total(), 190);
     }
 
     #[test]
