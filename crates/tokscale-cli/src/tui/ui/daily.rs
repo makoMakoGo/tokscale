@@ -768,6 +768,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyDetailColumn::Cost => {
                         Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green))
                     }
+                    // daily_detail_table_layout never includes Performance; panic if the layout drifts.
                     DailyDetailColumn::Performance => {
                         unreachable!("daily detail rows have no timing data")
                     }

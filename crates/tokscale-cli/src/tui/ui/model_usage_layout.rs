@@ -58,6 +58,15 @@ fn clamped_content_width(content_width: u16, min: u16, max: u16) -> u16 {
     content_width.clamp(min, max)
 }
 
+fn core_model_width(table_width: u16, content_width: u16) -> u16 {
+    let desired = clamped_content_width(content_width, MODEL_MIN_WIDTH, MODEL_MAX_WIDTH);
+    let fixed_core_width = DETAIL_TOTAL_WIDTH
+        .saturating_add(DETAIL_COST_WIDTH)
+        .saturating_add(TABLE_COLUMN_SPACING.saturating_mul(2));
+
+    desired.min(table_width.saturating_sub(fixed_core_width))
+}
+
 fn spaced_width(widths: &[u16]) -> u16 {
     let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
     widths.iter().copied().sum::<u16>().saturating_add(spacing)
@@ -129,7 +138,7 @@ pub(crate) fn model_usage_table_layout(
     source_content_width: u16,
     optional_columns: &[ModelUsageColumn],
 ) -> ModelUsageTableLayout {
-    let model_width = clamped_content_width(model_content_width, MODEL_MIN_WIDTH, MODEL_MAX_WIDTH);
+    let model_width = core_model_width(table_width, model_content_width);
     let mut provider_width = DETAIL_PROVIDER_WIDTH;
     let mut source_width = DETAIL_SOURCE_WIDTH;
     let required_columns = vec![
@@ -221,5 +230,63 @@ pub(crate) fn model_usage_table_layout(
         columns,
         widths,
         model_width: model_width as usize,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn width_at(widths: &[Constraint], index: usize) -> u16 {
+        match widths[index] {
+            Constraint::Length(width) => width,
+            other => panic!("expected Length at index {index}, got {other:?}"),
+        }
+    }
+
+    fn table_width(layout: &ModelUsageTableLayout) -> u16 {
+        let widths: Vec<u16> = (0..layout.widths.len())
+            .map(|index| width_at(&layout.widths, index))
+            .collect();
+        spaced_width(&widths)
+    }
+
+    #[test]
+    fn very_narrow_layout_clamps_model_column_to_core_width() {
+        let layout = model_usage_table_layout(35, true, 80, 56, 40, &[]);
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelUsageColumn::Model,
+                ModelUsageColumn::Total,
+                ModelUsageColumn::Cost,
+            ]
+        );
+        assert_eq!(layout.model_width, 15);
+        assert_eq!(table_width(&layout), 35);
+    }
+
+    #[test]
+    fn core_layout_drops_optional_columns_before_overflowing_required_columns() {
+        let layout = model_usage_table_layout(
+            35,
+            false,
+            80,
+            56,
+            40,
+            &[ModelUsageColumn::Source, ModelUsageColumn::Provider],
+        );
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelUsageColumn::Model,
+                ModelUsageColumn::Total,
+                ModelUsageColumn::Cost,
+            ]
+        );
+        assert_eq!(layout.model_width, 15);
+        assert_eq!(table_width(&layout), 35);
     }
 }

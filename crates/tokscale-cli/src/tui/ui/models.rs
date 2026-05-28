@@ -213,6 +213,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ModelsColumn::Provider => {
                         Cell::from(get_provider_display_name(&model.provider))
                     }
+                    // models_table_layout never includes Messages; panic if renderer and layout diverge.
                     ModelsColumn::Messages => unreachable!("models rows do not have message data"),
                     ModelsColumn::Source => Cell::from(get_client_display_name(&model.client))
                         .style(Style::default().fg(theme_muted)),
