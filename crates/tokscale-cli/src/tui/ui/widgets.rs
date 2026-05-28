@@ -1,5 +1,6 @@
 use ratatui::prelude::*;
 use tokscale_core::{normalize_provider_for_grouping, ClientId};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
@@ -70,6 +71,62 @@ pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
     } else {
         format!("{:.0}ms", value)
     }
+}
+
+pub(crate) const MODEL_DISPLAY_MAX_WIDTH: usize = 29;
+
+fn char_display_width(ch: char) -> usize {
+    ch.width().unwrap_or(0)
+}
+
+pub(crate) fn truncate_display_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_width = ellipsis.width();
+    if max_width <= ellipsis_width {
+        return s
+            .chars()
+            .scan(0usize, |width, ch| {
+                let next_width = *width + char_display_width(ch);
+                if next_width > max_width {
+                    None
+                } else {
+                    *width = next_width;
+                    Some(ch)
+                }
+            })
+            .collect();
+    }
+
+    let head_width = max_width - ellipsis_width;
+    let head: String = s
+        .chars()
+        .scan(0usize, |width, ch| {
+            let next_width = *width + char_display_width(ch);
+            if next_width > head_width {
+                None
+            } else {
+                *width = next_width;
+                Some(ch)
+            }
+        })
+        .collect();
+    format!("{}{}", head, ellipsis)
+}
+
+pub(crate) fn truncate_model_display_name(model: &str) -> String {
+    truncate_display_width(model, MODEL_DISPLAY_MAX_WIDTH)
+}
+
+pub(crate) fn truncate_model_display_name_to(model: &str, max_width: usize) -> String {
+    truncate_display_width(model, max_width)
 }
 
 pub fn get_model_color(model: &str) -> Color {

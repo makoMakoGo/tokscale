@@ -53,7 +53,9 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 });
 
 pub fn resolve_alias(model_id: &str) -> Option<&'static str> {
-    MODEL_ALIASES.get(model_id.to_lowercase().as_str()).copied()
+    let lower = model_id.to_lowercase();
+    crate::normalize_longcat_model_for_grouping(&lower)
+        .or_else(|| MODEL_ALIASES.get(lower.as_str()).copied())
 }
 
 #[cfg(test)]
@@ -100,5 +102,13 @@ mod tests {
         assert_eq!(resolve_alias("k2-p6"), Some("kimi-k2.6"));
         assert_eq!(resolve_alias("kimi-for-coding/k2p5"), Some("kimi-k2.5"));
         assert_eq!(resolve_alias("kimi-for-coding/k2p6"), Some("kimi-k2.6"));
+    }
+
+    #[test]
+    fn resolves_longcat_quant_variant() {
+        assert_eq!(
+            resolve_alias("LongCat-Flash-3B-All-Quant-0203-Eagle3"),
+            Some("longcat-flash-3b")
+        );
     }
 }

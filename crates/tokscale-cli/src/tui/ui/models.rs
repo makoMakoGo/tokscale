@@ -5,11 +5,11 @@ use ratatui::widgets::{
 
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
-    get_provider_display_name,
+    get_provider_display_name, truncate_model_display_name_to, MODEL_DISPLAY_MAX_WIDTH,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
     model
@@ -29,7 +29,7 @@ fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) 
 const TABLE_COLUMN_SPACING: u16 = 1;
 
 const MODEL_MIN_WIDTH: u16 = 20;
-const MODEL_MAX_WIDTH: u16 = 40;
+const MODEL_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
 const PROVIDER_MAX_WIDTH: u16 = 56;
 const SOURCE_MAX_WIDTH: u16 = 40;
 
@@ -73,10 +73,6 @@ struct ModelsTableLayout {
 
 fn display_width(s: &str) -> u16 {
     s.width().min(usize::from(u16::MAX)) as u16
-}
-
-fn char_display_width(ch: char) -> usize {
-    ch.width().unwrap_or(0)
 }
 
 fn clamped_content_width(content_width: u16, min: u16, max: u16) -> u16 {
@@ -393,13 +389,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let display_name = model_display_name(model, &group_by);
             let cell_for_column = |column: ModelsColumn| -> Cell {
                 match column {
-                    ModelsColumn::Model => {
-                        Cell::from(truncate(&display_name, table_layout.model_width)).style(
-                            Style::default()
-                                .fg(model_color)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                    }
+                    ModelsColumn::Model => Cell::from(truncate_model_display_name_to(
+                        &display_name,
+                        table_layout.model_width,
+                    ))
+                    .style(
+                        Style::default()
+                            .fg(model_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     ModelsColumn::Provider => {
                         Cell::from(get_provider_display_name(&model.provider))
                     }
@@ -472,48 +470,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn truncate(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-
-    if s.width() <= max_width {
-        return s.to_string();
-    }
-
-    let ellipsis = "...";
-    let ellipsis_width = ellipsis.width();
-    if max_width <= ellipsis_width {
-        return s
-            .chars()
-            .scan(0usize, |width, ch| {
-                let next_width = *width + char_display_width(ch);
-                if next_width > max_width {
-                    None
-                } else {
-                    *width = next_width;
-                    Some(ch)
-                }
-            })
-            .collect();
-    }
-
-    let head_width = max_width - ellipsis_width;
-    let head: String = s
-        .chars()
-        .scan(0usize, |width, ch| {
-            let next_width = *width + char_display_width(ch);
-            if next_width > head_width {
-                None
-            } else {
-                *width = next_width;
-                Some(ch)
-            }
-        })
-        .collect();
-    format!("{}{}", head, ellipsis)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +526,7 @@ mod tests {
             vec![
                 ModelsColumn::Model,
                 ModelsColumn::Source,
+                ModelsColumn::Provider,
                 ModelsColumn::Total,
                 ModelsColumn::Cost,
             ]
@@ -635,8 +592,8 @@ mod tests {
 
     #[test]
     fn truncate_uses_terminal_columns_for_unicode() {
-        assert_eq!(truncate("模型abc", 5), "模...");
-        assert_eq!(truncate("模型abc", 7), "模型abc");
+        assert_eq!(truncate_model_display_name_to("模型abc", 5), "模...");
+        assert_eq!(truncate_model_display_name_to("模型abc", 7), "模型abc");
     }
 
     #[test]

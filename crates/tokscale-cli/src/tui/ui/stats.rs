@@ -3,7 +3,10 @@ use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use super::widgets::{format_cost, format_tokens, get_client_color, get_client_display_name};
+use super::widgets::{
+    format_cost, format_tokens, get_client_color, get_client_display_name,
+    truncate_model_display_name, truncate_model_display_name_to,
+};
 use crate::tui::app::{App, ClickAction};
 
 const CELL_WIDTH: u16 = 2;
@@ -286,7 +289,11 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(row1_label, Style::default().fg(app.theme.muted)),
         Span::raw(" "),
         Span::styled(
-            truncate_model_name(favorite_model_name, if is_narrow { 15 } else { 30 }),
+            if is_narrow {
+                truncate_model_display_name_to(favorite_model_name, 15)
+            } else {
+                truncate_model_display_name(favorite_model_name)
+            },
             Style::default().fg(model_color),
         ),
     ]);
@@ -552,7 +559,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                         Span::raw("  "),
                         Span::styled("●", Style::default().fg(model_color)),
                         Span::styled(
-                            format!(" {}", truncate_model_name(&model_info.display_name, 25)),
+                            format!(" {}", truncate_model_display_name(&model_info.display_name)),
                             Style::default().fg(Color::White),
                         ),
                     ]));
@@ -653,20 +660,5 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             }),
             &mut scrollbar_state,
         );
-    }
-}
-
-fn truncate_model_name(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars == 1 {
-        "…".to_string()
-    } else {
-        let head: String = s.chars().take(max_chars - 1).collect();
-        format!("{}…", head)
     }
 }

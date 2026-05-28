@@ -125,6 +125,10 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
         return normalized.into();
     }
 
+    if let Some(normalized) = normalize_longcat_model_for_grouping(name) {
+        return normalized.into();
+    }
+
     if let Some(normalized) = normalize_gpt_model_for_grouping(name) {
         return normalized;
     }
@@ -220,6 +224,16 @@ fn normalize_kimi_coding_plan_alias_for_grouping(name: &str) -> Option<&'static 
         "k2p6" | "k2-p6" => Some("kimi-k2.6"),
         _ => None,
     }
+}
+
+pub(crate) fn normalize_longcat_model_for_grouping(name: &str) -> Option<&'static str> {
+    if name == "longcat-flash-3b" {
+        return Some("longcat-flash-3b");
+    }
+
+    name.strip_prefix("longcat-flash-3b-all-quant-")
+        .filter(|suffix| !suffix.is_empty())
+        .map(|_| "longcat-flash-3b")
 }
 
 fn normalize_gpt_model_for_grouping(name: &str) -> Option<String> {
@@ -3059,6 +3073,14 @@ mod tests {
             normalize_model_for_grouping("gemini-2.5-pro"),
             "gemini-2.5-pro"
         );
+        assert_eq!(
+            normalize_model_for_grouping("longcat-flash-3b-all-quant-0203-eagle3"),
+            "longcat-flash-3b"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("LongCat-Flash-3B-All-Quant-0203-Eagle3"),
+            "longcat-flash-3b"
+        );
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-high"),
@@ -5343,6 +5365,40 @@ mod tests {
             "codex",
             "gpt-4o",
             "provider",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.02);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_resolves_longcat_quant_variant() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "longcat-flash-3b".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut msg = UnifiedMessage::new(
+            "claudecode",
+            "longcat-flash-3b-all-quant-0203-eagle3",
+            "meituan",
             "session-1",
             1_733_011_200_000,
             TokenBreakdown {

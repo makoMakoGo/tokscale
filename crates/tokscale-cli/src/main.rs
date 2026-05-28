@@ -7,7 +7,9 @@ mod paths;
 mod trae;
 mod tui;
 
-use crate::tui::{client_ui, get_client_display_name, get_provider_display_name};
+use crate::tui::{
+    client_ui, get_client_display_name, get_provider_display_name, truncate_model_display_name,
+};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, IsTerminal, Write};
@@ -1783,7 +1785,7 @@ fn run_models_report(
                             Cell::new(display_clients),
                             Cell::new(get_provider_display_name(&entry.provider))
                                 .add_attribute(Attribute::Dim),
-                            Cell::new(&entry.model),
+                            Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
@@ -1843,7 +1845,7 @@ fn run_models_report(
                             Cell::new(get_client_display_name(&entry.client)),
                             Cell::new(get_provider_display_name(&entry.provider))
                                 .add_attribute(Attribute::Dim),
-                            Cell::new(&entry.model),
+                            Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
@@ -1911,7 +1913,7 @@ fn run_models_report(
                         }
                         row.extend([
                             Cell::new(session_label),
-                            Cell::new(&entry.model),
+                            Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(total_tokens))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
@@ -1963,7 +1965,7 @@ fn run_models_report(
                     for entry in &report.entries {
                         table.add_row(vec![
                             Cell::new(workspace_name(entry.workspace_label.as_deref())),
-                            Cell::new(&entry.model),
+                            Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
@@ -2012,7 +2014,7 @@ fn run_models_report(
                             Cell::new(display_clients),
                             Cell::new(get_provider_display_name(&entry.provider))
                                 .add_attribute(Attribute::Dim),
-                            Cell::new(&entry.model),
+                            Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
@@ -2100,7 +2102,7 @@ fn run_models_report(
                         row.extend([
                             Cell::new(session_label),
                             Cell::new(&entry.provider).add_attribute(Attribute::Dim),
-                            Cell::new(&entry.model),
+                            Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
@@ -2180,8 +2182,10 @@ fn run_models_report(
                             Cell::new(get_client_display_name(&entry.client)),
                             Cell::new(get_provider_display_name(&entry.provider))
                                 .add_attribute(Attribute::Dim),
-                            Cell::new(&entry.model),
-                            Cell::new(format_model_name(&entry.model)),
+                            Cell::new(truncate_model_display_name(&entry.model)),
+                            Cell::new(truncate_model_display_name(&format_model_name(
+                                &entry.model,
+                            ))),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
@@ -2264,7 +2268,7 @@ fn run_models_report(
                             Cell::new(get_provider_display_name(&entry.provider))
                                 .add_attribute(Attribute::Dim),
                             Cell::new(display_clients),
-                            Cell::new(&entry.model),
+                            Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.output))
@@ -2495,7 +2499,7 @@ fn run_monthly_report(
                     let mut unique_models: Vec<String> = entry
                         .models
                         .iter()
-                        .map(|model| format_model_name(model))
+                        .map(|model| truncate_model_display_name(&format_model_name(model)))
                         .collect::<std::collections::BTreeSet<_>>()
                         .into_iter()
                         .collect();
@@ -2565,7 +2569,7 @@ fn run_monthly_report(
                     let mut unique_models: Vec<String> = entry
                         .models
                         .iter()
-                        .map(|model| format_model_name(model))
+                        .map(|model| truncate_model_display_name(&format_model_name(model)))
                         .collect::<std::collections::BTreeSet<_>>()
                         .into_iter()
                         .collect();
@@ -2859,7 +2863,7 @@ fn run_hourly_report(
                     let mut unique: Vec<String> = entry
                         .models
                         .iter()
-                        .map(|m| format_model_name(m))
+                        .map(|m| truncate_model_display_name(&format_model_name(m)))
                         .collect::<std::collections::BTreeSet<_>>()
                         .into_iter()
                         .collect();

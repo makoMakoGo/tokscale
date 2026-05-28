@@ -21,7 +21,9 @@ use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 use std::thread;
 use std::time::Duration;
-pub(crate) use ui::widgets::{get_client_display_name, get_provider_display_name};
+pub(crate) use ui::widgets::{
+    get_client_display_name, get_provider_display_name, truncate_model_display_name,
+};
 
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
