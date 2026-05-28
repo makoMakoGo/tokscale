@@ -4,9 +4,15 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
+use super::model_usage_layout::{
+    display_width, model_usage_table_layout, ModelUsageColumn as DailyDetailColumn,
+    ModelUsageTableDensity as DailyDetailTableDensity,
+    ModelUsageTableLayout as DailyDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
+    MODEL_MIN_WIDTH,
+};
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
-    get_provider_display_name, truncate_model_display_name_to, MODEL_DISPLAY_MAX_WIDTH,
+    get_provider_display_name, truncate_model_display_name_to,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
@@ -189,8 +195,64 @@ fn daily_table_layout(
     }
 }
 
+fn daily_detail_table_layout(
+    table_width: u16,
+    is_very_narrow: bool,
+    model_content_width: u16,
+    provider_content_width: u16,
+    source_content_width: u16,
+) -> DailyDetailTableLayout {
+    model_usage_table_layout(
+        table_width,
+        is_very_narrow,
+        model_content_width,
+        provider_content_width,
+        source_content_width,
+        &[
+            DailyDetailColumn::Source,
+            DailyDetailColumn::Provider,
+            DailyDetailColumn::Messages,
+            DailyDetailColumn::Input,
+            DailyDetailColumn::Output,
+            DailyDetailColumn::CacheRate,
+            DailyDetailColumn::CacheRead,
+            DailyDetailColumn::CacheWrite,
+        ],
+    )
+}
+
+fn daily_detail_column_header(
+    column: DailyDetailColumn,
+    density: DailyDetailTableDensity,
+) -> &'static str {
+    match column {
+        DailyDetailColumn::Model => "Model",
+        DailyDetailColumn::Provider => "Provider",
+        DailyDetailColumn::Source => "Source",
+        DailyDetailColumn::Messages => "Msgs",
+        DailyDetailColumn::Input => "Input",
+        DailyDetailColumn::Output => "Output",
+        DailyDetailColumn::CacheRead => "Cache R",
+        DailyDetailColumn::CacheWrite => "Cache W",
+        DailyDetailColumn::CacheRate => "Cache×",
+        DailyDetailColumn::Total if density == DailyDetailTableDensity::Full => "Total",
+        DailyDetailColumn::Total => "Tokens",
+        DailyDetailColumn::Cost => "Cost",
+        DailyDetailColumn::Performance => "ms/1K",
+    }
+}
+
+fn daily_detail_column_sort_field(column: DailyDetailColumn) -> Option<SortField> {
+    match column {
+        DailyDetailColumn::Total => Some(SortField::Tokens),
+        DailyDetailColumn::Cost => Some(SortField::Cost),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::model_usage_layout::MODEL_MAX_WIDTH;
     use super::*;
 
     #[test]
@@ -273,6 +335,83 @@ mod tests {
         assert!(full.columns.contains(&DailyColumn::CacheRead));
         assert!(full.columns.contains(&DailyColumn::CacheWrite));
         assert!(full.columns.contains(&DailyColumn::CacheRate));
+    }
+
+    #[test]
+    fn very_narrow_daily_detail_layout_keeps_model_tokens_and_cost() {
+        let layout = daily_detail_table_layout(54, true, 80, 56, 40);
+
+        assert_eq!(layout.density, DailyDetailTableDensity::VeryCompact);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyDetailColumn::Model,
+                DailyDetailColumn::Total,
+                DailyDetailColumn::Cost,
+            ]
+        );
+        assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
+    }
+
+    #[test]
+    fn narrow_daily_detail_layout_uses_models_core_priority() {
+        let layout = daily_detail_table_layout(74, false, 80, 56, 40);
+
+        assert_eq!(layout.density, DailyDetailTableDensity::Detail);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyDetailColumn::Model,
+                DailyDetailColumn::Source,
+                DailyDetailColumn::Provider,
+                DailyDetailColumn::Total,
+                DailyDetailColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&DailyDetailColumn::Messages));
+        assert!(!layout.columns.contains(&DailyDetailColumn::Input));
+        assert!(!layout.columns.contains(&DailyDetailColumn::CacheRead));
+    }
+
+    #[test]
+    fn daily_detail_layout_adds_messages_before_token_details() {
+        let layout = daily_detail_table_layout(82, false, 80, 56, 40);
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyDetailColumn::Model,
+                DailyDetailColumn::Source,
+                DailyDetailColumn::Provider,
+                DailyDetailColumn::Messages,
+                DailyDetailColumn::Total,
+                DailyDetailColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&DailyDetailColumn::Input));
+    }
+
+    #[test]
+    fn wide_daily_detail_layout_adds_cache_columns_before_total() {
+        let layout = daily_detail_table_layout(124, false, 80, 56, 40);
+
+        assert_eq!(layout.density, DailyDetailTableDensity::Full);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyDetailColumn::Model,
+                DailyDetailColumn::Source,
+                DailyDetailColumn::Provider,
+                DailyDetailColumn::Messages,
+                DailyDetailColumn::Input,
+                DailyDetailColumn::Output,
+                DailyDetailColumn::CacheRate,
+                DailyDetailColumn::CacheRead,
+                DailyDetailColumn::CacheWrite,
+                DailyDetailColumn::Total,
+                DailyDetailColumn::Cost,
+            ]
+        );
     }
 }
 
@@ -510,7 +649,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let is_narrow = app.is_narrow();
     let is_very_narrow = app.is_very_narrow();
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
@@ -519,17 +657,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
-
-    let header_cells = if is_very_narrow {
-        vec!["Model", "Cost"]
-    } else if is_narrow {
-        vec!["Model", "Source", "Msgs", "Tokens", "Cost"]
-    } else {
-        vec![
-            "#", "Model", "Provider", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W",
-            "Cache×", "Total", "Cost",
-        ]
-    };
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -542,19 +669,38 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
+    let model_content_width = rows_data
+        .iter()
+        .map(|row| display_width(row.model))
+        .max()
+        .unwrap_or(MODEL_MIN_WIDTH);
+    let provider_content_width = rows_data
+        .iter()
+        .map(|row| display_width(&get_provider_display_name(row.provider)))
+        .max()
+        .unwrap_or(DETAIL_PROVIDER_WIDTH);
+    let source_content_width = rows_data
+        .iter()
+        .map(|row| display_width(&get_client_display_name(row.source)))
+        .max()
+        .unwrap_or(DETAIL_SOURCE_WIDTH);
+    let table_layout = daily_detail_table_layout(
+        inner.width,
+        is_very_narrow,
+        model_content_width,
+        provider_content_width,
+        source_content_width,
+    );
+    let columns = table_layout.columns.clone();
+
     let header = Row::new(
-        header_cells
+        columns
             .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let indicator = match (i, is_narrow, is_very_narrow) {
-                    (10, false, false) => sort_indicator(SortField::Tokens),
-                    (11, false, false) => sort_indicator(SortField::Cost),
-                    (3, true, false) => sort_indicator(SortField::Tokens),
-                    (4, true, false) => sort_indicator(SortField::Cost),
-                    (1, _, true) => sort_indicator(SortField::Cost),
-                    _ => "",
-                };
+            .map(|column| {
+                let h = daily_detail_column_header(*column, table_layout.density);
+                let indicator = daily_detail_column_sort_field(*column)
+                    .map(sort_indicator)
+                    .unwrap_or("");
                 Cell::from(format!("{}{}", h, indicator))
             })
             .collect::<Vec<_>>(),
@@ -583,62 +729,54 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_striped = idx % 2 == 1;
             let model_color = app.model_color_for(row.provider, row.color_key);
 
-            let cells: Vec<Cell> = if is_very_narrow {
-                vec![
-                    Cell::from(truncate_model_display_name_to(row.model, 18)).style(
-                        Style::default()
-                            .fg(model_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else if is_narrow {
-                vec![
-                    Cell::from(truncate_model_display_name_to(row.model, 24)).style(
-                        Style::default()
-                            .fg(model_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Cell::from(get_client_display_name(row.source))
-                        .style(Style::default().fg(theme_muted)),
-                    Cell::from(row.messages.to_string()),
-                    Cell::from(format_tokens(row.tokens.total())),
-                    Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else {
-                vec![
-                    Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate_model_display_name_to(
+            let cell_for_column = |column: DailyDetailColumn| -> Cell {
+                match column {
+                    DailyDetailColumn::Model => Cell::from(truncate_model_display_name_to(
                         row.model,
-                        MODEL_DISPLAY_MAX_WIDTH,
+                        table_layout.model_width,
                     ))
                     .style(
                         Style::default()
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(get_provider_display_name(row.provider)),
-                    Cell::from(get_client_display_name(row.source))
+                    DailyDetailColumn::Provider => {
+                        Cell::from(get_provider_display_name(row.provider))
+                    }
+                    DailyDetailColumn::Source => Cell::from(get_client_display_name(row.source))
                         .style(Style::default().fg(theme_muted)),
-                    Cell::from(row.messages.to_string()),
-                    Cell::from(format_tokens(row.tokens.input))
+                    DailyDetailColumn::Messages => Cell::from(row.messages.to_string()),
+                    DailyDetailColumn::Input => Cell::from(format_tokens(row.tokens.input))
                         .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    Cell::from(format_tokens(row.tokens.output))
+                    DailyDetailColumn::Output => Cell::from(format_tokens(row.tokens.output))
                         .style(Style::default().fg(Color::Rgb(200, 100, 100))),
-                    Cell::from(format_tokens(row.tokens.cache_read))
-                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
-                    Cell::from(format_tokens(row.tokens.cache_write))
-                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
-                    Cell::from(format_cache_hit_rate(
+                    DailyDetailColumn::CacheRead => {
+                        Cell::from(format_tokens(row.tokens.cache_read))
+                            .style(Style::default().fg(Color::Rgb(100, 150, 200)))
+                    }
+                    DailyDetailColumn::CacheWrite => {
+                        Cell::from(format_tokens(row.tokens.cache_write))
+                            .style(Style::default().fg(Color::Rgb(200, 150, 100)))
+                    }
+                    DailyDetailColumn::CacheRate => Cell::from(format_cache_hit_rate(
                         row.tokens.cache_read,
                         row.tokens.input,
                         row.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(row.tokens.total())),
-                    Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green)),
-                ]
+                    DailyDetailColumn::Total => Cell::from(format_tokens(row.tokens.total())),
+                    DailyDetailColumn::Cost => {
+                        Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green))
+                    }
+                    DailyDetailColumn::Performance => {
+                        unreachable!("daily detail rows have no timing data")
+                    }
+                }
             };
+            let cells: Vec<Cell> = columns
+                .iter()
+                .map(|column| cell_for_column(*column))
+                .collect();
 
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
@@ -652,32 +790,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(70), Constraint::Percentage(30)]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(42),
-            Constraint::Percentage(18),
-            Constraint::Percentage(12),
-            Constraint::Percentage(15),
-            Constraint::Percentage(13),
-        ]
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Min(20),
-            Constraint::Length(16),
-            Constraint::Length(14),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ]
-    };
+    let widths = table_layout.widths;
 
     let table = Table::new(rows, widths)
         .header(header)
