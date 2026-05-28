@@ -198,6 +198,8 @@ pub struct App {
     pub selected_daily_detail_date: Option<NaiveDate>,
     daily_list_selected_index: usize,
     daily_list_scroll_offset: usize,
+    daily_list_sort_before_detail: Option<(SortField, SortDirection)>,
+    daily_detail_sort_state: Option<(SortField, SortDirection)>,
 
     pub selected_graph_cell: Option<(usize, usize)>,
     pub stats_breakdown_total_lines: usize,
@@ -322,6 +324,8 @@ impl App {
             selected_daily_detail_date: None,
             daily_list_selected_index: 0,
             daily_list_scroll_offset: 0,
+            daily_list_sort_before_detail: None,
+            daily_detail_sort_state: None,
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -381,6 +385,7 @@ impl App {
         // empty while the user is still nominally in detail mode.
         if let Some(date) = self.selected_daily_detail_date {
             if !self.data.daily.iter().any(|day| day.date == date) {
+                self.leave_daily_detail_sort_context();
                 self.selected_daily_detail_date = None;
                 self.selected_index = self.daily_list_selected_index;
                 self.scroll_offset = self.daily_list_scroll_offset;
@@ -725,6 +730,7 @@ impl App {
         self.selected_daily_detail_date = None;
         self.daily_list_selected_index = 0;
         self.daily_list_scroll_offset = 0;
+        self.daily_list_sort_before_detail = None;
         self.selected_graph_cell = None;
         self.stats_breakdown_total_lines = 0;
     }
@@ -734,11 +740,13 @@ impl App {
             return;
         }
 
+        let was_daily_detail = self.current_tab == Tab::Daily && self.is_daily_detail_active();
         self.persist_current_sort();
 
         self.current_tab = target;
-        if target != Tab::Daily {
+        if target != Tab::Daily || was_daily_detail {
             self.selected_daily_detail_date = None;
+            self.daily_list_sort_before_detail = None;
         }
 
         let (field, dir) = self
@@ -760,6 +768,10 @@ impl App {
                 (SortField::Cost, SortDirection::Descending)
             }
         }
+    }
+
+    fn default_sort_for_daily_detail() -> (SortField, SortDirection) {
+        (SortField::Tokens, SortDirection::Descending)
     }
 
     pub(crate) fn tab_visible(settings: &Settings, tab: Tab) -> bool {
@@ -791,8 +803,38 @@ impl App {
     }
 
     fn persist_current_sort(&mut self) {
-        self.tab_sort_state
-            .insert(self.current_tab, (self.sort_field, self.sort_direction));
+        let current_sort = (self.sort_field, self.sort_direction);
+        if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
+            self.daily_detail_sort_state = Some(current_sort);
+            let daily_sort = self
+                .daily_list_sort_before_detail
+                .unwrap_or_else(|| Self::default_sort_for_tab(Tab::Daily));
+            self.tab_sort_state.insert(Tab::Daily, daily_sort);
+            return;
+        }
+
+        self.tab_sort_state.insert(self.current_tab, current_sort);
+    }
+
+    fn enter_daily_detail_sort_context(&mut self) {
+        self.daily_list_sort_before_detail = Some((self.sort_field, self.sort_direction));
+        let (field, direction) = self
+            .daily_detail_sort_state
+            .unwrap_or_else(Self::default_sort_for_daily_detail);
+        self.sort_field = field;
+        self.sort_direction = direction;
+    }
+
+    fn leave_daily_detail_sort_context(&mut self) {
+        self.daily_detail_sort_state = Some((self.sort_field, self.sort_direction));
+        let daily_sort = self
+            .daily_list_sort_before_detail
+            .take()
+            .or_else(|| self.tab_sort_state.get(&Tab::Daily).copied())
+            .unwrap_or_else(|| Self::default_sort_for_tab(Tab::Daily));
+        self.sort_field = daily_sort.0;
+        self.sort_direction = daily_sort.1;
+        self.tab_sort_state.insert(Tab::Daily, daily_sort);
     }
 
     fn move_selection_up(&mut self) {
@@ -954,6 +996,9 @@ impl App {
         if self.current_tab != Tab::Daily {
             return;
         }
+        if self.is_daily_detail_active() {
+            self.leave_daily_detail_sort_context();
+        }
         self.selected_daily_detail_date = None;
 
         let today = chrono::Local::now().date_naive();
@@ -1056,6 +1101,7 @@ impl App {
             self.daily_list_selected_index = self.selected_index;
             self.daily_list_scroll_offset = self.scroll_offset;
             self.selected_daily_detail_date = Some(date);
+            self.enter_daily_detail_sort_context();
             self.selected_index = 0;
             self.scroll_offset = 0;
             self.set_status(&format!("Viewing daily details for {}", date));
@@ -1068,6 +1114,7 @@ impl App {
             return;
         };
 
+        self.leave_daily_detail_sort_context();
         self.selected_daily_detail_date = None;
 
         // Re-anchor by date so a sort change inside detail mode still
@@ -2331,6 +2378,28 @@ mod tests {
     }
 
     #[test]
+    fn test_enter_on_daily_detail_uses_token_sort_default() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![daily_usage(
+            "2026-05-17",
+            8.0,
+            vec![
+                ("a-low-token", "anthropic", 1.0),
+                ("z-high-token", "openai", 7.0),
+            ],
+        )];
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+        assert_eq!(app.get_sorted_daily_detail_rows()[0].model, "z-high-token");
+    }
+
+    #[test]
     fn test_esc_from_daily_detail_restores_daily_selection() {
         let mut app = make_app();
         app.current_tab = Tab::Daily;
@@ -2352,10 +2421,14 @@ mod tests {
         app.handle_key_event(key(KeyCode::Enter));
         app.handle_key_event(key(KeyCode::Down));
         assert_eq!(app.selected_index, 1);
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
 
         app.handle_key_event(key(KeyCode::Esc));
 
         assert_eq!(app.current_tab, Tab::Daily);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
         assert_eq!(app.selected_index, 1);
         assert_eq!(app.scroll_offset, 1);
         assert_eq!(app.get_current_list_len(), 3);
