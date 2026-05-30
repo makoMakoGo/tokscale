@@ -682,6 +682,9 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
       "hermes": [
         "/Users/me/.hermes/profiles/director_planning",
         "/Users/me/.hermes/profiles/research/state.db"
+      ],
+      "zed": [
+        "/mnt/c/Users/me/AppData/Local/Zed/threads"
       ]
     }
   }
@@ -701,7 +704,7 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `minutelyTabEnabled` | boolean | `false` | Show the per-minute Minutely tab in the TUI and aggregate per-minute usage during data loading. Default-off because minute-granularity is a niche/diagnostic view for most users and the per-minute bucketing has a non-trivial cost on large datasets. |
 | `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
 
-Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories, imported Gemini/OpenClaw histories, or Hermes profile databases. Hermes entries may point at a profile directory containing `state.db` or directly at a `state.db` file. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
+Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories, imported Gemini/OpenClaw histories, Hermes profile databases, or a Windows Zed data directory mounted from WSL. Hermes entries may point at a profile directory containing `state.db` or directly at a `state.db` file. Zed entries may point at a `threads` directory containing `threads.db` or directly at `threads.db`. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
 
 Use `defaultClients` to pin a personal default — for example, set it to `["opencode", "claude"]` if those are the only clients you use, and `tokscale` (with no flags) will scope every report to them automatically. Pass `--client` on the command line to override for a single run.
 
@@ -1281,13 +1284,14 @@ If you keep sessions outside Tokscale's default home-root locations, you can als
         "/Users/me/.hermes/profiles/director_planning",
         "/Users/me/.hermes/profiles/research/state.db"
       ],
+      "zed": ["/mnt/c/Users/me/AppData/Local/Zed/threads"],
       "openclaw": ["/Users/me/imports/imac/openclaw/agents"]
     }
   }
 }
 ```
 
-This is useful for project-level `.codex` directories, imported histories, and Hermes profile databases outside the default `$HERMES_HOME/state.db` or `~/.hermes/state.db` location. Tokscale still scans its default roots, then merges `scanner.extraScanPaths` and `TOKSCALE_EXTRA_DIRS` on top with canonical-path deduplication. It does not auto-discover your whole workspace.
+This is useful for project-level `.codex` directories, imported histories, Hermes profile databases outside the default `$HERMES_HOME/state.db` or `~/.hermes/state.db` location, and Windows Zed `threads.db` files mounted into WSL. Tokscale still scans its default roots, then merges `scanner.extraScanPaths` and `TOKSCALE_EXTRA_DIRS` on top with canonical-path deduplication. It does not auto-discover your whole workspace.
 
 Each message contains:
 ```json
