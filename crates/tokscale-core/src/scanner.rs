@@ -2708,7 +2708,8 @@ mod tests {
         fs::create_dir_all(&amp_threads).unwrap();
         File::create(amp_threads.join("T-legacy.json")).unwrap();
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["amp".to_string()]);
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["amp".to_string()], false);
 
         assert_eq!(result.get(ClientId::Amp).len(), 1);
     }

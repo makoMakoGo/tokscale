@@ -9,8 +9,8 @@ use super::model_usage_layout::{
     DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH,
 };
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
-    get_provider_display_name, truncate_model_display_name_to,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
+    get_client_display_name, get_provider_display_name, truncate_model_display_name_to,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -52,6 +52,7 @@ fn models_table_layout(
             ModelsColumn::CacheRead,
             ModelsColumn::CacheWrite,
             ModelsColumn::Performance,
+            ModelsColumn::CostPerMillion,
         ],
     )
 }
@@ -77,6 +78,7 @@ fn model_column_header(
         ModelsColumn::Total => "Tokens",
         ModelsColumn::Performance => "ms/1K",
         ModelsColumn::Cost => "Cost",
+        ModelsColumn::CostPerMillion => "Cost/1M",
     }
 }
 
@@ -84,6 +86,7 @@ fn model_column_sort_field(column: ModelsColumn) -> Option<SortField> {
     match column {
         ModelsColumn::Total => Some(SortField::Tokens),
         ModelsColumn::Cost => Some(SortField::Cost),
+        ModelsColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -115,6 +118,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
+    let metric_input_style = app.theme.metric_input_style();
+    let metric_output_style = app.theme.metric_output_style();
+    let metric_cache_read_style = app.theme.metric_cache_read_style();
+    let metric_cache_write_style = app.theme.metric_cache_write_style();
+    let striped_row_style = app.theme.striped_row_style();
 
     let models = app.get_sorted_models();
     if models.is_empty() {
@@ -217,14 +225,16 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ModelsColumn::Messages => unreachable!("models rows do not have message data"),
                     ModelsColumn::Source => Cell::from(get_client_display_name(&model.client))
                         .style(Style::default().fg(theme_muted)),
-                    ModelsColumn::Input => Cell::from(format_tokens(model.tokens.input))
-                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    ModelsColumn::Output => Cell::from(format_tokens(model.tokens.output))
-                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
+                    ModelsColumn::Input => {
+                        Cell::from(format_tokens(model.tokens.input)).style(metric_input_style)
+                    }
+                    ModelsColumn::Output => {
+                        Cell::from(format_tokens(model.tokens.output)).style(metric_output_style)
+                    }
                     ModelsColumn::CacheRead => Cell::from(format_tokens(model.tokens.cache_read))
-                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
+                        .style(metric_cache_read_style),
                     ModelsColumn::CacheWrite => Cell::from(format_tokens(model.tokens.cache_write))
-                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
+                        .style(metric_cache_write_style),
                     ModelsColumn::CacheRate => Cell::from(format_cache_hit_rate(
                         model.tokens.cache_read,
                         model.tokens.input,
@@ -239,6 +249,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ModelsColumn::Cost => {
                         Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green))
                     }
+                    ModelsColumn::CostPerMillion => {
+                        Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
+                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                    }
                 }
             };
             let cells: Vec<Cell> = columns
@@ -249,7 +263,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
             } else if is_striped {
-                Style::default().bg(Color::Rgb(20, 24, 30))
+                striped_row_style
             } else {
                 Style::default()
             };

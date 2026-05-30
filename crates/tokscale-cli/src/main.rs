@@ -1206,7 +1206,7 @@ fn cursor_setup_warnings_for_report(
 
     let Some(state) = cursor_setup_state(home_dir) else {
         return vec![
-            "Cursor usage requires Tokscale's Cursor API cache, but the home directory could not be resolved. Tokscale does not parse local ~/.cursor session data.".to_string(),
+            "Cursor usage requires Tokscale's Cursor API cache, but the home directory could not be resolved. Run `tokscale cursor login` and `tokscale cursor sync --json`. Tokscale does not parse local `~/.cursor` session data.".to_string(),
         ];
     };
     if state.has_cache {
@@ -1214,11 +1214,11 @@ fn cursor_setup_warnings_for_report(
     }
 
     let action = if state.home_override {
-        "populate that cache before running a report with --home"
+        "run `tokscale cursor login` and `tokscale cursor sync --json`, or populate that cache before running a report with --home"
     } else if state.has_credentials {
-        "run `tokscale cursor sync`"
+        "run `tokscale cursor sync --json`"
     } else {
-        "run `tokscale cursor login` and `tokscale cursor sync`"
+        "run `tokscale cursor login` and `tokscale cursor sync --json`"
     };
 
     vec![format!(
@@ -5096,19 +5096,15 @@ fn write_light_cache(
     year: &Option<String>,
     group_by: &tokscale_core::GroupBy,
 ) {
-    use crate::tui::{save_cached_data, DataLoader};
+    use crate::tui::{save_cached_data, CacheReportScope, DataLoader};
 
-    // The TUI cache key is `(enabled_clients, group_by)` only — it does
-    // NOT include `--since`, `--until`, `--year`, or `--home`. Writing
-    // date-filtered or home-scoped data under that key would silently
-    // poison subsequent TUI launches: the next `tokscale tui` would
-    // hit the cache and render the date-filtered slice as if it were
-    // the full report. Refuse the write when any of those filters is
-    // present and tell the user; their CLI report still prints fine.
-    if since.is_some() || until.is_some() || year.is_some() || home_dir.is_some() {
+    // The TUI cache key includes date filters, but not `--home`. Writing
+    // home-scoped data would still poison the default cache, so keep that
+    // guard until home is part of the cache key.
+    if home_dir.is_some() {
         eprintln!(
-            "tokscale: --write-cache skipped because --since/--until/--year/--home are set; \
-             the TUI cache key does not include those filters and writing would poison future TUI launches."
+            "tokscale: --write-cache skipped because --home is set; \
+             the TUI cache key does not include that filter and writing would poison future TUI launches."
         );
         return;
     }
@@ -5120,17 +5116,14 @@ fn write_light_cache(
         .collect();
     let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
 
-    // No date/home filters at this point (guarded above), so passing
-    // None into `with_filters` matches what the TUI itself does on
-    // launch — keeps the cache key derivation byte-identical.
-    //
     // The report has already been flushed to stdout by the time we reach
     // here. Keep the report exit code stable, but expose cache scan/write
     // failures instead of swallowing them.
-    let loader = DataLoader::with_filters(None, None, None, None);
+    let loader = DataLoader::with_filters(None, since.clone(), until.clone(), year.clone());
+    let report_scope = CacheReportScope::new(since.clone(), until.clone(), year.clone());
     match loader.load(&scan_clients, group_by, include_synthetic) {
         Ok(data) => {
-            if let Err(err) = save_cached_data(&data, &enabled_set, group_by) {
+            if let Err(err) = save_cached_data(&data, &enabled_set, group_by, &report_scope) {
                 eprintln!("tokscale: --write-cache failed to save TUI cache: {err}");
             }
         }
@@ -5141,7 +5134,7 @@ fn write_light_cache(
 }
 
 fn run_warm_tui_cache() -> Result<()> {
-    use crate::tui::{save_cached_data, DataLoader, TUI_DEFAULT_GROUP_BY};
+    use crate::tui::{save_cached_data, CacheReportScope, DataLoader, TUI_DEFAULT_GROUP_BY};
     use tokscale_core::ClientId;
 
     // Warm the cache using the same default filter set the TUI uses on
@@ -5167,7 +5160,12 @@ fn run_warm_tui_cache() -> Result<()> {
     let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
     let loader = DataLoader::with_filters(None, None, None, None);
     let data = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY, include_synthetic)?;
-    save_cached_data(&data, &enabled_set, &TUI_DEFAULT_GROUP_BY)?;
+    save_cached_data(
+        &data,
+        &enabled_set,
+        &TUI_DEFAULT_GROUP_BY,
+        &CacheReportScope::default(),
+    )?;
     Ok(())
 }
 

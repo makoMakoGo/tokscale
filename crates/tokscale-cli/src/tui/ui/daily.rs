@@ -11,8 +11,8 @@ use super::model_usage_layout::{
     MODEL_MIN_WIDTH,
 };
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
-    get_provider_display_name, truncate_model_display_name_to,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
+    get_client_display_name, get_provider_display_name, truncate_model_display_name_to,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
@@ -23,6 +23,7 @@ const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
 const CACHE_RATE_WIDTH: u16 = 8;
 const COST_WIDTH: u16 = 10;
+const COST_PER_MILLION_WIDTH: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DailyTableDensity {
@@ -44,6 +45,7 @@ enum DailyColumn {
     CacheRate,
     Total,
     Cost,
+    CostPerMillion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +87,7 @@ fn daily_full_min_width(has_turn_data: bool) -> u16 {
         CACHE_RATE_WIDTH,
         NUMERIC_WIDTH,
         COST_WIDTH,
+        COST_PER_MILLION_WIDTH,
     ];
     if has_turn_data {
         widths.insert(1, TURN_WIDTH);
@@ -127,6 +130,7 @@ fn daily_table_layout(
             DailyColumn::CacheRate,
             DailyColumn::Total,
             DailyColumn::Cost,
+            DailyColumn::CostPerMillion,
         ]);
         widths.extend([
             Constraint::Length(MSGS_WIDTH),
@@ -137,6 +141,7 @@ fn daily_table_layout(
             Constraint::Length(CACHE_RATE_WIDTH),
             Constraint::Length(NUMERIC_WIDTH),
             Constraint::Length(COST_WIDTH),
+            Constraint::Length(COST_PER_MILLION_WIDTH),
         ]);
 
         return DailyTableLayout {
@@ -217,6 +222,7 @@ fn daily_detail_table_layout(
             DailyDetailColumn::CacheRate,
             DailyDetailColumn::CacheRead,
             DailyDetailColumn::CacheWrite,
+            DailyDetailColumn::CostPerMillion,
         ],
     )
 }
@@ -238,6 +244,7 @@ fn daily_detail_column_header(
         DailyDetailColumn::Total if density == DailyDetailTableDensity::Full => "Total",
         DailyDetailColumn::Total => "Tokens",
         DailyDetailColumn::Cost => "Cost",
+        DailyDetailColumn::CostPerMillion => "Cost/1M",
         DailyDetailColumn::Performance => "ms/1K",
     }
 }
@@ -246,6 +253,7 @@ fn daily_detail_column_sort_field(column: DailyDetailColumn) -> Option<SortField
     match column {
         DailyDetailColumn::Total => Some(SortField::Tokens),
         DailyDetailColumn::Cost => Some(SortField::Cost),
+        DailyDetailColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -335,6 +343,7 @@ mod tests {
         assert!(full.columns.contains(&DailyColumn::CacheRead));
         assert!(full.columns.contains(&DailyColumn::CacheWrite));
         assert!(full.columns.contains(&DailyColumn::CacheRate));
+        assert!(full.columns.contains(&DailyColumn::CostPerMillion));
     }
 
     #[test]
@@ -428,6 +437,7 @@ fn daily_column_header(column: DailyColumn, density: DailyTableDensity) -> &'sta
         DailyColumn::Total if density == DailyTableDensity::Full => "Total",
         DailyColumn::Total => "Tokens",
         DailyColumn::Cost => "Cost",
+        DailyColumn::CostPerMillion => "Cost/1M",
     }
 }
 
@@ -436,6 +446,7 @@ fn daily_column_sort_field(column: DailyColumn) -> Option<SortField> {
         DailyColumn::Date => Some(SortField::Date),
         DailyColumn::Total => Some(SortField::Tokens),
         DailyColumn::Cost => Some(SortField::Cost),
+        DailyColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -481,6 +492,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected_index = app.selected_index;
     let theme_accent = app.theme.accent;
     let theme_selection = app.theme.selection;
+    let metric_input_style = app.theme.metric_input_style();
+    let metric_output_style = app.theme.metric_output_style();
+    let metric_cache_read_style = app.theme.metric_cache_read_style();
+    let metric_cache_write_style = app.theme.metric_cache_write_style();
+    let current_row_style = app.theme.current_row_style();
+    let striped_row_style = app.theme.striped_row_style();
     let today = Local::now().date_naive();
     let table_layout = daily_table_layout(inner.width, is_narrow, is_very_narrow, has_turn_data);
     let columns = table_layout.columns.clone();
@@ -552,14 +569,16 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyColumn::Date => Cell::from(date_text.clone()).style(date_style),
                     DailyColumn::Turn => Cell::from(turn_str.clone()),
                     DailyColumn::Messages => Cell::from(day.message_count.to_string()),
-                    DailyColumn::Input => Cell::from(format_tokens(day.tokens.input))
-                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    DailyColumn::Output => Cell::from(format_tokens(day.tokens.output))
-                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
+                    DailyColumn::Input => {
+                        Cell::from(format_tokens(day.tokens.input)).style(metric_input_style)
+                    }
+                    DailyColumn::Output => {
+                        Cell::from(format_tokens(day.tokens.output)).style(metric_output_style)
+                    }
                     DailyColumn::CacheRead => Cell::from(format_tokens(day.tokens.cache_read))
-                        .style(Style::default().fg(Color::Rgb(100, 150, 200))),
+                        .style(metric_cache_read_style),
                     DailyColumn::CacheWrite => Cell::from(format_tokens(day.tokens.cache_write))
-                        .style(Style::default().fg(Color::Rgb(200, 150, 100))),
+                        .style(metric_cache_write_style),
                     DailyColumn::CacheRate => Cell::from(format_cache_hit_rate(
                         day.tokens.cache_read,
                         day.tokens.input,
@@ -569,6 +588,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyColumn::Total => Cell::from(format_tokens(day.tokens.total())),
                     DailyColumn::Cost => {
                         Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green))
+                    }
+                    DailyColumn::CostPerMillion => {
+                        Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
+                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
                     }
                 }
             };
@@ -580,9 +603,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
             } else if is_today {
-                Style::default().bg(Color::Rgb(28, 42, 34))
+                current_row_style
             } else if is_striped {
-                Style::default().bg(Color::Rgb(20, 24, 30))
+                striped_row_style
             } else {
                 Style::default()
             };
@@ -657,6 +680,11 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
+    let metric_input_style = app.theme.metric_input_style();
+    let metric_output_style = app.theme.metric_output_style();
+    let metric_cache_read_style = app.theme.metric_cache_read_style();
+    let metric_cache_write_style = app.theme.metric_cache_write_style();
+    let striped_row_style = app.theme.striped_row_style();
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -746,17 +774,19 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyDetailColumn::Source => Cell::from(get_client_display_name(row.source))
                         .style(Style::default().fg(theme_muted)),
                     DailyDetailColumn::Messages => Cell::from(row.messages.to_string()),
-                    DailyDetailColumn::Input => Cell::from(format_tokens(row.tokens.input))
-                        .style(Style::default().fg(Color::Rgb(100, 200, 100))),
-                    DailyDetailColumn::Output => Cell::from(format_tokens(row.tokens.output))
-                        .style(Style::default().fg(Color::Rgb(200, 100, 100))),
+                    DailyDetailColumn::Input => {
+                        Cell::from(format_tokens(row.tokens.input)).style(metric_input_style)
+                    }
+                    DailyDetailColumn::Output => {
+                        Cell::from(format_tokens(row.tokens.output)).style(metric_output_style)
+                    }
                     DailyDetailColumn::CacheRead => {
                         Cell::from(format_tokens(row.tokens.cache_read))
-                            .style(Style::default().fg(Color::Rgb(100, 150, 200)))
+                            .style(metric_cache_read_style)
                     }
                     DailyDetailColumn::CacheWrite => {
                         Cell::from(format_tokens(row.tokens.cache_write))
-                            .style(Style::default().fg(Color::Rgb(200, 150, 100)))
+                            .style(metric_cache_write_style)
                     }
                     DailyDetailColumn::CacheRate => Cell::from(format_cache_hit_rate(
                         row.tokens.cache_read,
@@ -767,6 +797,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyDetailColumn::Total => Cell::from(format_tokens(row.tokens.total())),
                     DailyDetailColumn::Cost => {
                         Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green))
+                    }
+                    DailyDetailColumn::CostPerMillion => {
+                        Cell::from(format_cost_per_million(row.cost, row.tokens.total()))
+                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
                     }
                     // daily_detail_table_layout never includes Performance; panic if the layout drifts.
                     DailyDetailColumn::Performance => {
@@ -782,7 +816,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
             } else if is_striped {
-                Style::default().bg(Color::Rgb(20, 24, 30))
+                striped_row_style
             } else {
                 Style::default()
             };

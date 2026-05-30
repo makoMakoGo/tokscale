@@ -17,6 +17,7 @@ pub(crate) const DETAIL_NUMERIC_WIDTH: u16 = 8;
 pub(crate) const DETAIL_TOTAL_WIDTH: u16 = 9;
 pub(crate) const DETAIL_PERFORMANCE_WIDTH: u16 = 10;
 pub(crate) const DETAIL_COST_WIDTH: u16 = 9;
+pub(crate) const DETAIL_COST_PER_MILLION_WIDTH: u16 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelUsageTableDensity {
@@ -40,6 +41,7 @@ pub(crate) enum ModelUsageColumn {
     Total,
     Performance,
     Cost,
+    CostPerMillion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,7 @@ fn column_width(
         ModelUsageColumn::Total => DETAIL_TOTAL_WIDTH,
         ModelUsageColumn::Performance => DETAIL_PERFORMANCE_WIDTH,
         ModelUsageColumn::Cost => DETAIL_COST_WIDTH,
+        ModelUsageColumn::CostPerMillion => DETAIL_COST_PER_MILLION_WIDTH,
         ModelUsageColumn::Source => source_width,
         ModelUsageColumn::Provider => provider_width,
         ModelUsageColumn::Messages => DETAIL_MESSAGES_WIDTH,
@@ -120,6 +123,7 @@ fn density_for_columns(columns: &[ModelUsageColumn]) -> ModelUsageTableDensity {
                 | ModelUsageColumn::CacheRate
                 | ModelUsageColumn::CacheRead
                 | ModelUsageColumn::Performance
+                | ModelUsageColumn::CostPerMillion
         )
     }) {
         ModelUsageTableDensity::Detail
@@ -171,7 +175,13 @@ pub(crate) fn model_usage_table_layout(
 
     for column in optional_columns {
         let mut candidate = columns.clone();
-        let insert_at = if *column == ModelUsageColumn::Performance {
+        let insert_at = if *column == ModelUsageColumn::CostPerMillion {
+            candidate
+                .iter()
+                .position(|existing| *existing == ModelUsageColumn::Cost)
+                .map(|index| index + 1)
+                .unwrap_or(candidate.len())
+        } else if *column == ModelUsageColumn::Performance {
             candidate
                 .iter()
                 .position(|existing| *existing == ModelUsageColumn::Cost)

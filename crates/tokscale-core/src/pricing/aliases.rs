@@ -10,6 +10,7 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("k2-p5", "kimi-k2.5");
     m.insert("k2p6", "kimi-k2.6");
     m.insert("k2-p6", "kimi-k2.6");
+    m.insert("kimi-k2p6", "kimi-k2.6");
     m.insert("kimi-for-coding/k2p5", "kimi-k2.5");
     m.insert("kimi-for-coding/k2-p5", "kimi-k2.5");
     m.insert("kimi-for-coding/k2p6", "kimi-k2.6");
@@ -100,6 +101,8 @@ mod tests {
         assert_eq!(resolve_alias("k2-p5"), Some("kimi-k2.5"));
         assert_eq!(resolve_alias("k2p6"), Some("kimi-k2.6"));
         assert_eq!(resolve_alias("k2-p6"), Some("kimi-k2.6"));
+        assert_eq!(resolve_alias("kimi-k2p6"), Some("kimi-k2.6"));
+        assert_eq!(resolve_alias("KIMI-K2P6"), Some("kimi-k2.6"));
         assert_eq!(resolve_alias("kimi-for-coding/k2p5"), Some("kimi-k2.5"));
         assert_eq!(resolve_alias("kimi-for-coding/k2p6"), Some("kimi-k2.6"));
     }

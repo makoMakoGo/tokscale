@@ -2225,6 +2225,8 @@ mod tests {
             ("kimi-for-coding/k2p5", "moonshotai/kimi-k2.5"),
             ("k2p6", "moonshotai/kimi-k2.6"),
             ("k2-p6", "moonshotai/kimi-k2.6"),
+            ("kimi-k2p6", "moonshotai/kimi-k2.6"),
+            ("Kimi-K2.6", "moonshotai/kimi-k2.6"),
             ("kimi-for-coding/k2p6", "moonshotai/kimi-k2.6"),
         ];
 
@@ -2233,6 +2235,37 @@ mod tests {
             assert_eq!(result.matched_key, expected_key, "alias {alias}");
             assert_eq!(result.source, "OpenRouter", "alias {alias}");
         }
+    }
+
+    #[test]
+    fn test_opencode_zen_kimi_k2_6_alias_pricing() {
+        let lookup = create_lookup();
+        let result = lookup.lookup("kimi-k2p6").unwrap();
+        assert_eq!(result.matched_key, "moonshotai/kimi-k2.6");
+        assert_eq!(result.source, "OpenRouter");
+        assert_eq!(result.pricing.input_cost_per_token, Some(9.5e-7));
+        assert_eq!(result.pricing.output_cost_per_token, Some(0.000004));
+    }
+
+    #[test]
+    fn test_opencode_zen_kimi_k2_6_provider_hint_from_kimi_for_coding() {
+        let lookup = create_lookup();
+        let result = lookup
+            .lookup_with_provider("k2p6", Some("kimi-for-coding"))
+            .unwrap();
+        assert_eq!(result.matched_key, "moonshotai/kimi-k2.6");
+        assert_eq!(result.source, "OpenRouter");
+    }
+
+    #[test]
+    fn test_opencode_zen_kimi_k2_5_aliases_follow_coding_plan() {
+        let lookup = create_lookup();
+
+        let raw_k2p5 = lookup.lookup("k2p5").unwrap();
+        assert_eq!(raw_k2p5.matched_key, "moonshotai/kimi-k2.5");
+
+        let dotted = lookup.lookup("kimi-k2.5").unwrap();
+        assert_eq!(dotted.matched_key, "moonshotai/kimi-k2.5");
     }
 
     // =========================================================================

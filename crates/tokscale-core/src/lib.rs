@@ -1801,11 +1801,11 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         clients
     });
 
-    let pricing = load_pricing_for_local_parse().await?;
+    let pricing = load_pricing_for_local_parse().await;
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        Some(pricing.as_ref()),
+        pricing.as_deref(),
         options.use_env_roots,
         &options.scanner_settings,
     )?;
@@ -1857,11 +1857,11 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         clients
     });
 
-    let pricing = load_pricing_for_local_parse().await?;
+    let pricing = load_pricing_for_local_parse().await;
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        Some(pricing.as_ref()),
+        pricing.as_deref(),
         options.use_env_roots,
         &options.scanner_settings,
     )?;
@@ -1949,11 +1949,11 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
         clients
     });
 
-    let pricing = pricing::PricingService::get_or_init().await?;
+    let pricing = load_pricing_for_local_parse().await;
     let all_messages = parse_all_messages_with_pricing_with_env_strategy(
         &home_dir,
         &clients,
-        Some(&pricing),
+        pricing.as_deref(),
         options.use_env_roots,
         &options.scanner_settings,
     )?;
@@ -2119,8 +2119,8 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
 }
 
 pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
-    let pricing = load_pricing_for_local_parse().await?;
-    generate_graph_with_loaded_pricing(options, Some(pricing.as_ref())).await
+    let pricing = load_pricing_for_local_parse().await;
+    generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
 }
 
 fn filter_messages_for_report(
@@ -2211,19 +2211,28 @@ fn parse_hermes_sqlite_with_pricing(
         .collect()
 }
 
-async fn load_pricing_for_local_parse() -> Result<Arc<pricing::PricingService>, String> {
+fn select_local_parse_pricing<F>(
+    fresh: Result<Arc<pricing::PricingService>, String>,
+    stale: F,
+) -> Option<Arc<pricing::PricingService>>
+where
+    F: FnOnce() -> Option<pricing::PricingService>,
+{
+    fresh.ok().or_else(|| stale().map(Arc::new))
+}
+
+async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
     if std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
     {
-        return pricing::PricingService::load_cached_any_age()
-            .map(Arc::new)
-            .ok_or_else(|| {
-                "TOKSCALE_PRICING_CACHE_ONLY is set, but no pricing cache is available".to_string()
-            });
+        return pricing::PricingService::load_cached_any_age().map(Arc::new);
     }
 
-    pricing::PricingService::get_or_init().await
+    select_local_parse_pricing(
+        pricing::PricingService::get_or_init().await,
+        pricing::PricingService::load_cached_any_age,
+    )
 }
 
 fn resolve_local_parse_request(
@@ -2725,8 +2734,8 @@ pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
 ) -> Result<Vec<UnifiedMessage>, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    let pricing = load_pricing_for_local_parse().await?;
-    parse_local_unified_messages_resolved(options, &home_dir, &clients, Some(pricing.as_ref()))
+    let pricing = load_pricing_for_local_parse().await;
+    parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing.as_deref())
 }
 
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
@@ -2818,12 +2827,13 @@ mod tests {
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
         message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
         parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        unified_to_parsed, ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
-        UNKNOWN_WORKSPACE_LABEL,
+        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
+        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::str::FromStr;
+    use std::sync::Arc;
 
     fn make_workspace_message(
         client: &str,
@@ -4011,6 +4021,84 @@ mod tests {
         assert_eq!(messages[0].client, "cursor");
         assert_eq!(messages[0].model_id, "Composer 1.5");
         assert!(messages[0].cost > 0.0);
+    }
+
+    fn write_kimi_repeated_status_fixture(source_home: &std::path::Path) {
+        let session_dir = source_home.join(".kimi/sessions/group-1/session-1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("wire.jsonl"),
+            r#"{"type": "metadata", "protocol_version": "1.3"}
+{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 10, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-progressive"}}}
+{"timestamp": 1770983420.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 20, "output": 2, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-progressive"}}}
+{"timestamp": 1770983430.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 5, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-distinct"}}}
+{"timestamp": 1770983440.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 7, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}}}}
+{"timestamp": 1770983450.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 8, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}}}}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_kimi_deduplicates_repeated_status_updates() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_kimi_repeated_status_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["kimi".to_string()],
+                None,
+            )
+            .unwrap();
+
+            assert_eq!(messages.len(), 4);
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 40);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 5);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_local_clients_kimi_deduplicates_repeated_status_updates() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_kimi_repeated_status_fixture(source_home.path());
+
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(vec!["kimi".to_string()]),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+
+            assert_eq!(parsed.counts.get(ClientId::Kimi), 4);
+            assert_eq!(parsed.messages.len(), 4);
+            assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 40);
+            assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 5);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]
@@ -5947,6 +6035,112 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_prices_kimi_k2p6_alias() {
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "moonshotai/kimi-k2.6".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(9.5e-7),
+                output_cost_per_token: Some(0.000004),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(HashMap::new(), openrouter);
+
+        let mut msg = UnifiedMessage::new(
+            "kimi",
+            "k2p6",
+            "kimi-for-coding",
+            "session-1",
+            1_776_000_000_000,
+            TokenBreakdown {
+                input: 1_000_000,
+                output: 250_000,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        let expected = 1_000_000.0 * 9.5e-7 + 250_000.0 * 0.000004;
+        assert!((msg.cost - expected).abs() < 1e-12);
+        assert!(msg.cost > 0.0);
+    }
+
+    #[test]
+    fn test_select_local_parse_pricing_prefers_fresh_service_for_new_models() {
+        let mut fresh_litellm = HashMap::new();
+        fresh_litellm.insert(
+            "gpt-5.4".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.000002),
+                output_cost_per_token: Some(0.00001),
+                ..Default::default()
+            },
+        );
+        let fresh = Arc::new(pricing::PricingService::new(fresh_litellm, HashMap::new()));
+        let stale = pricing::PricingService::new(HashMap::new(), HashMap::new());
+        let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || Some(stale)).unwrap();
+
+        let mut msg = UnifiedMessage::new(
+            "opencode",
+            "gpt-5.4",
+            "openai",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        apply_pricing_if_available(&mut msg, Some(selected.as_ref()));
+
+        assert!(msg.cost > 0.0);
+    }
+
+    #[test]
+    fn test_select_local_parse_pricing_falls_back_to_stale_cache_on_fetch_error() {
+        let mut stale_litellm = HashMap::new();
+        stale_litellm.insert(
+            "gpt-5.2".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.00000175),
+                output_cost_per_token: Some(0.000014),
+                ..Default::default()
+            },
+        );
+        let stale = pricing::PricingService::new(stale_litellm, HashMap::new());
+
+        let selected =
+            select_local_parse_pricing(Err("network failed".to_string()), || Some(stale)).unwrap();
+
+        assert!(selected.lookup_with_source("gpt-5.2", None).is_some());
+    }
+
+    #[test]
+    fn test_select_local_parse_pricing_does_not_evaluate_stale_fallback_on_fresh_success() {
+        let fresh = Arc::new(pricing::PricingService::new(HashMap::new(), HashMap::new()));
+        let mut stale_called = false;
+
+        let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || {
+            stale_called = true;
+            None
+        })
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&selected, &fresh));
+        assert!(!stale_called);
     }
 
     #[test]
