@@ -258,172 +258,6 @@ fn daily_detail_column_sort_field(column: DailyDetailColumn) -> Option<SortField
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::super::model_usage_layout::MODEL_MAX_WIDTH;
-    use super::*;
-
-    #[test]
-    fn narrow_daily_layout_keeps_date_tokens_and_cost_without_cache_columns() {
-        let layout = daily_table_layout(74, true, false, false);
-
-        assert_eq!(layout.density, DailyTableDensity::Core);
-        assert_eq!(
-            layout.columns,
-            vec![
-                DailyColumn::Date,
-                DailyColumn::Messages,
-                DailyColumn::Total,
-                DailyColumn::Cost,
-            ]
-        );
-        assert!(!layout.columns.contains(&DailyColumn::CacheRead));
-        assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
-        assert!(!layout.columns.contains(&DailyColumn::CacheRate));
-        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
-    }
-
-    #[test]
-    fn narrow_daily_layout_preserves_turn_after_date_when_available() {
-        let layout = daily_table_layout(74, true, false, true);
-
-        assert_eq!(layout.density, DailyTableDensity::Core);
-        assert_eq!(
-            layout.columns,
-            vec![
-                DailyColumn::Date,
-                DailyColumn::Turn,
-                DailyColumn::Messages,
-                DailyColumn::Total,
-                DailyColumn::Cost,
-            ]
-        );
-    }
-
-    #[test]
-    fn portrait_daily_layout_drops_cache_before_input_output() {
-        let layout = daily_table_layout(74, false, false, false);
-
-        assert_eq!(layout.density, DailyTableDensity::Detail);
-        assert_eq!(
-            layout.columns,
-            vec![
-                DailyColumn::Date,
-                DailyColumn::Messages,
-                DailyColumn::Input,
-                DailyColumn::Output,
-                DailyColumn::Total,
-                DailyColumn::Cost,
-            ]
-        );
-        assert!(!layout.columns.contains(&DailyColumn::CacheRead));
-        assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
-        assert!(!layout.columns.contains(&DailyColumn::CacheRate));
-    }
-
-    #[test]
-    fn very_narrow_daily_layout_keeps_date_tokens_and_cost() {
-        let layout = daily_table_layout(54, true, true, true);
-
-        assert_eq!(layout.density, DailyTableDensity::VeryCompact);
-        assert_eq!(
-            layout.columns,
-            vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost]
-        );
-        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
-    }
-
-    #[test]
-    fn cache_columns_only_appear_in_full_daily_layout() {
-        let detail = daily_table_layout(74, false, false, false);
-        let full = daily_table_layout(120, false, false, false);
-
-        assert_eq!(detail.density, DailyTableDensity::Detail);
-        assert_eq!(full.density, DailyTableDensity::Full);
-        assert!(full.columns.contains(&DailyColumn::CacheRead));
-        assert!(full.columns.contains(&DailyColumn::CacheWrite));
-        assert!(full.columns.contains(&DailyColumn::CacheRate));
-        assert!(full.columns.contains(&DailyColumn::CostPerMillion));
-    }
-
-    #[test]
-    fn very_narrow_daily_detail_layout_keeps_model_tokens_and_cost() {
-        let layout = daily_detail_table_layout(54, true, 80, 56, 40);
-
-        assert_eq!(layout.density, DailyDetailTableDensity::VeryCompact);
-        assert_eq!(
-            layout.columns,
-            vec![
-                DailyDetailColumn::Model,
-                DailyDetailColumn::Total,
-                DailyDetailColumn::Cost,
-            ]
-        );
-        assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
-    }
-
-    #[test]
-    fn narrow_daily_detail_layout_uses_models_core_priority() {
-        let layout = daily_detail_table_layout(74, false, 80, 56, 40);
-
-        assert_eq!(layout.density, DailyDetailTableDensity::Detail);
-        assert_eq!(
-            layout.columns,
-            vec![
-                DailyDetailColumn::Model,
-                DailyDetailColumn::Source,
-                DailyDetailColumn::Provider,
-                DailyDetailColumn::Total,
-                DailyDetailColumn::Cost,
-            ]
-        );
-        assert!(!layout.columns.contains(&DailyDetailColumn::Messages));
-        assert!(!layout.columns.contains(&DailyDetailColumn::Input));
-        assert!(!layout.columns.contains(&DailyDetailColumn::CacheRead));
-    }
-
-    #[test]
-    fn daily_detail_layout_adds_messages_before_token_details() {
-        let layout = daily_detail_table_layout(82, false, 80, 56, 40);
-
-        assert_eq!(
-            layout.columns,
-            vec![
-                DailyDetailColumn::Model,
-                DailyDetailColumn::Source,
-                DailyDetailColumn::Provider,
-                DailyDetailColumn::Messages,
-                DailyDetailColumn::Total,
-                DailyDetailColumn::Cost,
-            ]
-        );
-        assert!(!layout.columns.contains(&DailyDetailColumn::Input));
-    }
-
-    #[test]
-    fn wide_daily_detail_layout_adds_cache_columns_before_total() {
-        let layout = daily_detail_table_layout(124, false, 80, 56, 40);
-
-        assert_eq!(layout.density, DailyDetailTableDensity::Full);
-        assert_eq!(
-            layout.columns,
-            vec![
-                DailyDetailColumn::Model,
-                DailyDetailColumn::Source,
-                DailyDetailColumn::Provider,
-                DailyDetailColumn::Messages,
-                DailyDetailColumn::Input,
-                DailyDetailColumn::Output,
-                DailyDetailColumn::CacheRate,
-                DailyDetailColumn::CacheRead,
-                DailyDetailColumn::CacheWrite,
-                DailyDetailColumn::Total,
-                DailyDetailColumn::Cost,
-            ]
-        );
-    }
-}
-
 fn daily_column_header(column: DailyColumn, density: DailyTableDensity) -> &'static str {
     match column {
         DailyColumn::Date => "Date",
@@ -847,6 +681,172 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                 vertical: 1,
             }),
             &mut scrollbar_state,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::model_usage_layout::MODEL_MAX_WIDTH;
+    use super::*;
+
+    #[test]
+    fn narrow_daily_layout_keeps_date_tokens_and_cost_without_cache_columns() {
+        let layout = daily_table_layout(74, true, false, false);
+
+        assert_eq!(layout.density, DailyTableDensity::Core);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyColumn::Date,
+                DailyColumn::Messages,
+                DailyColumn::Total,
+                DailyColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&DailyColumn::CacheRead));
+        assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
+        assert!(!layout.columns.contains(&DailyColumn::CacheRate));
+        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
+    }
+
+    #[test]
+    fn narrow_daily_layout_preserves_turn_after_date_when_available() {
+        let layout = daily_table_layout(74, true, false, true);
+
+        assert_eq!(layout.density, DailyTableDensity::Core);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyColumn::Date,
+                DailyColumn::Turn,
+                DailyColumn::Messages,
+                DailyColumn::Total,
+                DailyColumn::Cost,
+            ]
+        );
+    }
+
+    #[test]
+    fn portrait_daily_layout_drops_cache_before_input_output() {
+        let layout = daily_table_layout(74, false, false, false);
+
+        assert_eq!(layout.density, DailyTableDensity::Detail);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyColumn::Date,
+                DailyColumn::Messages,
+                DailyColumn::Input,
+                DailyColumn::Output,
+                DailyColumn::Total,
+                DailyColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&DailyColumn::CacheRead));
+        assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
+        assert!(!layout.columns.contains(&DailyColumn::CacheRate));
+    }
+
+    #[test]
+    fn very_narrow_daily_layout_keeps_date_tokens_and_cost() {
+        let layout = daily_table_layout(54, true, true, true);
+
+        assert_eq!(layout.density, DailyTableDensity::VeryCompact);
+        assert_eq!(
+            layout.columns,
+            vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost]
+        );
+        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
+    }
+
+    #[test]
+    fn cache_columns_only_appear_in_full_daily_layout() {
+        let detail = daily_table_layout(74, false, false, false);
+        let full = daily_table_layout(120, false, false, false);
+
+        assert_eq!(detail.density, DailyTableDensity::Detail);
+        assert_eq!(full.density, DailyTableDensity::Full);
+        assert!(full.columns.contains(&DailyColumn::CacheRead));
+        assert!(full.columns.contains(&DailyColumn::CacheWrite));
+        assert!(full.columns.contains(&DailyColumn::CacheRate));
+        assert!(full.columns.contains(&DailyColumn::CostPerMillion));
+    }
+
+    #[test]
+    fn very_narrow_daily_detail_layout_keeps_model_tokens_and_cost() {
+        let layout = daily_detail_table_layout(54, true, 80, 56, 40);
+
+        assert_eq!(layout.density, DailyDetailTableDensity::VeryCompact);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyDetailColumn::Model,
+                DailyDetailColumn::Total,
+                DailyDetailColumn::Cost,
+            ]
+        );
+        assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
+    }
+
+    #[test]
+    fn narrow_daily_detail_layout_uses_models_core_priority() {
+        let layout = daily_detail_table_layout(74, false, 80, 56, 40);
+
+        assert_eq!(layout.density, DailyDetailTableDensity::Detail);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyDetailColumn::Model,
+                DailyDetailColumn::Source,
+                DailyDetailColumn::Provider,
+                DailyDetailColumn::Total,
+                DailyDetailColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&DailyDetailColumn::Messages));
+        assert!(!layout.columns.contains(&DailyDetailColumn::Input));
+        assert!(!layout.columns.contains(&DailyDetailColumn::CacheRead));
+    }
+
+    #[test]
+    fn daily_detail_layout_adds_messages_before_token_details() {
+        let layout = daily_detail_table_layout(82, false, 80, 56, 40);
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyDetailColumn::Model,
+                DailyDetailColumn::Source,
+                DailyDetailColumn::Provider,
+                DailyDetailColumn::Messages,
+                DailyDetailColumn::Total,
+                DailyDetailColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&DailyDetailColumn::Input));
+    }
+
+    #[test]
+    fn wide_daily_detail_layout_adds_cache_columns_before_total() {
+        let layout = daily_detail_table_layout(124, false, 80, 56, 40);
+
+        assert_eq!(layout.density, DailyDetailTableDensity::Full);
+        assert_eq!(
+            layout.columns,
+            vec![
+                DailyDetailColumn::Model,
+                DailyDetailColumn::Source,
+                DailyDetailColumn::Provider,
+                DailyDetailColumn::Messages,
+                DailyDetailColumn::Input,
+                DailyDetailColumn::Output,
+                DailyDetailColumn::CacheRate,
+                DailyDetailColumn::CacheRead,
+                DailyDetailColumn::CacheWrite,
+                DailyDetailColumn::Total,
+                DailyDetailColumn::Cost,
+            ]
         );
     }
 }

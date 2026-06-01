@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 
 mod aggregator;
+mod cc_mirror;
 pub mod clients;
 pub mod fs_atomic;
 mod message_cache;
@@ -360,6 +361,7 @@ fn retain_for_requested_clients(
     requested: &HashSet<&str>,
 ) -> bool {
     requested.contains(client)
+        || (requested.contains("claude") && client.starts_with("cc-mirror/"))
         || (requested.contains("synthetic")
             && sessions::synthetic::matches_synthetic_filter(client, model_id, provider_id))
 }
@@ -897,15 +899,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         ))
     }
 
-    fn load_or_parse_source_with_fingerprint_and_policy<F>(
+    fn load_or_parse_source_with_fingerprint_and_policy<F, FingerprintFn>(
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
-        fingerprint_from_path: fn(&Path) -> Option<message_cache::SourceFingerprint>,
+        fingerprint_from_path: FingerprintFn,
         parse: F,
     ) -> CachedParseOutcome
     where
         F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
+        FingerprintFn: Fn(&Path) -> Option<message_cache::SourceFingerprint>,
     {
         let Some(fingerprint) = fingerprint_from_path(path) else {
             let (mut messages, _) = parse(path);
@@ -948,15 +951,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    fn load_or_parse_source_with_fingerprint<F>(
+    fn load_or_parse_source_with_fingerprint<F, FingerprintFn>(
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
-        fingerprint_from_path: fn(&Path) -> Option<message_cache::SourceFingerprint>,
+        fingerprint_from_path: FingerprintFn,
         parse: F,
     ) -> CachedParseOutcome
     where
         F: Fn(&Path) -> Vec<UnifiedMessage>,
+        FingerprintFn: Fn(&Path) -> Option<message_cache::SourceFingerprint>,
     {
         load_or_parse_source_with_fingerprint_and_policy(
             path,
@@ -1158,6 +1162,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let claude_home = PathBuf::from(home_dir);
     let claude_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Claude)
         .par_iter()
@@ -1166,8 +1171,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_claude_code_path,
-                sessions::claudecode::parse_claude_file,
+                |path| {
+                    message_cache::SourceFingerprint::from_claude_code_path_with_home(
+                        path,
+                        Some(&claude_home),
+                    )
+                },
+                |path| sessions::claudecode::parse_claude_file_with_home(path, Some(&claude_home)),
             )
         })
         .collect();
@@ -1267,6 +1277,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in cursor_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    let warp_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Warp)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::warp::parse_warp_file(path)
+            })
+        })
+        .collect();
+    for outcome in warp_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
@@ -2343,17 +2369,22 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     };
     counts.set(ClientId::OpenCode, opencode_count);
 
+    let claude_home = PathBuf::from(&home_dir);
     let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
         .get(ClientId::Claude)
         .par_iter()
         .map_init(std::collections::HashMap::new, |parent_cache, path| {
-            sessions::claudecode::parse_claude_file_with_cache(path, parent_cache)
-                .into_iter()
-                .map(|msg| {
-                    let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-                    (dedup_key, unified_to_parsed(&msg))
-                })
-                .collect::<Vec<_>>()
+            sessions::claudecode::parse_claude_file_with_cache_and_home(
+                path,
+                parent_cache,
+                Some(&claude_home),
+            )
+            .into_iter()
+            .map(|msg| {
+                let dedup_key = msg.dedup_key.clone().unwrap_or_default();
+                (dedup_key, unified_to_parsed(&msg))
+            })
+            .collect::<Vec<_>>()
         })
         .flatten()
         .collect();
@@ -2683,6 +2714,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let trae_count = trae_msgs.len() as i32;
     counts.set(ClientId::Trae, trae_count);
     messages.extend(trae_msgs);
+
+    let warp_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Warp)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::warp::parse_warp_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let warp_count = summed_parsed_message_count(&warp_msgs);
+    counts.set(ClientId::Warp, warp_count);
+    messages.extend(warp_msgs);
 
     if include_synthetic {
         if let Some(db_path) = &scan_result.synthetic_db {
@@ -4661,7 +4706,9 @@ mod tests {
                 "\n",
                 r#"{"timestamp":"2026-04-30T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-04-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+                r#"{"timestamp":"2026-04-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
                 "\n"
             ),
         )
@@ -4669,13 +4716,17 @@ mod tests {
         std::fs::write(
             codex_dir.join("fork.jsonl"),
             concat!(
-                r#"{"timestamp":"2026-04-30T10:01:00Z","type":"session_meta","payload":{"id":"fork-session","forked_from_id":"parent-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","cwd":"/Users/alice/root-worktree"}}"#,
+                r#"{"timestamp":"2026-04-30T10:01:00Z","type":"session_meta","payload":{"id":"fork-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","cwd":"/Users/alice/root-worktree"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-04-30T10:01:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+                r#"{"timestamp":"2026-04-30T10:01:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130}}}}"#,
                 "\n",
-                r#"{"timestamp":"2026-04-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+                r#"{"timestamp":"2026-04-30T10:01:02Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-04-30T10:01:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                r#"{"timestamp":"2026-04-30T10:01:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T10:01:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-30T10:01:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33,"total_tokens":143},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"total_tokens":13}}}}"#,
                 "\n"
             ),
         )
@@ -4700,7 +4751,7 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(messages.len(), 2);
+            assert_eq!(messages.len(), 3);
             assert_eq!(
                 messages
                     .iter()
@@ -4829,8 +4880,8 @@ mod tests {
             })
             .unwrap();
 
-            assert_eq!(parsed.counts.get(ClientId::Codex), 2);
-            assert_eq!(parsed.messages.len(), 2);
+            assert_eq!(parsed.counts.get(ClientId::Codex), 3);
+            assert_eq!(parsed.messages.len(), 3);
             assert_eq!(
                 parsed
                     .messages
