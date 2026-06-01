@@ -1526,6 +1526,22 @@ fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let entries = json["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
+    for entry in entries {
+        let hour = entry["hour"].as_str().unwrap();
+        assert_eq!(hour.len(), "MM-DD HH:00".len());
+        assert_eq!(hour.as_bytes()[2], b'-');
+        assert_eq!(hour.as_bytes()[5], b' ');
+        assert_eq!(hour.as_bytes()[8], b':');
+        assert!(
+            !hour.contains("2024-") && !hour.contains("2025-") && !hour.contains("2026-"),
+            "hour should omit the year: {hour}"
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let forbidden_camel = ["cost", "Per", "Million"].concat();
+    let forbidden_snake = ["cost", "_per", "_million"].concat();
+    assert!(!stdout.contains(&forbidden_camel));
+    assert!(!stdout.contains(&forbidden_snake));
     assert_eq!(
         entries
             .iter()
@@ -1545,6 +1561,31 @@ fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
         (total_cost - 0.10).abs() < 1e-9,
         "unexpected totalCost without pricing: {total_cost}"
     );
+}
+
+#[test]
+fn test_usage_text_reports_do_not_show_efficiency_column() {
+    let tmp = create_temp_fixture_dir();
+    let forbidden_header = ["Cost", "/1M"].concat();
+
+    for args in [
+        &["models", "--opencode", "--no-spinner"][..],
+        &["monthly", "--opencode", "--no-spinner"][..],
+        &["hourly", "--opencode", "--no-spinner"][..],
+    ] {
+        let output = cmd_with_home(tmp.path()).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "command {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains(&forbidden_header),
+            "command {args:?} still showed forbidden usage efficiency header:\n{stdout}"
+        );
+    }
 }
 
 #[test]

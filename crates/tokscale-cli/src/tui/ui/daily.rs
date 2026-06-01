@@ -11,8 +11,8 @@ use super::model_usage_layout::{
     MODEL_MIN_WIDTH,
 };
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name, truncate_model_display_name_to,
+    format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
+    get_provider_display_name, truncate_model_display_name_to,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
@@ -23,7 +23,6 @@ const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
 const CACHE_RATE_WIDTH: u16 = 8;
 const COST_WIDTH: u16 = 10;
-const COST_PER_MILLION_WIDTH: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DailyTableDensity {
@@ -45,7 +44,6 @@ enum DailyColumn {
     CacheRate,
     Total,
     Cost,
-    CostPerMillion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +85,6 @@ fn daily_full_min_width(has_turn_data: bool) -> u16 {
         CACHE_RATE_WIDTH,
         NUMERIC_WIDTH,
         COST_WIDTH,
-        COST_PER_MILLION_WIDTH,
     ];
     if has_turn_data {
         widths.insert(1, TURN_WIDTH);
@@ -130,7 +127,6 @@ fn daily_table_layout(
             DailyColumn::CacheRate,
             DailyColumn::Total,
             DailyColumn::Cost,
-            DailyColumn::CostPerMillion,
         ]);
         widths.extend([
             Constraint::Length(MSGS_WIDTH),
@@ -141,7 +137,6 @@ fn daily_table_layout(
             Constraint::Length(CACHE_RATE_WIDTH),
             Constraint::Length(NUMERIC_WIDTH),
             Constraint::Length(COST_WIDTH),
-            Constraint::Length(COST_PER_MILLION_WIDTH),
         ]);
 
         return DailyTableLayout {
@@ -222,7 +217,6 @@ fn daily_detail_table_layout(
             DailyDetailColumn::CacheRate,
             DailyDetailColumn::CacheRead,
             DailyDetailColumn::CacheWrite,
-            DailyDetailColumn::CostPerMillion,
         ],
     )
 }
@@ -244,7 +238,6 @@ fn daily_detail_column_header(
         DailyDetailColumn::Total if density == DailyDetailTableDensity::Full => "Total",
         DailyDetailColumn::Total => "Tokens",
         DailyDetailColumn::Cost => "Cost",
-        DailyDetailColumn::CostPerMillion => "Cost/1M",
         DailyDetailColumn::Performance => "ms/1K",
     }
 }
@@ -253,7 +246,6 @@ fn daily_detail_column_sort_field(column: DailyDetailColumn) -> Option<SortField
     match column {
         DailyDetailColumn::Total => Some(SortField::Tokens),
         DailyDetailColumn::Cost => Some(SortField::Cost),
-        DailyDetailColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -271,7 +263,6 @@ fn daily_column_header(column: DailyColumn, density: DailyTableDensity) -> &'sta
         DailyColumn::Total if density == DailyTableDensity::Full => "Total",
         DailyColumn::Total => "Tokens",
         DailyColumn::Cost => "Cost",
-        DailyColumn::CostPerMillion => "Cost/1M",
     }
 }
 
@@ -280,7 +271,6 @@ fn daily_column_sort_field(column: DailyColumn) -> Option<SortField> {
         DailyColumn::Date => Some(SortField::Date),
         DailyColumn::Total => Some(SortField::Tokens),
         DailyColumn::Cost => Some(SortField::Cost),
-        DailyColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -422,10 +412,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyColumn::Total => Cell::from(format_tokens(day.tokens.total())),
                     DailyColumn::Cost => {
                         Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green))
-                    }
-                    DailyColumn::CostPerMillion => {
-                        Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
-                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
                     }
                 }
             };
@@ -632,10 +618,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyDetailColumn::Cost => {
                         Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green))
                     }
-                    DailyDetailColumn::CostPerMillion => {
-                        Cell::from(format_cost_per_million(row.cost, row.tokens.total()))
-                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
-                    }
                     // daily_detail_table_layout never includes Performance; panic if the layout drifts.
                     DailyDetailColumn::Performance => {
                         unreachable!("daily detail rows have no timing data")
@@ -770,7 +752,6 @@ mod tests {
         assert!(full.columns.contains(&DailyColumn::CacheRead));
         assert!(full.columns.contains(&DailyColumn::CacheWrite));
         assert!(full.columns.contains(&DailyColumn::CacheRate));
-        assert!(full.columns.contains(&DailyColumn::CostPerMillion));
     }
 
     #[test]

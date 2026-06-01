@@ -1884,14 +1884,11 @@ fn run_models_report(
                         Cell::new("Output").fg(Color::Cyan),
                         Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
-                        Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
 
                     for entry in &report.entries {
                         let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
                         let display_clients = get_client_display_name(clients_str);
-                        let total_tokens =
-                            entry.input + entry.output + entry.cache_read + entry.cache_write;
                         table.add_row(vec![
                             Cell::new(display_clients),
                             Cell::new(get_provider_display_name(&entry.provider))
@@ -1905,15 +1902,9 @@ fn run_models_report(
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_cost_per_million(entry.cost, total_tokens))
-                                .set_alignment(CellAlignment::Right),
                         ]);
                     }
 
-                    let total_tokens = report.total_input
-                        + report.total_output
-                        + report.total_cache_read
-                        + report.total_cache_write;
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -1930,9 +1921,6 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_cost_per_million(report.total_cost, total_tokens))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                     ]);
@@ -1946,12 +1934,9 @@ fn run_models_report(
                         Cell::new("Output").fg(Color::Cyan),
                         Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
-                        Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
 
                     for entry in &report.entries {
-                        let total_tokens =
-                            entry.input + entry.output + entry.cache_read + entry.cache_write;
                         table.add_row(vec![
                             Cell::new(get_client_display_name(&entry.client)),
                             Cell::new(get_provider_display_name(&entry.provider))
@@ -1965,15 +1950,9 @@ fn run_models_report(
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_cost_per_million(entry.cost, total_tokens))
-                                .set_alignment(CellAlignment::Right),
                         ]);
                     }
 
-                    let total_tokens = report.total_input
-                        + report.total_output
-                        + report.total_cache_read
-                        + report.total_cache_write;
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -1990,9 +1969,6 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_cost_per_million(report.total_cost, total_tokens))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                     ]);
@@ -2112,7 +2088,6 @@ fn run_models_report(
                         Cell::new("Total").fg(Color::Cyan),
                         Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
-                        Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
 
                     for entry in &report.entries {
@@ -2139,8 +2114,6 @@ fn run_models_report(
                             Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_cost_per_million(entry.cost, total))
                                 .set_alignment(CellAlignment::Right),
                         ]);
                     }
@@ -2176,14 +2149,11 @@ fn run_models_report(
                         Cell::new(format_currency(report.total_cost))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_cost_per_million(report.total_cost, total_all))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
                     ]);
                 }
                 GroupBy::Session | GroupBy::ClientSession => {
                     let show_client = group_by == GroupBy::ClientSession;
-                    let mut header = Vec::with_capacity(9);
+                    let mut header = Vec::with_capacity(8);
                     if show_client {
                         header.push(Cell::new("Client").fg(Color::Cyan));
                     }
@@ -2195,7 +2165,6 @@ fn run_models_report(
                         Cell::new("Output").fg(Color::Cyan),
                         Cell::new("Total").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
-                        Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
                     table.set_header(header);
 
@@ -2206,7 +2175,7 @@ fn run_models_report(
                             .session_id
                             .clone()
                             .unwrap_or_else(|| "(unknown)".to_string());
-                        let mut row = Vec::with_capacity(9);
+                        let mut row = Vec::with_capacity(8);
                         if show_client {
                             row.push(Cell::new(get_client_display_name(&entry.client)));
                         }
@@ -2222,8 +2191,6 @@ fn run_models_report(
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_cost_per_million(entry.cost, total))
-                                .set_alignment(CellAlignment::Right),
                         ]);
                         table.add_row(row);
                     }
@@ -2232,7 +2199,7 @@ fn run_models_report(
                         + report.total_output
                         + report.total_cache_write
                         + report.total_cache_read;
-                    let mut total_row: Vec<Cell> = Vec::with_capacity(9);
+                    let mut total_row: Vec<Cell> = Vec::with_capacity(8);
                     total_row.push(
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -2262,11 +2229,6 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                     );
-                    total_row.push(
-                        Cell::new(format_cost_per_million(report.total_cost, total_all))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    );
                     table.add_row(total_row);
                 }
                 GroupBy::ClientModel | GroupBy::ClientProviderModel => {
@@ -2282,7 +2244,6 @@ fn run_models_report(
                         Cell::new("Total").fg(Color::Cyan),
                         Cell::new("ms/1K").fg(Color::Cyan),
                         Cell::new("Cost").fg(Color::Cyan),
-                        Cell::new("Cost/1M").fg(Color::Cyan),
                     ]);
 
                     for entry in &report.entries {
@@ -2310,8 +2271,6 @@ fn run_models_report(
                             Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_cost_per_million(entry.cost, total))
                                 .set_alignment(CellAlignment::Right),
                         ]);
                     }
@@ -2346,9 +2305,6 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_cost_per_million(report.total_cost, total_all))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                     ]);
@@ -2600,7 +2556,6 @@ fn run_monthly_report(
                 Cell::new("Input").fg(Color::Cyan),
                 Cell::new("Output").fg(Color::Cyan),
                 Cell::new("Cost").fg(Color::Cyan),
-                Cell::new("Cost/1M").fg(Color::Cyan),
             ]);
 
             for entry in &report.entries {
@@ -2621,9 +2576,6 @@ fn run_monthly_report(
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                let total_tokens =
-                    entry.input + entry.output + entry.cache_read + entry.cache_write;
-
                 table.add_row(vec![
                     Cell::new(entry.month.clone()),
                     Cell::new(models_col),
@@ -2632,16 +2584,11 @@ fn run_monthly_report(
                     Cell::new(format_tokens_with_commas(entry.output))
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_currency(entry.cost)).set_alignment(CellAlignment::Right),
-                    Cell::new(format_cost_per_million(entry.cost, total_tokens))
-                        .set_alignment(CellAlignment::Right),
                 ]);
             }
 
             let total_input: i64 = report.entries.iter().map(|e| e.input).sum();
             let total_output: i64 = report.entries.iter().map(|e| e.output).sum();
-            let total_cache_read: i64 = report.entries.iter().map(|e| e.cache_read).sum();
-            let total_cache_write: i64 = report.entries.iter().map(|e| e.cache_write).sum();
-            let total_tokens = total_input + total_output + total_cache_read + total_cache_write;
             table.add_row(vec![
                 Cell::new("Total")
                     .fg(Color::Yellow)
@@ -2656,9 +2603,6 @@ fn run_monthly_report(
                 Cell::new(format_currency(report.total_cost))
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
-                Cell::new(format_cost_per_million(report.total_cost, total_tokens))
-                    .fg(Color::Yellow)
-                    .set_alignment(CellAlignment::Right),
             ]);
         } else {
             table.set_header(vec![
@@ -2670,7 +2614,6 @@ fn run_monthly_report(
                 Cell::new("Cache Read").fg(Color::Cyan),
                 Cell::new("Total").fg(Color::Cyan),
                 Cell::new("Cost").fg(Color::Cyan),
-                Cell::new("Cost/1M").fg(Color::Cyan),
             ]);
 
             for entry in &report.entries {
@@ -2706,8 +2649,6 @@ fn run_monthly_report(
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(total)).set_alignment(CellAlignment::Right),
                     Cell::new(format_currency(entry.cost)).set_alignment(CellAlignment::Right),
-                    Cell::new(format_cost_per_million(entry.cost, total))
-                        .set_alignment(CellAlignment::Right),
                 ]);
             }
 
@@ -2738,9 +2679,6 @@ fn run_monthly_report(
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
                 Cell::new(format_currency(report.total_cost))
-                    .fg(Color::Yellow)
-                    .set_alignment(CellAlignment::Right),
-                Cell::new(format_cost_per_million(report.total_cost, total_all))
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
             ]);
@@ -2906,7 +2844,6 @@ fn run_hourly_report(
                 Cell::new("Input").fg(Color::Cyan),
                 Cell::new("Output").fg(Color::Cyan),
                 Cell::new("Cost").fg(Color::Cyan),
-                Cell::new("Cost/1M").fg(Color::Cyan),
             ]);
 
             for entry in &report.entries {
@@ -2924,8 +2861,6 @@ fn run_hourly_report(
                 } else {
                     "—".to_string()
                 };
-                let total_tokens =
-                    entry.input + entry.output + entry.cache_read + entry.cache_write;
                 table.add_row(vec![
                     Cell::new(&entry.hour).fg(Color::White),
                     Cell::new(&clients_col),
@@ -2937,8 +2872,6 @@ fn run_hourly_report(
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_currency(entry.cost))
                         .fg(Color::Green)
-                        .set_alignment(CellAlignment::Right),
-                    Cell::new(format_cost_per_million(entry.cost, total_tokens))
                         .set_alignment(CellAlignment::Right),
                 ]);
             }
@@ -2955,7 +2888,6 @@ fn run_hourly_report(
                 Cell::new("Cache W").fg(Color::Cyan),
                 Cell::new("Cache×").fg(Color::Cyan),
                 Cell::new("Cost").fg(Color::Cyan),
-                Cell::new("Cost/1M").fg(Color::Cyan),
             ]);
 
             for entry in &report.entries {
@@ -3001,9 +2933,6 @@ fn run_hourly_report(
                     "—".to_string()
                 };
 
-                let total_tokens =
-                    entry.input + entry.output + entry.cache_read + entry.cache_write;
-
                 table.add_row(vec![
                     Cell::new(&entry.hour).fg(Color::White),
                     Cell::new(&clients_col),
@@ -3023,8 +2952,6 @@ fn run_hourly_report(
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_currency(entry.cost))
                         .fg(Color::Green)
-                        .set_alignment(CellAlignment::Right),
-                    Cell::new(format_cost_per_million(entry.cost, total_tokens))
                         .set_alignment(CellAlignment::Right),
                 ]);
             }
@@ -3378,18 +3305,6 @@ fn run_pricing_list_overrides(json: bool) -> Result<()> {
 
 fn format_currency(n: f64) -> String {
     format!("${:.2}", n)
-}
-
-fn format_cost_per_million(cost: f64, total_tokens: i64) -> String {
-    if total_tokens <= 0 || !cost.is_finite() {
-        return "—".to_string();
-    }
-    let cost_per_m = cost * 1_000_000.0 / total_tokens as f64;
-    if !cost_per_m.is_finite() {
-        "—".to_string()
-    } else {
-        format!("${:.2}/M", cost_per_m)
-    }
 }
 
 fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {

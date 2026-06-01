@@ -9,8 +9,8 @@ use super::model_usage_layout::{
     DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH,
 };
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
-    get_client_display_name, get_provider_display_name, truncate_model_display_name_to,
+    format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
+    get_provider_display_name, truncate_model_display_name_to,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -52,7 +52,6 @@ fn models_table_layout(
             ModelsColumn::CacheRead,
             ModelsColumn::CacheWrite,
             ModelsColumn::Performance,
-            ModelsColumn::CostPerMillion,
         ],
     )
 }
@@ -78,7 +77,6 @@ fn model_column_header(
         ModelsColumn::Total => "Tokens",
         ModelsColumn::Performance => "ms/1K",
         ModelsColumn::Cost => "Cost",
-        ModelsColumn::CostPerMillion => "Cost/1M",
     }
 }
 
@@ -86,7 +84,6 @@ fn model_column_sort_field(column: ModelsColumn) -> Option<SortField> {
     match column {
         ModelsColumn::Total => Some(SortField::Tokens),
         ModelsColumn::Cost => Some(SortField::Cost),
-        ModelsColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -248,10 +245,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     }
                     ModelsColumn::Cost => {
                         Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green))
-                    }
-                    ModelsColumn::CostPerMillion => {
-                        Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
-                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
                     }
                 }
             };

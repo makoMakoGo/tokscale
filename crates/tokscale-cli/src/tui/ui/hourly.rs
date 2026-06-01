@@ -1,22 +1,170 @@
-use chrono::{Local, Timelike};
+use chrono::{Local, NaiveDateTime, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
 use super::hourly_profile;
-use super::time_table::{display_width, full_time_table_widths};
-use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name,
-};
+use super::model_usage_layout::{choose_priority_columns, display_width};
+use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
+
+const TABLE_COLUMN_SPACING: u16 = 1;
+const HOUR_WIDTH: u16 = 11;
+const SOURCE_MIN_WIDTH: u16 = 12;
+const SOURCE_MAX_WIDTH: u16 = 40;
+const TURN_WIDTH: u16 = 6;
+const MSGS_WIDTH: u16 = 6;
+const NUMERIC_WIDTH: u16 = 10;
+const TOTAL_WIDTH: u16 = 9;
+const CACHE_RATE_WIDTH: u16 = 8;
+const COST_WIDTH: u16 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HourlyColumn {
+    Hour,
+    Source,
+    Turn,
+    Messages,
+    Input,
+    Output,
+    CacheRead,
+    CacheWrite,
+    CacheRate,
+    Total,
+    Cost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HourlyTableLayout {
+    columns: Vec<HourlyColumn>,
+    widths: Vec<Constraint>,
+}
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.hourly_view_mode {
         HourlyViewMode::Table => render_table(frame, app, area),
         HourlyViewMode::Profile => hourly_profile::render(frame, app, area),
     }
+}
+
+fn spaced_width(widths: &[u16]) -> u16 {
+    let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
+    widths.iter().copied().sum::<u16>().saturating_add(spacing)
+}
+
+fn hourly_column_width(column: HourlyColumn, source_width: u16) -> u16 {
+    match column {
+        HourlyColumn::Hour => HOUR_WIDTH,
+        HourlyColumn::Source => source_width,
+        HourlyColumn::Turn => TURN_WIDTH,
+        HourlyColumn::Messages => MSGS_WIDTH,
+        HourlyColumn::Input
+        | HourlyColumn::Output
+        | HourlyColumn::CacheRead
+        | HourlyColumn::CacheWrite => NUMERIC_WIDTH,
+        HourlyColumn::CacheRate => CACHE_RATE_WIDTH,
+        HourlyColumn::Total => TOTAL_WIDTH,
+        HourlyColumn::Cost => COST_WIDTH,
+    }
+}
+
+fn hourly_layout_width(columns: &[HourlyColumn], source_width: u16) -> u16 {
+    let widths: Vec<u16> = columns
+        .iter()
+        .map(|column| hourly_column_width(*column, source_width))
+        .collect();
+
+    spaced_width(&widths)
+}
+
+fn hourly_insert_index(candidate: &[HourlyColumn], column: HourlyColumn) -> usize {
+    if column == HourlyColumn::Cost {
+        return candidate
+            .iter()
+            .position(|existing| *existing == HourlyColumn::Total)
+            .map(|index| index + 1)
+            .unwrap_or(candidate.len());
+    }
+
+    candidate
+        .iter()
+        .position(|existing| matches!(existing, HourlyColumn::Total | HourlyColumn::Cost))
+        .unwrap_or(candidate.len())
+}
+
+fn hourly_table_layout(
+    table_width: u16,
+    has_turn_data: bool,
+    source_content_width: u16,
+) -> HourlyTableLayout {
+    let required_columns = [HourlyColumn::Hour, HourlyColumn::Total];
+    let mut optional_columns = vec![HourlyColumn::Cost, HourlyColumn::Source];
+    if has_turn_data {
+        optional_columns.push(HourlyColumn::Turn);
+    }
+    optional_columns.extend([
+        HourlyColumn::Messages,
+        HourlyColumn::Input,
+        HourlyColumn::Output,
+        HourlyColumn::CacheRead,
+        HourlyColumn::CacheWrite,
+        HourlyColumn::CacheRate,
+    ]);
+
+    let mut source_width = SOURCE_MIN_WIDTH;
+    let columns = choose_priority_columns(
+        table_width,
+        &required_columns,
+        &optional_columns,
+        hourly_insert_index,
+        |candidate| hourly_layout_width(candidate, source_width),
+    );
+
+    if columns.contains(&HourlyColumn::Source) {
+        let used_width = hourly_layout_width(&columns, source_width);
+        let ideal_source_width = source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH);
+        let grow_by = table_width
+            .saturating_sub(used_width)
+            .min(ideal_source_width.saturating_sub(source_width));
+        source_width += grow_by;
+    }
+
+    let widths = columns
+        .iter()
+        .map(|column| Constraint::Length(hourly_column_width(*column, source_width)))
+        .collect();
+
+    HourlyTableLayout { columns, widths }
+}
+
+fn hourly_column_header(column: HourlyColumn) -> &'static str {
+    match column {
+        HourlyColumn::Hour => "Hour",
+        HourlyColumn::Source => "Source",
+        HourlyColumn::Turn => "Turn",
+        HourlyColumn::Messages => "Msgs",
+        HourlyColumn::Input => "Input",
+        HourlyColumn::Output => "Output",
+        HourlyColumn::CacheRead => "Cache R",
+        HourlyColumn::CacheWrite => "Cache W",
+        HourlyColumn::CacheRate => "Cache×",
+        HourlyColumn::Total => "Total",
+        HourlyColumn::Cost => "Cost",
+    }
+}
+
+fn hourly_column_sort_field(column: HourlyColumn) -> Option<SortField> {
+    match column {
+        HourlyColumn::Hour => Some(SortField::Date),
+        HourlyColumn::Total => Some(SortField::Tokens),
+        HourlyColumn::Cost => Some(SortField::Cost),
+        _ => None,
+    }
+}
+
+fn format_hour_label(datetime: NaiveDateTime) -> String {
+    datetime.format("%m-%d %H:00").to_string()
 }
 
 fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -46,8 +194,6 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let is_narrow = app.is_narrow();
-    let is_very_narrow = app.is_very_narrow();
     let has_turn_data = hourly.iter().any(|h| h.turn_count > 0);
     let source_content_width = hourly
         .iter()
@@ -68,26 +214,8 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let striped_row_style = app.theme.striped_row_style();
     let now = Local::now().naive_local();
     let current_hour = now.date().and_hms_opt(now.hour(), 0, 0).unwrap_or(now);
-
-    let header_cells = if is_very_narrow {
-        vec!["Hour", "Cost"]
-    } else if is_narrow {
-        if has_turn_data {
-            vec!["Hour", "Source", "Turn", "Msgs", "Tokens", "Cost"]
-        } else {
-            vec!["Hour", "Source", "Msgs", "Tokens", "Cost"]
-        }
-    } else if has_turn_data {
-        vec![
-            "Hour", "Source", "Turn", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×",
-            "Total", "Cost", "Cost/1M",
-        ]
-    } else {
-        vec![
-            "Hour", "Source", "Msgs", "Input", "Output", "Cache R", "Cache W", "Cache×", "Total",
-            "Cost", "Cost/1M",
-        ]
-    };
+    let table_layout = hourly_table_layout(inner.width, has_turn_data, source_content_width);
+    let columns = table_layout.columns.clone();
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -101,23 +229,13 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let header = Row::new(
-        header_cells
+        columns
             .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let indicator = match (i, is_narrow, is_very_narrow) {
-                    (0, _, _) => sort_indicator(SortField::Date),
-                    (9, false, false) if has_turn_data => sort_indicator(SortField::Tokens),
-                    (8, false, false) if !has_turn_data => sort_indicator(SortField::Tokens),
-                    (4, true, false) if has_turn_data => sort_indicator(SortField::Tokens),
-                    (3, true, false) if !has_turn_data => sort_indicator(SortField::Tokens),
-                    (10, false, false) if has_turn_data => sort_indicator(SortField::Cost),
-                    (9, false, false) if !has_turn_data => sort_indicator(SortField::Cost),
-                    (5, true, false) if has_turn_data => sort_indicator(SortField::Cost),
-                    (4, true, false) if !has_turn_data => sort_indicator(SortField::Cost),
-                    (1, _, true) => sort_indicator(SortField::Cost),
-                    _ => "",
-                };
+            .map(|column| {
+                let h = hourly_column_header(*column);
+                let indicator = hourly_column_sort_field(*column)
+                    .map(sort_indicator)
+                    .unwrap_or("");
                 Cell::from(format!("{}{}", h, indicator))
             })
             .collect::<Vec<_>>(),
@@ -147,89 +265,52 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_current = hour.datetime == current_hour;
 
             let clients_str = hourly_source_text(hour.clients.iter());
-
-            let cells: Vec<Cell> = if is_very_narrow {
-                vec![
-                    Cell::from(hour.datetime.format("%m/%d %H:%M").to_string()).style(
-                        if is_current {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        },
-                    ),
-                    Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else if is_narrow {
-                let mut cells = vec![
-                    Cell::from(hour.datetime.format("%Y-%m-%d %H:%M").to_string()).style(
-                        if is_current {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        },
-                    ),
-                    Cell::from(clients_str),
-                ];
-                if has_turn_data {
-                    let turn_str = if hour.turn_count > 0 {
-                        hour.turn_count.to_string()
-                    } else {
-                        "\u{2014}".to_string()
-                    };
-                    cells.push(Cell::from(turn_str));
-                }
-                cells.extend([
-                    Cell::from(hour.message_count.to_string()),
-                    Cell::from(format_tokens(hour.tokens.total())),
-                    Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
-                ]);
-                cells
+            let hour_label = format_hour_label(hour.datetime);
+            let hour_style = if is_current {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                let mut cells = vec![
-                    Cell::from(hour.datetime.format("%Y-%m-%d %H:%M").to_string()).style(
-                        if is_current {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().add_modifier(Modifier::BOLD)
-                        },
-                    ),
-                    Cell::from(clients_str),
-                ];
-                if has_turn_data {
-                    let turn_str = if hour.turn_count > 0 {
-                        hour.turn_count.to_string()
-                    } else {
-                        "\u{2014}".to_string()
-                    };
-                    cells.push(Cell::from(turn_str));
-                }
-                cells.extend([
-                    Cell::from(hour.message_count.to_string()),
-                    Cell::from(format_tokens(hour.tokens.input)).style(metric_input_style),
-                    Cell::from(format_tokens(hour.tokens.output)).style(metric_output_style),
-                    Cell::from(format_tokens(hour.tokens.cache_read))
+                Style::default().add_modifier(Modifier::BOLD)
+            };
+            let turn_str = if hour.turn_count > 0 {
+                hour.turn_count.to_string()
+            } else {
+                "\u{2014}".to_string()
+            };
+
+            let cell_for_column = |column: HourlyColumn| -> Cell {
+                match column {
+                    HourlyColumn::Hour => Cell::from(hour_label.clone()).style(hour_style),
+                    HourlyColumn::Source => Cell::from(clients_str.clone()),
+                    HourlyColumn::Turn => Cell::from(turn_str.clone()),
+                    HourlyColumn::Messages => Cell::from(hour.message_count.to_string()),
+                    HourlyColumn::Input => {
+                        Cell::from(format_tokens(hour.tokens.input)).style(metric_input_style)
+                    }
+                    HourlyColumn::Output => {
+                        Cell::from(format_tokens(hour.tokens.output)).style(metric_output_style)
+                    }
+                    HourlyColumn::CacheRead => Cell::from(format_tokens(hour.tokens.cache_read))
                         .style(metric_cache_read_style),
-                    Cell::from(format_tokens(hour.tokens.cache_write))
+                    HourlyColumn::CacheWrite => Cell::from(format_tokens(hour.tokens.cache_write))
                         .style(metric_cache_write_style),
-                    Cell::from(format_cache_hit_rate(
+                    HourlyColumn::CacheRate => Cell::from(format_cache_hit_rate(
                         hour.tokens.cache_read,
                         hour.tokens.input,
                         hour.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format_tokens(hour.tokens.total())),
-                    Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
-                    Cell::from(format_cost_per_million(hour.cost, hour.tokens.total()))
-                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
-                ]);
-                cells
+                    HourlyColumn::Total => Cell::from(format_tokens(hour.tokens.total())),
+                    HourlyColumn::Cost => {
+                        Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green))
+                    }
+                }
             };
+            let cells: Vec<Cell> = columns
+                .iter()
+                .map(|column| cell_for_column(*column))
+                .collect();
 
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
@@ -245,30 +326,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(60), Constraint::Percentage(40)]
-    } else if is_narrow && has_turn_data {
-        vec![
-            Constraint::Percentage(25),
-            Constraint::Percentage(20),
-            Constraint::Percentage(12),
-            Constraint::Percentage(13),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(30),
-            Constraint::Percentage(25),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    } else if has_turn_data {
-        full_time_table_widths(inner.width, true, source_content_width)
-    } else {
-        full_time_table_widths(inner.width, false, source_content_width)
-    };
+    let widths = table_layout.widths;
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -300,4 +358,67 @@ fn hourly_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
         .collect();
     labels.sort();
     labels.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn length_at(widths: &[Constraint], index: usize) -> u16 {
+        match widths[index] {
+            Constraint::Length(width) => width,
+            other => panic!("expected Length at index {index}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tight_hourly_layout_keeps_hour_and_total() {
+        let layout = hourly_table_layout(21, false, 40);
+
+        assert_eq!(
+            layout.columns,
+            vec![HourlyColumn::Hour, HourlyColumn::Total]
+        );
+        assert_eq!(length_at(&layout.widths, 0), HOUR_WIDTH);
+    }
+
+    #[test]
+    fn hourly_layout_adds_cost_before_secondary_columns() {
+        let layout = hourly_table_layout(32, false, 40);
+
+        assert_eq!(
+            layout.columns,
+            vec![HourlyColumn::Hour, HourlyColumn::Total, HourlyColumn::Cost]
+        );
+    }
+
+    #[test]
+    fn hourly_layout_prioritizes_cost_over_source() {
+        let layout = hourly_table_layout(44, false, 40);
+
+        assert!(layout.columns.contains(&HourlyColumn::Cost));
+        assert!(!layout.columns.contains(&HourlyColumn::Source));
+    }
+
+    #[test]
+    fn hourly_layout_adds_secondary_columns_before_total_and_cost() {
+        let layout = hourly_table_layout(72, true, 20);
+
+        assert_eq!(layout.columns[0], HourlyColumn::Hour);
+        assert!(layout.columns.contains(&HourlyColumn::Source));
+        assert!(layout.columns.contains(&HourlyColumn::Turn));
+        assert_eq!(
+            layout.columns[layout.columns.len() - 2],
+            HourlyColumn::Total
+        );
+        assert_eq!(layout.columns[layout.columns.len() - 1], HourlyColumn::Cost);
+    }
+
+    #[test]
+    fn hourly_label_omits_year() {
+        let datetime =
+            NaiveDateTime::parse_from_str("2026-03-02 18:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+
+        assert_eq!(format_hour_label(datetime), "03-02 18:00");
+    }
 }

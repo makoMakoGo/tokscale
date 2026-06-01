@@ -10,7 +10,6 @@ const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
 const CACHE_RATE_WIDTH: u16 = 8;
 const COST_WIDTH: u16 = 10;
-const COST_PER_MILLION_WIDTH: u16 = 10;
 
 pub(crate) fn display_width(s: &str) -> u16 {
     s.width().min(usize::from(u16::MAX)) as u16
@@ -33,7 +32,6 @@ fn source_width(table_width: u16, has_turn_data: bool, source_content_width: u16
         CACHE_RATE_WIDTH,
         NUMERIC_WIDTH,
         COST_WIDTH,
-        COST_PER_MILLION_WIDTH,
     ];
     if has_turn_data {
         widths.insert(2, TURN_WIDTH);
@@ -73,7 +71,6 @@ pub(crate) fn full_time_table_widths(
         Constraint::Length(CACHE_RATE_WIDTH),
         Constraint::Length(NUMERIC_WIDTH),
         Constraint::Length(COST_WIDTH),
-        Constraint::Length(COST_PER_MILLION_WIDTH),
     ]);
 
     widths

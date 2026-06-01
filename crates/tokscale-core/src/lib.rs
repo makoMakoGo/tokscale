@@ -725,7 +725,7 @@ pub struct MonthlyReport {
     pub processing_time_ms: u32,
 }
 
-/// Hourly usage entry for a single hour slot (e.g. "2026-03-23 14:00")
+/// Hourly usage entry for a single hour slot (e.g. "03-23 14:00")
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HourlyUsage {
     pub hour: String,
@@ -1955,7 +1955,14 @@ struct HourAggregator {
     cost: f64,
 }
 
-/// Generate hourly usage report, keyed by "YYYY-MM-DD HH:00".
+fn hourly_report_label(hour_key: &str) -> Result<String, String> {
+    hour_key
+        .get(5..)
+        .map(str::to_string)
+        .ok_or_else(|| format!("Invalid hourly report key: {hour_key}"))
+}
+
+/// Generate hourly usage report with hour labels formatted as "MM-DD HH:00".
 ///
 /// Derives the hour slot from `UnifiedMessage.timestamp` (Unix ms).
 /// Falls back to date + "00:00" when timestamp is zero or missing.
@@ -2017,10 +2024,10 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
         entry.cost += msg.cost;
     }
 
-    let mut entries: Vec<HourlyUsage> = hour_map
-        .into_iter()
-        .map(|(hour, agg)| HourlyUsage {
-            hour,
+    let mut entries: Vec<(String, HourlyUsage)> = Vec::with_capacity(hour_map.len());
+    for (hour, agg) in hour_map {
+        let entry = HourlyUsage {
+            hour: hourly_report_label(&hour)?,
             clients: {
                 let mut v: Vec<String> = agg.clients.into_iter().collect();
                 v.sort();
@@ -2039,10 +2046,12 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
             turn_count: agg.turn_count,
             reasoning: agg.reasoning,
             cost: agg.cost,
-        })
-        .collect();
+        };
+        entries.push((hour, entry));
+    }
 
-    entries.sort_by(|a, b| a.hour.cmp(&b.hour));
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let entries: Vec<HourlyUsage> = entries.into_iter().map(|(_, entry)| entry).collect();
 
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
 

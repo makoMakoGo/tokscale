@@ -17,7 +17,6 @@ pub(crate) const DETAIL_NUMERIC_WIDTH: u16 = 8;
 pub(crate) const DETAIL_TOTAL_WIDTH: u16 = 9;
 pub(crate) const DETAIL_PERFORMANCE_WIDTH: u16 = 10;
 pub(crate) const DETAIL_COST_WIDTH: u16 = 9;
-pub(crate) const DETAIL_COST_PER_MILLION_WIDTH: u16 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelUsageTableDensity {
@@ -41,7 +40,6 @@ pub(crate) enum ModelUsageColumn {
     Total,
     Performance,
     Cost,
-    CostPerMillion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +72,33 @@ fn spaced_width(widths: &[u16]) -> u16 {
     widths.iter().copied().sum::<u16>().saturating_add(spacing)
 }
 
+pub(crate) fn choose_priority_columns<T, InsertAt, Width>(
+    table_width: u16,
+    required_columns: &[T],
+    optional_columns: &[T],
+    mut insert_at: InsertAt,
+    mut width: Width,
+) -> Vec<T>
+where
+    T: Copy,
+    InsertAt: FnMut(&[T], T) -> usize,
+    Width: FnMut(&[T]) -> u16,
+{
+    let mut columns = required_columns.to_vec();
+
+    for column in optional_columns {
+        let mut candidate = columns.clone();
+        let insert_at = insert_at(&candidate, *column).min(candidate.len());
+        candidate.insert(insert_at, *column);
+
+        if width(&candidate) <= table_width {
+            columns = candidate;
+        }
+    }
+
+    columns
+}
+
 fn column_width(
     column: ModelUsageColumn,
     model_width: u16,
@@ -85,7 +110,6 @@ fn column_width(
         ModelUsageColumn::Total => DETAIL_TOTAL_WIDTH,
         ModelUsageColumn::Performance => DETAIL_PERFORMANCE_WIDTH,
         ModelUsageColumn::Cost => DETAIL_COST_WIDTH,
-        ModelUsageColumn::CostPerMillion => DETAIL_COST_PER_MILLION_WIDTH,
         ModelUsageColumn::Source => source_width,
         ModelUsageColumn::Provider => provider_width,
         ModelUsageColumn::Messages => DETAIL_MESSAGES_WIDTH,
@@ -123,7 +147,6 @@ fn density_for_columns(columns: &[ModelUsageColumn]) -> ModelUsageTableDensity {
                 | ModelUsageColumn::CacheRate
                 | ModelUsageColumn::CacheRead
                 | ModelUsageColumn::Performance
-                | ModelUsageColumn::CostPerMillion
         )
     }) {
         ModelUsageTableDensity::Detail
@@ -145,12 +168,36 @@ pub(crate) fn model_usage_table_layout(
     let model_width = core_model_width(table_width, model_content_width);
     let mut provider_width = DETAIL_PROVIDER_WIDTH;
     let mut source_width = DETAIL_SOURCE_WIDTH;
-    let required_columns = vec![
+    let required_columns = [
         ModelUsageColumn::Model,
         ModelUsageColumn::Total,
         ModelUsageColumn::Cost,
     ];
-    let mut columns = required_columns;
+    let columns = if is_very_narrow {
+        required_columns.to_vec()
+    } else {
+        choose_priority_columns(
+            table_width,
+            &required_columns,
+            optional_columns,
+            |candidate, column| {
+                if column == ModelUsageColumn::Performance {
+                    candidate
+                        .iter()
+                        .position(|existing| *existing == ModelUsageColumn::Cost)
+                        .unwrap_or(candidate.len())
+                } else {
+                    candidate
+                        .iter()
+                        .position(|existing| {
+                            matches!(existing, ModelUsageColumn::Total | ModelUsageColumn::Cost)
+                        })
+                        .unwrap_or(candidate.len())
+                }
+            },
+            |candidate| layout_width(candidate, model_width, provider_width, source_width),
+        )
+    };
 
     if is_very_narrow {
         let widths = columns
@@ -171,34 +218,6 @@ pub(crate) fn model_usage_table_layout(
             model_width: model_width as usize,
             density: ModelUsageTableDensity::VeryCompact,
         };
-    }
-
-    for column in optional_columns {
-        let mut candidate = columns.clone();
-        let insert_at = if *column == ModelUsageColumn::CostPerMillion {
-            candidate
-                .iter()
-                .position(|existing| *existing == ModelUsageColumn::Cost)
-                .map(|index| index + 1)
-                .unwrap_or(candidate.len())
-        } else if *column == ModelUsageColumn::Performance {
-            candidate
-                .iter()
-                .position(|existing| *existing == ModelUsageColumn::Cost)
-                .unwrap_or(candidate.len())
-        } else {
-            candidate
-                .iter()
-                .position(|existing| {
-                    matches!(existing, ModelUsageColumn::Total | ModelUsageColumn::Cost)
-                })
-                .unwrap_or(candidate.len())
-        };
-        candidate.insert(insert_at, *column);
-
-        if layout_width(&candidate, model_width, provider_width, source_width) <= table_width {
-            columns = candidate;
-        }
     }
 
     let mut used_width = layout_width(&columns, model_width, provider_width, source_width);
