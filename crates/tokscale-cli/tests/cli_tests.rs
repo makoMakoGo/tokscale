@@ -1666,6 +1666,7 @@ fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
     write_pricing_cache(tmp.path(), 1);
 
     let output = offline_cmd_with_home(tmp.path())
+        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
         .args(["hourly", "--json", "--opencode", "--no-spinner"])
         .output()
         .unwrap();
