@@ -67,7 +67,7 @@ fn background_data_loader(
 
 fn send_background_result(tx: &mpsc::Sender<Result<UsageData>>, result: Result<UsageData>) {
     if tx.send(result).is_err() {
-        eprintln!("tokscale: dropped TUI background load result because receiver is closed");
+        tracing::warn!("dropped TUI background load result because receiver is closed");
     }
 }
 
@@ -199,7 +199,7 @@ pub fn run(
                 if let Err(err) =
                     save_cached_data(data, &bg_enabled_clients, &bg_group_by, &bg_report_scope)
                 {
-                    eprintln!("tokscale: failed to save TUI cache: {err}");
+                    tracing::error!("failed to save TUI cache: {err}");
                 }
             }
 
@@ -325,7 +325,7 @@ fn run_loop_with_background(
                     if let Err(err) =
                         save_cached_data(data, &enabled_clients, &group_by, &report_scope)
                     {
-                        eprintln!("tokscale: failed to save TUI cache: {err}");
+                        tracing::error!("failed to save TUI cache: {err}");
                     }
                 }
                 send_background_result(&tx, result);

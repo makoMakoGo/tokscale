@@ -30,6 +30,14 @@ fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) 
     }
 }
 
+fn model_content_width(models: &[&crate::tui::data::ModelUsage], group_by: &GroupBy) -> u16 {
+    models
+        .iter()
+        .map(|model| display_width(&model_display_name(model, group_by)))
+        .max()
+        .unwrap_or(MODEL_MIN_WIDTH)
+}
+
 fn models_table_layout(
     table_width: u16,
     is_very_narrow: bool,
@@ -151,11 +159,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let model_content_width = models
-        .iter()
-        .map(|model| display_width(&model.model))
-        .max()
-        .unwrap_or(MODEL_MIN_WIDTH);
+    let model_content_width = model_content_width(&models, &group_by);
     let provider_content_width = models
         .iter()
         .map(|model| display_width(&get_provider_display_name(&model.provider)))
@@ -445,6 +449,34 @@ mod tests {
         assert_eq!(length_at(&fit.widths, 1), 26);
         assert_eq!(length_at(&wider.widths, 1), 26);
         assert_eq!(length_at(&wider.widths, 2), length_at(&fit.widths, 2));
+    }
+
+    #[test]
+    fn workspace_model_content_width_includes_workspace_prefix() {
+        let model = crate::tui::data::ModelUsage {
+            model: "gpt-5".to_string(),
+            provider: "openai".to_string(),
+            client: "opencode".to_string(),
+            workspace_key: Some("/work/project".to_string()),
+            workspace_label: Some("project-with-long-name".to_string()),
+            tokens: crate::tui::data::TokenBreakdown {
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost: 0.0,
+            performance: Default::default(),
+            session_count: 0,
+        };
+        let models = vec![&model];
+
+        assert_eq!(
+            model_content_width(&models, &GroupBy::WorkspaceModel),
+            display_width("project-with-long-name / gpt-5")
+        );
+        assert_eq!(model_content_width(&models, &GroupBy::Model), 5);
     }
 
     #[test]

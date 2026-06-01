@@ -5,6 +5,7 @@ mod cc_mirror;
 pub mod clients;
 pub mod fs_atomic;
 mod message_cache;
+mod model_aliases;
 mod parser;
 pub mod paths;
 pub mod pricing;

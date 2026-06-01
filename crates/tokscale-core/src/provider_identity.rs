@@ -161,16 +161,10 @@ fn contains_delimited(haystack: &str, needle: &str) -> bool {
 }
 
 pub(crate) fn provider_override_from_model(model: &str) -> Option<&'static str> {
-    let lower = model.trim().to_lowercase();
-    let model_part = lower
-        .trim_end_matches('/')
-        .rsplit('/')
-        .find(|segment| !segment.is_empty())
-        .unwrap_or(&lower);
-
-    match model_part {
-        "model1" | "model2" => Some("deepseek"),
-        _ => None,
+    if crate::model_aliases::is_deepseek_v4_beta_alias(model) {
+        Some("deepseek")
+    } else {
+        None
     }
 }
 

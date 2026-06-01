@@ -79,8 +79,18 @@ impl PricingService {
             // model1 = DeepSeek V4 Pro: $1.74 input, $3.48 output, $0.145 cache hit per 1M
             // model2 = DeepSeek V4 Flash: $0.14 input, $0.28 output, $0.028 cache hit per 1M
             // Source: DeepSeek API changelog/pricing (2026-04-24 V4 launch), Apidog launch table.
-            ("model1", 0.00000174, 0.00000348, Some(0.000000145)),
-            ("model2", 0.00000014, 0.00000028, Some(0.000000028)),
+            (
+                crate::model_aliases::DEEPSEEK_V4_PRO_BETA_ALIAS,
+                0.00000174,
+                0.00000348,
+                Some(0.000000145),
+            ),
+            (
+                crate::model_aliases::DEEPSEEK_V4_FLASH_BETA_ALIAS,
+                0.00000014,
+                0.00000028,
+                Some(0.000000028),
+            ),
             // GPT-5.3 family: $1.75/$14.00 per 1M tokens, $0.175 cache read
             // Source: Cursor docs (cursor.com/en-US/docs/models), llm-stats.com
             ("gpt-5.3", 0.00000175, 0.000014, Some(1.75e-7)),

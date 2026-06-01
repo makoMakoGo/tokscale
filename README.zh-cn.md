@@ -108,6 +108,7 @@
   - [Cursor IDE 命令](#cursor-ide-命令)
   - [Antigravity 命令](#antigravity-命令)
   - [Trae 命令](#trae-命令)
+  - [订阅 Usage](#订阅-usage)
   - [示例输出](#示例输出--light-版本)
   - [配置](#配置)
   - [环境变量](#环境变量)
@@ -225,6 +226,7 @@ tokscale
 # 使用特定标签启动 TUI
 tokscale models    # 模型标签
 tokscale monthly   # 每日视图（显示每日分解）
+tokscale hourly    # Hourly 标签
 
 # 使用传统 CLI 表格输出
 tokscale --light
@@ -236,10 +238,14 @@ tokscale tui
 # 导出贡献图数据为 JSON
 tokscale graph --output data.json
 
+# 查看订阅额度 Usage
+tokscale usage
+
 # 以 JSON 输出数据（用于脚本/自动化）
 tokscale --json                    # 默认模型视图为 JSON
 tokscale models --json             # 模型分解为 JSON
 tokscale monthly --json            # 月度分解为 JSON
+tokscale usage --json              # 订阅额度 Usage 为 JSON
 tokscale models --json > report.json   # 保存到文件
 ```
 
@@ -247,7 +253,7 @@ tokscale models --json > report.json   # 保存到文件
 
 交互式 TUI 模式提供：
 
-- **6 个视图**：概览（图表 + 热门模型）、模型、每日、每时、统计（贡献图）、代理
+- **6 个核心视图**：概览（图表 + 热门模型）、模型、每日、每时、统计（贡献图）、代理。可选的 Usage（订阅额度）与 Minutely 视图默认隐藏，可在 `settings.json` 中通过 `usageTabEnabled` / `minutelyTabEnabled` 启用，参见[配置](#配置)
 - **键盘导航**：
   - `←/→/Tab/BackTab`：切换视图
   - `↑/↓` 或 `Home/End`：导航列表
@@ -256,7 +262,7 @@ tokscale models --json > report.json   # 保存到文件
   - `c/d/t`：按成本/日期/Token 排序
   - `j`：跳转到今天
   - `s`：打开来源选择对话框
-  - `g`：打开分组方式选择对话框（模型、客户端+模型、客户端+提供商+模型）
+  - `g`：打开分组方式选择对话框（模型、客户端+模型、客户端+提供商+模型、工作区+模型、会话+模型、客户端+会话+模型）
   - `h`：切换日/时图表粒度（Overview 标签）
   - `v`：切换表格/Profile 视图（Hourly 标签）
   - `y`：复制选中行到剪贴板
@@ -518,6 +524,25 @@ tokscale trae logout --variant solo
 
 > **中国区版本**：中国区版本（`trae.com.cn`）目前有意不支持。CN 后端暂未暴露按会话查询使用量的官方 API；如果上游提供正式端点，再加入支持。
 
+### 订阅 Usage
+
+Tokscale 可以获取并展示 AI 提供商报告的实时订阅额度，方便查看套餐已用量以及额度重置时间。
+
+```bash
+# 显示所有已检测提供商的订阅额度
+tokscale usage
+
+# 以 JSON 输出（用于脚本）
+tokscale usage --json
+
+# 轻量终端输出（不进入 TUI）
+tokscale usage --light
+```
+
+在 TUI 中，将 `usageTabEnabled` 设为 `true` 后切换到 **Usage** 标签即可查看订阅数据。按 `u` 或 `r` 可刷新。
+
+> **注意**：订阅额度与余额来自各提供商自己的接口，tokscale 会调用对应提供商的额度端点并展示其返回结果。这些数字反映提供商报告的状态，和官方控制台中看到的数据一致；tokscale 不会用本地 Token 统计对其做二次校验。
+
 ### 示例输出（`--light` 版本）
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -545,6 +570,20 @@ Tokscale 将设置存储在 `~/.config/tokscale/settings.json`：
 | `light.writeCache` | boolean | `false` | 为 `true` 时，`tokscale --light` 会在渲染完成后以原子方式覆盖 TUI 缓存。CLI 标志 `--write-cache` / `--no-write-cache` 会按次运行覆盖该设置。 |
 | `usageTabEnabled` | boolean | `false` | 在 TUI 中显示订阅额度 Usage 标签。默认关闭，因为本地 Token 使用统计是主要 TUI 工作流，订阅额度查询是可选功能。 |
 | `minutelyTabEnabled` | boolean | `false` | 在 TUI 中显示按分钟的 Minutely 标签，并在数据加载期间执行分钟级聚合。对大多数用户而言，分钟级粒度是较为小众的诊断视图，而在大数据集上分钟分桶有非平凡的代价，因此默认关闭。 |
+
+#### 启用 Usage 标签
+
+Usage 视图显示订阅额度与重置时间，适合在本地 Token 使用统计之外查看提供商账号级额度。它默认隐藏，因为额度查询依赖提供商接口，且不是本地用量分析的主流程。
+
+要启用它，请在 `~/.config/tokscale/settings.json` 中将 `usageTabEnabled` 设为 `true`：
+
+```json
+{
+  "usageTabEnabled": true
+}
+```
+
+重启后，Usage 标签会出现在 TUI 标签栏中。也可以直接运行 `tokscale usage`、`tokscale usage --json` 或 `tokscale usage --light` 查看订阅额度。
 
 #### 启用 Minutely 标签
 

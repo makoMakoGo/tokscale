@@ -2181,7 +2181,8 @@ fn run_models_report(
                         }
                         row.extend([
                             Cell::new(session_label),
-                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(get_provider_display_name(&entry.provider))
+                                .add_attribute(Attribute::Dim),
                             Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
@@ -2562,14 +2563,7 @@ fn run_monthly_report(
                 let models_col = if entry.models.is_empty() {
                     "-".to_string()
                 } else {
-                    let mut unique_models: Vec<String> = entry
-                        .models
-                        .iter()
-                        .map(|model| truncate_model_display_name(&format_model_name(model)))
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .into_iter()
-                        .collect();
-                    unique_models.sort();
+                    let unique_models = formatted_unique_model_names(&entry.models);
                     unique_models
                         .iter()
                         .map(|m| format!("- {}", m))
@@ -2620,14 +2614,7 @@ fn run_monthly_report(
                 let models_col = if entry.models.is_empty() {
                     "-".to_string()
                 } else {
-                    let mut unique_models: Vec<String> = entry
-                        .models
-                        .iter()
-                        .map(|model| truncate_model_display_name(&format_model_name(model)))
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .into_iter()
-                        .collect();
-                    unique_models.sort();
+                    let unique_models = formatted_unique_model_names(&entry.models);
                     unique_models
                         .iter()
                         .map(|m| format!("- {}", m))
@@ -2903,14 +2890,7 @@ fn run_hourly_report(
                 let models_col = if entry.models.is_empty() {
                     "-".to_string()
                 } else {
-                    let mut unique: Vec<String> = entry
-                        .models
-                        .iter()
-                        .map(|m| truncate_model_display_name(&format_model_name(m)))
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .into_iter()
-                        .collect();
-                    unique.sort();
+                    let unique = formatted_unique_model_names(&entry.models);
                     unique.join(", ")
                 };
 
@@ -3395,6 +3375,16 @@ fn format_model_name(model: &str) -> String {
         }
     }
     name.to_string()
+}
+
+fn formatted_unique_model_names(models: &[String]) -> Vec<String> {
+    models
+        .iter()
+        .map(|model| format_model_name(model))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|model| truncate_model_display_name(&model))
+        .collect()
 }
 
 fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
@@ -5040,7 +5030,8 @@ fn spawn_warm_tui_cache_detached() {
     let mut cmd = Command::new(exe);
     cmd.arg("warm-tui-cache")
         .stdin(Stdio::null())
-        .stdout(Stdio::null());
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 
     #[cfg(unix)]
     {
@@ -5131,7 +5122,7 @@ fn write_light_cache(
     // The TUI cache key includes date filters, but not `--home`. Writing
     // home-scoped data would still poison the default cache, so keep that
     // guard until home is part of the cache key.
-    if home_dir.is_some() {
+    if !can_write_light_cache(home_dir) {
         eprintln!(
             "tokscale: --write-cache skipped because --home is set; \
              the TUI cache key does not include that filter and writing would poison future TUI launches."
@@ -5161,6 +5152,10 @@ fn write_light_cache(
             eprintln!("tokscale: --write-cache failed to scan TUI data: {err}");
         }
     }
+}
+
+fn can_write_light_cache(home_dir: &Option<String>) -> bool {
+    home_dir.is_none()
 }
 
 fn run_warm_tui_cache() -> Result<()> {
@@ -7106,65 +7101,12 @@ mod tests {
     }
 
     #[test]
-    fn write_light_cache_refuses_when_since_filter_set() {
-        // Date/home filters are NOT part of the TUI cache key. Writing
-        // the filtered slice would silently poison subsequent TUI launches
-        // (next `tokscale tui` would render the filtered slice as if it
-        // were the default report). The function returns `()` and prints
-        // an eprintln; reaching this assertion line proves the function
-        // returned normally without panicking or attempting the write.
-        let group_by = tokscale_core::GroupBy::default();
-        write_light_cache(
-            &None,
-            &None,
-            &Some("2025-01-01".to_string()),
-            &None,
-            &None,
-            &group_by,
-        );
+    fn light_cache_write_allows_default_home() {
+        assert!(can_write_light_cache(&None));
     }
 
     #[test]
-    fn write_light_cache_refuses_when_until_filter_set() {
-        let group_by = tokscale_core::GroupBy::default();
-        write_light_cache(
-            &None,
-            &None,
-            &None,
-            &Some("2025-12-31".to_string()),
-            &None,
-            &group_by,
-        );
-    }
-
-    #[test]
-    fn write_light_cache_refuses_when_year_filter_set() {
-        let group_by = tokscale_core::GroupBy::default();
-        write_light_cache(
-            &None,
-            &None,
-            &None,
-            &None,
-            &Some("2025".to_string()),
-            &group_by,
-        );
-    }
-
-    #[test]
-    fn write_light_cache_refuses_when_home_dir_set() {
-        // --home rebinds the scan root; DataLoader::load currently ignores
-        // this field and resolves home from dirs::home_dir() with
-        // use_env_roots=true, so the printed --light report is built from
-        // <home> while a naive cache write would store data scanned from
-        // the default home. Refuse the write to avoid that drift.
-        let group_by = tokscale_core::GroupBy::default();
-        write_light_cache(
-            &Some("/tmp/fake-home".to_string()),
-            &None,
-            &None,
-            &None,
-            &None,
-            &group_by,
-        );
+    fn light_cache_write_refuses_when_home_dir_set() {
+        assert!(!can_write_light_cache(&Some("/tmp/fake-home".to_string())));
     }
 }
