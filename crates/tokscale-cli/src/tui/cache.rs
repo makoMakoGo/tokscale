@@ -1,7 +1,8 @@
 //! TUI data caching for instant startup.
 //!
 //! This module provides disk-based caching for TUI data to enable instant UI display
-//! while fresh data loads in the background (matching TypeScript implementation behavior).
+//! on launch. Fresh cache data renders without an immediate background scan; stale
+//! or missing cache data still triggers a refresh.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File};
@@ -695,7 +696,9 @@ pub fn load_cache(
             return CacheResult::Miss;
         }
     };
-    let cache_age = now.saturating_sub(cached.timestamp);
+    let Some(cache_age) = now.checked_sub(cached.timestamp) else {
+        return CacheResult::Stale(data);
+    };
     if cache_age > CACHE_STALE_THRESHOLD_MS {
         CacheResult::Stale(data)
     } else {
@@ -836,6 +839,13 @@ mod tests {
             cost: total_seed as f64,
             message_count: 1,
         }
+    }
+
+    fn fresh_timestamp_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
     }
 
     #[test]
@@ -1053,37 +1063,20 @@ mod tests {
             env::set_var("HOME", temp_dir.path());
         }
 
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "schemaVersion": 12,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "includeSynthetic": false,
-  "groupBy": "model",
-  "reportScope": {
-    "since": "2026-05-01",
-    "until": "2026-05-07",
-    "year": null
-  },
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [],
-    "hourly": [],
-    "graph": null,
-    "totalTokens": 0,
-    "totalCost": 0.0,
-    "currentStreak": 0,
-    "longestStreak": 0
-  }
-}"#,
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        let filtered_scope = CacheReportScope::new(
+            Some("2026-05-01".to_string()),
+            Some("2026-05-07".to_string()),
+            None,
+        );
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &filtered_scope,
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1094,15 +1087,42 @@ mod tests {
             CacheResult::Miss
         ));
 
-        let filtered_scope = CacheReportScope::new(
-            Some("2026-05-01".to_string()),
-            Some("2026-05-07".to_string()),
-            None,
-        );
         assert!(matches!(
             load_cache(&clients, &GroupBy::Model, &filtered_scope, false),
             CacheResult::Fresh(_)
         ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_treats_future_timestamp_as_stale() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        let scope = CacheReportScope::default();
+        save_cached_data(&UsageData::default(), &clients, &GroupBy::Model, &scope).unwrap();
+
+        let cache_path = cache_file().unwrap();
+        let mut cached: CachedTUIData = serde_json::from_slice(&fs::read(&cache_path).unwrap())
+            .expect("saved cache should deserialize");
+        cached.timestamp = u64::MAX;
+        fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
+
+        let result = load_cache(&clients, &GroupBy::Model, &scope, false);
+        assert!(
+            matches!(result, CacheResult::Stale(_)),
+            "expected Stale for future cache timestamp, got {}",
+            other_variant_name(&result)
+        );
 
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
@@ -1259,11 +1279,10 @@ mod tests {
 
         let cache_path = cache_file().unwrap();
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
+        let mut cached: serde_json::Value = serde_json::from_str(
             r#"{
   "schemaVersion": 12,
-  "timestamp": 9999999999999,
+  "timestamp": 0,
   "enabledClients": ["claude", "cursor"],
   "includeSynthetic": false,
   "groupBy": "model",
@@ -1357,6 +1376,8 @@ mod tests {
 }"#,
         )
         .unwrap();
+        cached["timestamp"] = serde_json::Value::from(fresh_timestamp_ms());
+        fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
         let clients = make_filters(&[ClientFilter::Claude, ClientFilter::Cursor], false);
         match load_cache(

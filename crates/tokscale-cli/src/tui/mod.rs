@@ -48,12 +48,11 @@ use tokscale_core::ClientId;
 use crate::ClientFilter;
 
 fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
-    let cached_data = match load_result {
-        CacheResult::Fresh(data) | CacheResult::Stale(data) => Some(data),
-        CacheResult::Miss => None,
-    };
-
-    (cached_data, true)
+    match load_result {
+        CacheResult::Fresh(data) => (Some(data), false),
+        CacheResult::Stale(data) => (Some(data), true),
+        CacheResult::Miss => (None, true),
+    }
 }
 
 fn background_data_loader(
@@ -406,6 +405,15 @@ pub fn test_data_loading() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launches_with_fresh_cache_skips_immediate_background_load() {
+        let (cached_data, needs_background_load) =
+            decide_initial_data(CacheResult::Fresh(UsageData::default()));
+
+        assert!(cached_data.is_some());
+        assert!(!needs_background_load);
+    }
 
     #[test]
     fn launches_with_24h_old_cache_renders_immediately() {

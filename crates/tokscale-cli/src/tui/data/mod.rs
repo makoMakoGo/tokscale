@@ -422,10 +422,10 @@ impl DataLoader {
         let mut client_totals_by_model: HashMap<String, HashMap<String, ClientContributionOrder>> =
             HashMap::new();
 
-        for msg in &messages {
+        for msg in messages {
             let normalized_model = normalize_model_for_grouping(&msg.model_id);
             let provider = normalize_provider_for_grouping(&msg.provider_id);
-            let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
+            let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
             let (key, merge_clients) = match group_by {
                 GroupBy::Model => (normalized_model.clone(), true),
                 GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized_model), false),
