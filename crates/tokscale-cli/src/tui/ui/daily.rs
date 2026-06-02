@@ -774,17 +774,17 @@ mod tests {
     fn narrow_daily_detail_layout_uses_models_core_priority() {
         let layout = daily_detail_table_layout(74, false, 80, 56, 40);
 
-        assert_eq!(layout.density, DailyDetailTableDensity::Detail);
+        assert_eq!(layout.density, DailyDetailTableDensity::Core);
         assert_eq!(
             layout.columns,
             vec![
                 DailyDetailColumn::Model,
-                DailyDetailColumn::Source,
-                DailyDetailColumn::Provider,
                 DailyDetailColumn::Total,
                 DailyDetailColumn::Cost,
             ]
         );
+        assert!(!layout.columns.contains(&DailyDetailColumn::Source));
+        assert!(!layout.columns.contains(&DailyDetailColumn::Provider));
         assert!(!layout.columns.contains(&DailyDetailColumn::Messages));
         assert!(!layout.columns.contains(&DailyDetailColumn::Input));
         assert!(!layout.columns.contains(&DailyDetailColumn::CacheRead));
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn daily_detail_layout_adds_messages_before_token_details() {
-        let layout = daily_detail_table_layout(82, false, 80, 56, 40);
+        let layout = daily_detail_table_layout(154, false, 80, 56, 40);
 
         assert_eq!(
             layout.columns,
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn wide_daily_detail_layout_adds_cache_columns_before_total() {
-        let layout = daily_detail_table_layout(124, false, 80, 56, 40);
+        let layout = daily_detail_table_layout(199, false, 80, 56, 40);
 
         assert_eq!(layout.density, DailyDetailTableDensity::Full);
         assert_eq!(

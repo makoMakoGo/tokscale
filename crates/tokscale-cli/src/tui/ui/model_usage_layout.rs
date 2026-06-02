@@ -5,10 +5,8 @@ use super::widgets::MODEL_DISPLAY_MAX_WIDTH;
 
 const TABLE_COLUMN_SPACING: u16 = 1;
 
-pub(crate) const MODEL_MIN_WIDTH: u16 = 20;
+pub(crate) const MODEL_MIN_WIDTH: u16 = 5;
 pub(crate) const MODEL_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
-pub(crate) const PROVIDER_MAX_WIDTH: u16 = 56;
-pub(crate) const SOURCE_MAX_WIDTH: u16 = 40;
 
 pub(crate) const DETAIL_PROVIDER_WIDTH: u16 = 8;
 pub(crate) const DETAIL_SOURCE_WIDTH: u16 = 12;
@@ -69,7 +67,11 @@ fn core_model_width(table_width: u16, content_width: u16) -> u16 {
 
 fn spaced_width(widths: &[u16]) -> u16 {
     let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
-    widths.iter().copied().sum::<u16>().saturating_add(spacing)
+    widths
+        .iter()
+        .copied()
+        .fold(0u16, u16::saturating_add)
+        .saturating_add(spacing)
 }
 
 pub(crate) fn choose_priority_columns<T, InsertAt, Width>(
@@ -93,6 +95,8 @@ where
 
         if width(&candidate) <= table_width {
             columns = candidate;
+        } else {
+            break;
         }
     }
 
@@ -165,15 +169,16 @@ pub(crate) fn model_usage_table_layout(
     source_content_width: u16,
     optional_columns: &[ModelUsageColumn],
 ) -> ModelUsageTableLayout {
+    let model_target_width = model_content_width.min(MODEL_MAX_WIDTH);
     let model_width = core_model_width(table_width, model_content_width);
-    let mut provider_width = DETAIL_PROVIDER_WIDTH;
-    let mut source_width = DETAIL_SOURCE_WIDTH;
+    let provider_width = provider_content_width.max(DETAIL_PROVIDER_WIDTH);
+    let source_width = source_content_width.max(DETAIL_SOURCE_WIDTH);
     let required_columns = [
         ModelUsageColumn::Model,
         ModelUsageColumn::Total,
         ModelUsageColumn::Cost,
     ];
-    let columns = if is_very_narrow {
+    let columns = if is_very_narrow || model_width < model_target_width {
         required_columns.to_vec()
     } else {
         choose_priority_columns(
@@ -199,7 +204,7 @@ pub(crate) fn model_usage_table_layout(
         )
     };
 
-    if is_very_narrow {
+    if is_very_narrow || model_width < model_target_width {
         let widths = columns
             .iter()
             .map(|column| {
@@ -218,28 +223,6 @@ pub(crate) fn model_usage_table_layout(
             model_width: model_width as usize,
             density: ModelUsageTableDensity::VeryCompact,
         };
-    }
-
-    let mut used_width = layout_width(&columns, model_width, provider_width, source_width);
-    if columns.contains(&ModelUsageColumn::Source) {
-        let ideal =
-            clamped_content_width(source_content_width, DETAIL_SOURCE_WIDTH, SOURCE_MAX_WIDTH);
-        let grow_by = table_width
-            .saturating_sub(used_width)
-            .min(ideal.saturating_sub(source_width));
-        source_width += grow_by;
-        used_width += grow_by;
-    }
-    if columns.contains(&ModelUsageColumn::Provider) {
-        let ideal = clamped_content_width(
-            provider_content_width,
-            DETAIL_PROVIDER_WIDTH,
-            PROVIDER_MAX_WIDTH,
-        );
-        let grow_by = table_width
-            .saturating_sub(used_width)
-            .min(ideal.saturating_sub(provider_width));
-        provider_width += grow_by;
     }
 
     let widths = columns
@@ -317,5 +300,79 @@ mod tests {
         );
         assert_eq!(layout.model_width, 15);
         assert_eq!(table_width(&layout), 35);
+    }
+
+    #[test]
+    fn priority_stops_before_optional_columns_while_model_is_truncated() {
+        let layout = model_usage_table_layout(
+            48,
+            false,
+            80,
+            16,
+            16,
+            &[ModelUsageColumn::Source, ModelUsageColumn::Provider],
+        );
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelUsageColumn::Model,
+                ModelUsageColumn::Total,
+                ModelUsageColumn::Cost,
+            ]
+        );
+        assert!(layout.model_width < MODEL_MAX_WIDTH as usize);
+        assert_eq!(table_width(&layout), 48);
+    }
+
+    #[test]
+    fn lower_priority_columns_do_not_skip_a_blocked_column() {
+        let layout = model_usage_table_layout(
+            70,
+            false,
+            28,
+            8,
+            40,
+            &[
+                ModelUsageColumn::Source,
+                ModelUsageColumn::Provider,
+                ModelUsageColumn::Input,
+            ],
+        );
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelUsageColumn::Model,
+                ModelUsageColumn::Total,
+                ModelUsageColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&ModelUsageColumn::Provider));
+        assert!(!layout.columns.contains(&ModelUsageColumn::Input));
+    }
+
+    #[test]
+    fn short_model_content_does_not_reserve_extra_width_before_source() {
+        let layout = model_usage_table_layout(
+            39,
+            false,
+            5,
+            8,
+            12,
+            &[ModelUsageColumn::Source, ModelUsageColumn::Provider],
+        );
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelUsageColumn::Model,
+                ModelUsageColumn::Source,
+                ModelUsageColumn::Total,
+                ModelUsageColumn::Cost,
+            ]
+        );
+        assert_eq!(layout.model_width, 5);
+        assert_eq!(table_width(&layout), 38);
     }
 }

@@ -297,7 +297,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::model_usage_layout::{MODEL_MAX_WIDTH, PROVIDER_MAX_WIDTH, SOURCE_MAX_WIDTH};
+    use super::super::model_usage_layout::MODEL_MAX_WIDTH;
     use super::*;
 
     fn length_at(widths: &[Constraint], index: usize) -> u16 {
@@ -330,14 +330,12 @@ mod tests {
             vec![
                 ModelsColumn::Model,
                 ModelsColumn::Source,
-                ModelsColumn::Provider,
-                ModelsColumn::Input,
-                ModelsColumn::Output,
-                ModelsColumn::CacheRate,
                 ModelsColumn::Total,
                 ModelsColumn::Cost,
             ]
         );
+        assert!(!layout.columns.contains(&ModelsColumn::Provider));
+        assert!(!layout.columns.contains(&ModelsColumn::Input));
         assert!(!layout.columns.contains(&ModelsColumn::CacheRead));
         assert!(!layout.columns.contains(&ModelsColumn::CacheWrite));
         assert!(layout.model_width >= MODEL_MIN_WIDTH as usize);
@@ -349,13 +347,7 @@ mod tests {
 
         assert_eq!(
             layout.columns,
-            vec![
-                ModelsColumn::Model,
-                ModelsColumn::Source,
-                ModelsColumn::Provider,
-                ModelsColumn::Total,
-                ModelsColumn::Cost,
-            ]
+            vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost,]
         );
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
     }
@@ -375,7 +367,7 @@ mod tests {
     #[test]
     fn wide_model_layout_is_required_before_cache_columns_are_shown() {
         let portrait = model_layout(100, 28, 42, 34);
-        let wide = model_layout(140, 28, 42, 34);
+        let wide = model_layout(180, 28, 42, 34);
 
         assert_eq!(portrait.density, ModelsTableDensity::Detail);
         assert_eq!(wide.density, ModelsTableDensity::Full);
@@ -385,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_model_layout_shares_extra_width_with_provider_and_source() {
+    fn wide_model_layout_uses_full_provider_and_source_widths() {
         let base = model_layout(140, 28, 42, 34);
         let wide = model_layout(180, 28, 42, 34);
 
@@ -393,12 +385,14 @@ mod tests {
         assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
         assert!(wide.columns.contains(&ModelsColumn::Source));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
-        assert!(length_at(&wide.widths, 2) > length_at(&base.widths, 2));
+        assert_eq!(length_at(&base.widths, 1), 34);
+        assert_eq!(length_at(&base.widths, 2), 42);
         assert_eq!(length_at(&wide.widths, 1), 34);
+        assert_eq!(length_at(&wide.widths, 2), 42);
     }
 
     #[test]
-    fn wide_workspace_model_layout_shares_extra_width_with_provider_and_source() {
+    fn wide_workspace_model_layout_uses_full_provider_and_source_widths() {
         let base = workspace_model_layout(160, 28, 42, 34);
         let wide = workspace_model_layout(200, 28, 42, 34);
 
@@ -406,8 +400,10 @@ mod tests {
         assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
         assert!(wide.columns.contains(&ModelsColumn::Source));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
-        assert!(length_at(&wide.widths, 2) > length_at(&base.widths, 2));
+        assert_eq!(length_at(&base.widths, 1), 34);
+        assert_eq!(length_at(&base.widths, 2), 42);
         assert_eq!(length_at(&wide.widths, 1), 34);
+        assert_eq!(length_at(&wide.widths, 2), 42);
     }
 
     #[test]
@@ -427,18 +423,19 @@ mod tests {
         let visible_only = model_layout(180, 28, 28, 26);
         let full_dataset = model_layout(180, 28, 56, 26);
 
-        assert_eq!(visible_only.columns, full_dataset.columns);
+        assert!(visible_only.columns.contains(&ModelsColumn::Performance));
+        assert!(!full_dataset.columns.contains(&ModelsColumn::Performance));
         assert!(length_at(&full_dataset.widths, 2) > length_at(&visible_only.widths, 2));
     }
 
     #[test]
     fn model_column_stays_capped_on_very_wide_tables() {
-        let layout = model_layout(260, 80, 120, 120);
+        let layout = model_layout(400, 80, 120, 120);
 
         assert_eq!(length_at(&layout.widths, 0), MODEL_MAX_WIDTH);
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
-        assert_eq!(length_at(&layout.widths, 2), PROVIDER_MAX_WIDTH);
-        assert_eq!(length_at(&layout.widths, 1), SOURCE_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 1), 120);
+        assert_eq!(length_at(&layout.widths, 2), 120);
     }
 
     #[test]

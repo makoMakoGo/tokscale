@@ -12,7 +12,6 @@ use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 const TABLE_COLUMN_SPACING: u16 = 1;
 const HOUR_WIDTH: u16 = 11;
 const SOURCE_MIN_WIDTH: u16 = 12;
-const SOURCE_MAX_WIDTH: u16 = 40;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
@@ -50,7 +49,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn spaced_width(widths: &[u16]) -> u16 {
     let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
-    widths.iter().copied().sum::<u16>().saturating_add(spacing)
+    widths
+        .iter()
+        .copied()
+        .fold(0u16, u16::saturating_add)
+        .saturating_add(spacing)
 }
 
 fn hourly_column_width(column: HourlyColumn, source_width: u16) -> u16 {
@@ -112,7 +115,7 @@ fn hourly_table_layout(
         HourlyColumn::CacheRate,
     ]);
 
-    let mut source_width = SOURCE_MIN_WIDTH;
+    let source_width = source_content_width.max(SOURCE_MIN_WIDTH);
     let columns = choose_priority_columns(
         table_width,
         &required_columns,
@@ -120,15 +123,6 @@ fn hourly_table_layout(
         hourly_insert_index,
         |candidate| hourly_layout_width(candidate, source_width),
     );
-
-    if columns.contains(&HourlyColumn::Source) {
-        let used_width = hourly_layout_width(&columns, source_width);
-        let ideal_source_width = source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH);
-        let grow_by = table_width
-            .saturating_sub(used_width)
-            .min(ideal_source_width.saturating_sub(source_width));
-        source_width += grow_by;
-    }
 
     let widths = columns
         .iter()
@@ -398,6 +392,18 @@ mod tests {
 
         assert!(layout.columns.contains(&HourlyColumn::Cost));
         assert!(!layout.columns.contains(&HourlyColumn::Source));
+    }
+
+    #[test]
+    fn hourly_layout_does_not_skip_blocked_source_for_lower_priority_columns() {
+        let layout = hourly_table_layout(45, true, 40);
+
+        assert_eq!(
+            layout.columns,
+            vec![HourlyColumn::Hour, HourlyColumn::Total, HourlyColumn::Cost]
+        );
+        assert!(!layout.columns.contains(&HourlyColumn::Turn));
+        assert!(!layout.columns.contains(&HourlyColumn::Messages));
     }
 
     #[test]
