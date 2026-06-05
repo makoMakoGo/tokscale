@@ -6,9 +6,7 @@ use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
     read_file_or_none,
 };
-use super::{
-    normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
-};
+use super::{normalize_agent_name, workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -40,6 +38,8 @@ pub struct ClaudeEntry {
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
     pub provider_id: Option<String>,
+    /// Current working directory emitted by Claude Code for workspace identity.
+    pub cwd: Option<String>,
 }
 
 /// Meta sidecar written next to nested-layout sidechain transcripts.
@@ -401,6 +401,16 @@ pub fn parse_claude_file_with_cache_and_home(
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<ClaudeEntry>(&mut buffer) {
+            let entry_workspace = entry.cwd.as_deref().and_then(workspace_metadata_from_key);
+            let current_workspace_key = entry_workspace
+                .as_ref()
+                .map(|workspace| workspace.key.clone())
+                .or_else(|| workspace_key.clone());
+            let current_workspace_label = entry_workspace
+                .as_ref()
+                .map(|workspace| workspace.label.clone())
+                .or_else(|| workspace_label.clone());
+
             // Detect sidechain on the first parseable entry (any type).
             // All lines in a subagent file carry isSidechain: true.
             if !sidechain_detected {
@@ -430,8 +440,8 @@ pub fn parse_claude_file_with_cache_and_home(
                         default_provider_hint: metadata_provider_hint,
                         session_id: &session_id,
                         fallback_timestamp,
-                        workspace_key: workspace_key.clone(),
-                        workspace_label: workspace_label.clone(),
+                        workspace_key: current_workspace_key.clone(),
+                        workspace_label: current_workspace_label.clone(),
                         sidechain_agent: sidechain_agent.clone(),
                     },
                 );
@@ -589,7 +599,7 @@ pub fn parse_claude_file_with_cache_and_home(
                 );
                 unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent.clone();
-                unified.set_workspace(workspace_key.clone(), workspace_label.clone());
+                unified.set_workspace(current_workspace_key, current_workspace_label);
                 // Mark the first assistant response after a user message as a turn start
                 if pending_turn_start {
                     unified.is_turn_start = true;
@@ -653,29 +663,29 @@ fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
 
     for window in components.windows(3) {
         if window[0] == ".claude" && window[1] == "projects" {
-            let key = normalize_workspace_key(&window[2]);
-            let label = key.as_deref().and_then(workspace_label_from_key);
-            return (key, label);
+            return workspace_parts_from_key(&window[2]);
         }
     }
 
     for window in components.windows(5) {
         if window[0] == ".cc-mirror" && window[2] == "config" && window[3] == "projects" {
-            let key = normalize_workspace_key(&window[4]);
-            let label = key.as_deref().and_then(workspace_label_from_key);
-            return (key, label);
+            return workspace_parts_from_key(&window[4]);
         }
     }
 
     for window in components.windows(2).rev() {
         if window[0] == "projects" {
-            let key = normalize_workspace_key(&window[1]);
-            let label = key.as_deref().and_then(workspace_label_from_key);
-            return (key, label);
+            return workspace_parts_from_key(&window[1]);
         }
     }
 
     (None, None)
+}
+
+fn workspace_parts_from_key(raw: &str) -> (Option<String>, Option<String>) {
+    workspace_metadata_from_key(raw)
+        .map(|WorkspaceMetadata { key, label }| (Some(key), Some(label)))
+        .unwrap_or((None, None))
 }
 
 fn sanitize_cc_mirror_segment(raw: &str) -> String {
@@ -2240,6 +2250,40 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
         assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_metadata_prefers_entry_cwd_over_claude_project_path() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/home/travis/01-workspace/tokscale","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) = create_project_file(
+            content,
+            "-home-travis-01-workspace-tokscale",
+            "session.jsonl",
+        );
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key,
+            Some("/home/travis/01-workspace/tokscale".to_string())
+        );
+        assert_eq!(messages[0].workspace_label, Some("tokscale".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_metadata_normalizes_entry_windows_cwd() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"C:\\Users\\Travis\\Desktop","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) = create_project_file(content, "C--Users-Travis-Desktop", "session.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key,
+            Some("C:/Users/Travis/Desktop".to_string())
+        );
+        assert_eq!(messages[0].workspace_label, Some("Desktop".to_string()));
     }
 
     #[test]
