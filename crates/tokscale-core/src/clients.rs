@@ -368,7 +368,7 @@ define_clients!(
         pattern: "*.jsonl",
         headless: false,
         parse_local: true,
-        submit_default: false
+        submit_default: true
     },
     Zed = 21 => {
         id: "zed",
@@ -403,7 +403,7 @@ define_clients!(
         relative: "warp-cache",
         pattern: "usage*.json",
         headless: false,
-        parse_local: false,
+        parse_local: true,
         submit_default: false
     }
 );
@@ -478,7 +478,7 @@ mod tests {
         let client = ClientId::from_str("warp").expect("warp client should be registered");
         assert_eq!(client.data().relative_path, "warp-cache");
         assert_eq!(client.data().pattern, "usage*.json");
-        assert!(!client.data().parse_local);
+        assert!(client.data().parse_local);
         assert!(!client.data().submit_default);
     }
 
@@ -738,8 +738,8 @@ mod tests {
     }
 
     #[test]
-    fn test_antigravity_submit_default_is_false() {
-        assert!(!ClientId::Antigravity.submit_default());
+    fn test_antigravity_submit_default_is_true() {
+        assert!(ClientId::Antigravity.submit_default());
     }
 
     #[test]

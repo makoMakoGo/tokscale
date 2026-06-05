@@ -2895,10 +2895,11 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        generate_graph_with_loaded_pricing, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_local_clients, parsed_to_unified, pricing,
+        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
+        ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -4806,6 +4807,68 @@ mod tests {
         .unwrap();
     }
 
+    fn write_codex_parent_replay_fixture(source_home: &std::path::Path) {
+        let codex_dir = source_home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("parent.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-05-24T20:00:00Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:01Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"output_tokens":13,"total_tokens":143},"last_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        for (filename, child_id, child_turn_id, timestamp) in [
+            (
+                "child-a.jsonl",
+                "019e5c03-1e99-7000-8000-000000000001",
+                "019e5c03-6425-7000-8000-000000000001",
+                "2026-05-24T21:00:00Z",
+            ),
+            (
+                "child-b.jsonl",
+                "019e5c04-1e99-7000-8000-000000000001",
+                "019e5c04-6425-7000-8000-000000000001",
+                "2026-05-24T22:00:00Z",
+            ),
+        ] {
+            std::fs::write(
+                codex_dir.join(filename),
+                format!(
+                    concat!(
+                        r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"{child_id}","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}}}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}},"last_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":130,"output_tokens":13,"total_tokens":143}},"last_token_usage":{{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"task_started","turn_id":"{child_turn_id}"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"{child_turn_id}","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":140,"output_tokens":14,"total_tokens":154}},"last_token_usage":{{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}}}}}}"#,
+                        "\n",
+                    ),
+                    timestamp = timestamp,
+                    child_id = child_id,
+                    child_turn_id = child_turn_id,
+                ),
+            )
+            .unwrap();
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_parse_all_messages_with_pricing_codex_deduplicates_forked_history() {
@@ -4854,12 +4917,41 @@ mod tests {
         }
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_codex_parent_replay_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            )
+            .unwrap();
+
+            assert_eq!(messages.len(), 4);
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 150);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 15);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     fn write_codex_twin_token_count_fixture(source_home: &std::path::Path) {
         // Single session with two turns whose `last_token_usage` deltas are
         // byte-identical but emitted at different timestamps. The fork-dedup
-        // key includes timestamp, so both turns must survive — collapsing
-        // them would erase legitimate usage when a user happens to send two
-        // turns producing the same per-turn delta.
+        // key includes the cumulative total, so both turns must survive even
+        // when a user happens to send two turns producing the same per-turn
+        // delta.
         let codex_dir = source_home.join(".codex/sessions");
         std::fs::create_dir_all(&codex_dir).unwrap();
         std::fs::write(
@@ -6657,6 +6749,118 @@ mod tests {
         );
         assert_eq!(parsed_with_settings.messages[0].input, 42);
         assert_eq!(parsed_with_settings.messages[0].output, 7);
+    }
+
+    #[test]
+    fn test_submit_default_graph_includes_antigravity_cache_rows() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions_dir = temp_dir
+            .path()
+            .join(".config/tokscale/antigravity-cache/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("ag-submit.jsonl"),
+            r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
+"#,
+        )
+        .unwrap();
+
+        let mut clients: Vec<String> = ClientId::iter()
+            .filter(|client| client.submit_default())
+            .map(|client| client.as_str().to_string())
+            .collect();
+        clients.push("synthetic".to_string());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let graph = rt
+            .block_on(generate_graph_with_loaded_pricing(
+                ReportOptions {
+                    home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                    use_env_roots: false,
+                    clients: Some(clients),
+                    since: None,
+                    until: None,
+                    year: None,
+                    group_by: GroupBy::default(),
+                    scanner_settings: scanner::ScannerSettings::default(),
+                },
+                None,
+            ))
+            .unwrap();
+
+        assert_eq!(graph.summary.clients, vec!["antigravity"]);
+        assert_eq!(graph.summary.models, vec!["model_placeholder_m84"]);
+        assert_eq!(graph.summary.total_tokens, 19);
+        assert_eq!(graph.contributions.len(), 1);
+        assert_eq!(graph.contributions[0].clients[0].client, "antigravity");
+        assert_eq!(
+            graph.contributions[0].clients[0].model_id,
+            "model_placeholder_m84"
+        );
+    }
+
+    #[test]
+    fn test_parse_local_clients_dedups_zed_threads_across_default_and_extra_dbs() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        // Place threads.db at the default platform path so the scanner finds it
+        // as `zed_db` AND we also pass it via extraScanPaths.
+        let default_threads_dir = temp_dir.path().join(".local/share/zed/threads");
+        std::fs::create_dir_all(&default_threads_dir).unwrap();
+        let default_db = default_threads_dir.join("threads.db");
+        let conn = create_zed_sqlite_db(&default_db);
+        insert_zed_thread(&conn, "shared-zed-thread", "claude-sonnet-4-5");
+        drop(conn);
+
+        // Point extraScanPaths.zed at the same directory — dedup should prevent
+        // the thread from appearing twice.
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert("zed".to_string(), vec![default_threads_dir.clone()]);
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["zed".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        // Should see exactly 1 message, not 2 (deduped by canonicalize).
+        assert_eq!(parsed.counts.get(ClientId::Zed), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].session_id, "shared-zed-thread");
+    }
+
+    #[test]
+    fn test_parse_local_clients_zed_extra_scan_paths_nonexistent_dir_is_silent() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert(
+            "zed".to_string(),
+            vec![temp_dir.path().join("does/not/exist")],
+        );
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["zed".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings {
+                extra_scan_paths,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Zed), 0);
+        assert!(parsed.messages.is_empty());
     }
 
     #[test]

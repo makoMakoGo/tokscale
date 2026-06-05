@@ -1,5 +1,6 @@
 mod antigravity;
 mod auth;
+mod claude_diagnostics;
 mod commands;
 mod cursor;
 mod device;
@@ -167,7 +168,7 @@ enum Commands {
         json: bool,
         #[arg(
             long,
-            help = "Force specific provider (custom, litellm, or openrouter)"
+            help = "Force specific pricing source (custom, litellm, openrouter, or models.dev)"
         )]
         provider: Option<String>,
         #[arg(long, help = "Disable spinner")]
@@ -1461,6 +1462,36 @@ fn use_env_roots(home_dir: &Option<String>) -> bool {
     home_dir.is_none()
 }
 
+fn resolve_effective_home_dir(home_dir: &Option<String>) -> Option<PathBuf> {
+    home_dir.as_ref().map(PathBuf::from).or_else(dirs::home_dir)
+}
+
+fn model_usage_includes_client(entry: &tokscale_core::ModelUsage, client: &str) -> bool {
+    if entry.client == client {
+        return true;
+    }
+
+    entry
+        .merged_clients
+        .as_deref()
+        .is_some_and(|clients| clients.split(", ").any(|id| id == client))
+}
+
+fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientDiagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+
+    use colored::Colorize;
+    for diagnostic in diagnostics {
+        eprintln!(
+            "{}",
+            format!("  {}: {}", diagnostic.severity, diagnostic.message).yellow()
+        );
+        eprintln!("{}", format!("  {}", diagnostic.help).bright_black());
+    }
+}
+
 fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
     if home_dir.is_some() {
         return Err(anyhow::anyhow!(
@@ -1723,6 +1754,7 @@ fn run_models_report(
     use tokscale_core::{get_model_report, GroupBy, ReportOptions};
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
+    let effective_home_dir = resolve_effective_home_dir(&home_dir);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
@@ -1761,6 +1793,22 @@ fn run_models_report(
         explicit_cursor_filter,
     );
     let processing_time_ms = start.elapsed().as_millis();
+    let claude_message_count = report
+        .entries
+        .iter()
+        .filter(|entry| model_usage_includes_client(entry, "claude"))
+        .map(|entry| entry.message_count)
+        .sum();
+    let diagnostics = effective_home_dir
+        .as_deref()
+        .map(|home| {
+            claude_diagnostics::diagnostics_for_empty_explicit_report(
+                home,
+                &clients,
+                claude_message_count,
+            )
+        })
+        .unwrap_or_default();
 
     if json {
         #[derive(serde::Serialize)]
@@ -1800,6 +1848,8 @@ fn run_models_report(
             processing_time_ms: u32,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
         }
 
         let output = ModelReportJson {
@@ -1849,10 +1899,12 @@ fn run_models_report(
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
             warnings: cursor_setup_warnings,
+            diagnostics,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
+        emit_client_diagnostics(&diagnostics);
 
         emit_cursor_setup_warnings(&cursor_setup_warnings);
         let total_performance = aggregate_model_report_performance(&report.entries);
@@ -3029,14 +3081,14 @@ fn run_pricing_lookup(
 
     let provider_normalized = provider.map(|p| p.to_lowercase());
     if let Some(ref p) = provider_normalized {
-        if p != "custom" && p != "litellm" && p != "openrouter" {
+        if p != "custom" && p != "litellm" && p != "openrouter" && p != "models.dev" {
             println!(
                 "\n  {}",
                 format!("Invalid provider: {}", provider.unwrap_or("")).red()
             );
             println!(
                 "{}\n",
-                "  Valid providers: custom, litellm, openrouter".bright_black()
+                "  Valid providers: custom, litellm, openrouter, models.dev".bright_black()
             );
             std::process::exit(1);
         }
@@ -3152,6 +3204,7 @@ fn run_pricing_lookup(
                     "custom" => "Custom",
                     "litellm" => "LiteLLM",
                     "openrouter" => "OpenRouter",
+                    "models.dev" => "Models.dev",
                     _ => pricing.source.as_str(),
                 };
                 println!("  Source: {}", source_label);
@@ -3446,6 +3499,8 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
         exporter_status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         extra_paths: Vec<ExtraPath>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
     }
 
     #[derive(serde::Serialize)]
@@ -3579,6 +3634,12 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     },
                 ));
 
+                let diagnostics = if client == ClientId::Claude {
+                    claude_diagnostics::diagnostics_for_clients_row(&home_dir)
+                } else {
+                    Vec::new()
+                };
+
                 ClientRow {
                     client: client.as_str().to_string(),
                     label,
@@ -3594,6 +3655,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                         && copilot_exporter_path.is_some())
                     .then(|| "configured".to_string()),
                     extra_paths,
+                    diagnostics,
                 }
             })
             .collect();
@@ -3735,6 +3797,14 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     "  {}",
                     format!("messages: {}", format_number(row.message_count)).bright_black()
                 );
+            }
+
+            for diagnostic in &row.diagnostics {
+                println!(
+                    "  {}",
+                    format!("{}: {}", diagnostic.severity, diagnostic.message).yellow()
+                );
+                println!("  {}", diagnostic.help.bright_black());
             }
 
             println!();
@@ -4436,18 +4506,9 @@ fn run_graph_command(
     use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let include_cursor = home_dir.is_none()
-        && clients
-            .as_ref()
-            .is_none_or(|s| s.iter().any(|src| src == "cursor"));
+    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
-    let has_cursor_cache = include_cursor && has_cursor_usage_cache_for_report(&home_dir);
-    let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
-
-    if include_cursor && cursor::is_cursor_logged_in() {
-        let rt_sync = tokio::runtime::Runtime::new()?;
-        cursor_sync_result = Some(rt_sync.block_on(async { cursor::sync_cursor_cache().await }));
-    }
+    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
 
     if show_progress {
@@ -4477,7 +4538,7 @@ fn run_graph_command(
         .map_err(|e| anyhow::anyhow!(e))?;
     emit_cursor_sync_warning(
         cursor_sync_result.as_ref(),
-        has_cursor_cache,
+        had_cursor_cache,
         explicit_cursor_filter,
     );
     emit_cursor_setup_warnings(&cursor_setup_warnings);
@@ -4528,7 +4589,7 @@ fn run_graph_command(
                         .bright_black()
                     );
                 } else if let Some(err) = sync.error {
-                    if has_cursor_cache {
+                    if had_cursor_cache {
                         eprintln!("{}", format!("  Cursor: sync failed - {}", err).yellow());
                     }
                 }
@@ -5383,6 +5444,96 @@ fn format_tokens_with_commas(n: i64) -> String {
     result
 }
 
+struct CaptureCommandOutcome {
+    exit_code: i32,
+    timed_out: bool,
+}
+
+fn run_capture_command(
+    command: &str,
+    args: &[String],
+    output_path: &Path,
+    timeout: Duration,
+) -> Result<CaptureCommandOutcome> {
+    use std::io::{Read, Write};
+    use std::process::Command;
+    use std::thread;
+    use std::time::Instant;
+
+    let mut child = Command::new(command)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", command, e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from command"))?;
+
+    let mut output_file = std::fs::File::create(output_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create output file '{}': {}",
+            output_path.display(),
+            e
+        )
+    })?;
+
+    let output_handle = thread::spawn(move || -> Result<()> {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buffer = [0; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(n) => output_file
+                    .write_all(&buffer[..n])
+                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to read from subprocess stdout: {}",
+                        e
+                    ));
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow::anyhow!("Failed to wait for subprocess: {}", e))?
+        {
+            break status;
+        }
+
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child
+                .wait()
+                .map_err(|e| anyhow::anyhow!("Failed to wait for timed-out subprocess: {}", e))?;
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let output_result = output_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Subprocess stdout reader thread panicked"))?;
+    if !timed_out {
+        output_result?;
+    }
+
+    Ok(CaptureCommandOutcome {
+        exit_code: status.code().unwrap_or(1),
+        timed_out,
+    })
+}
+
 fn run_headless_command(
     source: &str,
     args: Vec<String>,
@@ -5391,10 +5542,6 @@ fn run_headless_command(
     no_auto_flags: bool,
 ) -> Result<()> {
     use chrono::Utc;
-    use std::io::{Read, Write};
-    use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
     use uuid::Uuid;
 
     let source_lower = source.to_lowercase();
@@ -5465,76 +5612,10 @@ fn run_headless_command(
     );
     println!();
 
-    let mut child = Command::new(&source_lower)
-        .args(&final_args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .stdin(std::process::Stdio::inherit())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", source_lower, e))?;
+    let outcome =
+        run_capture_command(&source_lower, &final_args, Path::new(&output_path), timeout)?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from command"))?;
-
-    let mut output_file = std::fs::File::create(&output_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create output file '{}': {}", output_path, e))?;
-
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let timed_out_clone = Arc::clone(&timed_out);
-    let child_id = child.id();
-
-    let timeout_handle = std::thread::spawn(move || {
-        std::thread::sleep(timeout);
-        if !timed_out_clone.load(Ordering::SeqCst) {
-            timed_out_clone.store(true, Ordering::SeqCst);
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(child_id.to_string())
-                    .output();
-            }
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &child_id.to_string()])
-                    .output();
-            }
-        }
-    });
-
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut buffer = [0; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                output_file
-                    .write_all(&buffer[..n])
-                    .map_err(|e| anyhow::anyhow!("Failed to write to output file: {}", e))?;
-            }
-            Err(e) => {
-                if timed_out.load(Ordering::SeqCst) {
-                    break;
-                }
-                return Err(anyhow::anyhow!(
-                    "Failed to read from subprocess stdout: {}",
-                    e
-                ));
-            }
-        }
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("Failed to wait for subprocess: {}", e))?;
-
-    timed_out.store(true, Ordering::SeqCst);
-    let _ = timeout_handle.join();
-
-    if timed_out.load(Ordering::SeqCst) && !status.success() {
+    if outcome.timed_out {
         eprintln!(
             "{}",
             format!("\n  Subprocess timed out after {}s", timeout.as_secs()).red()
@@ -5544,16 +5625,14 @@ fn run_headless_command(
         std::process::exit(124);
     }
 
-    let exit_code = status.code().unwrap_or(1);
-
     println!(
         "{}",
         format!("✓ Saved headless output to {}", output_path).green()
     );
     println!();
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+    if outcome.exit_code != 0 {
+        std::process::exit(outcome.exit_code);
     }
 
     Ok(())
