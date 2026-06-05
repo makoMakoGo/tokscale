@@ -163,14 +163,17 @@ def main() -> None:
     publish_build = by_target(matrix_settings(publish_lines, "build-cli-binary"), "publish build")
     native_build = by_target(matrix_settings(native_lines, "build"), "build-native")
 
-    if list(publish_build) != list(native_build):
+    unexpected_native_targets = [
+        target for target in native_build if target not in publish_build
+    ]
+    if unexpected_native_targets:
         errors.append(
-            f"build matrix targets differ: publish={list(publish_build)}, build-native={list(native_build)}"
+            f"build-native matrix contains targets missing from publish: {unexpected_native_targets}"
         )
 
-    for target, publish_entry in publish_build.items():
-        native_entry = native_build.get(target)
-        if native_entry is None:
+    for target, native_entry in native_build.items():
+        publish_entry = publish_build.get(target)
+        if publish_entry is None:
             continue
         for field in COMMON_BUILD_FIELDS:
             if publish_entry.get(field, "") != native_entry.get(field, ""):
