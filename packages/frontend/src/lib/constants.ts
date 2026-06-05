@@ -71,6 +71,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   openclaw: `${GITHUB_CDN_BASE}/client-openclaw.jpg`,
   hermes: `${GITHUB_CDN_BASE}/client-hermes.png`,
   pi: `${GITHUB_CDN_BASE}/client-pi.png`,
+  // OMP has no dedicated logo asset yet; only the image is shared with Pi.
   omp: `${GITHUB_CDN_BASE}/client-pi.png`,
   kimi: `${GITHUB_CDN_BASE}/client-kimi.png`,
   qwen: `${GITHUB_CDN_BASE}/client-qwen.png`,
@@ -101,6 +102,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   openclaw: "#EF4444",
   hermes: "#FFD700",
   pi: "#6366F1",
+  // Match Pi's palette while OMP remains a separate client id/display label.
   omp: "#6366F1",
   kimi: "#8B5CF6",
   qwen: "#1A73E8",

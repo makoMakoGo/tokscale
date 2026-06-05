@@ -1477,6 +1477,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
         "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
         "Pi" => Some("https://tokscale.ai/assets/logos/pi.png"),
+        // OMP has no dedicated logo asset yet; keep id/display handling separate.
         "OMP" => Some("https://tokscale.ai/assets/logos/pi.png"),
         "Kimi CLI" => Some("https://tokscale.ai/assets/logos/kimi.png"),
         "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
