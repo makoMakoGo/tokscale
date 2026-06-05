@@ -220,6 +220,8 @@ pub struct App {
 
     pub background_loading: bool,
 
+    pub blocking_loading: bool,
+
     pub needs_reload: bool,
 
     pub dialog_stack: DialogStack,
@@ -342,6 +344,7 @@ impl App {
             click_areas: Vec::new(),
             spinner_frame: 0,
             background_loading: false,
+            blocking_loading: false,
             needs_reload: false,
             dialog_stack,
             dialog_needs_reload,
@@ -370,7 +373,36 @@ impl App {
 
     pub fn set_background_loading(&mut self, loading: bool) {
         self.background_loading = loading;
+        if !loading {
+            self.blocking_loading = false;
+        }
         // Don't set data.loading - let cached data remain visible during background refresh
+    }
+
+    pub fn request_blocking_reload(&mut self) {
+        self.needs_reload = true;
+        self.blocking_loading = true;
+    }
+
+    pub fn is_blocking_loading(&self) -> bool {
+        self.blocking_loading
+            || (!self.dialog_stack.is_active() && *self.dialog_needs_reload.borrow())
+    }
+
+    fn consume_dialog_reload_if_ready(&mut self) {
+        let needs_blocking_reload = {
+            let mut needs_reload = self.dialog_needs_reload.borrow_mut();
+            if !self.dialog_stack.is_active() && *needs_reload {
+                *needs_reload = false;
+                true
+            } else {
+                false
+            }
+        };
+
+        if needs_blocking_reload {
+            self.request_blocking_reload();
+        }
     }
 
     pub fn update_data(&mut self, data: UsageData) {
@@ -455,10 +487,7 @@ impl App {
             self.needs_reload = true;
         }
 
-        if *self.dialog_needs_reload.borrow() {
-            *self.dialog_needs_reload.borrow_mut() = false;
-            self.needs_reload = true;
-        }
+        self.consume_dialog_reload_if_ready();
 
         // Poll background usage fetch
         if let Some(ref rx) = self.usage_rx {
@@ -493,6 +522,7 @@ impl App {
 
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_key(key.code);
+            self.consume_dialog_reload_if_ready();
             return false;
         }
 
@@ -643,6 +673,7 @@ impl App {
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_mouse(event);
+            self.consume_dialog_reload_if_ready();
             return;
         }
 
@@ -2946,6 +2977,63 @@ mod tests {
             app.status_message.as_deref(),
             Some("Refresh already in progress")
         );
+    }
+
+    #[test]
+    fn test_group_by_change_requests_blocking_reload() {
+        let mut app = make_app();
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
+
+        app.handle_key_event(key(KeyCode::Char('g')));
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(
+            *app.group_by.borrow(),
+            tokscale_core::GroupBy::WorkspaceModel
+        );
+        assert!(!app.dialog_stack.is_active());
+        assert!(app.needs_reload);
+        assert!(app.blocking_loading);
+        assert!(app.is_blocking_loading());
+    }
+
+    #[test]
+    fn test_source_picker_waits_until_close_before_blocking_reload() {
+        let mut app = make_app();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        assert!(app.dialog_stack.is_active());
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.dialog_stack.is_active());
+        assert!(!app.needs_reload);
+        assert!(!app.blocking_loading);
+        assert!(!app.is_blocking_loading());
+
+        app.on_tick();
+        assert!(!app.needs_reload);
+        assert!(!app.blocking_loading);
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(!app.dialog_stack.is_active());
+        assert!(app.needs_reload);
+        assert!(app.blocking_loading);
+        assert!(app.is_blocking_loading());
+    }
+
+    #[test]
+    fn test_background_loading_clear_resets_blocking_loading() {
+        let mut app = make_app();
+
+        app.request_blocking_reload();
+        app.set_background_loading(true);
+        app.set_background_loading(false);
+
+        assert!(!app.background_loading);
+        assert!(!app.blocking_loading);
     }
 
     // ── handle_key_event: misc keys ─────────────────────────────────

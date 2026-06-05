@@ -7,6 +7,7 @@ const TABLE_COLUMN_SPACING: u16 = 1;
 
 pub(crate) const MODEL_MIN_WIDTH: u16 = 5;
 pub(crate) const MODEL_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
+pub(crate) const WORKSPACE_MODEL_MAX_WIDTH: u16 = 56;
 
 pub(crate) const DETAIL_PROVIDER_WIDTH: u16 = 8;
 pub(crate) const DETAIL_SOURCE_WIDTH: u16 = 12;
@@ -40,6 +41,52 @@ pub(crate) enum ModelUsageColumn {
     Cost,
 }
 
+pub(crate) const MODEL_USAGE_REQUIRED_COLUMNS: [ModelUsageColumn; 2] =
+    [ModelUsageColumn::Model, ModelUsageColumn::Total];
+
+pub(crate) const MODEL_USAGE_DISPLAY_ORDER: [ModelUsageColumn; 12] = [
+    ModelUsageColumn::Model,
+    ModelUsageColumn::Source,
+    ModelUsageColumn::Provider,
+    ModelUsageColumn::Messages,
+    ModelUsageColumn::Input,
+    ModelUsageColumn::Output,
+    ModelUsageColumn::CacheRate,
+    ModelUsageColumn::CacheRead,
+    ModelUsageColumn::CacheWrite,
+    ModelUsageColumn::Total,
+    ModelUsageColumn::Cost,
+    ModelUsageColumn::Performance,
+];
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModelUsageLayoutProfile<'a> {
+    pub(crate) required_columns: &'a [ModelUsageColumn],
+    pub(crate) optional_columns_by_priority: &'a [ModelUsageColumn],
+    pub(crate) display_order: &'a [ModelUsageColumn],
+    pub(crate) model_max_width: u16,
+}
+
+impl<'a> ModelUsageLayoutProfile<'a> {
+    pub(crate) fn standard(optional_columns_by_priority: &'a [ModelUsageColumn]) -> Self {
+        Self {
+            required_columns: &MODEL_USAGE_REQUIRED_COLUMNS,
+            optional_columns_by_priority,
+            display_order: &MODEL_USAGE_DISPLAY_ORDER,
+            model_max_width: MODEL_MAX_WIDTH,
+        }
+    }
+
+    pub(crate) fn workspace(optional_columns_by_priority: &'a [ModelUsageColumn]) -> Self {
+        Self {
+            required_columns: &MODEL_USAGE_REQUIRED_COLUMNS,
+            optional_columns_by_priority,
+            display_order: &MODEL_USAGE_DISPLAY_ORDER,
+            model_max_width: WORKSPACE_MODEL_MAX_WIDTH,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelUsageTableLayout {
     pub(crate) columns: Vec<ModelUsageColumn>,
@@ -56,11 +103,24 @@ fn clamped_content_width(content_width: u16, min: u16, max: u16) -> u16 {
     content_width.clamp(min, max)
 }
 
-fn core_model_width(table_width: u16, content_width: u16) -> u16 {
-    let desired = clamped_content_width(content_width, MODEL_MIN_WIDTH, MODEL_MAX_WIDTH);
-    let fixed_core_width = DETAIL_TOTAL_WIDTH
-        .saturating_add(DETAIL_COST_WIDTH)
-        .saturating_add(TABLE_COLUMN_SPACING.saturating_mul(2));
+fn core_model_width(
+    table_width: u16,
+    content_width: u16,
+    provider_width: u16,
+    source_width: u16,
+    profile: ModelUsageLayoutProfile<'_>,
+) -> u16 {
+    let desired = clamped_content_width(content_width, MODEL_MIN_WIDTH, profile.model_max_width);
+    let fixed_core_width = profile
+        .required_columns
+        .iter()
+        .filter(|column| **column != ModelUsageColumn::Model)
+        .map(|column| column_width(*column, 0, provider_width, source_width))
+        .fold(0u16, u16::saturating_add)
+        .saturating_add(
+            TABLE_COLUMN_SPACING
+                .saturating_mul(profile.required_columns.len().saturating_sub(1) as u16),
+        );
 
     desired.min(table_width.saturating_sub(fixed_core_width))
 }
@@ -154,11 +214,30 @@ fn density_for_columns(columns: &[ModelUsageColumn]) -> ModelUsageTableDensity {
         )
     }) {
         ModelUsageTableDensity::Detail
-    } else if columns.len() == 3 {
+    } else if columns.contains(&ModelUsageColumn::Cost) {
         ModelUsageTableDensity::Core
     } else {
         ModelUsageTableDensity::VeryCompact
     }
+}
+
+fn display_rank(column: ModelUsageColumn, display_order: &[ModelUsageColumn]) -> usize {
+    display_order
+        .iter()
+        .position(|candidate| *candidate == column)
+        .unwrap_or(display_order.len())
+}
+
+fn insert_by_display_order(
+    candidate: &[ModelUsageColumn],
+    column: ModelUsageColumn,
+    display_order: &[ModelUsageColumn],
+) -> usize {
+    let column_rank = display_rank(column, display_order);
+    candidate
+        .iter()
+        .position(|existing| display_rank(*existing, display_order) > column_rank)
+        .unwrap_or(candidate.len())
 }
 
 pub(crate) fn model_usage_table_layout(
@@ -167,39 +246,26 @@ pub(crate) fn model_usage_table_layout(
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
-    optional_columns: &[ModelUsageColumn],
+    profile: ModelUsageLayoutProfile<'_>,
 ) -> ModelUsageTableLayout {
-    let model_target_width = model_content_width.min(MODEL_MAX_WIDTH);
-    let model_width = core_model_width(table_width, model_content_width);
     let provider_width = provider_content_width.max(DETAIL_PROVIDER_WIDTH);
     let source_width = source_content_width.max(DETAIL_SOURCE_WIDTH);
-    let required_columns = [
-        ModelUsageColumn::Model,
-        ModelUsageColumn::Total,
-        ModelUsageColumn::Cost,
-    ];
+    let model_target_width = model_content_width.min(profile.model_max_width);
+    let model_width = core_model_width(
+        table_width,
+        model_content_width,
+        provider_width,
+        source_width,
+        profile,
+    );
     let columns = if is_very_narrow || model_width < model_target_width {
-        required_columns.to_vec()
+        profile.required_columns.to_vec()
     } else {
         choose_priority_columns(
             table_width,
-            &required_columns,
-            optional_columns,
-            |candidate, column| {
-                if column == ModelUsageColumn::Performance {
-                    candidate
-                        .iter()
-                        .position(|existing| *existing == ModelUsageColumn::Cost)
-                        .unwrap_or(candidate.len())
-                } else {
-                    candidate
-                        .iter()
-                        .position(|existing| {
-                            matches!(existing, ModelUsageColumn::Total | ModelUsageColumn::Cost)
-                        })
-                        .unwrap_or(candidate.len())
-                }
-            },
+            profile.required_columns,
+            profile.optional_columns_by_priority,
+            |candidate, column| insert_by_display_order(candidate, column, profile.display_order),
             |candidate| layout_width(candidate, model_width, provider_width, source_width),
         )
     };
@@ -249,6 +315,36 @@ pub(crate) fn model_usage_table_layout(
 mod tests {
     use super::*;
 
+    const MODEL_OPTIONAL_COLUMNS: [ModelUsageColumn; 9] = [
+        ModelUsageColumn::Cost,
+        ModelUsageColumn::Source,
+        ModelUsageColumn::Provider,
+        ModelUsageColumn::Input,
+        ModelUsageColumn::Output,
+        ModelUsageColumn::CacheRate,
+        ModelUsageColumn::CacheRead,
+        ModelUsageColumn::CacheWrite,
+        ModelUsageColumn::Performance,
+    ];
+
+    fn standard_layout(
+        table_width: u16,
+        is_very_narrow: bool,
+        model_content_width: u16,
+        provider_content_width: u16,
+        source_content_width: u16,
+        optional_columns: &[ModelUsageColumn],
+    ) -> ModelUsageTableLayout {
+        model_usage_table_layout(
+            table_width,
+            is_very_narrow,
+            model_content_width,
+            provider_content_width,
+            source_content_width,
+            ModelUsageLayoutProfile::standard(optional_columns),
+        )
+    }
+
     fn width_at(widths: &[Constraint], index: usize) -> u16 {
         match widths[index] {
             Constraint::Length(width) => width,
@@ -265,46 +361,31 @@ mod tests {
 
     #[test]
     fn very_narrow_layout_clamps_model_column_to_core_width() {
-        let layout = model_usage_table_layout(35, true, 80, 56, 40, &[]);
+        let layout = standard_layout(35, true, 80, 56, 40, &MODEL_OPTIONAL_COLUMNS);
 
         assert_eq!(
             layout.columns,
-            vec![
-                ModelUsageColumn::Model,
-                ModelUsageColumn::Total,
-                ModelUsageColumn::Cost,
-            ]
+            vec![ModelUsageColumn::Model, ModelUsageColumn::Total]
         );
-        assert_eq!(layout.model_width, 15);
+        assert_eq!(layout.model_width, 25);
         assert_eq!(table_width(&layout), 35);
     }
 
     #[test]
     fn core_layout_drops_optional_columns_before_overflowing_required_columns() {
-        let layout = model_usage_table_layout(
-            35,
-            false,
-            80,
-            56,
-            40,
-            &[ModelUsageColumn::Source, ModelUsageColumn::Provider],
-        );
+        let layout = standard_layout(35, false, 80, 56, 40, &MODEL_OPTIONAL_COLUMNS);
 
         assert_eq!(
             layout.columns,
-            vec![
-                ModelUsageColumn::Model,
-                ModelUsageColumn::Total,
-                ModelUsageColumn::Cost,
-            ]
+            vec![ModelUsageColumn::Model, ModelUsageColumn::Total]
         );
-        assert_eq!(layout.model_width, 15);
+        assert_eq!(layout.model_width, 25);
         assert_eq!(table_width(&layout), 35);
     }
 
     #[test]
-    fn priority_stops_before_optional_columns_while_model_is_truncated() {
-        let layout = model_usage_table_layout(
+    fn priority_stops_before_cost_when_it_does_not_fit() {
+        let layout = standard_layout(
             48,
             false,
             80,
@@ -315,25 +396,21 @@ mod tests {
 
         assert_eq!(
             layout.columns,
-            vec![
-                ModelUsageColumn::Model,
-                ModelUsageColumn::Total,
-                ModelUsageColumn::Cost,
-            ]
+            vec![ModelUsageColumn::Model, ModelUsageColumn::Total]
         );
-        assert!(layout.model_width < MODEL_MAX_WIDTH as usize);
-        assert_eq!(table_width(&layout), 48);
+        assert_eq!(table_width(&layout), 39);
     }
 
     #[test]
     fn lower_priority_columns_do_not_skip_a_blocked_column() {
-        let layout = model_usage_table_layout(
+        let layout = standard_layout(
             70,
             false,
             28,
             8,
             40,
             &[
+                ModelUsageColumn::Cost,
                 ModelUsageColumn::Source,
                 ModelUsageColumn::Provider,
                 ModelUsageColumn::Input,
@@ -354,13 +431,17 @@ mod tests {
 
     #[test]
     fn short_model_content_does_not_reserve_extra_width_before_source() {
-        let layout = model_usage_table_layout(
+        let layout = standard_layout(
             39,
             false,
             5,
             8,
             12,
-            &[ModelUsageColumn::Source, ModelUsageColumn::Provider],
+            &[
+                ModelUsageColumn::Cost,
+                ModelUsageColumn::Source,
+                ModelUsageColumn::Provider,
+            ],
         );
 
         assert_eq!(
@@ -374,5 +455,27 @@ mod tests {
         );
         assert_eq!(layout.model_width, 5);
         assert_eq!(table_width(&layout), 38);
+    }
+
+    #[test]
+    fn workspace_profile_allows_a_wider_model_column() {
+        let layout = model_usage_table_layout(
+            90,
+            false,
+            80,
+            8,
+            40,
+            ModelUsageLayoutProfile::workspace(&MODEL_OPTIONAL_COLUMNS),
+        );
+
+        assert_eq!(layout.model_width, WORKSPACE_MODEL_MAX_WIDTH as usize);
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelUsageColumn::Model,
+                ModelUsageColumn::Total,
+                ModelUsageColumn::Cost,
+            ]
+        );
     }
 }
