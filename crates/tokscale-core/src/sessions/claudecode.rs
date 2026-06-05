@@ -2007,6 +2007,17 @@ mod tests {
     }
 
     #[test]
+    fn test_deepseek_ai_prefixed_model_uses_deepseek_provider() {
+        let content = r#"{"type":"assistant","timestamp":"2026-06-04T19:32:18.247Z","message":{"model":"deepseek-ai/deepseek-v4-flash","usage":{"input_tokens":1008,"output_tokens":0}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "deepseek");
+    }
+
+    #[test]
     fn test_multi_provider_models_infer_provider_from_model() {
         let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":10}}}
 {"type":"assistant","timestamp":"2026-02-18T10:00:01.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}

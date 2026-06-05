@@ -156,6 +156,21 @@ fn last_non_empty_path_segment(value: &str) -> Option<&str> {
 }
 
 fn strip_trailing_date_suffix(name: &str) -> &str {
+    if name.len() > 11 {
+        let potential_date = &name[name.len() - 10..];
+        let bytes = potential_date.as_bytes();
+        if bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && potential_date
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+            && name.as_bytes()[name.len() - 11] == b'-'
+        {
+            return &name[..name.len() - 11];
+        }
+    }
+
     if name.len() > 9 {
         let potential_date = &name[name.len() - 8..];
         if potential_date.chars().all(|c| c.is_ascii_digit())
@@ -3123,6 +3138,22 @@ mod tests {
             normalize_model_for_grouping("claude-sonnet-4-20250514"),
             "claude-sonnet-4"
         );
+        assert_eq!(
+            normalize_model_for_grouping("qwen3.7-max-2026-05-20"),
+            "qwen3.7-max"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("qwen/qwen3.7-max-20260520"),
+            "qwen3.7-max"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("qwen3.7-max-2605"),
+            "qwen3.7-max-2605"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("qwen3.7-max-05-20"),
+            "qwen3.7-max-05-20"
+        );
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.5"),
@@ -3533,6 +3564,38 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].model, "gpt-5.5");
         assert_eq!(entries[0].cost, 5.0);
+        assert_eq!(entries[0].message_count, 2);
+    }
+
+    #[test]
+    fn test_model_grouping_merges_hyphenated_date_snapshot() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "qwen",
+                    "qwen3.7-max-2026-05-20",
+                    "qwen",
+                    "session-1",
+                    1.25,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "qwen",
+                    "qwen3.7-max",
+                    "qwen",
+                    "session-2",
+                    2.75,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::ClientModel,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "qwen3.7-max");
+        assert_eq!(entries[0].cost, 4.0);
         assert_eq!(entries[0].message_count, 2);
     }
 
