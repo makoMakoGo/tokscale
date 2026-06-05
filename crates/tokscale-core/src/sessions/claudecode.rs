@@ -40,6 +40,8 @@ pub struct ClaudeEntry {
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
     pub provider_id: Option<String>,
+    /// Current working directory emitted by Claude Code for workspace identity.
+    pub cwd: Option<String>,
 }
 
 /// Meta sidecar written next to nested-layout sidechain transcripts.
@@ -59,6 +61,22 @@ struct CcMirrorVariantMetadata {
 impl CcMirrorVariantMetadata {
     fn client_id(&self) -> String {
         format!("cc-mirror/{}", sanitize_cc_mirror_segment(&self.name))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ClaudeWorkspaceParts {
+    key: String,
+    label: Option<String>,
+}
+
+impl ClaudeWorkspaceParts {
+    fn into_options(self) -> (Option<String>, Option<String>) {
+        (Some(self.key), self.label)
+    }
+
+    fn to_options(&self) -> (Option<String>, Option<String>) {
+        (Some(self.key.clone()), self.label.clone())
     }
 }
 
@@ -401,6 +419,8 @@ pub fn parse_claude_file_with_cache_and_home(
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<ClaudeEntry>(&mut buffer) {
+            let entry_workspace = entry.cwd.as_deref().and_then(workspace_parts_from_key);
+
             // Detect sidechain on the first parseable entry (any type).
             // All lines in a subagent file carry isSidechain: true.
             if !sidechain_detected {
@@ -420,6 +440,11 @@ pub fn parse_claude_file_with_cache_and_home(
             }
 
             if entry.entry_type == "user" || entry.entry_type == "tool_result" {
+                let (context_workspace_key, context_workspace_label) = workspace_options_for_entry(
+                    entry_workspace.as_ref(),
+                    &workspace_key,
+                    &workspace_label,
+                );
                 let tool_result_message = extract_claude_tool_result_message(
                     trimmed,
                     ClaudeToolResultContext {
@@ -430,8 +455,8 @@ pub fn parse_claude_file_with_cache_and_home(
                         default_provider_hint: metadata_provider_hint,
                         session_id: &session_id,
                         fallback_timestamp,
-                        workspace_key: workspace_key.clone(),
-                        workspace_label: workspace_label.clone(),
+                        workspace_key: context_workspace_key,
+                        workspace_label: context_workspace_label,
                         sidechain_agent: sidechain_agent.clone(),
                     },
                 );
@@ -453,6 +478,9 @@ pub fn parse_claude_file_with_cache_and_home(
                                 tool_message.tokens.input,
                                 tool_message.timestamp,
                             );
+                            if let Some(workspace) = entry_workspace.as_ref() {
+                                set_message_workspace(&mut messages[existing_idx], workspace);
+                            }
                             continue;
                         }
                         processed_hashes.insert(dedup_key.clone(), messages.len());
@@ -512,6 +540,9 @@ pub fn parse_claude_file_with_cache_and_home(
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
                                 pending_request_start_timestamp_ms,
                             );
+                            if let Some(workspace) = entry_workspace.as_ref() {
+                                set_message_workspace(&mut messages[existing_idx], workspace);
+                            }
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
                                     &mut messages[existing_idx].provider_id,
@@ -539,6 +570,9 @@ pub fn parse_claude_file_with_cache_and_home(
                                 parse_claude_entry_timestamp(entry.timestamp.as_deref()),
                                 pending_request_start_timestamp_ms,
                             );
+                            if let Some(workspace) = entry_workspace.as_ref() {
+                                set_message_workspace(&mut messages[existing_idx], workspace);
+                            }
                             if let Some(choice) = duplicate_provider_choice {
                                 update_claude_provider_id(
                                     &mut messages[existing_idx].provider_id,
@@ -589,7 +623,12 @@ pub fn parse_claude_file_with_cache_and_home(
                 );
                 unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent.clone();
-                unified.set_workspace(workspace_key.clone(), workspace_label.clone());
+                let (message_workspace_key, message_workspace_label) = workspace_options_for_entry(
+                    entry_workspace.as_ref(),
+                    &workspace_key,
+                    &workspace_label,
+                );
+                unified.set_workspace(message_workspace_key, message_workspace_label);
                 // Mark the first assistant response after a user message as a turn start
                 if pending_turn_start {
                     unified.is_turn_start = true;
@@ -653,29 +692,52 @@ fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
 
     for window in components.windows(3) {
         if window[0] == ".claude" && window[1] == "projects" {
-            let key = normalize_workspace_key(&window[2]);
-            let label = key.as_deref().and_then(workspace_label_from_key);
-            return (key, label);
+            return workspace_options_from_key(&window[2]);
         }
     }
 
     for window in components.windows(5) {
         if window[0] == ".cc-mirror" && window[2] == "config" && window[3] == "projects" {
-            let key = normalize_workspace_key(&window[4]);
-            let label = key.as_deref().and_then(workspace_label_from_key);
-            return (key, label);
+            return workspace_options_from_key(&window[4]);
         }
     }
 
     for window in components.windows(2).rev() {
         if window[0] == "projects" {
-            let key = normalize_workspace_key(&window[1]);
-            let label = key.as_deref().and_then(workspace_label_from_key);
-            return (key, label);
+            return workspace_options_from_key(&window[1]);
         }
     }
 
     (None, None)
+}
+
+fn workspace_options_from_key(raw: &str) -> (Option<String>, Option<String>) {
+    workspace_parts_from_key(raw)
+        .map(ClaudeWorkspaceParts::into_options)
+        .unwrap_or((None, None))
+}
+
+fn workspace_parts_from_key(raw: &str) -> Option<ClaudeWorkspaceParts> {
+    let key = normalize_workspace_key(raw)?;
+    let label = workspace_label_from_key(&key);
+    Some(ClaudeWorkspaceParts { key, label })
+}
+
+fn set_message_workspace(message: &mut UnifiedMessage, workspace: &ClaudeWorkspaceParts) {
+    let (workspace_key, workspace_label) = workspace.to_options();
+    message.set_workspace(workspace_key, workspace_label);
+}
+
+fn workspace_options_for_entry(
+    entry_workspace: Option<&ClaudeWorkspaceParts>,
+    fallback_key: &Option<String>,
+    fallback_label: &Option<String>,
+) -> (Option<String>, Option<String>) {
+    if let Some(workspace) = entry_workspace {
+        workspace.to_options()
+    } else {
+        (fallback_key.clone(), fallback_label.clone())
+    }
 }
 
 fn sanitize_cc_mirror_segment(raw: &str) -> String {
@@ -2240,6 +2302,70 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
         assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_metadata_prefers_entry_cwd_over_claude_project_path() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/home/travis/01-workspace/tokscale","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) = create_project_file(
+            content,
+            "-home-travis-01-workspace-tokscale",
+            "session.jsonl",
+        );
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key,
+            Some("/home/travis/01-workspace/tokscale".to_string())
+        );
+        assert_eq!(messages[0].workspace_label, Some("tokscale".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_metadata_preserves_key_without_label() {
+        let (workspace_key, workspace_label) = workspace_options_from_key("/");
+
+        assert_eq!(workspace_key, Some("/".to_string()));
+        assert_eq!(workspace_label, None);
+    }
+
+    #[test]
+    fn test_workspace_metadata_prefers_later_entry_cwd_on_dedupe() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_late_cwd","message":{"id":"msg_late_cwd","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_late_cwd","cwd":"/home/travis/01-workspace/tokscale","message":{"id":"msg_late_cwd","model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":70}}}"#;
+        let (_dir, path) = create_project_file(
+            content,
+            "-home-travis-01-workspace-tokscale",
+            "session.jsonl",
+        );
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 70);
+        assert_eq!(
+            messages[0].workspace_key,
+            Some("/home/travis/01-workspace/tokscale".to_string())
+        );
+        assert_eq!(messages[0].workspace_label, Some("tokscale".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_metadata_normalizes_entry_windows_cwd() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"C:\\Users\\Travis\\Desktop","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) = create_project_file(content, "C--Users-Travis-Desktop", "session.jsonl");
+
+        let messages = parse_claude_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key,
+            Some("C:/Users/Travis/Desktop".to_string())
+        );
+        assert_eq!(messages[0].workspace_label, Some("Desktop".to_string()));
     }
 
     #[test]

@@ -356,6 +356,112 @@ fn create_codex_workspace_fixture_dir() -> TempDir {
     tmp
 }
 
+fn create_mixed_workspace_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+
+    let workspace = "/Users/alice/shared-workspace";
+
+    let claude_session = base
+        .join(".claude")
+        .join("projects")
+        .join("-Users-alice-shared-workspace");
+    fs::create_dir_all(&claude_session).unwrap();
+    fs::write(
+        claude_session.join("claude-session.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "cwd": workspace,
+                "message": {
+                    "model": "gpt-5.4",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5
+                    }
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let codex_sessions = base.join(".codex/sessions");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    fs::write(
+        codex_sessions.join("codex-session.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "source": "chat",
+                    "cwd": workspace
+                }
+            }),
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {
+                    "model": "gpt-5.4"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 20,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 10
+                        }
+                    }
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let pi_sessions = base.join(".pi/agent/sessions");
+    fs::create_dir_all(&pi_sessions).unwrap();
+    fs::write(
+        pi_sessions.join("pi-session.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session",
+                "id": "pi-session",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "cwd": workspace
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "pi-msg",
+                "parentId": null,
+                "timestamp": "2026-01-01T00:00:03.000Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "gpt-5.4",
+                    "provider": "openai",
+                    "usage": {
+                        "input": 30,
+                        "output": 15,
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "totalTokens": 45
+                    }
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    tmp
+}
+
 fn create_opencode_workspace_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
@@ -2276,6 +2382,48 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
         "codex-workspace"
     );
     assert_eq!(entries[0]["model"].as_str().unwrap(), "gpt-5.4");
+}
+
+#[test]
+fn test_models_group_by_workspace_model_merges_claude_codex_pi_by_cwd() {
+    let tmp = create_mixed_workspace_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "models",
+            "--json",
+            "--client",
+            "claude,codex,pi",
+            "--no-spinner",
+        ])
+        .args(["--group-by", "workspace,model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {:?}", output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0]["workspaceKey"].as_str().unwrap(),
+        "/Users/alice/shared-workspace"
+    );
+    assert_eq!(
+        entries[0]["workspaceLabel"].as_str().unwrap(),
+        "shared-workspace"
+    );
+    assert_eq!(entries[0]["model"].as_str().unwrap(), "gpt-5.4");
+    assert_eq!(entries[0]["input"].as_i64().unwrap(), 60);
+    assert_eq!(entries[0]["output"].as_i64().unwrap(), 30);
+    assert_eq!(entries[0]["messageCount"].as_i64().unwrap(), 3);
+
+    let mut clients: Vec<_> = entries[0]["mergedClients"]
+        .as_str()
+        .unwrap()
+        .split(", ")
+        .collect();
+    clients.sort_unstable();
+    assert_eq!(clients, vec!["claude", "codex", "pi"]);
 }
 
 #[test]

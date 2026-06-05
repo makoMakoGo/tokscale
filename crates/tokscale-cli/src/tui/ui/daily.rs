@@ -6,7 +6,7 @@ use ratatui::widgets::{
 
 use super::model_usage_layout::{
     display_width, model_usage_table_layout, ModelUsageColumn as DailyDetailColumn,
-    ModelUsageTableDensity as DailyDetailTableDensity,
+    ModelUsageLayoutProfile, ModelUsageTableDensity as DailyDetailTableDensity,
     ModelUsageTableLayout as DailyDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
     MODEL_MIN_WIDTH,
 };
@@ -45,6 +45,18 @@ enum DailyColumn {
     Total,
     Cost,
 }
+
+const DAILY_DETAIL_OPTIONAL_COLUMNS: [DailyDetailColumn; 9] = [
+    DailyDetailColumn::Cost,
+    DailyDetailColumn::Source,
+    DailyDetailColumn::Provider,
+    DailyDetailColumn::Messages,
+    DailyDetailColumn::Input,
+    DailyDetailColumn::Output,
+    DailyDetailColumn::CacheRate,
+    DailyDetailColumn::CacheRead,
+    DailyDetailColumn::CacheWrite,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DailyTableLayout {
@@ -208,16 +220,7 @@ fn daily_detail_table_layout(
         model_content_width,
         provider_content_width,
         source_content_width,
-        &[
-            DailyDetailColumn::Source,
-            DailyDetailColumn::Provider,
-            DailyDetailColumn::Messages,
-            DailyDetailColumn::Input,
-            DailyDetailColumn::Output,
-            DailyDetailColumn::CacheRate,
-            DailyDetailColumn::CacheRead,
-            DailyDetailColumn::CacheWrite,
-        ],
+        ModelUsageLayoutProfile::standard(&DAILY_DETAIL_OPTIONAL_COLUMNS),
     )
 }
 
@@ -755,17 +758,13 @@ mod tests {
     }
 
     #[test]
-    fn very_narrow_daily_detail_layout_keeps_model_tokens_and_cost() {
+    fn very_narrow_daily_detail_layout_keeps_model_and_tokens() {
         let layout = daily_detail_table_layout(54, true, 80, 56, 40);
 
         assert_eq!(layout.density, DailyDetailTableDensity::VeryCompact);
         assert_eq!(
             layout.columns,
-            vec![
-                DailyDetailColumn::Model,
-                DailyDetailColumn::Total,
-                DailyDetailColumn::Cost,
-            ]
+            vec![DailyDetailColumn::Model, DailyDetailColumn::Total]
         );
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
     }

@@ -5,8 +5,9 @@ use ratatui::widgets::{
 
 use super::model_usage_layout::{
     display_width, model_usage_table_layout, ModelUsageColumn as ModelsColumn,
-    ModelUsageTableDensity as ModelsTableDensity, ModelUsageTableLayout as ModelsTableLayout,
-    DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH,
+    ModelUsageLayoutProfile, ModelUsageTableDensity as ModelsTableDensity,
+    ModelUsageTableLayout as ModelsTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
+    MODEL_MIN_WIDTH,
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
@@ -38,29 +39,39 @@ fn model_content_width(models: &[&crate::tui::data::ModelUsage], group_by: &Grou
         .unwrap_or(MODEL_MIN_WIDTH)
 }
 
+const MODEL_OPTIONAL_COLUMNS: [ModelsColumn; 9] = [
+    ModelsColumn::Cost,
+    ModelsColumn::Source,
+    ModelsColumn::Provider,
+    ModelsColumn::Input,
+    ModelsColumn::Output,
+    ModelsColumn::CacheRate,
+    ModelsColumn::CacheRead,
+    ModelsColumn::CacheWrite,
+    ModelsColumn::Performance,
+];
+
 fn models_table_layout(
     table_width: u16,
     is_very_narrow: bool,
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
+    group_by: &GroupBy,
 ) -> ModelsTableLayout {
+    let profile = if *group_by == GroupBy::WorkspaceModel {
+        ModelUsageLayoutProfile::workspace(&MODEL_OPTIONAL_COLUMNS)
+    } else {
+        ModelUsageLayoutProfile::standard(&MODEL_OPTIONAL_COLUMNS)
+    };
+
     model_usage_table_layout(
         table_width,
         is_very_narrow,
         model_content_width,
         provider_content_width,
         source_content_width,
-        &[
-            ModelsColumn::Source,
-            ModelsColumn::Provider,
-            ModelsColumn::Input,
-            ModelsColumn::Output,
-            ModelsColumn::CacheRate,
-            ModelsColumn::CacheRead,
-            ModelsColumn::CacheWrite,
-            ModelsColumn::Performance,
-        ],
+        profile,
     )
 }
 
@@ -177,6 +188,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         model_content_width,
         provider_content_width,
         source_content_width,
+        &group_by,
     );
     let columns = table_layout.columns.clone();
     let header = Row::new(
@@ -297,7 +309,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::model_usage_layout::MODEL_MAX_WIDTH;
+    use super::super::model_usage_layout::{MODEL_MAX_WIDTH, WORKSPACE_MODEL_MAX_WIDTH};
     use super::*;
 
     fn length_at(widths: &[Constraint], index: usize) -> u16 {
@@ -308,7 +320,7 @@ mod tests {
     }
 
     fn model_layout(table_width: u16, model: u16, provider: u16, source: u16) -> ModelsTableLayout {
-        models_table_layout(table_width, false, model, provider, source)
+        models_table_layout(table_width, false, model, provider, source, &GroupBy::Model)
     }
 
     fn workspace_model_layout(
@@ -317,7 +329,14 @@ mod tests {
         provider: u16,
         source: u16,
     ) -> ModelsTableLayout {
-        models_table_layout(table_width, false, model, provider, source)
+        models_table_layout(
+            table_width,
+            false,
+            model,
+            provider,
+            source,
+            &GroupBy::WorkspaceModel,
+        )
     }
 
     #[test]
@@ -343,7 +362,7 @@ mod tests {
 
     #[test]
     fn narrow_model_layout_keeps_model_tokens_and_cost() {
-        let layout = models_table_layout(74, false, 80, 56, 40);
+        let layout = models_table_layout(74, false, 80, 56, 40, &GroupBy::Model);
 
         assert_eq!(
             layout.columns,
@@ -354,12 +373,12 @@ mod tests {
 
     #[test]
     fn very_narrow_model_layout_still_keeps_tokens_before_cache_details() {
-        let layout = models_table_layout(54, true, 80, 56, 40);
+        let layout = models_table_layout(54, true, 80, 56, 40, &GroupBy::Model);
 
         assert_eq!(layout.density, ModelsTableDensity::VeryCompact);
         assert_eq!(
             layout.columns,
-            vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost]
+            vec![ModelsColumn::Model, ModelsColumn::Total]
         );
         assert!(!layout.columns.contains(&ModelsColumn::CacheRead));
     }
@@ -397,7 +416,7 @@ mod tests {
         let wide = workspace_model_layout(200, 28, 42, 34);
 
         assert_eq!(length_at(&wide.widths, 0) as usize, wide.model_width);
-        assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
+        assert!(wide.model_width <= WORKSPACE_MODEL_MAX_WIDTH as usize);
         assert!(wide.columns.contains(&ModelsColumn::Source));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
         assert_eq!(length_at(&base.widths, 1), 34);
@@ -436,6 +455,14 @@ mod tests {
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
         assert_eq!(length_at(&layout.widths, 1), 120);
         assert_eq!(length_at(&layout.widths, 2), 120);
+    }
+
+    #[test]
+    fn workspace_model_column_uses_workspace_cap_on_wide_tables() {
+        let layout = workspace_model_layout(400, 80, 120, 120);
+
+        assert_eq!(length_at(&layout.widths, 0), WORKSPACE_MODEL_MAX_WIDTH);
+        assert_eq!(layout.model_width, WORKSPACE_MODEL_MAX_WIDTH as usize);
     }
 
     #[test]

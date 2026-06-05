@@ -321,6 +321,18 @@ impl UnifiedMessage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMetadata {
+    pub key: String,
+    pub label: String,
+}
+
+pub fn workspace_metadata_from_key(raw: &str) -> Option<WorkspaceMetadata> {
+    let key = normalize_workspace_key(raw)?;
+    let label = workspace_label_from_key(&key)?;
+    Some(WorkspaceMetadata { key, label })
+}
+
 pub fn normalize_workspace_key(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -580,6 +592,17 @@ mod tests {
         assert_eq!(
             workspace_label_from_key("encoded-project-key"),
             Some("encoded-project-key".to_string())
+        );
+    }
+
+    #[test]
+    fn test_workspace_metadata_from_key_pairs_normalized_key_and_label() {
+        assert_eq!(
+            workspace_metadata_from_key(r"C:\Users\alice\repo\"),
+            Some(WorkspaceMetadata {
+                key: "C:/Users/alice/repo".to_string(),
+                label: "repo".to_string(),
+            })
         );
     }
 
