@@ -256,7 +256,16 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Kimi = 9 => {
+    Omp = 9 => {
+        id: "omp",
+        root: PathRoot::Home,
+        relative: ".omp/agent/sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    Kimi = 10 => {
         id: "kimi",
         root: PathRoot::Home,
         relative: ".kimi/sessions",
@@ -265,7 +274,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Qwen = 10 => {
+    Qwen = 11 => {
         id: "qwen",
         root: PathRoot::Home,
         relative: ".qwen/projects",
@@ -274,7 +283,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    RooCode = 11 => {
+    RooCode = 12 => {
         id: "roocode",
         root: PathRoot::Home,
         relative: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
@@ -283,7 +292,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    KiloCode = 12 => {
+    KiloCode = 13 => {
         id: "kilocode",
         root: PathRoot::Home,
         relative: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
@@ -292,7 +301,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Mux = 13 => {
+    Mux = 14 => {
         id: "mux",
         root: PathRoot::Home,
         relative: ".mux/sessions",
@@ -301,7 +310,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Kilo = 14 => {
+    Kilo = 15 => {
         id: "kilo",
         root: PathRoot::XdgData,
         relative: "kilo/kilo.db",
@@ -310,7 +319,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Crush = 15 => {
+    Crush = 16 => {
         id: "crush",
         root: PathRoot::XdgData,
         relative: "crush/projects.json",
@@ -319,7 +328,7 @@ define_clients!(
         parse_local: true,
         submit_default: false
     },
-    Hermes = 16 => {
+    Hermes = 17 => {
         id: "hermes",
         root: PathRoot::EnvVar {
             var: "HERMES_HOME",
@@ -331,7 +340,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Copilot = 17 => {
+    Copilot = 18 => {
         id: "copilot",
         root: PathRoot::Home,
         relative: ".copilot/otel",
@@ -340,7 +349,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Goose = 18 => {
+    Goose = 19 => {
         id: "goose",
         root: PathRoot::XdgData,
         relative: "goose/sessions/sessions.db",
@@ -349,7 +358,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Codebuff = 19 => {
+    Codebuff = 20 => {
         id: "codebuff",
         root: PathRoot::EnvVar {
             var: "CODEBUFF_DATA_DIR",
@@ -361,7 +370,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Antigravity = 20 => {
+    Antigravity = 21 => {
         id: "antigravity",
         root: PathRoot::Config,
         relative: "antigravity-cache/sessions",
@@ -370,7 +379,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Zed = 21 => {
+    Zed = 22 => {
         id: "zed",
         root: PathRoot::XdgData,
         relative: "zed/threads/threads.db",
@@ -379,7 +388,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Kiro = 22 => {
+    Kiro = 23 => {
         id: "kiro",
         root: PathRoot::Home,
         relative: ".kiro/sessions/cli",
@@ -388,7 +397,7 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    Trae = 23 => {
+    Trae = 24 => {
         id: "trae",
         root: PathRoot::Config,
         relative: "trae-cache/sessions",
@@ -397,7 +406,7 @@ define_clients!(
         parse_local: true,
         submit_default: false
     },
-    Warp = 24 => {
+    Warp = 25 => {
         id: "warp",
         root: PathRoot::Config,
         relative: "warp-cache",
@@ -457,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 25);
+        assert_eq!(ClientId::COUNT, 26);
     }
 
     #[test]
@@ -480,6 +489,16 @@ mod tests {
         assert_eq!(client.data().pattern, "usage*.json");
         assert!(client.data().parse_local);
         assert!(!client.data().submit_default);
+    }
+
+    #[test]
+    fn test_omp_client_registered_as_independent_pi_format_source() {
+        let client = ClientId::from_str("omp").expect("omp client should be registered");
+        assert_eq!(client, ClientId::Omp);
+        assert_eq!(client.data().relative_path, ".omp/agent/sessions");
+        assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
     }
 
     #[test]

@@ -43,6 +43,10 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
         hotkey: '9',
     },
     ClientUi {
+        display_name: "OMP",
+        hotkey: 'm',
+    },
+    ClientUi {
         display_name: "Kimi",
         hotkey: '0',
     },

@@ -830,6 +830,7 @@ pub enum ClientFilter {
     Droid,
     Openclaw,
     Pi,
+    Omp,
     Kimi,
     Qwen,
     Roocode,
@@ -865,6 +866,7 @@ impl ClientFilter {
             Self::Droid => "droid",
             Self::Openclaw => "openclaw",
             Self::Pi => "pi",
+            Self::Omp => "omp",
             Self::Kimi => "kimi",
             Self::Qwen => "qwen",
             Self::Roocode => "roocode",
@@ -902,6 +904,7 @@ impl ClientFilter {
             Self::Droid => Some(ClientId::Droid),
             Self::Openclaw => Some(ClientId::OpenClaw),
             Self::Pi => Some(ClientId::Pi),
+            Self::Omp => Some(ClientId::Omp),
             Self::Kimi => Some(ClientId::Kimi),
             Self::Qwen => Some(ClientId::Qwen),
             Self::Roocode => Some(ClientId::RooCode),
@@ -936,6 +939,7 @@ impl ClientFilter {
             ClientId::Droid => Self::Droid,
             ClientId::OpenClaw => Self::Openclaw,
             ClientId::Pi => Self::Pi,
+            ClientId::Omp => Self::Omp,
             ClientId::Kimi => Self::Kimi,
             ClientId::Qwen => Self::Qwen,
             ClientId::RooCode => Self::Roocode,
@@ -5843,10 +5847,7 @@ mod tests {
         let result = build_client_filter_with_defaults(flags, &[]);
         assert!(result.is_some());
         let sources = result.unwrap();
-        // ClientId::COUNT does not include synthetic, but ClientFilter does.
-        let expected_len = tokscale_core::ClientId::iter().count() + 1;
-        assert_eq!(sources.len(), expected_len);
-        for required in [
+        let required = [
             "opencode",
             "claude",
             "codex",
@@ -5873,7 +5874,13 @@ mod tests {
             "trae",
             "warp",
             "synthetic",
-        ] {
+        ];
+
+        // New clients do not need deprecated boolean flags; only the
+        // pre-existing legacy flags plus synthetic are represented here.
+        let expected_len = required.len();
+        assert_eq!(sources.len(), expected_len);
+        for required in required {
             assert!(
                 sources.contains(&required.to_string()),
                 "missing client filter id: {required}"

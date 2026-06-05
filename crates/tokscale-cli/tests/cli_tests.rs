@@ -459,6 +459,40 @@ fn create_mixed_workspace_fixture_dir() -> TempDir {
     )
     .unwrap();
 
+    let omp_sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&omp_sessions).unwrap();
+    fs::write(
+        omp_sessions.join("omp-session.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session",
+                "id": "omp-session",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "cwd": workspace
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "omp-msg",
+                "parentId": null,
+                "timestamp": "2026-01-01T00:00:04.000Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "gpt-5.4",
+                    "provider": "openai",
+                    "usage": {
+                        "input": 40,
+                        "output": 20,
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "totalTokens": 60
+                    }
+                }
+            })
+        ),
+    )
+    .unwrap();
+
     tmp
 }
 
@@ -2424,6 +2458,43 @@ fn test_models_group_by_workspace_model_merges_claude_codex_pi_by_cwd() {
         .collect();
     clients.sort_unstable();
     assert_eq!(clients, vec!["claude", "codex", "pi"]);
+}
+
+#[test]
+fn test_models_client_filter_splits_pi_and_omp_sessions() {
+    let tmp = create_mixed_workspace_fixture_dir();
+
+    let pi_output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "pi", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        pi_output.status.success(),
+        "command failed: {:?}",
+        pi_output
+    );
+    let pi_json: serde_json::Value = serde_json::from_slice(&pi_output.stdout).unwrap();
+    let pi_entries = pi_json["entries"].as_array().unwrap();
+    assert_eq!(pi_entries.len(), 1);
+    assert_eq!(pi_entries[0]["client"].as_str().unwrap(), "pi");
+    assert_eq!(pi_entries[0]["input"].as_i64().unwrap(), 30);
+    assert_eq!(pi_entries[0]["output"].as_i64().unwrap(), 15);
+
+    let omp_output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        omp_output.status.success(),
+        "command failed: {:?}",
+        omp_output
+    );
+    let omp_json: serde_json::Value = serde_json::from_slice(&omp_output.stdout).unwrap();
+    let omp_entries = omp_json["entries"].as_array().unwrap();
+    assert_eq!(omp_entries.len(), 1);
+    assert_eq!(omp_entries[0]["client"].as_str().unwrap(), "omp");
+    assert_eq!(omp_entries[0]["input"].as_i64().unwrap(), 40);
+    assert_eq!(omp_entries[0]["output"].as_i64().unwrap(), 20);
 }
 
 #[test]

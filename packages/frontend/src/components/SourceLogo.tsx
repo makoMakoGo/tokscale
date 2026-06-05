@@ -45,6 +45,8 @@ export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogo
       case "hermes":
         return "/assets/logos/hermes.png";
       case "pi":
+      case "omp":
+        // OMP has no dedicated logo asset yet; keep labels/id handling separate.
         return "/assets/logos/pi.png";
       case "kimi":
         return "/assets/logos/kimi.png";

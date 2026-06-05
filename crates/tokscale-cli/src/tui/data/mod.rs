@@ -1549,32 +1549,15 @@ mod tests {
     #[test]
     fn test_client_all() {
         let clients = ClientId::ALL;
-        assert_eq!(clients.len(), 25);
-        assert_eq!(clients[0], ClientId::OpenCode);
-        assert_eq!(clients[1], ClientId::Claude);
-        assert_eq!(clients[2], ClientId::Codex);
-        assert_eq!(clients[3], ClientId::Cursor);
-        assert_eq!(clients[4], ClientId::Gemini);
-        assert_eq!(clients[5], ClientId::Amp);
-        assert_eq!(clients[6], ClientId::Droid);
-        assert_eq!(clients[7], ClientId::OpenClaw);
-        assert_eq!(clients[8], ClientId::Pi);
-        assert_eq!(clients[9], ClientId::Kimi);
-        assert_eq!(clients[10], ClientId::Qwen);
-        assert_eq!(clients[11], ClientId::RooCode);
-        assert_eq!(clients[12], ClientId::KiloCode);
-        assert_eq!(clients[13], ClientId::Mux);
-        assert_eq!(clients[14], ClientId::Kilo);
-        assert_eq!(clients[15], ClientId::Crush);
-        assert_eq!(clients[16], ClientId::Hermes);
-        assert_eq!(clients[17], ClientId::Copilot);
-        assert_eq!(clients[18], ClientId::Goose);
-        assert_eq!(clients[19], ClientId::Codebuff);
-        assert_eq!(clients[20], ClientId::Antigravity);
-        assert_eq!(clients[21], ClientId::Zed);
-        assert_eq!(clients[22], ClientId::Kiro);
-        assert_eq!(clients[23], ClientId::Trae);
-        assert_eq!(clients[24], ClientId::Warp);
+        let iterated_clients: Vec<ClientId> = ClientId::iter().collect();
+        assert_eq!(clients, iterated_clients.as_slice());
+
+        let pi_index = clients
+            .iter()
+            .position(|client| *client == ClientId::Pi)
+            .unwrap();
+        assert_eq!(clients[pi_index + 1], ClientId::Omp);
+        assert_eq!(clients[pi_index + 2], ClientId::Kimi);
     }
 
     #[test]
@@ -1613,6 +1596,7 @@ mod tests {
             "OpenClaw"
         );
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Pi), "Pi");
+        assert_eq!(crate::tui::client_ui::display_name(ClientId::Omp), "OMP");
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Kimi), "Kimi");
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Qwen), "Qwen");
         assert_eq!(
@@ -1664,6 +1648,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Droid), '7');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenClaw), '8');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Pi), '9');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Omp), 'm');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kimi), '0');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Qwen), 'w');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::RooCode), 'r');
@@ -1715,6 +1700,7 @@ mod tests {
             Some(ClientId::OpenClaw)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('9'), Some(ClientId::Pi));
+        assert_eq!(crate::tui::client_ui::from_hotkey('m'), Some(ClientId::Omp));
         assert_eq!(
             crate::tui::client_ui::from_hotkey('0'),
             Some(ClientId::Kimi)

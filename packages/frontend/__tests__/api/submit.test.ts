@@ -279,6 +279,13 @@ describe('POST /api/submit - Client-Level Merge', () => {
       expect(data.contributions[0].clients[0].client).toBe('pi');
     });
 
+    it('should support omp client in submission payload', () => {
+      const data = createMockSubmissionData({ clients: ['omp'] });
+
+      expect(data.summary.clients).toContain('omp');
+      expect(data.contributions[0].clients[0].client).toBe('omp');
+    });
+
     it('should support kimi client in submission payload', () => {
       const data = createMockSubmissionData({ clients: ['kimi'] });
 
