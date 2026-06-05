@@ -420,12 +420,6 @@ pub fn parse_claude_file_with_cache_and_home(
         buffer.extend_from_slice(trimmed.as_bytes());
         if let Ok(entry) = simd_json::from_slice::<ClaudeEntry>(&mut buffer) {
             let entry_workspace = entry.cwd.as_deref().and_then(workspace_parts_from_key);
-            let (current_workspace_key, current_workspace_label) =
-                if let Some(workspace) = entry_workspace.as_ref() {
-                    workspace.to_options()
-                } else {
-                    (workspace_key.clone(), workspace_label.clone())
-                };
 
             // Detect sidechain on the first parseable entry (any type).
             // All lines in a subagent file carry isSidechain: true.
@@ -446,6 +440,11 @@ pub fn parse_claude_file_with_cache_and_home(
             }
 
             if entry.entry_type == "user" || entry.entry_type == "tool_result" {
+                let (context_workspace_key, context_workspace_label) = workspace_options_for_entry(
+                    entry_workspace.as_ref(),
+                    &workspace_key,
+                    &workspace_label,
+                );
                 let tool_result_message = extract_claude_tool_result_message(
                     trimmed,
                     ClaudeToolResultContext {
@@ -456,8 +455,8 @@ pub fn parse_claude_file_with_cache_and_home(
                         default_provider_hint: metadata_provider_hint,
                         session_id: &session_id,
                         fallback_timestamp,
-                        workspace_key: current_workspace_key.clone(),
-                        workspace_label: current_workspace_label.clone(),
+                        workspace_key: context_workspace_key,
+                        workspace_label: context_workspace_label,
                         sidechain_agent: sidechain_agent.clone(),
                     },
                 );
@@ -624,7 +623,12 @@ pub fn parse_claude_file_with_cache_and_home(
                 );
                 unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent.clone();
-                unified.set_workspace(current_workspace_key, current_workspace_label);
+                let (message_workspace_key, message_workspace_label) = workspace_options_for_entry(
+                    entry_workspace.as_ref(),
+                    &workspace_key,
+                    &workspace_label,
+                );
+                unified.set_workspace(message_workspace_key, message_workspace_label);
                 // Mark the first assistant response after a user message as a turn start
                 if pending_turn_start {
                     unified.is_turn_start = true;
@@ -722,6 +726,18 @@ fn workspace_parts_from_key(raw: &str) -> Option<ClaudeWorkspaceParts> {
 fn set_message_workspace(message: &mut UnifiedMessage, workspace: &ClaudeWorkspaceParts) {
     let (workspace_key, workspace_label) = workspace.to_options();
     message.set_workspace(workspace_key, workspace_label);
+}
+
+fn workspace_options_for_entry(
+    entry_workspace: Option<&ClaudeWorkspaceParts>,
+    fallback_key: &Option<String>,
+    fallback_label: &Option<String>,
+) -> (Option<String>, Option<String>) {
+    if let Some(workspace) = entry_workspace {
+        workspace.to_options()
+    } else {
+        (fallback_key.clone(), fallback_label.clone())
+    }
 }
 
 fn sanitize_cc_mirror_segment(raw: &str) -> String {
