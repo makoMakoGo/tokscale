@@ -1395,6 +1395,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let omp_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Omp)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::pi::parse_omp_file(path)
+            })
+        })
+        .collect();
+    for outcome in omp_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
@@ -2545,6 +2561,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let pi_count = pi_msgs.len() as i32;
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
+
+    let omp_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Omp)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::pi::parse_omp_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let omp_count = omp_msgs.len() as i32;
+    counts.set(ClientId::Omp, omp_count);
+    messages.extend(omp_msgs);
 
     // Parse Kimi wire.jsonl files in parallel
     let kimi_msgs: Vec<ParsedMessage> = scan_result

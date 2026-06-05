@@ -57,6 +57,15 @@ pub struct PiUsage {
 
 /// Parse a Pi JSONL session file
 pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
+    parse_pi_format_file(path, "pi")
+}
+
+/// Parse an OMP JSONL session file.
+pub fn parse_omp_file(path: &Path) -> Vec<UnifiedMessage> {
+    parse_pi_format_file(path, "omp")
+}
+
+fn parse_pi_format_file(path: &Path, client: &'static str) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
@@ -141,7 +150,7 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
             .unwrap_or(fallback_timestamp);
 
         let mut unified = UnifiedMessage::new(
-            "pi",
+            client,
             model,
             provider,
             session_id.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -197,6 +206,25 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].workspace_key, Some("/tmp".to_string()));
         assert_eq!(messages[0].workspace_label, Some("tmp".to_string()));
+    }
+
+    #[test]
+    fn test_parse_omp_jsonl_uses_omp_client() {
+        // given
+        let content = r#"{"type":"session","id":"omp_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
+        let file = create_test_file(content);
+
+        // when
+        let messages = parse_omp_file(file.path());
+
+        // then
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "omp");
+        assert_eq!(messages[0].session_id, "omp_ses_001");
+        assert_eq!(messages[0].model_id, "gpt-5.5");
+        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].tokens.total(), 30);
     }
 
     #[test]

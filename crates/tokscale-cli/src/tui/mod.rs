@@ -369,6 +369,7 @@ pub fn test_data_loading() -> Result<()> {
         ClientId::Droid,
         ClientId::OpenClaw,
         ClientId::Pi,
+        ClientId::Omp,
         ClientId::Kimi,
         ClientId::Qwen,
         ClientId::RooCode,

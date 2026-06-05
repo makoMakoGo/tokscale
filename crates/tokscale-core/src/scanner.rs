@@ -841,12 +841,6 @@ fn scan_all_clients_with_env_strategy_inner(
         );
     }
 
-    // Oh My Pi fork (https://github.com/can1357/oh-my-pi) — same JSONL format, different root
-    if enabled.contains(&ClientId::Pi) {
-        let omp_path = format!("{}/.omp/agent/sessions", home_dir);
-        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Pi, omp_path);
-    }
-
     if include_synthetic {
         let xdg_data = if use_env_roots {
             std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
@@ -2141,26 +2135,40 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_all_clients_omp_scanned_as_pi() {
+    fn test_scan_all_clients_omp_scanned_as_omp() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         setup_mock_omp_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
-        assert_eq!(result.get(ClientId::Pi).len(), 1);
-        assert!(result.get(ClientId::Pi)[0].ends_with("2026-04-06T03-04-28Z_omp_ses_001.jsonl"));
+        let result = scan_all_clients(home.to_str().unwrap(), &["omp".to_string()]);
+        assert_eq!(result.get(ClientId::Omp).len(), 1);
+        assert!(result.get(ClientId::Omp)[0].ends_with("2026-04-06T03-04-28Z_omp_ses_001.jsonl"));
+        assert!(result.get(ClientId::Pi).is_empty());
         assert!(result.get(ClientId::OpenCode).is_empty());
     }
 
     #[test]
-    fn test_scan_all_clients_pi_from_both_paths() {
+    fn test_scan_all_clients_pi_does_not_scan_omp() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         setup_mock_pi_dir(home);
         setup_mock_omp_dir(home);
 
         let result = scan_all_clients(home.to_str().unwrap(), &["pi".to_string()]);
-        assert_eq!(result.get(ClientId::Pi).len(), 2);
+        assert_eq!(result.get(ClientId::Pi).len(), 1);
+        assert!(result.get(ClientId::Omp).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_pi_and_omp_from_separate_paths() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_pi_dir(home);
+        setup_mock_omp_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &[]);
+        assert_eq!(result.get(ClientId::Pi).len(), 1);
+        assert_eq!(result.get(ClientId::Omp).len(), 1);
     }
 
     #[test]

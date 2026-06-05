@@ -11,6 +11,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "openclaw",
   "hermes",
   "pi",
+  "omp",
   "kimi",
   "qwen",
   "roocode",

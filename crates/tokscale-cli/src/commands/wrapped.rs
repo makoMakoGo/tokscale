@@ -1442,6 +1442,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "openclaw" => Some("OpenClaw"),
         "hermes" => Some("Hermes Agent"),
         "pi" => Some("Pi"),
+        "omp" => Some("OMP"),
         "kimi" => Some("Kimi CLI"),
         "qwen" => Some("Qwen CLI"),
         "roocode" => Some("Roo Code"),
@@ -1476,6 +1477,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
         "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
         "Pi" => Some("https://tokscale.ai/assets/logos/pi.png"),
+        "OMP" => Some("https://tokscale.ai/assets/logos/pi.png"),
         "Kimi CLI" => Some("https://tokscale.ai/assets/logos/kimi.png"),
         "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
         "Roo Code" => Some("https://tokscale.ai/assets/logos/roocode.png"),
@@ -1889,6 +1891,7 @@ fn default_clients() -> Vec<String> {
         "openclaw".to_string(),
         "hermes".to_string(),
         "pi".to_string(),
+        "omp".to_string(),
     ]
 }
 
@@ -2421,6 +2424,11 @@ mod tests {
     }
 
     #[test]
+    fn test_client_display_name_omp() {
+        assert_eq!(client_display_name("omp"), Some("OMP"));
+    }
+
+    #[test]
     fn test_client_display_name_kilo() {
         assert_eq!(client_display_name("kilo"), Some("Kilo CLI"));
     }
@@ -2468,6 +2476,12 @@ mod tests {
     fn test_default_clients_includes_copilot() {
         let clients = default_clients();
         assert!(clients.iter().any(|client| client == "copilot"));
+    }
+
+    #[test]
+    fn test_default_clients_includes_omp() {
+        let clients = default_clients();
+        assert!(clients.iter().any(|client| client == "omp"));
     }
 
     // ========== client_logo_url tests ==========
@@ -2568,6 +2582,14 @@ mod tests {
     fn test_client_logo_url_pi() {
         assert_eq!(
             client_logo_url("Pi"),
+            Some("https://tokscale.ai/assets/logos/pi.png")
+        );
+    }
+
+    #[test]
+    fn test_client_logo_url_omp() {
+        assert_eq!(
+            client_logo_url("OMP"),
             Some("https://tokscale.ai/assets/logos/pi.png")
         );
     }
