@@ -173,15 +173,11 @@ pub fn run(
         app.set_background_loading(true);
 
         let tx = bg_tx.clone();
-        // Project the filter set into the (clients, include_synthetic)
-        // pair the loader still consumes. Keeping the projection here
-        // (instead of inside DataLoader) avoids touching tokscale-core's
-        // public API in this PR.
+        // Project the filter set into the client list the loader consumes.
         let bg_clients: Vec<ClientId> = enabled_clients
             .iter()
             .filter_map(|f| f.to_client_id())
             .collect();
-        let bg_include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
         let bg_since = since.clone();
         let bg_until = until.clone();
         let bg_year = year.clone();
@@ -192,7 +188,7 @@ pub fn run(
 
         thread::spawn(move || {
             let loader = background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
-            let result = loader.load(&bg_clients, &bg_group_by, bg_include_synthetic);
+            let result = loader.load(&bg_clients, &bg_group_by);
 
             if let Ok(ref data) = result {
                 if let Err(err) =
@@ -306,9 +302,7 @@ fn run_loop_with_background(
             app.set_background_loading(true);
 
             let tx = bg_tx.clone();
-            // Boundary projection: see [`run`] above for the shape rationale.
             let clients = app.scan_clients();
-            let include_synthetic = app.include_synthetic();
             let since = app.data_loader.since.clone();
             let until = app.data_loader.until.clone();
             let year = app.data_loader.year.clone();
@@ -319,7 +313,7 @@ fn run_loop_with_background(
 
             thread::spawn(move || {
                 let loader = background_data_loader(since, until, year, minutely_enabled);
-                let result = loader.load(&clients, &group_by, include_synthetic);
+                let result = loader.load(&clients, &group_by);
                 if let Ok(ref data) = result {
                     if let Err(err) =
                         save_cached_data(data, &enabled_clients, &group_by, &report_scope)
@@ -381,7 +375,7 @@ pub fn test_data_loading() -> Result<()> {
         ClientId::Codebuff,
     ];
 
-    let data = loader.load(&all_clients, &tokscale_core::GroupBy::default(), false)?;
+    let data = loader.load(&all_clients, &tokscale_core::GroupBy::default())?;
 
     println!("Loaded {} models", data.models.len());
     println!("Total cost: ${:.2}", data.total_cost);

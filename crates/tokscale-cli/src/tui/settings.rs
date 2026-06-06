@@ -70,7 +70,7 @@ pub struct Settings {
     /// invocation.
     ///
     /// Stored as canonical lowercase ids matching `ClientFilter::as_filter_str`
-    /// (e.g. `["opencode", "claude", "synthetic"]`). Unknown ids are dropped
+    /// (e.g. `["opencode", "claude", "zed"]`). Unknown ids are dropped
     /// silently at load time so a typo or stale entry never breaks tokscale.
     /// CLI flags always override this list completely — no merging.
     #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
@@ -647,7 +647,7 @@ mod tests {
             "autoRefreshMs": 60000,
             "includeUnusedModels": false,
             "nativeTimeoutMs": 300000,
-            "defaultClients": ["opencode", "claude", "synthetic"]
+            "defaultClients": ["opencode", "claude", "zed"]
         }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(
@@ -655,7 +655,7 @@ mod tests {
             vec![
                 "opencode".to_string(),
                 "claude".to_string(),
-                "synthetic".to_string()
+                "zed".to_string()
             ]
         );
 
@@ -663,7 +663,7 @@ mod tests {
         let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(
             round_trip["defaultClients"],
-            serde_json::json!(["opencode", "claude", "synthetic"])
+            serde_json::json!(["opencode", "claude", "zed"])
         );
     }
 

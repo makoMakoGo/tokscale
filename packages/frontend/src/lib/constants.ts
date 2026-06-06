@@ -53,7 +53,6 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   zed: "Zed Agent",
   trae: "Trae",
   warp: "Warp",
-  synthetic: "Synthetic",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -86,7 +85,6 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   zed: `${GITHUB_CDN_BASE}/client-zed.webp`,
   trae: `${GITHUB_CDN_BASE}/client-trae.png`,
   warp: `${GITHUB_CDN_BASE}/client-warp.png`,
-  synthetic: `${GITHUB_CDN_BASE}/client-synthetic.png`,
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -117,7 +115,6 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   zed: "#084CCF",
   trae: "#00BFA5",
   warp: "#01A4A4",
-  synthetic: "#4ADE80",
 };
 
 export const SOURCE_TEXT_COLORS: Partial<Record<ClientType, string>> = {

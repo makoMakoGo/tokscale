@@ -306,24 +306,16 @@ impl DataLoader {
         self
     }
 
-    pub fn load(
-        &self,
-        enabled_clients: &[ClientId],
-        group_by: &GroupBy,
-        include_synthetic: bool,
-    ) -> Result<UsageData> {
+    pub fn load(&self, enabled_clients: &[ClientId], group_by: &GroupBy) -> Result<UsageData> {
         let home = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
             .to_string_lossy()
             .to_string();
 
-        let mut sources: Vec<String> = enabled_clients
+        let sources: Vec<String> = enabled_clients
             .iter()
             .map(|client| client.as_str().to_string())
             .collect();
-        if include_synthetic {
-            sources.push("synthetic".to_string());
-        }
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
@@ -358,7 +350,6 @@ impl DataLoader {
         &self,
         enabled_clients: &[ClientId],
         group_by: &GroupBy,
-        include_synthetic: bool,
         pricing: &tokscale_core::pricing::PricingService,
     ) -> Result<UsageData> {
         let home = dirs::home_dir()
@@ -366,13 +357,10 @@ impl DataLoader {
             .to_string_lossy()
             .to_string();
 
-        let mut sources: Vec<String> = enabled_clients
+        let sources: Vec<String> = enabled_clients
             .iter()
             .map(|client| client.as_str().to_string())
             .collect();
-        if include_synthetic {
-            sources.push("synthetic".to_string());
-        }
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
@@ -1249,7 +1237,6 @@ mod tests {
         loader: &DataLoader,
         enabled_clients: &[ClientId],
         group_by: &GroupBy,
-        include_synthetic: bool,
         pricing: Option<&PricingService>,
     ) -> Result<UsageData> {
         let home = dirs::home_dir()
@@ -1257,13 +1244,10 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        let mut sources: Vec<String> = enabled_clients
+        let sources: Vec<String> = enabled_clients
             .iter()
             .map(|client| client.as_str().to_string())
             .collect();
-        if include_synthetic {
-            sources.push("synthetic".to_string());
-        }
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
@@ -2539,7 +2523,6 @@ after"#,
             &loader,
             &[ClientId::RooCode],
             &GroupBy::Model,
-            false,
             Some(&pricing),
         )
         .unwrap();
@@ -2611,7 +2594,7 @@ after"#,
 
     #[test]
     #[serial]
-    fn test_data_loader_keeps_synthetic_gateway_messages_under_original_client() {
+    fn test_data_loader_keeps_gateway_model_path_under_original_client() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         let message_dir = temp_dir
@@ -2634,7 +2617,6 @@ after"#,
             &loader,
             &[ClientId::OpenCode],
             &GroupBy::ClientProviderModel,
-            true,
             Some(&pricing),
         )
         .unwrap();

@@ -47,7 +47,7 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-3-flash", "gemini-3-flash-preview");
     m.insert("gemini-3-flash-c", "gemini-3-flash-preview");
 
-    // Synthetic model variants (only where resolver needs help)
+    // Gateway model variants (only where resolver needs help)
     m.insert("kimi-k2.5-nvfp4", "kimi-k2.5"); // Quantization variant → base model pricing
     m.insert("kimi-k2-instruct-0905", "kimi-k2.5"); // Specific version → base (avoids reseller)
     m

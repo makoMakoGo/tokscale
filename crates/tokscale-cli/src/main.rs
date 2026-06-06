@@ -807,17 +807,13 @@ fn main() -> Result<()> {
 
 /// Client identifiers exposed via `--client`.
 ///
-/// Mirrors `tokscale_core::ClientId` plus the `Synthetic` meta-client. We
-/// duplicate the variant set on the CLI side so `tokscale-core` stays free of
-/// CLI-parsing dependencies and so `Synthetic` (which has no scan path of its
-/// own) can be treated as a first-class filter value without changing core
-/// invariants.
+/// Mirrors `tokscale_core::ClientId`. We duplicate the variant set on the CLI
+/// side so `tokscale-core` stays free of CLI-parsing dependencies.
 ///
 /// Variant order intentionally mirrors `ClientId::ALL` declaration order so
 /// the TUI source picker, `--help`'s `[possible values: ...]` listing, and
 /// any future iteration over `ClientFilter::value_variants()` agree on a
-/// single chronological ordering. `Synthetic` is appended at the end since
-/// it has no `ClientId` counterpart.
+/// single chronological ordering.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[value(rename_all = "lowercase")]
 pub enum ClientFilter {
@@ -848,7 +844,6 @@ pub enum ClientFilter {
     #[value(name = "trae")]
     Trae,
     Warp,
-    Synthetic,
 }
 
 impl ClientFilter {
@@ -883,12 +878,10 @@ impl ClientFilter {
             Self::Kiro => "kiro",
             Self::Trae => "trae",
             Self::Warp => "warp",
-            Self::Synthetic => "synthetic",
         }
     }
 
-    /// Convert to the corresponding `ClientId`, or `None` for the
-    /// `Synthetic` meta-client which has no scan path of its own.
+    /// Convert to the corresponding `ClientId`.
     ///
     /// Used at boundaries where TUI state (`HashSet<ClientFilter>`) needs
     /// to feed core APIs that still consume `Vec<ClientId>`.
@@ -921,12 +914,11 @@ impl ClientFilter {
             Self::Kiro => Some(ClientId::Kiro),
             Self::Trae => Some(ClientId::Trae),
             Self::Warp => Some(ClientId::Warp),
-            Self::Synthetic => None,
         }
     }
 
     /// Lift a `ClientId` back into a `ClientFilter`. Total inverse of
-    /// `to_client_id` for non-`Synthetic` variants.
+    /// `to_client_id`.
     pub fn from_client_id(client: tokscale_core::ClientId) -> Self {
         use tokscale_core::ClientId;
         match client {
@@ -970,23 +962,13 @@ impl ClientFilter {
             .find(|f| f.as_filter_str() == s)
     }
 
-    /// The "no filter" default set: every real client, with `Synthetic`
-    /// **excluded**. Matches the pre-refactor behavior where a missing
-    /// filter scanned every `ClientId` but did NOT post-process synthetic
-    /// (synthetic detection has always been opt-in because it
-    /// re-attributes messages from other clients to a different bucket).
-    ///
     /// Single source of truth: every code path that needs a default
     /// filter (TUI launch, `submit` warm cache, etc.) must consult this
     /// so the cache key, the in-app state, and the loader filter all
     /// agree. Drift between them produces stale-cache misses on every
     /// launch.
     pub fn default_set() -> std::collections::HashSet<Self> {
-        Self::value_variants()
-            .iter()
-            .copied()
-            .filter(|f| !matches!(f, Self::Synthetic))
-            .collect()
+        Self::value_variants().iter().copied().collect()
     }
 }
 
@@ -1058,8 +1040,6 @@ pub struct ClientFlags {
     pub trae: bool,
     #[arg(long, hide = true)]
     pub warp: bool,
-    #[arg(long, hide = true)]
-    pub synthetic: bool,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -1112,7 +1092,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 26] = [
+    let legacy: [(bool, ClientFilter); 25] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1138,7 +1118,6 @@ fn build_client_filter_with_defaults(
         (flags.kiro, ClientFilter::Kiro),
         (flags.trae, ClientFilter::Trae),
         (flags.warp, ClientFilter::Warp),
-        (flags.synthetic, ClientFilter::Synthetic),
     ];
 
     let mut legacy_used: Vec<&'static str> = Vec::new();
@@ -1443,12 +1422,10 @@ fn emit_cursor_sync_warning(
 }
 
 fn default_submit_clients() -> Vec<String> {
-    let mut clients: Vec<String> = tokscale_core::ClientId::iter()
+    tokscale_core::ClientId::iter()
         .filter(|client| client.submit_default())
         .map(|client| client.as_str().to_string())
-        .collect();
-    clients.push("synthetic".to_string());
-    clients
+        .collect()
 }
 
 fn reject_unsupported_home_override(home_dir: &Option<String>, command: &str) -> Result<()> {
@@ -5119,7 +5096,7 @@ fn spawn_warm_tui_cache_detached() {
 /// 1. If `defaultClients` from `~/.config/tokscale/settings.json` is
 ///    set, use that (after dropping unknown ids).
 /// 2. Otherwise fall back to `ClientFilter::default_set()` (every real
-///    client, Synthetic excluded).
+///    client).
 ///
 /// This **must** stay in lockstep with the resolution that
 /// `tui::run(.., clients = None, ..)` would compute. If it drifts, the
@@ -5200,14 +5177,13 @@ fn write_light_cache(
         .iter()
         .filter_map(|filter| filter.to_client_id())
         .collect();
-    let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
 
     // The report has already been flushed to stdout by the time we reach
     // here. Keep the report exit code stable, but expose cache scan/write
     // failures instead of swallowing them.
     let loader = DataLoader::with_filters(None, since.clone(), until.clone(), year.clone());
     let report_scope = CacheReportScope::new(since.clone(), until.clone(), year.clone());
-    match loader.load(&scan_clients, group_by, include_synthetic) {
+    match loader.load(&scan_clients, group_by) {
         Ok(data) => {
             if let Err(err) = save_cached_data(&data, &enabled_set, group_by, &report_scope) {
                 eprintln!("tokscale: --write-cache failed to save TUI cache: {err}");
@@ -5247,9 +5223,8 @@ fn run_warm_tui_cache() -> Result<()> {
         .iter()
         .filter_map(|f| f.to_client_id())
         .collect();
-    let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
     let loader = DataLoader::with_filters(None, None, None, None);
-    let data = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY, include_synthetic)?;
+    let data = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY)?;
     save_cached_data(
         &data,
         &enabled_set,
@@ -5802,18 +5777,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_client_filter_synthetic_only_legacy() {
-        let flags = ClientFlags {
-            synthetic: true,
-            ..ClientFlags::default()
-        };
-        assert_eq!(
-            build_client_filter_with_defaults(flags, &[]),
-            Some(vec!["synthetic".to_string()])
-        );
-    }
-
-    #[test]
     fn test_build_client_filter_all_legacy_flags() {
         let flags = ClientFlags {
             opencode: true,
@@ -5841,7 +5804,6 @@ mod tests {
             kiro: true,
             trae: true,
             warp: true,
-            synthetic: true,
             ..ClientFlags::default()
         };
         let result = build_client_filter_with_defaults(flags, &[]);
@@ -5873,11 +5835,10 @@ mod tests {
             "kiro",
             "trae",
             "warp",
-            "synthetic",
         ];
 
         // New clients do not need deprecated boolean flags; only the
-        // pre-existing legacy flags plus synthetic are represented here.
+        // pre-existing legacy flags are represented here.
         let expected_len = required.len();
         assert_eq!(sources.len(), expected_len);
         for required in required {
@@ -5945,12 +5906,9 @@ mod tests {
 
     #[test]
     fn test_client_filter_as_filter_str_matches_client_id_for_overlap() {
-        // Every ClientFilter variant except Synthetic must agree with
-        // ClientId::as_str() so the core filter list stays consistent.
+        // Every ClientFilter variant must agree with ClientId::as_str()
+        // so the core filter list stays consistent.
         for filter in ClientFilter::value_variants() {
-            if matches!(filter, ClientFilter::Synthetic) {
-                continue;
-            }
             let id = filter.as_filter_str();
             assert!(
                 tokscale_core::ClientId::from_str(id).is_some(),
@@ -5963,30 +5921,25 @@ mod tests {
 
     #[test]
     fn test_client_filter_to_client_id_round_trip() {
-        // For every non-Synthetic filter:
-        //   from_client_id(to_client_id(filter).unwrap()) == filter
-        // and the canonical id strings agree.
+        // For every filter:
+        // from_client_id(to_client_id(filter).unwrap()) == filter
+        // and canonical id strings agree.
         for filter in ClientFilter::value_variants() {
-            match filter.to_client_id() {
-                Some(id) => {
-                    assert_eq!(
-                        ClientFilter::from_client_id(id),
-                        *filter,
-                        "round-trip mismatch for {:?}",
-                        filter
-                    );
-                    assert_eq!(
-                        id.as_str(),
-                        filter.as_filter_str(),
-                        "id string drift between ClientId and ClientFilter for {:?}",
-                        filter
-                    );
-                }
-                None => {
-                    // Synthetic is the only meta-client without a ClientId.
-                    assert!(matches!(filter, ClientFilter::Synthetic));
-                }
-            }
+            let id = filter
+                .to_client_id()
+                .expect("client filter must map to ClientId");
+            assert_eq!(
+                ClientFilter::from_client_id(id),
+                *filter,
+                "round-trip mismatch for {:?}",
+                filter
+            );
+            assert_eq!(
+                id.as_str(),
+                filter.as_filter_str(),
+                "id string drift between ClientId and ClientFilter for {:?}",
+                filter
+            );
         }
     }
 
@@ -5994,13 +5947,9 @@ mod tests {
     fn test_client_filter_order_matches_client_id_all() {
         // Picker rendering, --help possible-values listing, and any
         // future iteration over `ClientFilter::value_variants()` all
-        // assume the variant order mirrors `ClientId::ALL` (with
-        // Synthetic appended). Guard that invariant explicitly.
-        let filters: Vec<ClientFilter> = ClientFilter::value_variants()
-            .iter()
-            .copied()
-            .filter(|f| !matches!(f, ClientFilter::Synthetic))
-            .collect();
+        // assume the variant order mirrors `ClientId::ALL`. Guard that
+        // invariant explicitly.
+        let filters: Vec<ClientFilter> = ClientFilter::value_variants().iter().copied().collect();
         let ids: Vec<tokscale_core::ClientId> = tokscale_core::ClientId::ALL.to_vec();
         assert_eq!(filters.len(), ids.len());
         for (filter, id) in filters.iter().zip(ids.iter()) {
@@ -6011,11 +5960,6 @@ mod tests {
                 filter
             );
         }
-        // Synthetic is the very last variant.
-        assert_eq!(
-            ClientFilter::value_variants().last().copied(),
-            Some(ClientFilter::Synthetic)
-        );
     }
 
     #[test]
@@ -6028,29 +5972,17 @@ mod tests {
     }
 
     #[test]
-    fn test_client_filter_default_set_excludes_synthetic() {
-        // Synthetic detection is opt-in: it post-processes other clients'
-        // sessions to re-attribute messages to a different bucket. The
-        // pre-refactor default was "every ClientId, include_synthetic =
-        // false"; default_set() must preserve that contract.
+    fn test_client_filter_default_set_includes_all_clients() {
         let default = ClientFilter::default_set();
-        assert!(
-            !default.contains(&ClientFilter::Synthetic),
-            "default_set() must NOT include Synthetic — it is opt-in only"
-        );
-        // Every real client must be present so first-launch reports cover
+        // Every client must be present so first-launch reports cover
         // every integration the binary knows about.
         for filter in ClientFilter::value_variants() {
-            if matches!(filter, ClientFilter::Synthetic) {
-                continue;
-            }
             assert!(default.contains(filter), "default_set() missing {filter:?}");
         }
-        // Size sanity: every variant minus Synthetic.
         assert_eq!(
             default.len(),
-            ClientFilter::value_variants().len() - 1,
-            "default_set() size drifted from value_variants() - 1"
+            ClientFilter::value_variants().len(),
+            "default_set() size drifted from value_variants()"
         );
     }
 
@@ -6098,14 +6030,11 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_default_tui_filter_set_supports_synthetic() {
-        // Power users who explicitly want synthetic detection on every
-        // launch can put it in defaultClients.
-        let configured = vec!["claude".to_string(), "synthetic".to_string()];
+    fn test_resolve_default_tui_filter_set_drops_removed_client_id() {
+        let configured = vec!["claude".to_string(), "removed-client".to_string()];
         let set = resolve_default_tui_filter_set_with(&configured);
         let mut expected = std::collections::HashSet::new();
         expected.insert(ClientFilter::Claude);
-        expected.insert(ClientFilter::Synthetic);
         assert_eq!(set, expected);
     }
 
@@ -6306,7 +6235,6 @@ mod tests {
     #[test]
     fn test_default_submit_clients_excludes_crush() {
         let clients = default_submit_clients();
-        assert!(clients.contains(&"synthetic".to_string()));
         assert!(clients.contains(&"zed".to_string()));
         assert!(!clients.contains(&"crush".to_string()));
     }

@@ -1,5 +1,4 @@
 use super::litellm::ModelPricing;
-use crate::sessions::synthetic::normalize_synthetic_model;
 use serde::de::{MapAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value;
@@ -250,7 +249,7 @@ impl CustomPricing {
             });
         }
 
-        let normalized_key = normalize_synthetic_model(model_id).to_lowercase();
+        let normalized_key = normalize_gateway_model_path(model_id).to_lowercase();
         if normalized_key != raw_key {
             if let Some(pricing) = self.models.get_key_value(&normalized_key) {
                 return Some(CustomLookupResult {
@@ -306,6 +305,25 @@ impl CustomPricing {
 
         Self { models }
     }
+}
+
+fn normalize_gateway_model_path(model_id: &str) -> String {
+    let lower = model_id.to_lowercase();
+
+    if let Some(rest) = lower.strip_prefix("hf:") {
+        return rest
+            .split_once('/')
+            .map_or(rest, |(_, model)| model)
+            .to_string();
+    }
+
+    if let Some(rest) = lower.strip_prefix("accounts/") {
+        if let Some((_, model)) = rest.split_once("/models/") {
+            return model.to_string();
+        }
+    }
+
+    lower
 }
 
 fn base_price(

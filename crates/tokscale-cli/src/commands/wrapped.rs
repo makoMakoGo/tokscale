@@ -1454,7 +1454,6 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "antigravity" => Some("Antigravity"),
         "zed" => Some("Zed Agent"),
         "warp" => Some("Warp"),
-        "synthetic" => Some("Synthetic"),
         _ => None,
     }
 }
@@ -1497,7 +1496,6 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Zed Agent" => Some(
             "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
         ),
-        "Synthetic" => Some("https://tokscale.ai/assets/logos/synthetic.png"),
         _ => None,
     }
 }
