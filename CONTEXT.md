@@ -26,7 +26,7 @@ with local needs.
   in filters, scanner defaults, TUI source pickers, frontend logos, or docs.
 - Keep Pi and OMP as separate client/source identities. OMP usage must not be
   counted as Pi usage by display or aggregation code.
-- Treat cwd workspace attribution as branch behavior, not as caller folklore.
+- Treat `cwd` workspace attribution as branch behavior, not as caller folklore.
   Reports and TUI views should share the same workspace rules.
 
 ## Architecture Direction

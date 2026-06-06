@@ -1,4 +1,4 @@
-# ADR 0002: Claude placeholder is not a Synthetic source
+# ADR 0002: Claude placeholder is not a synthetic source
 
 Status: Accepted
 
@@ -24,6 +24,6 @@ pickers, frontend source logos, README platform lists, or session readers.
 
 ## Consequences
 
-Any useful pricing normalization currently attached to Synthetic code must move
-to a pricing helper with explicit tests. It must not keep using Synthetic source
+Any useful pricing normalization currently attached to synthetic code must move
+to a pricing helper with explicit tests. It must not keep using synthetic source
 or client vocabulary.
