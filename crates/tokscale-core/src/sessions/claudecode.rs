@@ -400,6 +400,7 @@ pub fn parse_claude_file_with_cache_and_home(
     let mut pending_request_start_timestamp_ms: Option<i64> = None;
     let mut last_model: Option<String> = None;
     let mut last_provider_hint: Option<String> = None;
+    let mut suppress_unattributed_tool_results = false;
     // Sidechain detection state (resolved lazily on first parseable entry)
     let mut sidechain_agent: Option<String> = None;
     let mut sidechain_detected = false;
@@ -455,6 +456,7 @@ pub fn parse_claude_file_with_cache_and_home(
                         default_provider_hint: metadata_provider_hint,
                         session_id: &session_id,
                         fallback_timestamp,
+                        suppress_unattributed: suppress_unattributed_tool_results,
                         workspace_key: context_workspace_key,
                         workspace_label: context_workspace_label,
                         sidechain_agent: sidechain_agent.clone(),
@@ -501,6 +503,14 @@ pub fn parse_claude_file_with_cache_and_home(
                 };
 
                 if let Some(model) = message.model.as_deref() {
+                    if is_claude_synthetic_placeholder_model(model) {
+                        last_model = None;
+                        last_provider_hint = None;
+                        pending_request_start_timestamp_ms = None;
+                        suppress_unattributed_tool_results = true;
+                        continue;
+                    }
+                    suppress_unattributed_tool_results = false;
                     last_model = Some(model.to_string());
                     last_provider_hint = message
                         .provider_id
@@ -885,6 +895,7 @@ struct ClaudeToolResultContext<'a> {
     default_provider_hint: Option<&'a str>,
     session_id: &'a str,
     fallback_timestamp: i64,
+    suppress_unattributed: bool,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
     sidechain_agent: Option<String>,
@@ -897,16 +908,24 @@ fn extract_claude_tool_result_message(
     let value: Value = serde_json::from_str(line).ok()?;
     let usage = extract_claude_tool_result_usage(&value)?;
 
-    let raw_model = extract_claude_model(&value)
-        .or_else(|| {
-            context
-                .entry
-                .message
-                .as_ref()
-                .and_then(|message| message.model.clone())
-        })
-        .or_else(|| context.last_model.map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string());
+    let explicit_model = extract_claude_model(&value).or_else(|| {
+        context
+            .entry
+            .message
+            .as_ref()
+            .and_then(|message| message.model.clone())
+    });
+    let raw_model = match explicit_model {
+        Some(model) => model,
+        None if context.suppress_unattributed => return None,
+        None => context
+            .last_model
+            .map(str::to_string)
+            .unwrap_or_else(|| "unknown".to_string()),
+    };
+    if is_claude_synthetic_placeholder_model(&raw_model) {
+        return None;
+    }
     let provider_hint = extract_claude_provider(&value)
         .or_else(|| {
             context
@@ -1124,6 +1143,10 @@ fn estimate_tokens_from_chars(chars: usize) -> i64 {
     chars.div_ceil(4) as i64
 }
 
+fn is_claude_synthetic_placeholder_model(model: &str) -> bool {
+    model.trim().eq_ignore_ascii_case("<synthetic>")
+}
+
 fn canonicalize_claude_model(model: &str) -> String {
     pricing::aliases::resolve_alias(model)
         .unwrap_or(model)
@@ -1200,7 +1223,15 @@ fn process_claude_headless_line(
                 default_provider_hint,
             );
 
-            state.model = extract_claude_model(&value);
+            let model = extract_claude_model(&value);
+            if model
+                .as_deref()
+                .is_some_and(is_claude_synthetic_placeholder_model)
+            {
+                *state = ClaudeHeadlessState::default();
+                return completed_message;
+            }
+            state.model = model;
             state.provider_id = extract_claude_provider(&value);
             state.timestamp_ms = extract_claude_timestamp(&value).or(state.timestamp_ms);
             if let Some(usage) = value
@@ -1255,6 +1286,9 @@ fn extract_claude_headless_message(
         .get("usage")
         .or_else(|| value.get("message").and_then(|msg| msg.get("usage")))?;
     let raw_model = extract_claude_model(value)?;
+    if is_claude_synthetic_placeholder_model(&raw_model) {
+        return None;
+    }
     let provider_hint = extract_claude_provider(value);
     let provider_id = claude_provider_id(
         &raw_model,
@@ -1497,6 +1531,10 @@ fn finalize_headless_state(
     default_provider_hint: Option<&str>,
 ) -> Option<UnifiedMessage> {
     let raw_model = state.model.clone()?;
+    if is_claude_synthetic_placeholder_model(&raw_model) {
+        *state = ClaudeHeadlessState::default();
+        return None;
+    }
     let provider_id = claude_provider_id(
         &raw_model,
         state.provider_id.as_deref().or(default_provider_hint),
@@ -2139,7 +2177,7 @@ mod tests {
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
-        assert_eq!(messages.len(), 9);
+        assert_eq!(messages.len(), 8);
         assert_eq!(messages[0].provider_id, "anthropic");
         assert_eq!(messages[1].provider_id, "openai");
         assert_eq!(messages[2].provider_id, "google");
@@ -2148,7 +2186,22 @@ mod tests {
         assert_eq!(messages[5].provider_id, "xiaomi");
         assert_eq!(messages[6].provider_id, "moonshotai");
         assert_eq!(messages[7].provider_id, "meituan");
-        assert_eq!(messages[8].provider_id, "unknown");
+        assert!(!messages.iter().any(|msg| msg.model_id == "<synthetic>"));
+    }
+
+    #[test]
+    fn test_synthetic_placeholder_does_not_seed_tool_result_model() {
+        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}},"isApiErrorMessage":true,"error":"unknown"}
+{"type":"user","timestamp":"2026-02-18T10:00:01.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"tool output that should not be estimated under a placeholder model"}]}}
+{"type":"assistant","timestamp":"2026-02-18T10:00:02.000Z","message":{"model":"glm-5.1","usage":{"input_tokens":123,"output_tokens":45}}}"#;
+
+        let file = create_test_file(content);
+        let messages = parse_claude_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5.1");
+        assert_eq!(messages[0].tokens.input, 123);
+        assert_eq!(messages[0].tokens.output, 45);
     }
 
     #[test]
