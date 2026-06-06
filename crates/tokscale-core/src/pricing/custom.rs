@@ -249,7 +249,7 @@ impl CustomPricing {
             });
         }
 
-        let normalized_key = normalize_gateway_model_path(model_id).to_lowercase();
+        let normalized_key = normalize_gateway_model_path(model_id);
         if normalized_key != raw_key {
             if let Some(pricing) = self.models.get_key_value(&normalized_key) {
                 return Some(CustomLookupResult {
