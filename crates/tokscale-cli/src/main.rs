@@ -844,6 +844,7 @@ pub enum ClientFilter {
     #[value(name = "trae")]
     Trae,
     Warp,
+    Cline,
 }
 
 impl ClientFilter {
@@ -878,6 +879,7 @@ impl ClientFilter {
             Self::Kiro => "kiro",
             Self::Trae => "trae",
             Self::Warp => "warp",
+            Self::Cline => "cline",
         }
     }
 
@@ -914,6 +916,7 @@ impl ClientFilter {
             Self::Kiro => Some(ClientId::Kiro),
             Self::Trae => Some(ClientId::Trae),
             Self::Warp => Some(ClientId::Warp),
+            Self::Cline => Some(ClientId::Cline),
         }
     }
 
@@ -948,6 +951,7 @@ impl ClientFilter {
             ClientId::Kiro => Self::Kiro,
             ClientId::Trae => Self::Trae,
             ClientId::Warp => Self::Warp,
+            ClientId::Cline => Self::Cline,
         }
     }
 
@@ -1040,6 +1044,8 @@ pub struct ClientFlags {
     pub trae: bool,
     #[arg(long, hide = true)]
     pub warp: bool,
+    #[arg(long, hide = true)]
+    pub cline: bool,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -1095,7 +1101,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 25] = [
+    let legacy: [(bool, ClientFilter); 26] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1121,6 +1127,7 @@ fn build_client_filter_with_defaults(
         (flags.kiro, ClientFilter::Kiro),
         (flags.trae, ClientFilter::Trae),
         (flags.warp, ClientFilter::Warp),
+        (flags.cline, ClientFilter::Cline),
     ];
 
     let mut legacy_used: Vec<&'static str> = Vec::new();
@@ -5826,6 +5833,7 @@ mod tests {
             kiro: true,
             trae: true,
             warp: true,
+            cline: true,
             ..ClientFlags::default()
         };
         let result = build_client_filter_with_defaults(flags, &[]).unwrap();
@@ -5857,10 +5865,9 @@ mod tests {
             "kiro",
             "trae",
             "warp",
+            "cline",
         ];
 
-        // New clients do not need deprecated boolean flags; only the
-        // pre-existing legacy flags are represented here.
         let expected_len = required.len();
         assert_eq!(sources.len(), expected_len);
         for required in required {
