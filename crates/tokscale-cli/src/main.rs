@@ -453,7 +453,7 @@ fn main() -> Result<()> {
             let month = date.month;
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
-            let clients = build_client_filter(clients, &cli.home);
+            let clients = build_client_filter(clients, &cli.home)?;
             if json || light || !can_use_tui {
                 run_models_report(
                     json,
@@ -499,7 +499,7 @@ fn main() -> Result<()> {
             let month = date.month;
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
-            let clients = build_client_filter(clients, &cli.home);
+            let clients = build_client_filter(clients, &cli.home)?;
             if json || light || !can_use_tui {
                 run_monthly_report(
                     json,
@@ -542,7 +542,7 @@ fn main() -> Result<()> {
             let month = date.month;
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
-            let clients = build_client_filter(clients, &cli.home);
+            let clients = build_client_filter(clients, &cli.home)?;
             if json || light || !can_use_tui {
                 run_hourly_report(
                     json,
@@ -610,7 +610,7 @@ fn main() -> Result<()> {
             let month = date.month;
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
-            let clients = build_client_filter(clients, &cli.home);
+            let clients = build_client_filter(clients, &cli.home)?;
             run_graph_command(
                 output,
                 cli.home.clone(),
@@ -629,7 +629,7 @@ fn main() -> Result<()> {
             let month = date.month;
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
-            let clients = build_client_filter(clients, &cli.home);
+            let clients = build_client_filter(clients, &cli.home)?;
             auto_sync_cursor_before_tui(&cli.home, &clients)?;
             tui::run(
                 &cli.theme,
@@ -658,7 +658,7 @@ fn main() -> Result<()> {
             // to fire when the user passes no client flags, not the user's general
             // defaultClients view filter (which may exclude clients they still want
             // to upload). Pass an explicit empty defaults slice.
-            let clients = build_client_filter_with_defaults(clients, &[]);
+            let clients = build_client_filter_with_defaults(clients, &[])?;
             run_submit_command(clients, since, until, year, dry_run)
         }
         Some(Commands::Headless {
@@ -682,7 +682,7 @@ fn main() -> Result<()> {
             no_spinner: _,
         }) => {
             reject_unsupported_home_override(&cli.home, "wrapped")?;
-            let client_filter = build_client_filter(client_flags, &cli.home);
+            let client_filter = build_client_filter(client_flags, &cli.home)?;
             run_wrapped_command(
                 output,
                 year,
@@ -728,7 +728,7 @@ fn main() -> Result<()> {
             let month = date.month;
             let (since, until) = build_date_filter(today, week, month, date.since, date.until);
             let year = normalize_year_filter(today, week, month, date.year);
-            let clients = build_client_filter(clients, &cli.home);
+            let clients = build_client_filter(clients, &cli.home)?;
             run_time_metrics_report(
                 json,
                 cli.home.clone(),
@@ -744,7 +744,7 @@ fn main() -> Result<()> {
             let today = cli.date.today;
             let week = cli.date.week;
             let month = cli.date.month;
-            let clients = build_client_filter(cli.clients, &cli.home);
+            let clients = build_client_filter(cli.clients, &cli.home)?;
             let (since, until) =
                 build_date_filter(today, week, month, cli.date.since, cli.date.until);
             let year = normalize_year_filter(today, week, month, cli.date.year);
@@ -953,8 +953,8 @@ impl ClientFilter {
 
     /// Parse a canonical lowercase identifier (the same form
     /// `as_filter_str` returns) into a `ClientFilter`. Returns `None` for
-    /// any unknown id so callers can drop unrecognized settings entries
-    /// without erroring.
+    /// any unknown id; callers decide whether unknown input is a user-facing
+    /// configuration error or already-validated CLI data.
     pub fn from_filter_str(s: &str) -> Option<Self> {
         Self::value_variants()
             .iter()
@@ -1070,18 +1070,21 @@ pub struct DateRangeFlags {
 ///
 /// Returns `None` when no filters are active *and* no defaults configured
 /// so the caller can scan all clients.
-fn build_client_filter(flags: ClientFlags, home_dir: &Option<String>) -> Option<Vec<String>> {
+fn build_client_filter(
+    flags: ClientFlags,
+    home_dir: &Option<String>,
+) -> Result<Option<Vec<String>>> {
     let defaults = tui::settings::load_default_clients_for_home(home_dir);
     build_client_filter_with_defaults(flags, &defaults)
 }
 
 /// Pure variant of [`build_client_filter`] for unit-testable resolution.
-/// `defaults` is the (already-validated) list of canonical filter ids that
+/// `defaults` is the raw list of configured filter ids that
 /// should apply when no CLI flag is present.
 fn build_client_filter_with_defaults(
     flags: ClientFlags,
     defaults: &[String],
-) -> Option<Vec<String>> {
+) -> Result<Option<Vec<String>>> {
     let mut ordered: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1136,26 +1139,46 @@ fn build_client_filter_with_defaults(
         emit_legacy_client_flag_warning(&legacy_used);
     }
 
-    // Defaults only apply when the user passed neither canonical nor legacy
-    // flags. CLI flags always win — predictable semantics over "merge".
-    // Unknown / typo'd ids are dropped silently so a stale settings.json
-    // entry never breaks tokscale.
     if ordered.is_empty() {
-        for raw in defaults {
-            if let Some(client) = ClientFilter::from_filter_str(raw) {
-                let id = client.as_filter_str().to_string();
-                if seen.insert(id.clone()) {
-                    ordered.push(id);
-                }
+        for client in parse_default_client_filters(defaults)? {
+            let id = client.as_filter_str().to_string();
+            if seen.insert(id.clone()) {
+                ordered.push(id);
             }
         }
     }
 
     if ordered.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(ordered)
+        Ok(Some(ordered))
     }
+}
+
+fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<ClientFilter>> {
+    let mut parsed = Vec::new();
+    let mut invalid = Vec::new();
+
+    for raw in defaults {
+        match ClientFilter::from_filter_str(raw) {
+            Some(client) => parsed.push(client),
+            None => invalid.push(raw.as_str()),
+        }
+    }
+
+    if invalid.is_empty() {
+        return Ok(parsed);
+    }
+
+    let valid = ClientFilter::value_variants()
+        .iter()
+        .map(ClientFilter::as_filter_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!(
+        "invalid client id(s) in settings.json defaultClients: {}. Remove stale entries such as `synthetic` or use one of: {valid}",
+        invalid.join(", ")
+    );
 }
 
 /// Emits a single stderr deprecation warning when legacy `--<client>` flags
@@ -5094,7 +5117,7 @@ fn spawn_warm_tui_cache_detached() {
 /// when the user passes no CLI client flag:
 ///
 /// 1. If `defaultClients` from `~/.config/tokscale/settings.json` is
-///    set, use that (after dropping unknown ids).
+///    set, use it after validating every id.
 /// 2. Otherwise fall back to `ClientFilter::default_set()` (every real
 ///    client).
 ///
@@ -5103,7 +5126,7 @@ fn spawn_warm_tui_cache_detached() {
 /// `submit` warm cache uses one filter set while the next no-flag TUI
 /// launch wants another, the cache key mismatches, and the warming
 /// becomes a wasted background scan.
-fn resolve_default_tui_filter_set() -> std::collections::HashSet<ClientFilter> {
+fn resolve_default_tui_filter_set() -> Result<std::collections::HashSet<ClientFilter>> {
     resolve_default_tui_filter_set_with(&tui::settings::load_default_clients())
 }
 
@@ -5112,15 +5135,12 @@ fn resolve_default_tui_filter_set() -> std::collections::HashSet<ClientFilter> {
 /// from settings.json.
 fn resolve_default_tui_filter_set_with(
     configured: &[String],
-) -> std::collections::HashSet<ClientFilter> {
-    let parsed: Vec<ClientFilter> = configured
-        .iter()
-        .filter_map(|s| ClientFilter::from_filter_str(s))
-        .collect();
+) -> Result<std::collections::HashSet<ClientFilter>> {
+    let parsed = parse_default_client_filters(configured)?;
     if parsed.is_empty() {
-        ClientFilter::default_set()
+        Ok(ClientFilter::default_set())
     } else {
-        parsed.into_iter().collect()
+        Ok(parsed.into_iter().collect())
     }
 }
 
@@ -5147,7 +5167,7 @@ fn resolve_light_cache_filter_set(
             .filter_map(|client| ClientFilter::from_filter_str(client))
             .collect()
     } else {
-        resolve_default_tui_filter_set()
+        ClientFilter::default_set()
     }
 }
 
@@ -5173,10 +5193,11 @@ fn write_light_cache(
     }
 
     let enabled_set = resolve_light_cache_filter_set(clients);
-    let scan_clients: Vec<tokscale_core::ClientId> = enabled_set
+    let mut scan_clients: Vec<tokscale_core::ClientId> = enabled_set
         .iter()
         .filter_map(|filter| filter.to_client_id())
         .collect();
+    scan_clients.sort_by_key(|client| *client as usize);
 
     // The report has already been flushed to stdout by the time we reach
     // here. Keep the report exit code stable, but expose cache scan/write
@@ -5218,11 +5239,12 @@ fn run_warm_tui_cache() -> Result<()> {
     // `GroupBy::default()` is `GroupBy::ClientModel`, so the warm cache
     // was written under a key the TUI never queried. Every submit
     // silently invalidated the next TUI launch.
-    let enabled_set = resolve_default_tui_filter_set();
-    let scan_clients: Vec<ClientId> = enabled_set
+    let enabled_set = resolve_default_tui_filter_set()?;
+    let mut scan_clients: Vec<ClientId> = enabled_set
         .iter()
         .filter_map(|f| f.to_client_id())
         .collect();
+    scan_clients.sort_by_key(|client| *client as usize);
     let loader = DataLoader::with_filters(None, None, None, None);
     let data = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY)?;
     save_cached_data(
@@ -5739,7 +5761,7 @@ mod tests {
     #[test]
     fn test_build_client_filter_all_false() {
         let flags = ClientFlags::default();
-        assert_eq!(build_client_filter_with_defaults(flags, &[]), None);
+        assert_eq!(build_client_filter_with_defaults(flags, &[]).unwrap(), None);
     }
 
     #[test]
@@ -5749,7 +5771,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter_with_defaults(flags, &[]),
+            build_client_filter_with_defaults(flags, &[]).unwrap(),
             Some(vec!["opencode".to_string()])
         );
     }
@@ -5767,7 +5789,7 @@ mod tests {
         // a deliberate trade-off: legacy flags are deprecated, and the
         // canonical `--client a,b,c` form preserves user order.
         assert_eq!(
-            build_client_filter_with_defaults(flags, &[]),
+            build_client_filter_with_defaults(flags, &[]).unwrap(),
             Some(vec![
                 "opencode".to_string(),
                 "claude".to_string(),
@@ -5806,7 +5828,7 @@ mod tests {
             warp: true,
             ..ClientFlags::default()
         };
-        let result = build_client_filter_with_defaults(flags, &[]);
+        let result = build_client_filter_with_defaults(flags, &[]).unwrap();
         assert!(result.is_some());
         let sources = result.unwrap();
         let required = [
@@ -5862,7 +5884,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter_with_defaults(flags, &[]),
+            build_client_filter_with_defaults(flags, &[]).unwrap(),
             Some(vec![
                 "claude".to_string(),
                 "opencode".to_string(),
@@ -5882,7 +5904,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter_with_defaults(flags, &[]),
+            build_client_filter_with_defaults(flags, &[]).unwrap(),
             Some(vec!["claude".to_string(), "opencode".to_string()])
         );
     }
@@ -5899,7 +5921,7 @@ mod tests {
             ..ClientFlags::default()
         };
         assert_eq!(
-            build_client_filter_with_defaults(flags, &[]),
+            build_client_filter_with_defaults(flags, &[]).unwrap(),
             Some(vec!["claude".to_string(), "opencode".to_string()])
         );
     }
@@ -5993,7 +6015,7 @@ mod tests {
         // client while the next no-flag TUI launch wants only the configured
         // ones, producing a guaranteed cache miss.
         let configured = vec!["opencode".to_string(), "claude".to_string()];
-        let set = resolve_default_tui_filter_set_with(&configured);
+        let set = resolve_default_tui_filter_set_with(&configured).unwrap();
         let mut expected = std::collections::HashSet::new();
         expected.insert(ClientFilter::Opencode);
         expected.insert(ClientFilter::Claude);
@@ -6003,39 +6025,38 @@ mod tests {
     #[test]
     fn test_resolve_default_tui_filter_set_falls_back_when_empty() {
         // No defaultClients configured → use the canonical default set.
-        let set = resolve_default_tui_filter_set_with(&[]);
+        let set = resolve_default_tui_filter_set_with(&[]).unwrap();
         assert_eq!(set, ClientFilter::default_set());
     }
 
     #[test]
-    fn test_resolve_default_tui_filter_set_drops_unknown_ids() {
-        // A stale settings.json entry (renamed/removed client) must not
-        // crash; unknown ids are dropped and the resolver still produces
-        // a usable filter set.
+    fn test_resolve_default_tui_filter_set_rejects_unknown_ids() {
         let configured = vec!["opencode".to_string(), "not-a-real-client".to_string()];
-        let set = resolve_default_tui_filter_set_with(&configured);
-        let mut expected = std::collections::HashSet::new();
-        expected.insert(ClientFilter::Opencode);
-        assert_eq!(set, expected);
+        let err = resolve_default_tui_filter_set_with(&configured).unwrap_err();
+        assert!(
+            err.to_string().contains("not-a-real-client"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
-    fn test_resolve_default_tui_filter_set_all_unknown_falls_back() {
-        // If every configured id is invalid, treat as if nothing is
-        // configured rather than producing an empty filter set (which
-        // would mean "scan nothing", definitely not the intent).
+    fn test_resolve_default_tui_filter_set_rejects_all_unknown_ids() {
         let configured = vec!["not-real".to_string(), "also-fake".to_string()];
-        let set = resolve_default_tui_filter_set_with(&configured);
-        assert_eq!(set, ClientFilter::default_set());
+        let err = resolve_default_tui_filter_set_with(&configured).unwrap_err();
+        assert!(
+            err.to_string().contains("not-real, also-fake"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
-    fn test_resolve_default_tui_filter_set_drops_removed_client_id() {
-        let configured = vec!["claude".to_string(), "removed-client".to_string()];
-        let set = resolve_default_tui_filter_set_with(&configured);
-        let mut expected = std::collections::HashSet::new();
-        expected.insert(ClientFilter::Claude);
-        assert_eq!(set, expected);
+    fn test_resolve_default_tui_filter_set_rejects_removed_synthetic_id() {
+        let configured = vec!["claude".to_string(), "synthetic".to_string()];
+        let err = resolve_default_tui_filter_set_with(&configured).unwrap_err();
+        assert!(
+            err.to_string().contains("synthetic"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -6044,7 +6065,7 @@ mod tests {
         let flags = ClientFlags::default();
         let defaults = vec!["opencode".to_string(), "claude".to_string()];
         assert_eq!(
-            build_client_filter_with_defaults(flags, &defaults),
+            build_client_filter_with_defaults(flags, &defaults).unwrap(),
             Some(vec!["opencode".to_string(), "claude".to_string()])
         );
     }
@@ -6060,7 +6081,7 @@ mod tests {
         };
         let defaults = vec!["opencode".to_string(), "claude".to_string()];
         assert_eq!(
-            build_client_filter_with_defaults(flags, &defaults),
+            build_client_filter_with_defaults(flags, &defaults).unwrap(),
             Some(vec!["codex".to_string()])
         );
     }
@@ -6076,20 +6097,19 @@ mod tests {
         };
         let defaults = vec!["claude".to_string()];
         assert_eq!(
-            build_client_filter_with_defaults(flags, &defaults),
+            build_client_filter_with_defaults(flags, &defaults).unwrap(),
             Some(vec!["opencode".to_string()])
         );
     }
 
     #[test]
-    fn test_build_client_filter_defaults_dropped_for_unknown_ids() {
-        // Stale settings entry (e.g. removed/renamed client) → silently
-        // dropped, never errors. Ensures a typo never breaks tokscale.
+    fn test_build_client_filter_defaults_reject_unknown_ids() {
         let flags = ClientFlags::default();
         let defaults = vec!["opencode".to_string(), "not-a-client".to_string()];
-        assert_eq!(
-            build_client_filter_with_defaults(flags, &defaults),
-            Some(vec!["opencode".to_string()])
+        let err = build_client_filter_with_defaults(flags, &defaults).unwrap_err();
+        assert!(
+            err.to_string().contains("not-a-client"),
+            "unexpected error: {err}"
         );
     }
 
@@ -6102,7 +6122,7 @@ mod tests {
             "claude".to_string(),
         ];
         assert_eq!(
-            build_client_filter_with_defaults(flags, &defaults),
+            build_client_filter_with_defaults(flags, &defaults).unwrap(),
             Some(vec!["claude".to_string(), "opencode".to_string()])
         );
     }
@@ -6111,7 +6131,10 @@ mod tests {
     fn test_build_client_filter_no_flags_no_defaults_returns_none() {
         let flags = ClientFlags::default();
         let defaults: Vec<String> = vec![];
-        assert_eq!(build_client_filter_with_defaults(flags, &defaults), None);
+        assert_eq!(
+            build_client_filter_with_defaults(flags, &defaults).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -6244,7 +6267,7 @@ mod tests {
         let flags = ClientFlags::default();
         let defaults = vec!["opencode".to_string(), "claude".to_string()];
         assert_eq!(
-            build_client_filter_with_defaults(flags, &defaults),
+            build_client_filter_with_defaults(flags, &defaults).unwrap(),
             Some(vec!["opencode".to_string(), "claude".to_string()])
         );
     }
@@ -6252,7 +6275,7 @@ mod tests {
     #[test]
     fn test_build_client_filter_with_defaults_empty_defaults_returns_none() {
         let flags = ClientFlags::default();
-        assert_eq!(build_client_filter_with_defaults(flags, &[]), None);
+        assert_eq!(build_client_filter_with_defaults(flags, &[]).unwrap(), None);
     }
 
     #[test]

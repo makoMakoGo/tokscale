@@ -318,7 +318,10 @@ fn normalize_gateway_model_path(model_id: &str) -> String {
     }
 
     if let Some(rest) = lower.strip_prefix("accounts/") {
-        if let Some((_, model)) = rest.split_once("/models/") {
+        if let Some((_, model)) = rest
+            .split_once("/models/")
+            .or_else(|| rest.split_once("/routers/"))
+        {
             return model.to_string();
         }
     }
@@ -455,6 +458,20 @@ mod tests {
         assert_eq!(pricing.input_cost_per_token, Some(0.000002));
         assert_eq!(pricing.output_cost_per_token, Some(0.000008));
         assert_eq!(pricing.cache_read_input_token_cost, Some(0.0000003));
+    }
+
+    #[test]
+    fn gateway_router_path_matches_base_model_key() {
+        let mut models = HashMap::new();
+        models.insert("kimi-k2p6-turbo".to_string(), pricing(2.0, 8.0));
+        let loaded = CustomPricing::from_models(models);
+
+        let result = loaded
+            .lookup_with_key("accounts/fireworks/routers/kimi-k2p6-turbo")
+            .unwrap();
+
+        assert_eq!(result.matched_key, "kimi-k2p6-turbo");
+        assert_eq!(result.pricing.input_cost_per_token, Some(2.0));
     }
 
     #[test]

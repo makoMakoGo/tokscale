@@ -174,10 +174,11 @@ pub fn run(
 
         let tx = bg_tx.clone();
         // Project the filter set into the client list the loader consumes.
-        let bg_clients: Vec<ClientId> = enabled_clients
+        let mut bg_clients: Vec<ClientId> = enabled_clients
             .iter()
             .filter_map(|f| f.to_client_id())
             .collect();
+        bg_clients.sort_by_key(|client| *client as usize);
         let bg_since = since.clone();
         let bg_until = until.clone();
         let bg_year = year.clone();

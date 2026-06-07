@@ -22,7 +22,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 13;
+const CACHE_SCHEMA_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -962,7 +962,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 13,
+  "schemaVersion": 14,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
@@ -991,6 +991,62 @@ mod tests {
             load_cache(
                 &clients,
                 &GroupBy::WorkspaceModel,
+                &CacheReportScope::default(),
+                false
+            ),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_misses_old_include_synthetic_schema() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 13,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": true,
+  "groupBy": "model",
+  "reportScope": {
+    "since": null,
+    "until": null,
+    "year": null
+  },
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude]);
+        assert!(matches!(
+            load_cache(
+                &clients,
+                &GroupBy::Model,
                 &CacheReportScope::default(),
                 false
             ),
@@ -1228,7 +1284,7 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         let mut cached: serde_json::Value = serde_json::from_str(
             r#"{
-  "schemaVersion": 13,
+  "schemaVersion": 14,
   "timestamp": 0,
   "enabledClients": ["claude", "cursor"],
   "groupBy": "model",
