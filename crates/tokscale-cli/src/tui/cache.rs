@@ -22,7 +22,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 13;
+const CACHE_SCHEMA_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +75,6 @@ struct CachedTUIData {
     schema_version: u32,
     timestamp: u64,
     enabled_clients: Vec<String>,
-    include_synthetic: bool,
     group_by: String,
     report_scope: CacheReportScope,
     data: CachedUsageData,
@@ -612,9 +611,9 @@ pub enum CacheResult {
 /// Returns Fresh/Stale/Miss so the caller can decide whether to
 /// display cached data immediately and/or trigger a background refresh.
 ///
-/// `enabled_clients` is the unified `HashSet<ClientFilter>` (Synthetic
-/// included as a set member). The cache key must match exactly; partial
-/// cache hits would show incomplete data before the background refresh.
+/// `enabled_clients` is the unified `HashSet<ClientFilter>`. The cache key must
+/// match exactly; partial cache hits would show incomplete data before the
+/// background refresh.
 pub fn load_cache(
     enabled_clients: &HashSet<ClientFilter>,
     group_by: &GroupBy,
@@ -665,11 +664,7 @@ pub fn load_cache(
         return CacheResult::Miss;
     }
 
-    if !cache_clients_match_exact(
-        enabled_clients,
-        &cached.enabled_clients,
-        cached.include_synthetic,
-    ) {
+    if !cache_clients_match_exact(enabled_clients, &cached.enabled_clients) {
         return CacheResult::Miss;
     }
 
@@ -710,28 +705,19 @@ pub fn load_cache(
 fn cache_clients_match_exact(
     enabled_clients: &HashSet<ClientFilter>,
     cached_clients: &[String],
-    cached_include_synthetic: bool,
 ) -> bool {
-    let include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
-    if include_synthetic != cached_include_synthetic {
-        return false;
-    }
-
-    let enabled_non_synthetic: HashSet<&str> = enabled_clients
+    let enabled: HashSet<&str> = enabled_clients
         .iter()
-        .filter(|filter| !matches!(filter, ClientFilter::Synthetic))
         .map(ClientFilter::as_filter_str)
         .collect();
-    let cached_non_synthetic: HashSet<&str> = cached_clients.iter().map(String::as_str).collect();
+    let cached: HashSet<&str> = cached_clients.iter().map(String::as_str).collect();
 
-    cached_non_synthetic.len() == cached_clients.len()
-        && enabled_non_synthetic == cached_non_synthetic
+    cached.len() == cached_clients.len() && enabled == cached
 }
 
 /// Save TUI data to disk cache.
 ///
-/// The on-disk cache key stores `(Vec<String> enabled_clients, bool
-/// include_synthetic)`. We project the unified `HashSet<ClientFilter>` here.
+/// The on-disk cache key stores the enabled client ids.
 pub fn save_cached_data(
     data: &UsageData,
     enabled_clients: &HashSet<ClientFilter>,
@@ -746,10 +732,8 @@ pub fn save_cached_data(
 
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
-    let include_synthetic = enabled_clients.contains(&ClientFilter::Synthetic);
     let mut clients_vec: Vec<String> = enabled_clients
         .iter()
-        .filter(|f| !matches!(f, ClientFilter::Synthetic))
         .map(|f| f.as_filter_str().to_string())
         .collect();
     // Sort so the cache key is deterministic across runs / HashSet
@@ -761,7 +745,6 @@ pub fn save_cached_data(
         schema_version: CACHE_SCHEMA_VERSION,
         timestamp,
         enabled_clients: clients_vec,
-        include_synthetic,
         group_by: group_by.to_string(),
         report_scope: report_scope.clone(),
         data: data.into(),
@@ -814,15 +797,8 @@ mod tests {
     use std::{env, fs};
     use tempfile::TempDir;
 
-    /// Build a unified filter set. Pass `synthetic=true` to include
-    /// `ClientFilter::Synthetic` as a set member (the new way to express
-    /// "user has synthetic enabled").
-    fn make_filters(filters: &[ClientFilter], synthetic: bool) -> HashSet<ClientFilter> {
-        let mut set: HashSet<ClientFilter> = filters.iter().copied().collect();
-        if synthetic {
-            set.insert(ClientFilter::Synthetic);
-        }
-        set
+    fn make_filters(filters: &[ClientFilter]) -> HashSet<ClientFilter> {
+        filters.iter().copied().collect()
     }
 
     fn cached_agent(agent: &str, clients: &str, total_seed: u64) -> CachedAgentUsage {
@@ -881,74 +857,49 @@ mod tests {
 
     #[test]
     fn test_exact_match() {
-        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Opencode], false);
+        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Opencode]);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
-        assert!(cache_clients_match_exact(&enabled, &cached, false));
+        assert!(cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
     fn test_new_client_added_is_not_exact_match() {
-        let enabled = make_filters(
-            &[
-                ClientFilter::Claude,
-                ClientFilter::Opencode,
-                ClientFilter::Qwen,
-            ],
-            false,
-        );
+        let enabled = make_filters(&[
+            ClientFilter::Claude,
+            ClientFilter::Opencode,
+            ClientFilter::Qwen,
+        ]);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached, false));
-    }
-
-    #[test]
-    fn test_synthetic_added_is_not_exact_match() {
-        let enabled = make_filters(&[ClientFilter::Claude], true);
-        let cached = vec!["claude".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached, false));
+        assert!(!cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
     fn test_mismatch_superset() {
         // Cache has more clients than enabled (user narrowed filter)
-        let enabled = make_filters(&[ClientFilter::Claude], false);
+        let enabled = make_filters(&[ClientFilter::Claude]);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached, false));
+        assert!(!cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
     fn test_mismatch_disjoint() {
-        let enabled = make_filters(&[ClientFilter::Claude], false);
+        let enabled = make_filters(&[ClientFilter::Claude]);
         let cached = vec!["opencode".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached, false));
+        assert!(!cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
-    fn test_mismatch_unwanted_synthetic() {
-        // Cache has synthetic data but user doesn't want it
-        let enabled = make_filters(&[ClientFilter::Claude], false);
+    fn test_new_client_is_not_exact_match() {
+        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Qwen]);
         let cached = vec!["claude".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached, true));
-    }
-
-    #[test]
-    fn test_exact_with_synthetic() {
-        let enabled = make_filters(&[ClientFilter::Claude], true);
-        let cached = vec!["claude".to_string()];
-        assert!(cache_clients_match_exact(&enabled, &cached, true));
-    }
-
-    #[test]
-    fn test_new_client_and_synthetic_is_not_exact_match() {
-        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Qwen], true);
-        let cached = vec!["claude".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached, false));
+        assert!(!cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
     fn test_empty_cache_is_not_exact_match() {
-        let enabled = make_filters(&[ClientFilter::Claude], false);
+        let enabled = make_filters(&[ClientFilter::Claude]);
         let cached: Vec<String> = vec![];
-        assert!(!cache_clients_match_exact(&enabled, &cached, false));
+        assert!(!cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
@@ -967,7 +918,6 @@ mod tests {
             r#"{
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "data": {
     "models": [],
     "daily": [],
@@ -981,7 +931,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1012,10 +962,9 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 13,
+  "schemaVersion": 14,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "reportScope": {
     "since": null,
@@ -1037,11 +986,67 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
                 &GroupBy::WorkspaceModel,
+                &CacheReportScope::default(),
+                false
+            ),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_misses_old_include_synthetic_schema() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 13,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "includeSynthetic": true,
+  "groupBy": "model",
+  "reportScope": {
+    "since": null,
+    "until": null,
+    "year": null
+  },
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 0,
+    "totalCost": 0.0,
+    "currentStreak": 0,
+    "longestStreak": 0
+  }
+}"#,
+        )
+        .unwrap();
+
+        let clients = make_filters(&[ClientFilter::Claude]);
+        assert!(matches!(
+            load_cache(
+                &clients,
+                &GroupBy::Model,
                 &CacheReportScope::default(),
                 false
             ),
@@ -1063,7 +1068,7 @@ mod tests {
             env::set_var("HOME", temp_dir.path());
         }
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         let filtered_scope = CacheReportScope::new(
             Some("2026-05-01".to_string()),
             Some("2026-05-07".to_string()),
@@ -1107,7 +1112,7 @@ mod tests {
             env::set_var("HOME", temp_dir.path());
         }
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         let scope = CacheReportScope::default();
         save_cached_data(&UsageData::default(), &clients, &GroupBy::Model, &scope).unwrap();
 
@@ -1147,7 +1152,6 @@ mod tests {
   "schemaVersion": 8,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "data": {
     "models": [{
@@ -1177,7 +1181,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1211,7 +1215,6 @@ mod tests {
   "schemaVersion": 3,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "data": {
     "models": [],
@@ -1251,7 +1254,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1281,10 +1284,9 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         let mut cached: serde_json::Value = serde_json::from_str(
             r#"{
-  "schemaVersion": 13,
+  "schemaVersion": 14,
   "timestamp": 0,
   "enabledClients": ["claude", "cursor"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "reportScope": {
     "since": null,
@@ -1379,7 +1381,7 @@ mod tests {
         cached["timestamp"] = serde_json::Value::from(fresh_timestamp_ms());
         fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude, ClientFilter::Cursor], false);
+        let clients = make_filters(&[ClientFilter::Claude, ClientFilter::Cursor]);
         match load_cache(
             &clients,
             &GroupBy::Model,
@@ -1414,7 +1416,7 @@ mod tests {
             env::set_var("HOME", temp_dir.path());
         }
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         save_cached_data(
             &UsageData::default(),
             &clients,
@@ -1461,7 +1463,6 @@ mod tests {
   "schemaVersion": 5,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "data": {
     "models": [],
@@ -1504,7 +1505,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1538,7 +1539,6 @@ mod tests {
   "schemaVersion": 3,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "data": {
     "models": [],
@@ -1578,7 +1578,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1616,7 +1616,6 @@ mod tests {
   "schemaVersion": 10,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "data": {
     "models": [],
@@ -1633,7 +1632,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1678,7 +1677,6 @@ mod tests {
   "schemaVersion": 6,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "data": {
     "models": [],
@@ -1695,7 +1693,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1740,7 +1738,6 @@ mod tests {
   "schemaVersion": 6,
   "timestamp": {old_timestamp},
   "enabledClients": ["claude"],
-  "includeSynthetic": false,
   "groupBy": "model",
   "data": {{
     "models": [],
@@ -1759,7 +1756,7 @@ mod tests {
         .unwrap();
         assert!(fs::metadata(&cache_path).is_ok());
 
-        let clients = make_filters(&[ClientFilter::Claude], false);
+        let clients = make_filters(&[ClientFilter::Claude]);
         save_cached_data(
             &UsageData::default(),
             &clients,

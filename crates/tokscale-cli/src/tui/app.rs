@@ -179,12 +179,7 @@ pub struct App {
     pub data: UsageData,
     pub data_loader: DataLoader,
 
-    /// Set of clients currently selected in the source picker. The
-    /// `Synthetic` variant is part of the same set so dialog code can
-    /// uniformly toggle/inspect every option without a separate boolean.
-    /// Code that talks to `tokscale_core` (which still expects a
-    /// `Vec<ClientId>` plus a `bool include_synthetic`) projects this set
-    /// at the boundary via `App::scan_clients` and `App::include_synthetic`.
+    /// Set of clients currently selected in the source picker.
     pub enabled_clients: Rc<RefCell<HashSet<ClientFilter>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
     pub sort_field: SortField,
@@ -260,7 +255,7 @@ impl App {
 
         let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = config.clients {
             // CLI-provided filter list. Each entry is the canonical
-            // lowercase id (`opencode`, `claude`, ..., `synthetic`).
+            // lowercase client id.
             // Unknown ids are dropped silently; the CLI parser already
             // validated against `ClientFilter` so this lookup should be
             // total in practice.
@@ -269,8 +264,7 @@ impl App {
                 .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
                 .collect()
         } else {
-            // No filter → use the canonical default set (every real
-            // client, Synthetic opt-in only). MUST stay in sync with
+            // No filter → use the canonical default set. MUST stay in sync with
             // `run_warm_tui_cache()` so a fresh cache warm produces a
             // fresh hit on the next no-filter launch.
             ClientFilter::default_set()
@@ -1090,9 +1084,6 @@ impl App {
 
     /// Project the unified `HashSet<ClientFilter>` into the
     /// `Vec<ClientId>` shape that `tokscale_core` scanners still consume.
-    /// `ClientFilter::Synthetic` does not have a `ClientId` and is
-    /// excluded from this projection — use [`Self::include_synthetic`]
-    /// for that signal.
     pub fn scan_clients(&self) -> Vec<ClientId> {
         let mut out: Vec<ClientId> = self
             .enabled_clients
@@ -1105,14 +1096,6 @@ impl App {
         // the canonical ordering used elsewhere.
         out.sort_by_key(|c| *c as usize);
         out
-    }
-
-    /// Whether the user has Synthetic enabled. Boundary helper for code
-    /// paths that still take a separate `bool include_synthetic` argument.
-    pub fn include_synthetic(&self) -> bool {
-        self.enabled_clients
-            .borrow()
-            .contains(&ClientFilter::Synthetic)
     }
 
     fn open_group_by_picker(&mut self) {
@@ -1936,10 +1919,6 @@ mod tests {
             actual, expected,
             "no-filter App default drifted from ClientFilter::default_set() — \
              warm cache and TUI launch will mismatch"
-        );
-        assert!(
-            !actual.contains(&ClientFilter::Synthetic),
-            "no-filter default must not include Synthetic (opt-in only)"
         );
     }
 

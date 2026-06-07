@@ -81,7 +81,6 @@ pub struct ScanResult {
     /// `opencode-nightly.db`, etc. See upstream logic in opencode's
     /// `packages/opencode/src/storage/db.ts` (`getChannelPath`).
     pub opencode_dbs: Vec<PathBuf>,
-    pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
     pub hermes_db: Option<PathBuf>,
     pub goose_db: Option<PathBuf>,
@@ -97,7 +96,6 @@ impl Default for ScanResult {
         Self {
             files: std::array::from_fn(|_| Vec::new()),
             opencode_dbs: Vec::new(),
-            synthetic_db: None,
             kilo_db: None,
             hermes_db: None,
             goose_db: None,
@@ -662,9 +660,7 @@ fn scan_all_clients_with_env_strategy_inner(
     let mut result = ScanResult::default();
 
     let include_all = clients.is_empty();
-    let include_synthetic = include_all || clients.iter().any(|s| s == "synthetic");
-
-    let enabled: HashSet<ClientId> = if include_all || include_synthetic {
+    let enabled: HashSet<ClientId> = if include_all {
         ClientId::iter().collect()
     } else {
         clients
@@ -839,18 +835,6 @@ fn scan_all_clients_with_env_strategy_inner(
             ClientId::OpenClaw,
             moldbot_path,
         );
-    }
-
-    if include_synthetic {
-        let xdg_data = if use_env_roots {
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
-        } else {
-            format!("{}/.local/share", home_dir)
-        };
-        let octofriend_db_path = PathBuf::from(format!("{}/octofriend/sqlite.db", xdg_data));
-        if octofriend_db_path.exists() {
-            result.synthetic_db = Some(octofriend_db_path);
-        }
     }
 
     if enabled.contains(&ClientId::RooCode) {
@@ -1994,11 +1978,10 @@ mod tests {
         // counts plus waste SQLite parsing work.
         //
         // The fix moves the merge inside the OpenCode-enabled block, so
-        // this test exercises the four canonical filter shapes:
+        // this test exercises the three canonical filter shapes:
         //   1. ["claude"]    → opencode_dbs must be empty
         //   2. ["opencode"]  → both auto + user-configured dbs present
-        //   3. ["synthetic"] → both present (synthetic enables all)
-        //   4. []            → both present (empty filter = all clients)
+        //   3. []            → both present (empty filter = all clients)
         let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
 
         let dir = TempDir::new().unwrap();
@@ -2053,21 +2036,7 @@ mod tests {
             opencode_only.opencode_dbs
         );
 
-        // 3. clients=["synthetic"] — synthetic enables all clients, so
-        //    both dbs must be present.
-        let synthetic_only = scan(&["synthetic"]);
-        assert!(
-            synthetic_only.opencode_dbs.iter().any(|p| p == &auto_db),
-            "synthetic-only filter must enable OpenCode auto-discovery, got {:?}",
-            synthetic_only.opencode_dbs
-        );
-        assert!(
-            synthetic_only.opencode_dbs.iter().any(|p| p == &outside_db),
-            "synthetic-only filter must merge user-configured paths, got {:?}",
-            synthetic_only.opencode_dbs
-        );
-
-        // 4. clients=[] — empty filter = all clients = both dbs present.
+        // 3. clients=[] — empty filter = all clients = both dbs present.
         let all_clients = scan(&[]);
         assert!(
             all_clients.opencode_dbs.iter().any(|p| p == &auto_db),

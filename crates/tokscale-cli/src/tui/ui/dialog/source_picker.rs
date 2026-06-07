@@ -18,17 +18,8 @@ use crate::ClientFilter;
 
 use super::{DialogContent, DialogResult};
 
-/// Hotkey assigned to the Synthetic option in the dialog.
-///
-/// `'n'` is reserved here for Synthetic so it does not collide with any
-/// real client hotkey in [`crate::tui::client_ui::CLIENT_UI`]. The toggle
-/// path checks `client_ui::from_hotkey` first, so any future client that
-/// also wants `'n'` would silently shadow Synthetic — keep this value in
-/// sync with the client hotkey table.
-const SYNTHETIC_HOTKEY: char = 'n';
-
-/// TUI dialog that lets the user toggle which clients (and Synthetic) are
-/// included in reports. Backed by the same unified
+/// TUI dialog that lets the user toggle which clients are included in reports.
+/// Backed by the same unified
 /// `Rc<RefCell<HashSet<ClientFilter>>>` the rest of the app sees, so
 /// toggles propagate without a separate sync step.
 pub struct ClientPickerDialog {
@@ -246,12 +237,9 @@ impl DialogContent for ClientPickerDialog {
             KeyCode::Char(c) => {
                 // Hotkey toggle: route through the centralized
                 // `ClientFilter` mapping so adding a new hotkey only
-                // requires editing `client_ui.rs` + (if it's a non-client
-                // meta source) updating SYNTHETIC_HOTKEY here.
+                // requires editing `client_ui.rs`.
                 if let Some(client_id) = client_ui::from_hotkey(c) {
                     self.toggle(ClientFilter::from_client_id(client_id));
-                } else if c == SYNTHETIC_HOTKEY {
-                    self.toggle(ClientFilter::Synthetic);
                 } else {
                     self.filter.push(c);
                     self.rebuild_filter();
@@ -264,19 +252,20 @@ impl DialogContent for ClientPickerDialog {
 }
 
 /// Display name for a `ClientFilter` row in the picker. Delegates to the
-/// existing `client_ui` registry for `ClientId`-backed variants and adds
-/// the meta-client label for `Synthetic`.
+/// existing `client_ui` registry.
 fn display_name(client: ClientFilter) -> &'static str {
-    match client.to_client_id() {
-        Some(id) => client_ui::display_name(id),
-        None => "Synthetic",
-    }
+    client_ui::display_name(
+        client
+            .to_client_id()
+            .expect("client filter must map to ClientId"),
+    )
 }
 
-/// Hotkey for a `ClientFilter` row. Mirrors `display_name`'s split.
+/// Hotkey for a `ClientFilter` row.
 fn hotkey(client: ClientFilter) -> char {
-    match client.to_client_id() {
-        Some(id) => client_ui::hotkey(id),
-        None => SYNTHETIC_HOTKEY,
-    }
+    client_ui::hotkey(
+        client
+            .to_client_id()
+            .expect("client filter must map to ClientId"),
+    )
 }

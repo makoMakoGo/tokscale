@@ -24,7 +24,6 @@ pub mod opencode;
 pub mod pi;
 pub mod qwen;
 pub mod roocode;
-pub mod synthetic;
 pub mod trae;
 pub(crate) mod utils;
 pub mod warp;
