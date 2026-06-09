@@ -1,4 +1,4 @@
-use chrono::Local;
+use chrono::{Datelike, Local, NaiveDate};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
@@ -17,7 +17,7 @@ use super::widgets::{
 use crate::tui::app::{App, SortDirection, SortField};
 
 const TABLE_COLUMN_SPACING: u16 = 1;
-const DATE_WIDTH: u16 = 12;
+const DATE_WIDTH: u16 = 7;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
@@ -278,6 +278,14 @@ fn daily_column_sort_field(column: DailyColumn) -> Option<SortField> {
     }
 }
 
+fn format_daily_row_date(date: NaiveDate) -> String {
+    date.format("%d %a").to_string()
+}
+
+fn format_month_separator(date: NaiveDate) -> String {
+    date.format("%Y/%m").to_string()
+}
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.is_daily_detail_active() {
         render_detail(frame, app, area);
@@ -299,7 +307,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
-    app.set_max_visible_items(visible_height);
 
     let daily = app.get_sorted_daily();
     if daily.is_empty() {
@@ -361,81 +368,105 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let daily_len = daily.len();
     let start = scroll_offset.min(daily_len);
-    let end = (start + visible_height).min(daily_len);
 
     if start >= daily_len {
         return;
     }
 
-    let rows: Vec<Row> = daily[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, day)| {
-            let idx = i + start;
-            let is_selected = idx == selected_index;
-            let is_striped = idx % 2 == 1;
-            let is_today = day.date == today;
+    let separator_style = Style::default()
+        .fg(theme_accent)
+        .bg(Color::Rgb(24, 28, 36))
+        .add_modifier(Modifier::BOLD);
 
-            let date_text = day.date.format("%Y-%m-%d").to_string();
-            let date_style = if is_today {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else if table_layout.density == DailyTableDensity::Full {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let turn_str = if day.turn_count > 0 {
-                day.turn_count.to_string()
-            } else {
-                "\u{2014}".to_string()
-            };
-            let cell_for_column = |column: DailyColumn| -> Cell {
-                match column {
-                    DailyColumn::Date => Cell::from(date_text.clone()).style(date_style),
-                    DailyColumn::Turn => Cell::from(turn_str.clone()),
-                    DailyColumn::Messages => Cell::from(day.message_count.to_string()),
-                    DailyColumn::Input => {
-                        Cell::from(format_tokens(day.tokens.input)).style(metric_input_style)
-                    }
-                    DailyColumn::Output => {
-                        Cell::from(format_tokens(day.tokens.output)).style(metric_output_style)
-                    }
-                    DailyColumn::CacheRead => Cell::from(format_tokens(day.tokens.cache_read))
-                        .style(metric_cache_read_style),
-                    DailyColumn::CacheWrite => Cell::from(format_tokens(day.tokens.cache_write))
-                        .style(metric_cache_write_style),
-                    DailyColumn::CacheRate => Cell::from(format_cache_hit_rate(
-                        day.tokens.cache_read,
-                        day.tokens.input,
-                        day.tokens.cache_write,
-                    ))
-                    .style(Style::default().fg(Color::Cyan)),
-                    DailyColumn::Total => Cell::from(format_tokens(day.tokens.total())),
-                    DailyColumn::Cost => {
-                        Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green))
-                    }
+    let mut rows: Vec<Row> = Vec::with_capacity(visible_height.saturating_add(1));
+    let mut lines_used = 0usize;
+    let mut prev_month: Option<(i32, u32)> = None;
+    let mut data_idx = start;
+
+    while data_idx < daily_len && lines_used < visible_height {
+        let day = daily[data_idx];
+        let row_month = (day.date.year(), day.date.month());
+
+        if prev_month != Some(row_month) && lines_used + 1 < visible_height {
+            let mut separator_cells = Vec::with_capacity(columns.len());
+            separator_cells.push(Cell::from(format_month_separator(day.date)));
+            separator_cells.extend((1..columns.len()).map(|_| Cell::from("")));
+            rows.push(Row::new(separator_cells).style(separator_style).height(1));
+            lines_used += 1;
+        }
+        prev_month = Some(row_month);
+
+        let idx = data_idx;
+        let is_selected = idx == selected_index;
+        let is_striped = idx % 2 == 1;
+        let is_today = day.date == today;
+
+        let date_text = format_daily_row_date(day.date);
+        let date_style = if is_today {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if table_layout.density == DailyTableDensity::Full {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let turn_str = if day.turn_count > 0 {
+            day.turn_count.to_string()
+        } else {
+            "\u{2014}".to_string()
+        };
+        let cell_for_column = |column: DailyColumn| -> Cell {
+            match column {
+                DailyColumn::Date => Cell::from(date_text.clone()).style(date_style),
+                DailyColumn::Turn => Cell::from(turn_str.clone()),
+                DailyColumn::Messages => Cell::from(day.message_count.to_string()),
+                DailyColumn::Input => {
+                    Cell::from(format_tokens(day.tokens.input)).style(metric_input_style)
                 }
-            };
-            let cells: Vec<Cell> = columns
-                .iter()
-                .map(|column| cell_for_column(*column))
-                .collect();
+                DailyColumn::Output => {
+                    Cell::from(format_tokens(day.tokens.output)).style(metric_output_style)
+                }
+                DailyColumn::CacheRead => {
+                    Cell::from(format_tokens(day.tokens.cache_read)).style(metric_cache_read_style)
+                }
+                DailyColumn::CacheWrite => Cell::from(format_tokens(day.tokens.cache_write))
+                    .style(metric_cache_write_style),
+                DailyColumn::CacheRate => Cell::from(format_cache_hit_rate(
+                    day.tokens.cache_read,
+                    day.tokens.input,
+                    day.tokens.cache_write,
+                ))
+                .style(Style::default().fg(Color::Cyan)),
+                DailyColumn::Total => Cell::from(format_tokens(day.tokens.total())),
+                DailyColumn::Cost => {
+                    Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green))
+                }
+            }
+        };
+        let cells: Vec<Cell> = columns
+            .iter()
+            .map(|column| cell_for_column(*column))
+            .collect();
 
-            let row_style = if is_selected {
-                Style::default().bg(theme_selection)
-            } else if is_today {
-                current_row_style
-            } else if is_striped {
-                striped_row_style
-            } else {
-                Style::default()
-            };
+        let row_style = if is_selected {
+            Style::default().bg(theme_selection)
+        } else if is_today {
+            current_row_style
+        } else if is_striped {
+            striped_row_style
+        } else {
+            Style::default()
+        };
 
-            Row::new(cells).style(row_style).height(1)
-        })
-        .collect();
+        rows.push(Row::new(cells).style(row_style).height(1));
+        lines_used += 1;
+        data_idx += 1;
+    }
+
+    let data_rows_shown = data_idx - start;
+    drop(daily);
+    app.set_max_visible_items(data_rows_shown.max(1));
     let widths = table_layout.widths;
 
     let table = Table::new(rows, widths)
@@ -444,7 +475,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     frame.render_widget(table, inner);
 
-    if daily_len > visible_height {
+    if daily_len > data_rows_shown {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
@@ -674,6 +705,65 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 mod tests {
     use super::super::model_usage_layout::MODEL_MAX_WIDTH;
     use super::*;
+    use crate::tui::app::{Tab, TuiConfig};
+    use crate::tui::data::{DailyUsage, TokenBreakdown};
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::collections::BTreeMap;
+
+    fn day(date: &str, cost: f64) -> DailyUsage {
+        DailyUsage {
+            date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            tokens: TokenBreakdown::default(),
+            cost,
+            source_breakdown: BTreeMap::new(),
+            message_count: 10,
+            turn_count: 3,
+        }
+    }
+
+    fn make_daily_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.terminal_width = width;
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            day("2026-06-09", 30.0),
+            day("2026-06-08", 10.0),
+            day("2026-05-31", 20.0),
+        ];
+        app
+    }
+
+    fn render_body(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn narrow_daily_layout_keeps_date_tokens_and_cost_without_cache_columns() {
@@ -828,5 +918,63 @@ mod tests {
                 DailyDetailColumn::Cost,
             ]
         );
+    }
+
+    #[test]
+    fn daily_rows_use_month_banners_and_compact_day_labels() {
+        let mut app = make_daily_app(120);
+        let body = render_body(&mut app, 120, 14);
+
+        assert!(body.contains("2026/06"), "expected June banner\n{body}");
+        assert!(body.contains("2026/05"), "expected May banner\n{body}");
+        assert!(
+            body.contains("09 Tue"),
+            "expected compact day label\n{body}"
+        );
+        assert!(
+            !body.contains("2026-06-09"),
+            "full date must not repeat on daily rows\n{body}"
+        );
+    }
+
+    #[test]
+    fn daily_month_banners_follow_cost_sorted_context() {
+        let mut app = make_daily_app(120);
+        app.sort_field = SortField::Cost;
+        app.sort_direction = SortDirection::Descending;
+        let body = render_body(&mut app, 120, 14);
+
+        assert!(
+            body.matches("2026/06").count() >= 2,
+            "June should appear twice when cost sort interleaves months\n{body}"
+        );
+        assert!(
+            body.contains("2026/05"),
+            "expected May context banner\n{body}"
+        );
+    }
+
+    #[test]
+    fn daily_selected_row_visible_when_month_banner_cannot_fit() {
+        let mut app = make_daily_app(120);
+        app.scroll_offset = 2;
+        app.selected_index = 2;
+        let body = render_body(&mut app, 120, 4);
+
+        assert!(
+            body.contains("31 Sun"),
+            "selected daily row must stay visible when its month banner cannot fit\n{body}"
+        );
+    }
+
+    #[test]
+    fn daily_window_reports_data_rows_without_month_banners() {
+        let mut app = make_daily_app(120);
+        let height = 6u16;
+        let body = render_body(&mut app, 120, height);
+
+        assert_eq!(body.lines().count(), height as usize);
+        assert!(app.max_visible_items >= 1);
+        assert!(app.max_visible_items <= (height as usize).saturating_sub(3));
     }
 }
