@@ -12,6 +12,7 @@ mod models;
 mod overview;
 pub mod spinner;
 mod stats;
+mod table_layout;
 mod time_table;
 mod usage;
 pub(crate) mod widgets;

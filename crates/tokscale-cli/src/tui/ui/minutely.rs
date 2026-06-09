@@ -4,9 +4,22 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
-use super::time_table::{display_width, full_time_table_widths};
+use super::table_layout::{allocate_widths, display_width, ColumnWidthSpec};
+use super::time_table::full_time_table_widths;
 use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, SortDirection, SortField};
+
+const COMPACT_TIME_WIDTH: u16 = 12;
+const COMPACT_TIME_MAX_WIDTH: u16 = 18;
+const COMPACT_SOURCE_MIN_WIDTH: u16 = 10;
+const COMPACT_SOURCE_MAX_WIDTH: u16 = 30;
+const COMPACT_SOURCE_EXTRA_WIDTH: u16 = 12;
+const TURN_WIDTH: u16 = 6;
+const MSGS_WIDTH: u16 = 6;
+const TOKENS_WIDTH: u16 = 10;
+const COST_WIDTH: u16 = 10;
+const SMALL_COLUMN_EXTRA_WIDTH: u16 = 2;
+const METRIC_EXTRA_WIDTH: u16 = 4;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -235,30 +248,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(60), Constraint::Percentage(40)]
-    } else if is_narrow && has_turn_data {
-        vec![
-            Constraint::Percentage(32),
-            Constraint::Percentage(18),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(32),
-            Constraint::Percentage(23),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    } else if has_turn_data {
-        full_time_table_widths(inner.width, true, source_content_width)
-    } else {
-        full_time_table_widths(inner.width, false, source_content_width)
-    };
+    let widths = minutely_widths(
+        inner.width,
+        is_very_narrow,
+        is_narrow,
+        has_turn_data,
+        source_content_width,
+    );
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -284,6 +280,66 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn minutely_widths(
+    table_width: u16,
+    is_very_narrow: bool,
+    is_narrow: bool,
+    has_turn_data: bool,
+    source_content_width: u16,
+) -> Vec<Constraint> {
+    if is_very_narrow {
+        return allocate_widths(
+            table_width,
+            &[
+                ColumnWidthSpec::flexible(COMPACT_TIME_WIDTH, COMPACT_TIME_MAX_WIDTH, 3),
+                ColumnWidthSpec::flexible(
+                    COST_WIDTH,
+                    COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
+                    1,
+                ),
+            ],
+        );
+    }
+
+    if is_narrow {
+        let mut specs = vec![
+            ColumnWidthSpec::flexible(COMPACT_TIME_WIDTH, COMPACT_TIME_MAX_WIDTH, 1),
+            ColumnWidthSpec::flexible(
+                COMPACT_SOURCE_MIN_WIDTH,
+                source_content_width
+                    .clamp(COMPACT_SOURCE_MIN_WIDTH, COMPACT_SOURCE_MAX_WIDTH)
+                    .saturating_add(COMPACT_SOURCE_EXTRA_WIDTH)
+                    .min(COMPACT_SOURCE_MAX_WIDTH),
+                4,
+            ),
+        ];
+        if has_turn_data {
+            specs.push(ColumnWidthSpec::flexible(
+                TURN_WIDTH,
+                TURN_WIDTH.saturating_add(SMALL_COLUMN_EXTRA_WIDTH),
+                1,
+            ));
+        }
+        specs.extend([
+            ColumnWidthSpec::flexible(
+                MSGS_WIDTH,
+                MSGS_WIDTH.saturating_add(SMALL_COLUMN_EXTRA_WIDTH),
+                1,
+            ),
+            ColumnWidthSpec::flexible(
+                TOKENS_WIDTH,
+                TOKENS_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
+                1,
+            ),
+            ColumnWidthSpec::flexible(COST_WIDTH, COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH), 1),
+        ]);
+
+        return allocate_widths(table_width, &specs);
+    }
+
+    full_time_table_widths(table_width, has_turn_data, source_content_width)
+}
+
 fn minutely_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
     let mut labels: Vec<String> = clients
         .map(|client| get_client_display_name(client))
@@ -295,6 +351,13 @@ fn minutely_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn length_at(widths: &[Constraint], index: usize) -> u16 {
+        match widths[index] {
+            Constraint::Length(width) => width,
+            other => panic!("expected Length at index {index}, got {other:?}"),
+        }
+    }
 
     #[test]
     fn minutely_source_text_formats_client_display_names() {
@@ -308,5 +371,15 @@ mod tests {
             minutely_source_text(clients.iter()),
             "Codex, OpenCode, unknown-client"
         );
+    }
+
+    #[test]
+    fn narrow_minutely_widths_expand_source_without_bloating_metrics() {
+        let widths = minutely_widths(100, false, true, true, 12);
+
+        assert!(length_at(&widths, 1) > COMPACT_SOURCE_MIN_WIDTH);
+        assert!(length_at(&widths, 1) <= COMPACT_SOURCE_MAX_WIDTH);
+        assert!(length_at(&widths, 4) <= TOKENS_WIDTH + METRIC_EXTRA_WIDTH);
+        assert!(length_at(&widths, 5) <= COST_WIDTH + METRIC_EXTRA_WIDTH);
     }
 }

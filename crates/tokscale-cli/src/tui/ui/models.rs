@@ -4,11 +4,11 @@ use ratatui::widgets::{
 };
 
 use super::model_usage_layout::{
-    display_width, model_usage_table_layout, ModelUsageColumn as ModelsColumn,
-    ModelUsageLayoutProfile, ModelUsageTableDensity as ModelsTableDensity,
-    ModelUsageTableLayout as ModelsTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
-    MODEL_MIN_WIDTH,
+    model_usage_table_layout, ModelUsageColumn as ModelsColumn, ModelUsageLayoutProfile,
+    ModelUsageTableDensity as ModelsTableDensity, ModelUsageTableLayout as ModelsTableLayout,
+    DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH,
 };
+use super::table_layout::display_width;
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
     get_provider_display_name, truncate_model_display_name_to,
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_model_layout_uses_full_provider_and_source_widths() {
+    fn wide_model_layout_balances_provider_and_source_widths() {
         let base = model_layout(140, 28, 42, 34);
         let wide = model_layout(180, 28, 42, 34);
 
@@ -404,14 +404,14 @@ mod tests {
         assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
         assert!(wide.columns.contains(&ModelsColumn::Source));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
-        assert_eq!(length_at(&base.widths, 1), 34);
-        assert_eq!(length_at(&base.widths, 2), 42);
-        assert_eq!(length_at(&wide.widths, 1), 34);
-        assert_eq!(length_at(&wide.widths, 2), 42);
+        assert!((34..=50).contains(&length_at(&base.widths, 1)));
+        assert!((42..=54).contains(&length_at(&base.widths, 2)));
+        assert!((34..=50).contains(&length_at(&wide.widths, 1)));
+        assert!((42..=54).contains(&length_at(&wide.widths, 2)));
     }
 
     #[test]
-    fn wide_workspace_model_layout_uses_full_provider_and_source_widths() {
+    fn wide_workspace_model_layout_balances_provider_and_source_widths() {
         let base = workspace_model_layout(160, 28, 42, 34);
         let wide = workspace_model_layout(200, 28, 42, 34);
 
@@ -419,10 +419,10 @@ mod tests {
         assert!(wide.model_width <= WORKSPACE_MODEL_MAX_WIDTH as usize);
         assert!(wide.columns.contains(&ModelsColumn::Source));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
-        assert_eq!(length_at(&base.widths, 1), 34);
-        assert_eq!(length_at(&base.widths, 2), 42);
-        assert_eq!(length_at(&wide.widths, 1), 34);
-        assert_eq!(length_at(&wide.widths, 2), 42);
+        assert!((34..=50).contains(&length_at(&base.widths, 1)));
+        assert!((42..=54).contains(&length_at(&base.widths, 2)));
+        assert!((34..=50).contains(&length_at(&wide.widths, 1)));
+        assert!((42..=54).contains(&length_at(&wide.widths, 2)));
     }
 
     #[test]
@@ -453,8 +453,8 @@ mod tests {
 
         assert_eq!(length_at(&layout.widths, 0), MODEL_MAX_WIDTH);
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
-        assert_eq!(length_at(&layout.widths, 1), 120);
-        assert_eq!(length_at(&layout.widths, 2), 120);
+        assert!((120..=136).contains(&length_at(&layout.widths, 1)));
+        assert!((120..=132).contains(&length_at(&layout.widths, 2)));
     }
 
     #[test]
@@ -466,12 +466,13 @@ mod tests {
     }
 
     #[test]
-    fn source_column_stops_growing_after_visible_content_fits() {
+    fn source_column_grows_to_its_balanced_cap() {
         let fit = model_layout(220, 28, 56, 26);
         let wider = model_layout(260, 28, 56, 26);
 
-        assert_eq!(length_at(&fit.widths, 1), 26);
-        assert_eq!(length_at(&wider.widths, 1), 26);
+        assert!(length_at(&fit.widths, 1) > 26);
+        assert!(length_at(&fit.widths, 1) <= 42);
+        assert_eq!(length_at(&wider.widths, 1), length_at(&fit.widths, 1));
         assert_eq!(length_at(&wider.widths, 2), length_at(&fit.widths, 2));
     }
 
@@ -504,12 +505,12 @@ mod tests {
     }
 
     #[test]
-    fn leftover_width_is_not_forced_into_text_columns_after_content_fits() {
+    fn leftover_width_expands_text_columns_until_caps() {
         let fit = model_layout(180, 28, 32, 26);
         let wider = model_layout(260, 28, 32, 26);
 
         assert_eq!(length_at(&wider.widths, 0), length_at(&fit.widths, 0));
-        assert_eq!(length_at(&wider.widths, 1), length_at(&fit.widths, 1));
-        assert_eq!(length_at(&wider.widths, 2), length_at(&fit.widths, 2));
+        assert!(length_at(&wider.widths, 1) > length_at(&fit.widths, 1));
+        assert!(length_at(&wider.widths, 2) >= length_at(&fit.widths, 2));
     }
 }

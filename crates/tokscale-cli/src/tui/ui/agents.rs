@@ -3,9 +3,23 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
-use super::widgets::{format_cost, format_tokens, get_client_display_name};
+use super::table_layout::{allocate_widths, display_width, ColumnWidthSpec};
+use super::widgets::{format_cost, format_tokens, get_client_display_name, truncate_display_width};
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::ClientFilter;
+
+const RANK_WIDTH: u16 = 3;
+const AGENT_MIN_WIDTH: u16 = 16;
+const AGENT_BASE_MAX_WIDTH: u16 = 22;
+const AGENT_MAX_WIDTH: u16 = 36;
+const SOURCE_MIN_WIDTH: u16 = 16;
+const SOURCE_BASE_MAX_WIDTH: u16 = 24;
+const SOURCE_MAX_WIDTH: u16 = 40;
+const TOKENS_WIDTH: u16 = 10;
+const COST_WIDTH: u16 = 10;
+const MSGS_WIDTH: u16 = 6;
+const SMALL_COLUMN_EXTRA_WIDTH: u16 = 2;
+const METRIC_EXTRA_WIDTH: u16 = 4;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -96,6 +110,24 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let agent_content_width = agents
+        .iter()
+        .map(|agent| display_width(&agent.agent))
+        .max()
+        .unwrap_or(AGENT_MIN_WIDTH);
+    let source_content_width = agents
+        .iter()
+        .map(|agent| display_width(&client_labels(&agent.clients)))
+        .max()
+        .unwrap_or(SOURCE_MIN_WIDTH);
+    let widths = agents_widths(
+        inner.width,
+        is_narrow,
+        is_very_narrow,
+        agent_content_width,
+        source_content_width,
+    );
+
     let rows: Vec<Row> = agents[start..end]
         .iter()
         .enumerate()
@@ -106,27 +138,40 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
-                    Cell::from(truncate(&agent.agent, 18))
-                        .style(Style::default().fg(app.theme.foreground)),
+                    Cell::from(truncate_display_width(
+                        &agent.agent,
+                        constraint_width(&widths, 0, AGENT_MIN_WIDTH),
+                    ))
+                    .style(Style::default().fg(app.theme.foreground)),
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else if is_narrow {
                 vec![
-                    Cell::from(truncate(&agent.agent, 18))
-                        .style(Style::default().fg(app.theme.foreground)),
+                    Cell::from(truncate_display_width(
+                        &agent.agent,
+                        constraint_width(&widths, 0, AGENT_MIN_WIDTH),
+                    ))
+                    .style(Style::default().fg(app.theme.foreground)),
                     Cell::from(format_tokens(agent.tokens.total())),
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
                 ]
             } else {
                 vec![
                     Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate(&agent.agent, 22)).style(
+                    Cell::from(truncate_display_width(
+                        &agent.agent,
+                        constraint_width(&widths, 1, AGENT_MIN_WIDTH),
+                    ))
+                    .style(
                         Style::default()
                             .fg(app.theme.foreground)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(truncate(&client_labels(&agent.clients), 24))
-                        .style(Style::default().fg(theme_muted)),
+                    Cell::from(truncate_display_width(
+                        &client_labels(&agent.clients),
+                        constraint_width(&widths, 2, SOURCE_MIN_WIDTH),
+                    ))
+                    .style(Style::default().fg(theme_muted)),
                     Cell::from(format_tokens(agent.tokens.total())),
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(agent.message_count.to_string())
@@ -145,25 +190,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             Row::new(cells).style(row_style).height(1)
         })
         .collect();
-
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(70), Constraint::Percentage(30)]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(45),
-            Constraint::Percentage(27),
-            Constraint::Percentage(28),
-        ]
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Min(16),
-            Constraint::Length(24),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(6),
-        ]
-    };
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -187,6 +213,93 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             &mut scrollbar_state,
         );
     }
+}
+
+fn agents_widths(
+    table_width: u16,
+    is_narrow: bool,
+    is_very_narrow: bool,
+    agent_content_width: u16,
+    source_content_width: u16,
+) -> Vec<Constraint> {
+    if is_very_narrow {
+        return allocate_widths(
+            table_width,
+            &[
+                ColumnWidthSpec::flexible(
+                    agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_BASE_MAX_WIDTH),
+                    AGENT_MAX_WIDTH,
+                    3,
+                ),
+                ColumnWidthSpec::flexible(
+                    COST_WIDTH,
+                    COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
+                    1,
+                ),
+            ],
+        );
+    }
+
+    if is_narrow {
+        return allocate_widths(
+            table_width,
+            &[
+                ColumnWidthSpec::flexible(
+                    agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_BASE_MAX_WIDTH),
+                    AGENT_MAX_WIDTH,
+                    3,
+                ),
+                ColumnWidthSpec::flexible(
+                    TOKENS_WIDTH,
+                    TOKENS_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
+                    1,
+                ),
+                ColumnWidthSpec::flexible(
+                    COST_WIDTH,
+                    COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
+                    1,
+                ),
+            ],
+        );
+    }
+
+    allocate_widths(
+        table_width,
+        &[
+            ColumnWidthSpec::fixed(RANK_WIDTH),
+            ColumnWidthSpec::flexible(
+                agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_BASE_MAX_WIDTH),
+                AGENT_MAX_WIDTH,
+                3,
+            ),
+            ColumnWidthSpec::flexible(
+                source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_BASE_MAX_WIDTH),
+                SOURCE_MAX_WIDTH,
+                2,
+            ),
+            ColumnWidthSpec::flexible(
+                TOKENS_WIDTH,
+                TOKENS_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
+                1,
+            ),
+            ColumnWidthSpec::flexible(COST_WIDTH, COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH), 1),
+            ColumnWidthSpec::flexible(
+                MSGS_WIDTH,
+                MSGS_WIDTH.saturating_add(SMALL_COLUMN_EXTRA_WIDTH),
+                1,
+            ),
+        ],
+    )
+}
+
+fn constraint_width(widths: &[Constraint], index: usize, fallback: u16) -> usize {
+    widths
+        .get(index)
+        .and_then(|constraint| match constraint {
+            Constraint::Length(width) => Some(*width),
+            _ => None,
+        })
+        .unwrap_or(fallback) as usize
 }
 
 fn get_empty_message(app: &App) -> String {
@@ -213,27 +326,20 @@ fn client_labels(clients: &str) -> String {
         .join(", ")
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars <= 3 {
-        s.chars().take(max_chars).collect()
-    } else {
-        let head: String = s.chars().take(max_chars - 3).collect();
-        format!("{}...", head)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::get_empty_message;
+    use super::{agents_widths, get_empty_message};
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
     use crate::ClientFilter;
+    use ratatui::prelude::Constraint;
+
+    fn length_at(widths: &[Constraint], index: usize) -> u16 {
+        match widths[index] {
+            Constraint::Length(width) => width,
+            other => panic!("expected Length at index {index}, got {other:?}"),
+        }
+    }
 
     fn make_app(clients: Vec<ClientFilter>) -> App {
         let app = App::new_with_cached_data(
@@ -271,5 +377,17 @@ mod tests {
 
         assert!(message.contains("Only some sources record agent metadata"));
         assert!(message.contains("change sources"));
+    }
+
+    #[test]
+    fn wide_agents_widths_share_spare_space_between_text_columns() {
+        let widths = agents_widths(120, false, false, 22, 24);
+
+        assert_eq!(length_at(&widths, 0), 3);
+        assert!(length_at(&widths, 1) > 22);
+        assert!(length_at(&widths, 2) > 24);
+        assert!(length_at(&widths, 3) <= 14);
+        assert!(length_at(&widths, 4) <= 14);
+        assert!(length_at(&widths, 5) <= 8);
     }
 }

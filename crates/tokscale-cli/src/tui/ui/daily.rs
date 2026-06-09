@@ -5,24 +5,27 @@ use ratatui::widgets::{
 };
 
 use super::model_usage_layout::{
-    display_width, model_usage_table_layout, ModelUsageColumn as DailyDetailColumn,
-    ModelUsageLayoutProfile, ModelUsageTableDensity as DailyDetailTableDensity,
+    model_usage_table_layout, ModelUsageColumn as DailyDetailColumn, ModelUsageLayoutProfile,
+    ModelUsageTableDensity as DailyDetailTableDensity,
     ModelUsageTableLayout as DailyDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
     MODEL_MIN_WIDTH,
 };
+use super::table_layout::{allocate_widths, display_width, spaced_width, ColumnWidthSpec};
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
     get_provider_display_name, truncate_model_display_name_to,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
-const TABLE_COLUMN_SPACING: u16 = 1;
 const DATE_WIDTH: u16 = 7;
+const DATE_MAX_WIDTH: u16 = 12;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
 const CACHE_RATE_WIDTH: u16 = 8;
 const COST_WIDTH: u16 = 10;
+const SMALL_COLUMN_EXTRA_WIDTH: u16 = 2;
+const METRIC_EXTRA_WIDTH: u16 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DailyTableDensity {
@@ -65,11 +68,6 @@ struct DailyTableLayout {
     density: DailyTableDensity,
 }
 
-fn spaced_width(widths: &[u16]) -> u16 {
-    let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
-    widths.iter().copied().sum::<u16>().saturating_add(spacing)
-}
-
 fn daily_detail_min_width(has_turn_data: bool) -> u16 {
     let mut widths = vec![
         DATE_WIDTH,
@@ -105,6 +103,61 @@ fn daily_full_min_width(has_turn_data: bool) -> u16 {
     spaced_width(&widths)
 }
 
+fn daily_column_width(column: DailyColumn) -> u16 {
+    match column {
+        DailyColumn::Date => DATE_WIDTH,
+        DailyColumn::Turn => TURN_WIDTH,
+        DailyColumn::Messages => MSGS_WIDTH,
+        DailyColumn::Input
+        | DailyColumn::Output
+        | DailyColumn::CacheRead
+        | DailyColumn::CacheWrite
+        | DailyColumn::Total => NUMERIC_WIDTH,
+        DailyColumn::CacheRate => CACHE_RATE_WIDTH,
+        DailyColumn::Cost => COST_WIDTH,
+    }
+}
+
+fn daily_column_spec(column: DailyColumn) -> ColumnWidthSpec {
+    match column {
+        DailyColumn::Date => ColumnWidthSpec::flexible(DATE_WIDTH, DATE_MAX_WIDTH, 2),
+        DailyColumn::Turn | DailyColumn::Messages => ColumnWidthSpec::flexible(
+            daily_column_width(column),
+            daily_column_width(column).saturating_add(SMALL_COLUMN_EXTRA_WIDTH),
+            1,
+        ),
+        DailyColumn::Input
+        | DailyColumn::Output
+        | DailyColumn::CacheRead
+        | DailyColumn::CacheWrite
+        | DailyColumn::CacheRate
+        | DailyColumn::Total
+        | DailyColumn::Cost => ColumnWidthSpec::flexible(
+            daily_column_width(column),
+            daily_column_width(column).saturating_add(METRIC_EXTRA_WIDTH),
+            1,
+        ),
+    }
+}
+
+fn daily_layout_from_columns(
+    table_width: u16,
+    columns: Vec<DailyColumn>,
+    density: DailyTableDensity,
+) -> DailyTableLayout {
+    let specs: Vec<ColumnWidthSpec> = columns
+        .iter()
+        .map(|column| daily_column_spec(*column))
+        .collect();
+    let widths = allocate_widths(table_width, &specs);
+
+    DailyTableLayout {
+        columns,
+        widths,
+        density,
+    }
+}
+
 fn daily_table_layout(
     table_width: u16,
     is_narrow: bool,
@@ -112,23 +165,17 @@ fn daily_table_layout(
     has_turn_data: bool,
 ) -> DailyTableLayout {
     if is_very_narrow {
-        return DailyTableLayout {
-            columns: vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost],
-            widths: vec![
-                Constraint::Length(DATE_WIDTH),
-                Constraint::Length(NUMERIC_WIDTH),
-                Constraint::Length(COST_WIDTH),
-            ],
-            density: DailyTableDensity::VeryCompact,
-        };
+        return daily_layout_from_columns(
+            table_width,
+            vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost],
+            DailyTableDensity::VeryCompact,
+        );
     }
 
     if !is_narrow && table_width >= daily_full_min_width(has_turn_data) {
         let mut columns = vec![DailyColumn::Date];
-        let mut widths = vec![Constraint::Length(DATE_WIDTH)];
         if has_turn_data {
             columns.push(DailyColumn::Turn);
-            widths.push(Constraint::Length(TURN_WIDTH));
         }
         columns.extend([
             DailyColumn::Messages,
@@ -140,30 +187,14 @@ fn daily_table_layout(
             DailyColumn::Total,
             DailyColumn::Cost,
         ]);
-        widths.extend([
-            Constraint::Length(MSGS_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(CACHE_RATE_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(COST_WIDTH),
-        ]);
 
-        return DailyTableLayout {
-            columns,
-            widths,
-            density: DailyTableDensity::Full,
-        };
+        return daily_layout_from_columns(table_width, columns, DailyTableDensity::Full);
     }
 
     if !is_narrow && table_width >= daily_detail_min_width(has_turn_data) {
         let mut columns = vec![DailyColumn::Date];
-        let mut widths = vec![Constraint::Length(DATE_WIDTH)];
         if has_turn_data {
             columns.push(DailyColumn::Turn);
-            widths.push(Constraint::Length(TURN_WIDTH));
         }
         columns.extend([
             DailyColumn::Messages,
@@ -172,39 +203,17 @@ fn daily_table_layout(
             DailyColumn::Total,
             DailyColumn::Cost,
         ]);
-        widths.extend([
-            Constraint::Length(MSGS_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(COST_WIDTH),
-        ]);
 
-        return DailyTableLayout {
-            columns,
-            widths,
-            density: DailyTableDensity::Detail,
-        };
+        return daily_layout_from_columns(table_width, columns, DailyTableDensity::Detail);
     }
 
     let mut columns = vec![DailyColumn::Date];
-    let mut widths = vec![Constraint::Length(DATE_WIDTH)];
     if has_turn_data {
         columns.push(DailyColumn::Turn);
-        widths.push(Constraint::Length(TURN_WIDTH));
     }
     columns.extend([DailyColumn::Messages, DailyColumn::Total, DailyColumn::Cost]);
-    widths.extend([
-        Constraint::Length(MSGS_WIDTH),
-        Constraint::Length(NUMERIC_WIDTH),
-        Constraint::Length(COST_WIDTH),
-    ]);
 
-    DailyTableLayout {
-        columns,
-        widths,
-        density: DailyTableDensity::Core,
-    }
+    daily_layout_from_columns(table_width, columns, DailyTableDensity::Core)
 }
 
 fn daily_detail_table_layout(
@@ -765,6 +774,13 @@ mod tests {
             .join("\n")
     }
 
+    fn length_at(widths: &[Constraint], index: usize) -> u16 {
+        match widths[index] {
+            Constraint::Length(width) => width,
+            other => panic!("expected Length at index {index}, got {other:?}"),
+        }
+    }
+
     #[test]
     fn narrow_daily_layout_keeps_date_tokens_and_cost_without_cache_columns() {
         let layout = daily_table_layout(74, true, false, false);
@@ -782,7 +798,8 @@ mod tests {
         assert!(!layout.columns.contains(&DailyColumn::CacheRead));
         assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
         assert!(!layout.columns.contains(&DailyColumn::CacheRate));
-        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
+        assert!(length_at(&layout.widths, 0) >= DATE_WIDTH);
+        assert!(length_at(&layout.widths, 0) <= DATE_MAX_WIDTH);
     }
 
     #[test]
@@ -832,7 +849,8 @@ mod tests {
             layout.columns,
             vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost]
         );
-        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
+        assert!(length_at(&layout.widths, 0) >= DATE_WIDTH);
+        assert!(length_at(&layout.widths, 0) <= DATE_MAX_WIDTH);
     }
 
     #[test]
