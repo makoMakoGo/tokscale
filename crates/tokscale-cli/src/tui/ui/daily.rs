@@ -11,7 +11,8 @@ use super::model_usage_layout::{
     MODEL_MIN_WIDTH,
 };
 use super::table_layout::{
-    allocate_widths, display_width, spaced_width, ColumnWidthSpec, PRIMARY_TABLE_FLEX,
+    allocate_widths, display_width, distributed_table_area, spaced_width, ColumnWidthSpec,
+    DISTRIBUTED_TABLE_FLEX,
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
@@ -20,14 +21,11 @@ use super::widgets::{
 use crate::tui::app::{App, SortDirection, SortField};
 
 const DATE_WIDTH: u16 = 7;
-const DATE_MAX_WIDTH: u16 = 12;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
 const CACHE_RATE_WIDTH: u16 = 8;
 const COST_WIDTH: u16 = 10;
-const SMALL_COLUMN_EXTRA_WIDTH: u16 = 2;
-const METRIC_EXTRA_WIDTH: u16 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DailyTableDensity {
@@ -121,25 +119,7 @@ fn daily_column_width(column: DailyColumn) -> u16 {
 }
 
 fn daily_column_spec(column: DailyColumn) -> ColumnWidthSpec {
-    match column {
-        DailyColumn::Date => ColumnWidthSpec::flexible(DATE_WIDTH, DATE_MAX_WIDTH, 2),
-        DailyColumn::Turn | DailyColumn::Messages => ColumnWidthSpec::flexible(
-            daily_column_width(column),
-            daily_column_width(column).saturating_add(SMALL_COLUMN_EXTRA_WIDTH),
-            1,
-        ),
-        DailyColumn::Input
-        | DailyColumn::Output
-        | DailyColumn::CacheRead
-        | DailyColumn::CacheWrite
-        | DailyColumn::CacheRate
-        | DailyColumn::Total
-        | DailyColumn::Cost => ColumnWidthSpec::flexible(
-            daily_column_width(column),
-            daily_column_width(column).saturating_add(METRIC_EXTRA_WIDTH),
-            1,
-        ),
-    }
+    ColumnWidthSpec::fixed(daily_column_width(column))
 }
 
 fn daily_layout_from_columns(
@@ -315,6 +295,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -344,7 +325,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let current_row_style = app.theme.current_row_style();
     let striped_row_style = app.theme.striped_row_style();
     let today = Local::now().date_naive();
-    let table_layout = daily_table_layout(inner.width, is_narrow, is_very_narrow, has_turn_data);
+    let table_layout =
+        daily_table_layout(table_area.width, is_narrow, is_very_narrow, has_turn_data);
     let columns = table_layout.columns.clone();
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -482,10 +464,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .flex(PRIMARY_TABLE_FLEX)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if daily_len > data_rows_shown {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -523,6 +505,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -579,7 +562,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .max()
         .unwrap_or(DETAIL_SOURCE_WIDTH);
     let table_layout = daily_detail_table_layout(
-        inner.width,
+        table_area.width,
         is_very_narrow,
         model_content_width,
         provider_content_width,
@@ -691,10 +674,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .flex(PRIMARY_TABLE_FLEX)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if detail_len > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -802,8 +785,7 @@ mod tests {
         assert!(!layout.columns.contains(&DailyColumn::CacheRead));
         assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
         assert!(!layout.columns.contains(&DailyColumn::CacheRate));
-        assert!(length_at(&layout.widths, 0) >= DATE_WIDTH);
-        assert!(length_at(&layout.widths, 0) <= DATE_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 0), DATE_WIDTH);
     }
 
     #[test]
@@ -853,8 +835,7 @@ mod tests {
             layout.columns,
             vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost]
         );
-        assert!(length_at(&layout.widths, 0) >= DATE_WIDTH);
-        assert!(length_at(&layout.widths, 0) <= DATE_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 0), DATE_WIDTH);
     }
 
     #[test]
@@ -903,7 +884,7 @@ mod tests {
 
     #[test]
     fn daily_detail_layout_adds_messages_before_token_details() {
-        let layout = daily_detail_table_layout(154, false, 80, 56, 40);
+        let layout = daily_detail_table_layout(146, false, 80, 56, 40);
 
         assert_eq!(
             layout.columns,

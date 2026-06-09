@@ -1,32 +1,26 @@
 use ratatui::layout::Flex;
-use ratatui::prelude::Constraint;
+use ratatui::prelude::{Constraint, Margin, Rect};
 use unicode_width::UnicodeWidthStr;
 
 pub(crate) const TABLE_COLUMN_SPACING: u16 = 1;
-pub(crate) const PRIMARY_TABLE_FLEX: Flex = Flex::SpaceBetween;
+pub(crate) const TABLE_EDGE_PADDING: u16 = 1;
+
+/// Position selected table columns after their content widths have been chosen.
+///
+/// Width allocation decides which columns are visible and how wide their content
+/// boxes are. This flex mode handles only the residual space: keep the first and
+/// last columns pinned to the table edges, then distribute leftover space as
+/// even inter-column padding.
+pub(crate) const DISTRIBUTED_TABLE_FLEX: Flex = Flex::SpaceBetween;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ColumnWidthSpec {
-    pub(crate) base: u16,
-    pub(crate) max: u16,
-    pub(crate) flex: u16,
+    pub(crate) width: u16,
 }
 
 impl ColumnWidthSpec {
     pub(crate) const fn fixed(width: u16) -> Self {
-        Self {
-            base: width,
-            max: width,
-            flex: 0,
-        }
-    }
-
-    pub(crate) fn flexible(base: u16, max: u16, flex: u16) -> Self {
-        Self {
-            base,
-            max: max.max(base),
-            flex,
-        }
+        Self { width }
     }
 }
 
@@ -37,6 +31,13 @@ pub(crate) fn display_width(s: &str) -> u16 {
 pub(crate) fn spaced_width(widths: &[u16]) -> u16 {
     let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
     widths.iter().copied().sum::<u16>().saturating_add(spacing)
+}
+
+pub(crate) fn distributed_table_area(area: Rect) -> Rect {
+    area.inner(Margin {
+        horizontal: TABLE_EDGE_PADDING,
+        vertical: 0,
+    })
 }
 
 pub(crate) fn choose_priority_columns<T, InsertAt, Width>(
@@ -68,35 +69,11 @@ where
     columns
 }
 
-pub(crate) fn allocate_widths(table_width: u16, specs: &[ColumnWidthSpec]) -> Vec<Constraint> {
-    let mut widths: Vec<u16> = specs.iter().map(|spec| spec.base.min(spec.max)).collect();
-    let mut remaining = table_width.saturating_sub(spaced_width(&widths));
-
-    while remaining > 0 {
-        let mut progressed = false;
-
-        for (index, spec) in specs.iter().enumerate() {
-            if spec.flex == 0 || widths[index] >= spec.max {
-                continue;
-            }
-
-            for _ in 0..spec.flex {
-                if remaining == 0 || widths[index] >= spec.max {
-                    break;
-                }
-
-                widths[index] = widths[index].saturating_add(1);
-                remaining -= 1;
-                progressed = true;
-            }
-        }
-
-        if !progressed {
-            break;
-        }
-    }
-
-    widths.into_iter().map(Constraint::Length).collect()
+pub(crate) fn allocate_widths(_table_width: u16, specs: &[ColumnWidthSpec]) -> Vec<Constraint> {
+    specs
+        .iter()
+        .map(|spec| Constraint::Length(spec.width))
+        .collect()
 }
 
 #[cfg(test)]
@@ -118,54 +95,23 @@ mod tests {
     use ratatui::Terminal;
 
     #[test]
-    fn exact_fit_returns_base_widths() {
+    fn fixed_specs_return_length_constraints() {
         let specs = [
             ColumnWidthSpec::fixed(8),
-            ColumnWidthSpec::flexible(10, 20, 2),
+            ColumnWidthSpec::fixed(10),
             ColumnWidthSpec::fixed(6),
         ];
 
-        let widths = allocate_widths(26, &specs);
+        let widths = allocate_widths(80, &specs);
 
         assert_eq!(constraint_lengths(&widths), vec![8, 10, 6]);
     }
 
     #[test]
-    fn surplus_width_goes_to_flexible_columns_by_weight() {
-        let specs = [
-            ColumnWidthSpec::flexible(10, 20, 3),
-            ColumnWidthSpec::fixed(8),
-            ColumnWidthSpec::flexible(10, 20, 1),
-        ];
+    fn distributed_table_area_adds_edge_padding() {
+        let area = Rect::new(10, 5, 40, 8);
 
-        let widths = allocate_widths(36, &specs);
-
-        assert_eq!(constraint_lengths(&widths), vec![15, 8, 11]);
-    }
-
-    #[test]
-    fn capped_columns_stop_growing() {
-        let specs = [
-            ColumnWidthSpec::flexible(10, 12, 3),
-            ColumnWidthSpec::flexible(10, 18, 1),
-        ];
-
-        let widths = allocate_widths(60, &specs);
-
-        assert_eq!(constraint_lengths(&widths), vec![12, 18]);
-    }
-
-    #[test]
-    fn fixed_numeric_columns_do_not_expand() {
-        let specs = [
-            ColumnWidthSpec::flexible(10, 20, 1),
-            ColumnWidthSpec::fixed(8),
-            ColumnWidthSpec::fixed(8),
-        ];
-
-        let widths = allocate_widths(40, &specs);
-
-        assert_eq!(constraint_lengths(&widths), vec![20, 8, 8]);
+        assert_eq!(distributed_table_area(area), Rect::new(11, 5, 38, 8));
     }
 
     #[test]
@@ -175,8 +121,8 @@ mod tests {
     }
 
     #[test]
-    fn primary_table_flex_spreads_surplus_width_between_columns() {
-        let backend = TestBackend::new(20, 1);
+    fn distributed_table_flex_spreads_surplus_width_between_columns() {
+        let backend = TestBackend::new(22, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         let widths = [
             Constraint::Length(1),
@@ -187,8 +133,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let table =
-                    Table::new([Row::new(["A", "B", "C"])], widths).flex(PRIMARY_TABLE_FLEX);
-                frame.render_widget(table, frame.area());
+                    Table::new([Row::new(["A", "B", "C"])], widths).flex(DISTRIBUTED_TABLE_FLEX);
+                frame.render_widget(table, distributed_table_area(frame.area()));
             })
             .unwrap();
 
@@ -199,18 +145,20 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
+        let a_index = line.find('A').expect("first column should render");
         let b_index = line.find('B').expect("middle column should render");
+        let c_index = line.find('C').expect("last column should render");
 
         assert!(
-            line.starts_with('A'),
-            "first column should stay at start: {line}"
+            a_index == usize::from(TABLE_EDGE_PADDING),
+            "first column should start after edge padding: {line}"
         );
         assert!(
-            line.trim_end().ends_with('C'),
-            "last column should not leave trailing surplus: {line}"
+            c_index == line.len() - usize::from(TABLE_EDGE_PADDING) - 1,
+            "last column should end before right edge padding: {line}"
         );
         assert!(
-            (4..=15).contains(&b_index),
+            (4..=17).contains(&b_index),
             "middle column should receive balanced spacing: {line}"
         );
     }

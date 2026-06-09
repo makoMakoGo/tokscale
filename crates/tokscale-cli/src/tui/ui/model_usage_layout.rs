@@ -5,12 +5,11 @@ use super::table_layout::{
 };
 use super::widgets::MODEL_DISPLAY_MAX_WIDTH;
 
-const TEXT_EXTRA_WIDTH: u16 = 16;
-const SECONDARY_TEXT_EXTRA_WIDTH: u16 = 12;
-
 pub(crate) const MODEL_MIN_WIDTH: u16 = 5;
 pub(crate) const MODEL_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
 pub(crate) const WORKSPACE_MODEL_MAX_WIDTH: u16 = 56;
+pub(crate) const SOURCE_MAX_WIDTH: u16 = 40;
+pub(crate) const PROVIDER_MAX_WIDTH: u16 = 40;
 
 pub(crate) const DETAIL_PROVIDER_WIDTH: u16 = 8;
 pub(crate) const DETAIL_SOURCE_WIDTH: u16 = 12;
@@ -149,22 +148,11 @@ fn column_width_spec(
     model_width: u16,
     provider_width: u16,
     source_width: u16,
-    profile: ModelUsageLayoutProfile<'_>,
 ) -> ColumnWidthSpec {
     match column {
-        ModelUsageColumn::Model => {
-            ColumnWidthSpec::flexible(model_width, profile.model_max_width, 3)
-        }
-        ModelUsageColumn::Source => ColumnWidthSpec::flexible(
-            source_width,
-            source_width.saturating_add(TEXT_EXTRA_WIDTH),
-            2,
-        ),
-        ModelUsageColumn::Provider => ColumnWidthSpec::flexible(
-            provider_width,
-            provider_width.saturating_add(SECONDARY_TEXT_EXTRA_WIDTH),
-            1,
-        ),
+        ModelUsageColumn::Model => ColumnWidthSpec::fixed(model_width),
+        ModelUsageColumn::Source => ColumnWidthSpec::fixed(source_width),
+        ModelUsageColumn::Provider => ColumnWidthSpec::fixed(provider_width),
         ModelUsageColumn::Total => ColumnWidthSpec::fixed(DETAIL_TOTAL_WIDTH),
         ModelUsageColumn::Performance => ColumnWidthSpec::fixed(DETAIL_PERFORMANCE_WIDTH),
         ModelUsageColumn::Cost => ColumnWidthSpec::fixed(DETAIL_COST_WIDTH),
@@ -244,8 +232,8 @@ pub(crate) fn model_usage_table_layout(
     source_content_width: u16,
     profile: ModelUsageLayoutProfile<'_>,
 ) -> ModelUsageTableLayout {
-    let provider_width = provider_content_width.max(DETAIL_PROVIDER_WIDTH);
-    let source_width = source_content_width.max(DETAIL_SOURCE_WIDTH);
+    let provider_width = provider_content_width.clamp(DETAIL_PROVIDER_WIDTH, PROVIDER_MAX_WIDTH);
+    let source_width = source_content_width.clamp(DETAIL_SOURCE_WIDTH, SOURCE_MAX_WIDTH);
     let model_target_width = model_content_width.min(profile.model_max_width);
     let model_width = core_model_width(
         table_width,
@@ -269,9 +257,7 @@ pub(crate) fn model_usage_table_layout(
     if is_very_narrow || model_width < model_target_width {
         let specs: Vec<ColumnWidthSpec> = columns
             .iter()
-            .map(|column| {
-                column_width_spec(*column, model_width, provider_width, source_width, profile)
-            })
+            .map(|column| column_width_spec(*column, model_width, provider_width, source_width))
             .collect();
         let widths = allocate_widths(table_width, &specs);
         let model_width = allocated_model_width(&columns, &widths, model_width);
@@ -286,9 +272,7 @@ pub(crate) fn model_usage_table_layout(
 
     let specs: Vec<ColumnWidthSpec> = columns
         .iter()
-        .map(|column| {
-            column_width_spec(*column, model_width, provider_width, source_width, profile)
-        })
+        .map(|column| column_width_spec(*column, model_width, provider_width, source_width))
         .collect();
     let widths = allocate_widths(table_width, &specs);
     let model_width = allocated_model_width(&columns, &widths, model_width);
@@ -435,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn short_model_content_uses_spare_width_after_column_selection() {
+    fn short_model_content_does_not_grow_after_column_selection() {
         let layout = standard_layout(
             39,
             false,
@@ -458,8 +442,8 @@ mod tests {
                 ModelUsageColumn::Cost,
             ]
         );
-        assert_eq!(layout.model_width, 6);
-        assert_eq!(table_width(&layout), 39);
+        assert_eq!(layout.model_width, 5);
+        assert_eq!(table_width(&layout), 38);
     }
 
     #[test]

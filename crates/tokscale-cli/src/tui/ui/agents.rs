@@ -3,23 +3,21 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
-use super::table_layout::{allocate_widths, display_width, ColumnWidthSpec, PRIMARY_TABLE_FLEX};
+use super::table_layout::{
+    allocate_widths, display_width, distributed_table_area, ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
+};
 use super::widgets::{format_cost, format_tokens, get_client_display_name, truncate_display_width};
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::ClientFilter;
 
 const RANK_WIDTH: u16 = 3;
 const AGENT_MIN_WIDTH: u16 = 16;
-const AGENT_BASE_MAX_WIDTH: u16 = 22;
 const AGENT_MAX_WIDTH: u16 = 36;
 const SOURCE_MIN_WIDTH: u16 = 16;
-const SOURCE_BASE_MAX_WIDTH: u16 = 24;
 const SOURCE_MAX_WIDTH: u16 = 40;
 const TOKENS_WIDTH: u16 = 10;
 const COST_WIDTH: u16 = 10;
 const MSGS_WIDTH: u16 = 6;
-const SMALL_COLUMN_EXTRA_WIDTH: u16 = 2;
-const METRIC_EXTRA_WIDTH: u16 = 4;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -34,6 +32,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -121,7 +120,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .max()
         .unwrap_or(SOURCE_MIN_WIDTH);
     let widths = agents_widths(
-        inner.width,
+        table_area.width,
         is_narrow,
         is_very_narrow,
         agent_content_width,
@@ -193,10 +192,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .flex(PRIMARY_TABLE_FLEX)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if agents_len > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -224,71 +223,39 @@ fn agents_widths(
     source_content_width: u16,
 ) -> Vec<Constraint> {
     if is_very_narrow {
+        let agent_width = agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_MAX_WIDTH);
         return allocate_widths(
             table_width,
             &[
-                ColumnWidthSpec::flexible(
-                    agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_BASE_MAX_WIDTH),
-                    AGENT_MAX_WIDTH,
-                    3,
-                ),
-                ColumnWidthSpec::flexible(
-                    COST_WIDTH,
-                    COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
-                    1,
-                ),
+                ColumnWidthSpec::fixed(agent_width),
+                ColumnWidthSpec::fixed(COST_WIDTH),
             ],
         );
     }
 
     if is_narrow {
+        let agent_width = agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_MAX_WIDTH);
         return allocate_widths(
             table_width,
             &[
-                ColumnWidthSpec::flexible(
-                    agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_BASE_MAX_WIDTH),
-                    AGENT_MAX_WIDTH,
-                    3,
-                ),
-                ColumnWidthSpec::flexible(
-                    TOKENS_WIDTH,
-                    TOKENS_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
-                    1,
-                ),
-                ColumnWidthSpec::flexible(
-                    COST_WIDTH,
-                    COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
-                    1,
-                ),
+                ColumnWidthSpec::fixed(agent_width),
+                ColumnWidthSpec::fixed(TOKENS_WIDTH),
+                ColumnWidthSpec::fixed(COST_WIDTH),
             ],
         );
     }
 
+    let agent_width = agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_MAX_WIDTH);
+    let source_width = source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH);
     allocate_widths(
         table_width,
         &[
             ColumnWidthSpec::fixed(RANK_WIDTH),
-            ColumnWidthSpec::flexible(
-                agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_BASE_MAX_WIDTH),
-                AGENT_MAX_WIDTH,
-                3,
-            ),
-            ColumnWidthSpec::flexible(
-                source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_BASE_MAX_WIDTH),
-                SOURCE_MAX_WIDTH,
-                2,
-            ),
-            ColumnWidthSpec::flexible(
-                TOKENS_WIDTH,
-                TOKENS_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
-                1,
-            ),
-            ColumnWidthSpec::flexible(COST_WIDTH, COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH), 1),
-            ColumnWidthSpec::flexible(
-                MSGS_WIDTH,
-                MSGS_WIDTH.saturating_add(SMALL_COLUMN_EXTRA_WIDTH),
-                1,
-            ),
+            ColumnWidthSpec::fixed(agent_width),
+            ColumnWidthSpec::fixed(source_width),
+            ColumnWidthSpec::fixed(TOKENS_WIDTH),
+            ColumnWidthSpec::fixed(COST_WIDTH),
+            ColumnWidthSpec::fixed(MSGS_WIDTH),
         ],
     )
 }
@@ -329,7 +296,10 @@ fn client_labels(clients: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{agents_widths, get_empty_message};
+    use super::{
+        agents_widths, get_empty_message, AGENT_MAX_WIDTH, COST_WIDTH, MSGS_WIDTH,
+        SOURCE_MAX_WIDTH, TOKENS_WIDTH,
+    };
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
     use crate::ClientFilter;
@@ -381,14 +351,22 @@ mod tests {
     }
 
     #[test]
-    fn wide_agents_widths_share_spare_space_between_text_columns() {
+    fn wide_agents_widths_keep_content_columns_capped_and_metrics_fixed() {
         let widths = agents_widths(120, false, false, 22, 24);
 
         assert_eq!(length_at(&widths, 0), 3);
-        assert!(length_at(&widths, 1) > 22);
-        assert!(length_at(&widths, 2) > 24);
-        assert!(length_at(&widths, 3) <= 14);
-        assert!(length_at(&widths, 4) <= 14);
-        assert!(length_at(&widths, 5) <= 8);
+        assert_eq!(length_at(&widths, 1), 22);
+        assert_eq!(length_at(&widths, 2), 24);
+        assert_eq!(length_at(&widths, 3), TOKENS_WIDTH);
+        assert_eq!(length_at(&widths, 4), COST_WIDTH);
+        assert_eq!(length_at(&widths, 5), MSGS_WIDTH);
+    }
+
+    #[test]
+    fn wide_agents_widths_cap_long_text_columns() {
+        let widths = agents_widths(200, false, false, 80, 80);
+
+        assert_eq!(length_at(&widths, 1), AGENT_MAX_WIDTH);
+        assert_eq!(length_at(&widths, 2), SOURCE_MAX_WIDTH);
     }
 }

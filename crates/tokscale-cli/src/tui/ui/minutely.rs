@@ -4,22 +4,20 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
-use super::table_layout::{allocate_widths, display_width, ColumnWidthSpec, PRIMARY_TABLE_FLEX};
+use super::table_layout::{
+    allocate_widths, display_width, distributed_table_area, ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
+};
 use super::time_table::full_time_table_widths;
 use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, SortDirection, SortField};
 
 const COMPACT_TIME_WIDTH: u16 = 12;
-const COMPACT_TIME_MAX_WIDTH: u16 = 18;
 const COMPACT_SOURCE_MIN_WIDTH: u16 = 10;
 const COMPACT_SOURCE_MAX_WIDTH: u16 = 30;
-const COMPACT_SOURCE_EXTRA_WIDTH: u16 = 12;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
 const TOKENS_WIDTH: u16 = 10;
 const COST_WIDTH: u16 = 10;
-const SMALL_COLUMN_EXTRA_WIDTH: u16 = 2;
-const METRIC_EXTRA_WIDTH: u16 = 4;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -34,6 +32,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -249,7 +248,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let widths = minutely_widths(
-        inner.width,
+        table_area.width,
         is_very_narrow,
         is_narrow,
         has_turn_data,
@@ -258,10 +257,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .flex(PRIMARY_TABLE_FLEX)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if minutely_len > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -292,47 +291,26 @@ fn minutely_widths(
         return allocate_widths(
             table_width,
             &[
-                ColumnWidthSpec::flexible(COMPACT_TIME_WIDTH, COMPACT_TIME_MAX_WIDTH, 3),
-                ColumnWidthSpec::flexible(
-                    COST_WIDTH,
-                    COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
-                    1,
-                ),
+                ColumnWidthSpec::fixed(COMPACT_TIME_WIDTH),
+                ColumnWidthSpec::fixed(COST_WIDTH),
             ],
         );
     }
 
     if is_narrow {
+        let source_width =
+            source_content_width.clamp(COMPACT_SOURCE_MIN_WIDTH, COMPACT_SOURCE_MAX_WIDTH);
         let mut specs = vec![
-            ColumnWidthSpec::flexible(COMPACT_TIME_WIDTH, COMPACT_TIME_MAX_WIDTH, 1),
-            ColumnWidthSpec::flexible(
-                COMPACT_SOURCE_MIN_WIDTH,
-                source_content_width
-                    .clamp(COMPACT_SOURCE_MIN_WIDTH, COMPACT_SOURCE_MAX_WIDTH)
-                    .saturating_add(COMPACT_SOURCE_EXTRA_WIDTH)
-                    .min(COMPACT_SOURCE_MAX_WIDTH),
-                4,
-            ),
+            ColumnWidthSpec::fixed(COMPACT_TIME_WIDTH),
+            ColumnWidthSpec::fixed(source_width),
         ];
         if has_turn_data {
-            specs.push(ColumnWidthSpec::flexible(
-                TURN_WIDTH,
-                TURN_WIDTH.saturating_add(SMALL_COLUMN_EXTRA_WIDTH),
-                1,
-            ));
+            specs.push(ColumnWidthSpec::fixed(TURN_WIDTH));
         }
         specs.extend([
-            ColumnWidthSpec::flexible(
-                MSGS_WIDTH,
-                MSGS_WIDTH.saturating_add(SMALL_COLUMN_EXTRA_WIDTH),
-                1,
-            ),
-            ColumnWidthSpec::flexible(
-                TOKENS_WIDTH,
-                TOKENS_WIDTH.saturating_add(METRIC_EXTRA_WIDTH),
-                1,
-            ),
-            ColumnWidthSpec::flexible(COST_WIDTH, COST_WIDTH.saturating_add(METRIC_EXTRA_WIDTH), 1),
+            ColumnWidthSpec::fixed(MSGS_WIDTH),
+            ColumnWidthSpec::fixed(TOKENS_WIDTH),
+            ColumnWidthSpec::fixed(COST_WIDTH),
         ]);
 
         return allocate_widths(table_width, &specs);
@@ -375,12 +353,11 @@ mod tests {
     }
 
     #[test]
-    fn narrow_minutely_widths_expand_source_without_bloating_metrics() {
+    fn narrow_minutely_widths_use_source_content_without_bloating_metrics() {
         let widths = minutely_widths(100, false, true, true, 12);
 
-        assert!(length_at(&widths, 1) > COMPACT_SOURCE_MIN_WIDTH);
-        assert!(length_at(&widths, 1) <= COMPACT_SOURCE_MAX_WIDTH);
-        assert!(length_at(&widths, 4) <= TOKENS_WIDTH + METRIC_EXTRA_WIDTH);
-        assert!(length_at(&widths, 5) <= COST_WIDTH + METRIC_EXTRA_WIDTH);
+        assert_eq!(length_at(&widths, 1), 12);
+        assert_eq!(length_at(&widths, 4), TOKENS_WIDTH);
+        assert_eq!(length_at(&widths, 5), COST_WIDTH);
     }
 }
