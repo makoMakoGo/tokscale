@@ -293,8 +293,9 @@ fn allocated_model_width(
     columns
         .iter()
         .position(|column| *column == ModelUsageColumn::Model)
-        .and_then(|index| match widths[index] {
-            Constraint::Length(width) => Some(width),
+        .and_then(|index| widths.get(index))
+        .and_then(|constraint| match constraint {
+            Constraint::Length(width) => Some(*width),
             _ => None,
         })
         .unwrap_or(fallback)

@@ -116,7 +116,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(AGENT_MIN_WIDTH);
     let source_content_width = agents
         .iter()
-        .map(|agent| display_width(&client_labels(&agent.clients)))
+        .map(|agent| client_labels_display_width(&agent.clients))
         .max()
         .unwrap_or(SOURCE_MIN_WIDTH);
     let widths = agents_widths(
@@ -294,11 +294,22 @@ fn client_labels(clients: &str) -> String {
         .join(", ")
 }
 
+fn client_labels_display_width(clients: &str) -> u16 {
+    clients
+        .split(", ")
+        .enumerate()
+        .map(|(index, client)| {
+            let separator_width = if index == 0 { 0 } else { 2 };
+            display_width(&get_client_display_name(client)).saturating_add(separator_width)
+        })
+        .fold(0u16, u16::saturating_add)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        agents_widths, get_empty_message, AGENT_MAX_WIDTH, COST_WIDTH, MSGS_WIDTH,
-        SOURCE_MAX_WIDTH, TOKENS_WIDTH,
+        agents_widths, client_labels_display_width, get_empty_message, AGENT_MAX_WIDTH, COST_WIDTH,
+        MSGS_WIDTH, SOURCE_MAX_WIDTH, TOKENS_WIDTH,
     };
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
@@ -348,6 +359,14 @@ mod tests {
 
         assert!(message.contains("Only some sources record agent metadata"));
         assert!(message.contains("change sources"));
+    }
+
+    #[test]
+    fn client_labels_display_width_counts_rendered_labels_without_joining() {
+        assert_eq!(
+            client_labels_display_width("codex, opencode"),
+            super::display_width("Codex, OpenCode")
+        );
     }
 
     #[test]
