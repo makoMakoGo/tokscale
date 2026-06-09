@@ -4,9 +4,20 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
-use super::time_table::{display_width, full_time_table_widths};
+use super::table_layout::{
+    allocate_widths, display_width, distributed_table_area, ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
+};
+use super::time_table::full_time_table_widths;
 use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, SortDirection, SortField};
+
+const COMPACT_TIME_WIDTH: u16 = 12;
+const COMPACT_SOURCE_MIN_WIDTH: u16 = 10;
+const COMPACT_SOURCE_MAX_WIDTH: u16 = 30;
+const TURN_WIDTH: u16 = 6;
+const MSGS_WIDTH: u16 = 6;
+const TOKENS_WIDTH: u16 = 10;
+const COST_WIDTH: u16 = 10;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -21,6 +32,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -235,36 +247,20 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths = if is_very_narrow {
-        vec![Constraint::Percentage(60), Constraint::Percentage(40)]
-    } else if is_narrow && has_turn_data {
-        vec![
-            Constraint::Percentage(32),
-            Constraint::Percentage(18),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    } else if is_narrow {
-        vec![
-            Constraint::Percentage(32),
-            Constraint::Percentage(23),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    } else if has_turn_data {
-        full_time_table_widths(inner.width, true, source_content_width)
-    } else {
-        full_time_table_widths(inner.width, false, source_content_width)
-    };
+    let widths = minutely_widths(
+        table_area.width,
+        is_very_narrow,
+        is_narrow,
+        has_turn_data,
+        source_content_width,
+    );
 
     let table = Table::new(rows, widths)
         .header(header)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if minutely_len > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -284,6 +280,45 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn minutely_widths(
+    table_width: u16,
+    is_very_narrow: bool,
+    is_narrow: bool,
+    has_turn_data: bool,
+    source_content_width: u16,
+) -> Vec<Constraint> {
+    if is_very_narrow {
+        return allocate_widths(
+            table_width,
+            &[
+                ColumnWidthSpec::fixed(COMPACT_TIME_WIDTH),
+                ColumnWidthSpec::fixed(COST_WIDTH),
+            ],
+        );
+    }
+
+    if is_narrow {
+        let source_width =
+            source_content_width.clamp(COMPACT_SOURCE_MIN_WIDTH, COMPACT_SOURCE_MAX_WIDTH);
+        let mut specs = vec![
+            ColumnWidthSpec::fixed(COMPACT_TIME_WIDTH),
+            ColumnWidthSpec::fixed(source_width),
+        ];
+        if has_turn_data {
+            specs.push(ColumnWidthSpec::fixed(TURN_WIDTH));
+        }
+        specs.extend([
+            ColumnWidthSpec::fixed(MSGS_WIDTH),
+            ColumnWidthSpec::fixed(TOKENS_WIDTH),
+            ColumnWidthSpec::fixed(COST_WIDTH),
+        ]);
+
+        return allocate_widths(table_width, &specs);
+    }
+
+    full_time_table_widths(table_width, has_turn_data, source_content_width)
+}
+
 fn minutely_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
     let mut labels: Vec<String> = clients
         .map(|client| get_client_display_name(client))
@@ -295,6 +330,13 @@ fn minutely_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn length_at(widths: &[Constraint], index: usize) -> u16 {
+        match widths[index] {
+            Constraint::Length(width) => width,
+            other => panic!("expected Length at index {index}, got {other:?}"),
+        }
+    }
 
     #[test]
     fn minutely_source_text_formats_client_display_names() {
@@ -308,5 +350,14 @@ mod tests {
             minutely_source_text(clients.iter()),
             "Codex, OpenCode, unknown-client"
         );
+    }
+
+    #[test]
+    fn narrow_minutely_widths_use_source_content_without_bloating_metrics() {
+        let widths = minutely_widths(100, false, true, true, 12);
+
+        assert_eq!(length_at(&widths, 1), 12);
+        assert_eq!(length_at(&widths, 4), TOKENS_WIDTH);
+        assert_eq!(length_at(&widths, 5), COST_WIDTH);
     }
 }

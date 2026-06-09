@@ -5,13 +5,16 @@ use ratatui::widgets::{
 };
 
 use super::hourly_profile;
-use super::model_usage_layout::{choose_priority_columns, display_width};
+use super::table_layout::{
+    allocate_widths, choose_priority_columns, display_width, distributed_table_area, spaced_width,
+    ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
+};
 use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
-const TABLE_COLUMN_SPACING: u16 = 1;
 const HOUR_WIDTH: u16 = 7;
 const SOURCE_MIN_WIDTH: u16 = 12;
+const SOURCE_MAX_WIDTH: u16 = 40;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
@@ -47,15 +50,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn spaced_width(widths: &[u16]) -> u16 {
-    let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
-    widths
-        .iter()
-        .copied()
-        .fold(0u16, u16::saturating_add)
-        .saturating_add(spacing)
-}
-
 fn hourly_column_width(column: HourlyColumn, source_width: u16) -> u16 {
     match column {
         HourlyColumn::Hour => HOUR_WIDTH,
@@ -70,6 +64,10 @@ fn hourly_column_width(column: HourlyColumn, source_width: u16) -> u16 {
         HourlyColumn::Total => TOTAL_WIDTH,
         HourlyColumn::Cost => COST_WIDTH,
     }
+}
+
+fn hourly_column_spec(column: HourlyColumn, source_width: u16) -> ColumnWidthSpec {
+    ColumnWidthSpec::fixed(hourly_column_width(column, source_width))
 }
 
 fn hourly_layout_width(columns: &[HourlyColumn], source_width: u16) -> u16 {
@@ -115,7 +113,7 @@ fn hourly_table_layout(
         HourlyColumn::CacheRate,
     ]);
 
-    let source_width = source_content_width.max(SOURCE_MIN_WIDTH);
+    let source_width = source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH);
     let columns = choose_priority_columns(
         table_width,
         &required_columns,
@@ -124,10 +122,11 @@ fn hourly_table_layout(
         |candidate| hourly_layout_width(candidate, source_width),
     );
 
-    let widths = columns
+    let specs: Vec<ColumnWidthSpec> = columns
         .iter()
-        .map(|column| Constraint::Length(hourly_column_width(*column, source_width)))
+        .map(|column| hourly_column_spec(*column, source_width))
         .collect();
+    let widths = allocate_widths(table_width, &specs);
 
     HourlyTableLayout { columns, widths }
 }
@@ -178,6 +177,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -211,7 +211,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let striped_row_style = app.theme.striped_row_style();
     let now = Local::now().naive_local();
     let current_hour = now.date().and_hms_opt(now.hour(), 0, 0).unwrap_or(now);
-    let table_layout = hourly_table_layout(inner.width, has_turn_data, source_content_width);
+    let table_layout = hourly_table_layout(table_area.width, has_turn_data, source_content_width);
     let columns = table_layout.columns.clone();
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -351,9 +351,10 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if hourly_len > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -510,6 +511,18 @@ mod tests {
             HourlyColumn::Total
         );
         assert_eq!(layout.columns[layout.columns.len() - 1], HourlyColumn::Cost);
+    }
+
+    #[test]
+    fn hourly_layout_keeps_source_content_width_with_spare_width() {
+        let layout = hourly_table_layout(100, true, 16);
+        let source_index = layout
+            .columns
+            .iter()
+            .position(|column| *column == HourlyColumn::Source)
+            .expect("source column should fit");
+
+        assert_eq!(length_at(&layout.widths, source_index), 16);
     }
 
     #[test]

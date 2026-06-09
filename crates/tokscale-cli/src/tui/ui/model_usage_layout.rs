@@ -1,13 +1,15 @@
 use ratatui::prelude::Constraint;
-use unicode_width::UnicodeWidthStr;
 
+use super::table_layout::{
+    allocate_widths, choose_priority_columns, spaced_width, ColumnWidthSpec,
+};
 use super::widgets::MODEL_DISPLAY_MAX_WIDTH;
-
-const TABLE_COLUMN_SPACING: u16 = 1;
 
 pub(crate) const MODEL_MIN_WIDTH: u16 = 5;
 pub(crate) const MODEL_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
 pub(crate) const WORKSPACE_MODEL_MAX_WIDTH: u16 = 56;
+pub(crate) const SOURCE_MAX_WIDTH: u16 = 40;
+pub(crate) const PROVIDER_MAX_WIDTH: u16 = 40;
 
 pub(crate) const DETAIL_PROVIDER_WIDTH: u16 = 8;
 pub(crate) const DETAIL_SOURCE_WIDTH: u16 = 12;
@@ -95,10 +97,6 @@ pub(crate) struct ModelUsageTableLayout {
     pub(crate) density: ModelUsageTableDensity,
 }
 
-pub(crate) fn display_width(s: &str) -> u16 {
-    s.width().min(usize::from(u16::MAX)) as u16
-}
-
 fn clamped_content_width(content_width: u16, min: u16, max: u16) -> u16 {
     content_width.clamp(min, max)
 }
@@ -115,55 +113,17 @@ fn core_model_width(
         .required_columns
         .iter()
         .filter(|column| **column != ModelUsageColumn::Model)
-        .map(|column| column_width(*column, 0, provider_width, source_width))
+        .map(|column| column_base_width(*column, 0, provider_width, source_width))
         .fold(0u16, u16::saturating_add)
         .saturating_add(
-            TABLE_COLUMN_SPACING
+            super::table_layout::TABLE_COLUMN_SPACING
                 .saturating_mul(profile.required_columns.len().saturating_sub(1) as u16),
         );
 
     desired.min(table_width.saturating_sub(fixed_core_width))
 }
 
-fn spaced_width(widths: &[u16]) -> u16 {
-    let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
-    widths
-        .iter()
-        .copied()
-        .fold(0u16, u16::saturating_add)
-        .saturating_add(spacing)
-}
-
-pub(crate) fn choose_priority_columns<T, InsertAt, Width>(
-    table_width: u16,
-    required_columns: &[T],
-    optional_columns: &[T],
-    mut insert_at: InsertAt,
-    mut width: Width,
-) -> Vec<T>
-where
-    T: Copy,
-    InsertAt: FnMut(&[T], T) -> usize,
-    Width: FnMut(&[T]) -> u16,
-{
-    let mut columns = required_columns.to_vec();
-
-    for column in optional_columns {
-        let mut candidate = columns.clone();
-        let insert_at = insert_at(&candidate, *column).min(candidate.len());
-        candidate.insert(insert_at, *column);
-
-        if width(&candidate) <= table_width {
-            columns = candidate;
-        } else {
-            break;
-        }
-    }
-
-    columns
-}
-
-fn column_width(
+fn column_base_width(
     column: ModelUsageColumn,
     model_width: u16,
     provider_width: u16,
@@ -183,6 +143,30 @@ fn column_width(
     }
 }
 
+fn column_width_spec(
+    column: ModelUsageColumn,
+    model_width: u16,
+    provider_width: u16,
+    source_width: u16,
+) -> ColumnWidthSpec {
+    match column {
+        ModelUsageColumn::Model => ColumnWidthSpec::fixed(model_width),
+        ModelUsageColumn::Source => ColumnWidthSpec::fixed(source_width),
+        ModelUsageColumn::Provider => ColumnWidthSpec::fixed(provider_width),
+        ModelUsageColumn::Total => ColumnWidthSpec::fixed(DETAIL_TOTAL_WIDTH),
+        ModelUsageColumn::Performance => ColumnWidthSpec::fixed(DETAIL_PERFORMANCE_WIDTH),
+        ModelUsageColumn::Cost => ColumnWidthSpec::fixed(DETAIL_COST_WIDTH),
+        ModelUsageColumn::Messages => ColumnWidthSpec::fixed(DETAIL_MESSAGES_WIDTH),
+        ModelUsageColumn::Input | ModelUsageColumn::Output => {
+            ColumnWidthSpec::fixed(DETAIL_NUMERIC_WIDTH)
+        }
+        ModelUsageColumn::CacheRate => ColumnWidthSpec::fixed(DETAIL_NUMERIC_WIDTH),
+        ModelUsageColumn::CacheRead | ModelUsageColumn::CacheWrite => {
+            ColumnWidthSpec::fixed(DETAIL_NUMERIC_WIDTH)
+        }
+    }
+}
+
 fn layout_width(
     columns: &[ModelUsageColumn],
     model_width: u16,
@@ -191,7 +175,7 @@ fn layout_width(
 ) -> u16 {
     let widths: Vec<u16> = columns
         .iter()
-        .map(|column| column_width(*column, model_width, provider_width, source_width))
+        .map(|column| column_base_width(*column, model_width, provider_width, source_width))
         .collect();
 
     spaced_width(&widths)
@@ -248,8 +232,8 @@ pub(crate) fn model_usage_table_layout(
     source_content_width: u16,
     profile: ModelUsageLayoutProfile<'_>,
 ) -> ModelUsageTableLayout {
-    let provider_width = provider_content_width.max(DETAIL_PROVIDER_WIDTH);
-    let source_width = source_content_width.max(DETAIL_SOURCE_WIDTH);
+    let provider_width = provider_content_width.clamp(DETAIL_PROVIDER_WIDTH, PROVIDER_MAX_WIDTH);
+    let source_width = source_content_width.clamp(DETAIL_SOURCE_WIDTH, SOURCE_MAX_WIDTH);
     let model_target_width = model_content_width.min(profile.model_max_width);
     let model_width = core_model_width(
         table_width,
@@ -271,17 +255,12 @@ pub(crate) fn model_usage_table_layout(
     };
 
     if is_very_narrow || model_width < model_target_width {
-        let widths = columns
+        let specs: Vec<ColumnWidthSpec> = columns
             .iter()
-            .map(|column| {
-                Constraint::Length(column_width(
-                    *column,
-                    model_width,
-                    provider_width,
-                    source_width,
-                ))
-            })
+            .map(|column| column_width_spec(*column, model_width, provider_width, source_width))
             .collect();
+        let widths = allocate_widths(table_width, &specs);
+        let model_width = allocated_model_width(&columns, &widths, model_width);
 
         return ModelUsageTableLayout {
             columns,
@@ -291,17 +270,12 @@ pub(crate) fn model_usage_table_layout(
         };
     }
 
-    let widths = columns
+    let specs: Vec<ColumnWidthSpec> = columns
         .iter()
-        .map(|column| {
-            Constraint::Length(column_width(
-                *column,
-                model_width,
-                provider_width,
-                source_width,
-            ))
-        })
+        .map(|column| column_width_spec(*column, model_width, provider_width, source_width))
         .collect();
+    let widths = allocate_widths(table_width, &specs);
+    let model_width = allocated_model_width(&columns, &widths, model_width);
 
     ModelUsageTableLayout {
         density: density_for_columns(&columns),
@@ -309,6 +283,22 @@ pub(crate) fn model_usage_table_layout(
         widths,
         model_width: model_width as usize,
     }
+}
+
+fn allocated_model_width(
+    columns: &[ModelUsageColumn],
+    widths: &[Constraint],
+    fallback: u16,
+) -> u16 {
+    columns
+        .iter()
+        .position(|column| *column == ModelUsageColumn::Model)
+        .and_then(|index| widths.get(index))
+        .and_then(|constraint| match constraint {
+            Constraint::Length(width) => Some(*width),
+            _ => None,
+        })
+        .unwrap_or(fallback)
 }
 
 #[cfg(test)]
@@ -430,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn short_model_content_does_not_reserve_extra_width_before_source() {
+    fn short_model_content_does_not_grow_after_column_selection() {
         let layout = standard_layout(
             39,
             false,

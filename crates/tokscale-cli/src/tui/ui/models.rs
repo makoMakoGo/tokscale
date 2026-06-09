@@ -4,11 +4,11 @@ use ratatui::widgets::{
 };
 
 use super::model_usage_layout::{
-    display_width, model_usage_table_layout, ModelUsageColumn as ModelsColumn,
-    ModelUsageLayoutProfile, ModelUsageTableDensity as ModelsTableDensity,
-    ModelUsageTableLayout as ModelsTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
-    MODEL_MIN_WIDTH,
+    model_usage_table_layout, ModelUsageColumn as ModelsColumn, ModelUsageLayoutProfile,
+    ModelUsageTableDensity as ModelsTableDensity, ModelUsageTableLayout as ModelsTableLayout,
+    DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH,
 };
+use super::table_layout::{display_width, distributed_table_area, DISTRIBUTED_TABLE_FLEX};
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
     get_provider_display_name, truncate_model_display_name_to,
@@ -120,6 +120,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -183,7 +184,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(DETAIL_SOURCE_WIDTH);
     let visible_models = &models[start..end];
     let table_layout = models_table_layout(
-        inner.width,
+        table_area.width,
         is_very_narrow,
         model_content_width,
         provider_content_width,
@@ -285,9 +286,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if models_len > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -309,7 +311,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::model_usage_layout::{MODEL_MAX_WIDTH, WORKSPACE_MODEL_MAX_WIDTH};
+    use super::super::model_usage_layout::{
+        MODEL_MAX_WIDTH, PROVIDER_MAX_WIDTH, SOURCE_MAX_WIDTH, WORKSPACE_MODEL_MAX_WIDTH,
+    };
     use super::*;
 
     fn length_at(widths: &[Constraint], index: usize) -> u16 {
@@ -396,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_model_layout_uses_full_provider_and_source_widths() {
+    fn wide_model_layout_keeps_provider_and_source_content_widths() {
         let base = model_layout(140, 28, 42, 34);
         let wide = model_layout(180, 28, 42, 34);
 
@@ -405,13 +409,13 @@ mod tests {
         assert!(wide.columns.contains(&ModelsColumn::Source));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
         assert_eq!(length_at(&base.widths, 1), 34);
-        assert_eq!(length_at(&base.widths, 2), 42);
+        assert_eq!(length_at(&base.widths, 2), PROVIDER_MAX_WIDTH);
         assert_eq!(length_at(&wide.widths, 1), 34);
-        assert_eq!(length_at(&wide.widths, 2), 42);
+        assert_eq!(length_at(&wide.widths, 2), PROVIDER_MAX_WIDTH);
     }
 
     #[test]
-    fn wide_workspace_model_layout_uses_full_provider_and_source_widths() {
+    fn wide_workspace_model_layout_keeps_provider_and_source_content_widths() {
         let base = workspace_model_layout(160, 28, 42, 34);
         let wide = workspace_model_layout(200, 28, 42, 34);
 
@@ -420,9 +424,9 @@ mod tests {
         assert!(wide.columns.contains(&ModelsColumn::Source));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
         assert_eq!(length_at(&base.widths, 1), 34);
-        assert_eq!(length_at(&base.widths, 2), 42);
+        assert_eq!(length_at(&base.widths, 2), PROVIDER_MAX_WIDTH);
         assert_eq!(length_at(&wide.widths, 1), 34);
-        assert_eq!(length_at(&wide.widths, 2), 42);
+        assert_eq!(length_at(&wide.widths, 2), PROVIDER_MAX_WIDTH);
     }
 
     #[test]
@@ -439,8 +443,8 @@ mod tests {
 
     #[test]
     fn full_model_list_controls_layout_width_not_visible_page() {
-        let visible_only = model_layout(180, 28, 28, 26);
-        let full_dataset = model_layout(180, 28, 56, 26);
+        let visible_only = model_layout(165, 28, 28, 26);
+        let full_dataset = model_layout(165, 28, 56, 26);
 
         assert!(visible_only.columns.contains(&ModelsColumn::Performance));
         assert!(!full_dataset.columns.contains(&ModelsColumn::Performance));
@@ -453,8 +457,8 @@ mod tests {
 
         assert_eq!(length_at(&layout.widths, 0), MODEL_MAX_WIDTH);
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
-        assert_eq!(length_at(&layout.widths, 1), 120);
-        assert_eq!(length_at(&layout.widths, 2), 120);
+        assert_eq!(length_at(&layout.widths, 1), SOURCE_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 2), PROVIDER_MAX_WIDTH);
     }
 
     #[test]
@@ -466,12 +470,12 @@ mod tests {
     }
 
     #[test]
-    fn source_column_stops_growing_after_visible_content_fits() {
+    fn source_column_stays_at_content_width_until_cap() {
         let fit = model_layout(220, 28, 56, 26);
         let wider = model_layout(260, 28, 56, 26);
 
         assert_eq!(length_at(&fit.widths, 1), 26);
-        assert_eq!(length_at(&wider.widths, 1), 26);
+        assert_eq!(length_at(&wider.widths, 1), length_at(&fit.widths, 1));
         assert_eq!(length_at(&wider.widths, 2), length_at(&fit.widths, 2));
     }
 
@@ -504,12 +508,18 @@ mod tests {
     }
 
     #[test]
-    fn leftover_width_is_not_forced_into_text_columns_after_content_fits() {
+    fn leftover_width_does_not_expand_content_columns() {
         let fit = model_layout(180, 28, 32, 26);
         let wider = model_layout(260, 28, 32, 26);
 
-        assert_eq!(length_at(&wider.widths, 0), length_at(&fit.widths, 0));
-        assert_eq!(length_at(&wider.widths, 1), length_at(&fit.widths, 1));
-        assert_eq!(length_at(&wider.widths, 2), length_at(&fit.widths, 2));
+        assert_eq!(wider.columns, fit.columns);
+        assert_eq!(
+            (0..wider.widths.len())
+                .map(|index| length_at(&wider.widths, index))
+                .collect::<Vec<_>>(),
+            (0..fit.widths.len())
+                .map(|index| length_at(&fit.widths, index))
+                .collect::<Vec<_>>()
+        );
     }
 }

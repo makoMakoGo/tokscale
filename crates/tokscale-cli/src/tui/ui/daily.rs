@@ -5,10 +5,14 @@ use ratatui::widgets::{
 };
 
 use super::model_usage_layout::{
-    display_width, model_usage_table_layout, ModelUsageColumn as DailyDetailColumn,
-    ModelUsageLayoutProfile, ModelUsageTableDensity as DailyDetailTableDensity,
+    model_usage_table_layout, ModelUsageColumn as DailyDetailColumn, ModelUsageLayoutProfile,
+    ModelUsageTableDensity as DailyDetailTableDensity,
     ModelUsageTableLayout as DailyDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
     MODEL_MIN_WIDTH,
+};
+use super::table_layout::{
+    allocate_widths, display_width, distributed_table_area, spaced_width, ColumnWidthSpec,
+    DISTRIBUTED_TABLE_FLEX,
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
@@ -16,7 +20,6 @@ use super::widgets::{
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
-const TABLE_COLUMN_SPACING: u16 = 1;
 const DATE_WIDTH: u16 = 7;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
@@ -65,11 +68,6 @@ struct DailyTableLayout {
     density: DailyTableDensity,
 }
 
-fn spaced_width(widths: &[u16]) -> u16 {
-    let spacing = TABLE_COLUMN_SPACING.saturating_mul(widths.len().saturating_sub(1) as u16);
-    widths.iter().copied().sum::<u16>().saturating_add(spacing)
-}
-
 fn daily_detail_min_width(has_turn_data: bool) -> u16 {
     let mut widths = vec![
         DATE_WIDTH,
@@ -105,6 +103,43 @@ fn daily_full_min_width(has_turn_data: bool) -> u16 {
     spaced_width(&widths)
 }
 
+fn daily_column_width(column: DailyColumn) -> u16 {
+    match column {
+        DailyColumn::Date => DATE_WIDTH,
+        DailyColumn::Turn => TURN_WIDTH,
+        DailyColumn::Messages => MSGS_WIDTH,
+        DailyColumn::Input
+        | DailyColumn::Output
+        | DailyColumn::CacheRead
+        | DailyColumn::CacheWrite
+        | DailyColumn::Total => NUMERIC_WIDTH,
+        DailyColumn::CacheRate => CACHE_RATE_WIDTH,
+        DailyColumn::Cost => COST_WIDTH,
+    }
+}
+
+fn daily_column_spec(column: DailyColumn) -> ColumnWidthSpec {
+    ColumnWidthSpec::fixed(daily_column_width(column))
+}
+
+fn daily_layout_from_columns(
+    table_width: u16,
+    columns: Vec<DailyColumn>,
+    density: DailyTableDensity,
+) -> DailyTableLayout {
+    let specs: Vec<ColumnWidthSpec> = columns
+        .iter()
+        .map(|column| daily_column_spec(*column))
+        .collect();
+    let widths = allocate_widths(table_width, &specs);
+
+    DailyTableLayout {
+        columns,
+        widths,
+        density,
+    }
+}
+
 fn daily_table_layout(
     table_width: u16,
     is_narrow: bool,
@@ -112,23 +147,17 @@ fn daily_table_layout(
     has_turn_data: bool,
 ) -> DailyTableLayout {
     if is_very_narrow {
-        return DailyTableLayout {
-            columns: vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost],
-            widths: vec![
-                Constraint::Length(DATE_WIDTH),
-                Constraint::Length(NUMERIC_WIDTH),
-                Constraint::Length(COST_WIDTH),
-            ],
-            density: DailyTableDensity::VeryCompact,
-        };
+        return daily_layout_from_columns(
+            table_width,
+            vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost],
+            DailyTableDensity::VeryCompact,
+        );
     }
 
     if !is_narrow && table_width >= daily_full_min_width(has_turn_data) {
         let mut columns = vec![DailyColumn::Date];
-        let mut widths = vec![Constraint::Length(DATE_WIDTH)];
         if has_turn_data {
             columns.push(DailyColumn::Turn);
-            widths.push(Constraint::Length(TURN_WIDTH));
         }
         columns.extend([
             DailyColumn::Messages,
@@ -140,30 +169,14 @@ fn daily_table_layout(
             DailyColumn::Total,
             DailyColumn::Cost,
         ]);
-        widths.extend([
-            Constraint::Length(MSGS_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(CACHE_RATE_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(COST_WIDTH),
-        ]);
 
-        return DailyTableLayout {
-            columns,
-            widths,
-            density: DailyTableDensity::Full,
-        };
+        return daily_layout_from_columns(table_width, columns, DailyTableDensity::Full);
     }
 
     if !is_narrow && table_width >= daily_detail_min_width(has_turn_data) {
         let mut columns = vec![DailyColumn::Date];
-        let mut widths = vec![Constraint::Length(DATE_WIDTH)];
         if has_turn_data {
             columns.push(DailyColumn::Turn);
-            widths.push(Constraint::Length(TURN_WIDTH));
         }
         columns.extend([
             DailyColumn::Messages,
@@ -172,39 +185,17 @@ fn daily_table_layout(
             DailyColumn::Total,
             DailyColumn::Cost,
         ]);
-        widths.extend([
-            Constraint::Length(MSGS_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(NUMERIC_WIDTH),
-            Constraint::Length(COST_WIDTH),
-        ]);
 
-        return DailyTableLayout {
-            columns,
-            widths,
-            density: DailyTableDensity::Detail,
-        };
+        return daily_layout_from_columns(table_width, columns, DailyTableDensity::Detail);
     }
 
     let mut columns = vec![DailyColumn::Date];
-    let mut widths = vec![Constraint::Length(DATE_WIDTH)];
     if has_turn_data {
         columns.push(DailyColumn::Turn);
-        widths.push(Constraint::Length(TURN_WIDTH));
     }
     columns.extend([DailyColumn::Messages, DailyColumn::Total, DailyColumn::Cost]);
-    widths.extend([
-        Constraint::Length(MSGS_WIDTH),
-        Constraint::Length(NUMERIC_WIDTH),
-        Constraint::Length(COST_WIDTH),
-    ]);
 
-    DailyTableLayout {
-        columns,
-        widths,
-        density: DailyTableDensity::Core,
-    }
+    daily_layout_from_columns(table_width, columns, DailyTableDensity::Core)
 }
 
 fn daily_detail_table_layout(
@@ -304,6 +295,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -333,7 +325,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let current_row_style = app.theme.current_row_style();
     let striped_row_style = app.theme.striped_row_style();
     let today = Local::now().date_naive();
-    let table_layout = daily_table_layout(inner.width, is_narrow, is_very_narrow, has_turn_data);
+    let table_layout =
+        daily_table_layout(table_area.width, is_narrow, is_very_narrow, has_turn_data);
     let columns = table_layout.columns.clone();
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -471,9 +464,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if daily_len > data_rows_shown {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -511,6 +505,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.background));
 
     let inner = block.inner(area);
+    let table_area = distributed_table_area(inner);
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -567,7 +562,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .max()
         .unwrap_or(DETAIL_SOURCE_WIDTH);
     let table_layout = daily_detail_table_layout(
-        inner.width,
+        table_area.width,
         is_very_narrow,
         model_content_width,
         provider_content_width,
@@ -679,9 +674,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
-    frame.render_widget(table, inner);
+    frame.render_widget(table, table_area);
 
     if detail_len > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -765,6 +761,13 @@ mod tests {
             .join("\n")
     }
 
+    fn length_at(widths: &[Constraint], index: usize) -> u16 {
+        match widths[index] {
+            Constraint::Length(width) => width,
+            other => panic!("expected Length at index {index}, got {other:?}"),
+        }
+    }
+
     #[test]
     fn narrow_daily_layout_keeps_date_tokens_and_cost_without_cache_columns() {
         let layout = daily_table_layout(74, true, false, false);
@@ -782,7 +785,7 @@ mod tests {
         assert!(!layout.columns.contains(&DailyColumn::CacheRead));
         assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
         assert!(!layout.columns.contains(&DailyColumn::CacheRate));
-        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
+        assert_eq!(length_at(&layout.widths, 0), DATE_WIDTH);
     }
 
     #[test]
@@ -832,7 +835,7 @@ mod tests {
             layout.columns,
             vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost]
         );
-        assert_eq!(layout.widths[0], Constraint::Length(DATE_WIDTH));
+        assert_eq!(length_at(&layout.widths, 0), DATE_WIDTH);
     }
 
     #[test]
@@ -881,7 +884,7 @@ mod tests {
 
     #[test]
     fn daily_detail_layout_adds_messages_before_token_details() {
-        let layout = daily_detail_table_layout(154, false, 80, 56, 40);
+        let layout = daily_detail_table_layout(146, false, 80, 56, 40);
 
         assert_eq!(
             layout.columns,

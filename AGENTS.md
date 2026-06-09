@@ -34,6 +34,8 @@ Keep this file concise and constraint-focused. Do not add hardcoded module count
 ## Git Identity & Merge Discipline
 
 - Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
+- For fork/personal branches, the expected identity is the fork contributor identity from the active Git account/global config. Do not set repo-local `user.name` or `user.email` to an upstream maintainer identity.
+- If `.git/config` contains stale repo-local `user.name` or `user.email` values that override the expected contributor identity, remove or correct them before committing.
 - Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
 - When merging pull requests through `gh`, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy.
 - Before merging, verify the squash commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
