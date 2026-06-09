@@ -2549,7 +2549,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Omp, omp_count);
     messages.extend(omp_msgs);
 
-    // Parse Kimi wire.jsonl files in parallel
+    // Parse Kimi usage records in parallel
     let kimi_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
@@ -4115,31 +4115,40 @@ mod tests {
         assert!(messages[0].cost > 0.0);
     }
 
-    fn write_kimi_repeated_status_fixture(source_home: &std::path::Path) {
-        let session_dir = source_home.join(".kimi/sessions/group-1/session-1");
+    fn write_kimi_code_usage_fixture(source_home: &std::path::Path) {
+        let kimi_home = source_home.join(".kimi-code");
+        std::fs::create_dir_all(&kimi_home).unwrap();
+        std::fs::write(
+            kimi_home.join("config.toml"),
+            r#"[models."openai-pro/gpt-5.5"]
+provider = "openai-pro"
+model = "gpt-5.5"
+"#,
+        )
+        .unwrap();
+
+        let session_dir = kimi_home.join("sessions/wd-project/session_1/agents/main");
         std::fs::create_dir_all(&session_dir).unwrap();
         std::fs::write(
             session_dir.join("wire.jsonl"),
-            r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 10, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-progressive"}}}
-{"timestamp": 1770983420.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 20, "output": 2, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-progressive"}}}
-{"timestamp": 1770983430.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 5, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-distinct"}}}
-{"timestamp": 1770983440.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 7, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}}}}
-{"timestamp": 1770983450.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 8, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}}}}"#,
+            r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"context.append_loop_event","time":1770983410000,"event":{"type":"step.end","usage":{"inputOther":10,"output":1,"inputCacheRead":0,"inputCacheCreation":0}}}
+{"type":"usage.record","time":1770983410000,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":10,"output":1,"inputCacheRead":0,"inputCacheCreation":0}}
+{"type":"usage.record","time":1770983420000,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":20,"output":2,"inputCacheRead":5,"inputCacheCreation":0}}"#,
         )
         .unwrap();
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_parse_all_messages_with_pricing_kimi_deduplicates_repeated_status_updates() {
+    fn test_parse_all_messages_with_pricing_kimi_code_usage_records() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", cache_home.path());
 
         {
-            write_kimi_repeated_status_fixture(source_home.path());
+            write_kimi_code_usage_fixture(source_home.path());
 
             let messages = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
@@ -4148,9 +4157,12 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(messages.len(), 4);
-            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 40);
-            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 5);
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0].provider_id, "openai-pro");
+            assert_eq!(messages[0].model_id, "gpt-5.5");
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 30);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 3);
+            assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 5);
         }
 
         match original_home {
@@ -4161,14 +4173,14 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_parse_local_clients_kimi_deduplicates_repeated_status_updates() {
+    fn test_parse_local_clients_kimi_code_usage_records() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", cache_home.path());
 
         {
-            write_kimi_repeated_status_fixture(source_home.path());
+            write_kimi_code_usage_fixture(source_home.path());
 
             let parsed = parse_local_clients(LocalParseOptions {
                 home_dir: Some(source_home.path().to_str().unwrap().to_string()),
@@ -4181,10 +4193,13 @@ mod tests {
             })
             .unwrap();
 
-            assert_eq!(parsed.counts.get(ClientId::Kimi), 4);
-            assert_eq!(parsed.messages.len(), 4);
-            assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 40);
-            assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 5);
+            assert_eq!(parsed.counts.get(ClientId::Kimi), 2);
+            assert_eq!(parsed.messages.len(), 2);
+            assert_eq!(parsed.messages[0].provider_id, "openai-pro");
+            assert_eq!(parsed.messages[0].model_id, "gpt-5.5");
+            assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 30);
+            assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 3);
+            assert_eq!(parsed.messages.iter().map(|m| m.cache_read).sum::<i64>(), 5);
         }
 
         match original_home {

@@ -1,7 +1,7 @@
-//! Kimi CLI session parser
+//! Kimi session parser
 //!
-//! Parses wire.jsonl files from ~/.kimi/sessions/[GROUP_ID]/[SESSION_UUID]/wire.jsonl
-//! Token data comes from StatusUpdate messages in the wire protocol.
+//! Parses Kimi Code `usage.record` entries from
+//! `~/.kimi-code/sessions/<WORKDIR_KEY>/<SESSION_ID>/agents/<AGENT_ID>/wire.jsonl`.
 
 use super::utils::file_modified_timestamp_ms;
 use super::UnifiedMessage;
@@ -9,32 +9,13 @@ use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Top-level wire.jsonl line: either metadata or a timestamped message
-#[derive(Debug, Deserialize)]
-struct WireLine {
-    timestamp: Option<f64>,
-    message: Option<WireMessage>,
-    #[serde(rename = "type")]
-    line_type: Option<String>,
-}
+const CLIENT_ID: &str = "kimi";
+const UNRESOLVED_PROVIDER: &str = "unresolved";
 
 #[derive(Debug, Deserialize)]
-struct WireMessage {
-    #[serde(rename = "type")]
-    msg_type: String,
-    payload: Option<StatusPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StatusPayload {
-    token_usage: Option<TokenUsage>,
-    #[allow(dead_code)]
-    message_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TokenUsage {
     input_other: Option<i64>,
     output: Option<i64>,
@@ -42,58 +23,35 @@ struct TokenUsage {
     input_cache_creation: Option<i64>,
 }
 
-/// Default model name when config.json is not available
-const DEFAULT_MODEL: &str = "kimi-for-coding";
-const DEFAULT_PROVIDER: &str = "moonshot";
-
-/// Read model name from ~/.kimi/config.json if available
-fn read_model_from_config(wire_path: &Path) -> String {
-    // Navigate from wire.jsonl up to ~/.kimi/config.json
-    // wire.jsonl is at ~/.kimi/sessions/GROUP/UUID/wire.jsonl
-    if let Some(sessions_dir) = wire_path
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-    {
-        if let Some(kimi_dir) = sessions_dir.parent() {
-            let config_path = kimi_dir.join("config.json");
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(bytes) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(model) = bytes.get("model").and_then(|v| v.as_str()) {
-                        if !model.is_empty() {
-                            return model.to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
-    DEFAULT_MODEL.to_string()
+#[derive(Debug, Deserialize)]
+struct WireLine {
+    #[serde(rename = "type")]
+    line_type: Option<String>,
+    time: Option<i64>,
+    model: Option<String>,
+    usage: Option<TokenUsage>,
 }
 
-/// Extract session ID from the wire.jsonl path
-/// Path format: ~/.kimi/sessions/GROUP_ID/SESSION_UUID/wire.jsonl
-fn extract_session_id(path: &Path) -> String {
-    path.parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
+#[derive(Debug, Clone)]
+struct ModelAlias {
+    provider: String,
+    model: String,
 }
 
-/// Parse a Kimi CLI wire.jsonl file
+/// Parse a Kimi Code wire.jsonl file.
 pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
 
-    let model = read_model_from_config(path);
+    let aliases = read_model_aliases(path);
     let session_id = extract_session_id(path);
+    let agent = extract_agent_id(path);
+    let fallback_timestamp = file_modified_timestamp_ms(path);
 
     let reader = BufReader::new(file);
-    let mut messages: Vec<UnifiedMessage> = Vec::new();
-    let mut keyed_indices: HashMap<String, usize> = HashMap::new();
+    let mut messages = Vec::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -112,280 +70,223 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
             Err(_) => continue,
         };
 
-        // Skip metadata lines (first line: {"type": "metadata", ...})
-        if wire_line.line_type.as_deref() == Some("metadata") {
+        if wire_line.line_type.as_deref() != Some("usage.record") {
             continue;
         }
 
-        let message = match wire_line.message {
-            Some(m) => m,
+        let raw_model = match wire_line.model.as_deref().map(str::trim) {
+            Some(model) if !model.is_empty() => model,
+            _ => continue,
+        };
+
+        let usage = match wire_line.usage {
+            Some(usage) => usage,
             None => continue,
         };
 
-        // Only process StatusUpdate messages
-        if message.msg_type != "StatusUpdate" {
-            continue;
-        }
+        let input = usage.input_other.unwrap_or(0).max(0);
+        let output = usage.output.unwrap_or(0).max(0);
+        let cache_read = usage.input_cache_read.unwrap_or(0).max(0);
+        let cache_write = usage.input_cache_creation.unwrap_or(0).max(0);
 
-        let payload = match message.payload {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let token_usage = match payload.token_usage {
-            Some(u) => u,
-            None => continue,
-        };
-
-        // Convert Unix seconds (float) to milliseconds, fallback to file mtime
-        let timestamp_ms = wire_line
-            .timestamp
-            .map(|ts| (ts * 1000.0) as i64)
-            .unwrap_or_else(|| file_modified_timestamp_ms(path));
-
-        let input = token_usage.input_other.unwrap_or(0).max(0);
-        let output = token_usage.output.unwrap_or(0).max(0);
-        let cache_read = token_usage.input_cache_read.unwrap_or(0).max(0);
-        let cache_write = token_usage.input_cache_creation.unwrap_or(0).max(0);
-
-        // Skip entries with zero tokens
         if input + output + cache_read + cache_write == 0 {
             continue;
         }
 
-        let dedup_key = payload.message_id;
-
-        let message = UnifiedMessage::new_with_dedup(
-            "kimi",
-            model.clone(),
-            DEFAULT_PROVIDER,
+        let (provider_id, model_id) = resolve_model(raw_model, &aliases);
+        messages.push(UnifiedMessage::new_with_agent(
+            CLIENT_ID,
+            model_id,
+            provider_id,
             session_id.clone(),
-            timestamp_ms,
+            wire_line.time.unwrap_or(fallback_timestamp),
             TokenBreakdown {
                 input,
                 output,
                 cache_read,
                 cache_write,
-                // Kimi wire protocol does not expose reasoning tokens; all reasoning included in output
                 reasoning: 0,
             },
             0.0,
-            dedup_key,
-        );
-        push_or_replace_status_update(&mut messages, &mut keyed_indices, message);
+            agent.clone(),
+        ));
     }
 
     messages
 }
 
-fn should_replace_status_update(existing: &UnifiedMessage, candidate: &UnifiedMessage) -> bool {
-    let existing_total = existing.tokens.total();
-    let candidate_total = candidate.tokens.total();
-
-    candidate_total > existing_total
-        || (candidate_total == existing_total && candidate.timestamp >= existing.timestamp)
-}
-
-fn push_or_replace_status_update(
-    messages: &mut Vec<UnifiedMessage>,
-    keyed_indices: &mut HashMap<String, usize>,
-    message: UnifiedMessage,
-) {
-    let dedup_key = message
-        .dedup_key
-        .as_ref()
-        .filter(|key| !key.is_empty())
-        .cloned();
-
-    let Some(dedup_key) = dedup_key else {
-        messages.push(message);
-        return;
-    };
-
-    if let Some(index) = keyed_indices.get(&dedup_key).copied() {
-        if should_replace_status_update(&messages[index], &message) {
-            messages[index] = message;
-        }
-        return;
+fn resolve_model(raw_model: &str, aliases: &HashMap<String, ModelAlias>) -> (String, String) {
+    if let Some(alias) = aliases.get(raw_model) {
+        return (alias.provider.clone(), alias.model.clone());
     }
 
-    let index = messages.len();
-    messages.push(message);
-    keyed_indices.insert(dedup_key, index);
+    (UNRESOLVED_PROVIDER.to_string(), raw_model.to_string())
+}
+
+fn read_model_aliases(wire_path: &Path) -> HashMap<String, ModelAlias> {
+    let Some(home) = kimi_home_from_wire_path(wire_path) else {
+        return HashMap::new();
+    };
+
+    let config_path = home.join("config.toml");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(_) => return HashMap::new(),
+    };
+
+    let value = match content.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let Some(models) = value.get("models").and_then(toml::Value::as_table) else {
+        return HashMap::new();
+    };
+
+    models
+        .iter()
+        .filter_map(|(alias, value)| {
+            let table = value.as_table()?;
+            let provider = table.get("provider")?.as_str()?.trim();
+            let model = table.get("model")?.as_str()?.trim();
+            if provider.is_empty() || model.is_empty() {
+                return None;
+            }
+            Some((
+                alias.clone(),
+                ModelAlias {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn kimi_home_from_wire_path(path: &Path) -> Option<PathBuf> {
+    let sessions_dir = path.parent()?.parent()?.parent()?.parent()?.parent()?;
+
+    if sessions_dir.file_name().and_then(|name| name.to_str()) != Some("sessions") {
+        return None;
+    }
+
+    sessions_dir.parent().map(Path::to_path_buf)
+}
+
+fn extract_session_id(path: &Path) -> String {
+    path.parent()
+        .and_then(|agent_dir| agent_dir.parent())
+        .and_then(|agents_dir| agents_dir.parent())
+        .and_then(|session_dir| session_dir.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn extract_agent_id(path: &Path) -> Option<String> {
+    path.parent()
+        .and_then(|agent_dir| agent_dir.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::TempDir;
 
-    fn create_test_file(content: &str) -> NamedTempFile {
-        let mut file = NamedTempFile::new().unwrap();
+    fn write_wire(home: &Path, content: &str) -> PathBuf {
+        let wire = home
+            .join("sessions")
+            .join("wd_project_abc123")
+            .join("session_123")
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        let mut file = std::fs::File::create(&wire).unwrap();
         file.write_all(content.as_bytes()).unwrap();
-        file.flush().unwrap();
-        file
+        wire
+    }
+
+    fn write_config(home: &Path, content: &str) {
+        std::fs::write(home.join("config.toml"), content).unwrap();
     }
 
     #[test]
-    fn test_parse_kimi_valid_status_update() {
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1770983426.420942, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 1562, "output": 2463, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "chatcmpl-xxx"}}}"#;
-        let file = create_test_file(content);
+    fn parses_usage_record_with_config_model_mapping() {
+        let dir = TempDir::new().unwrap();
+        write_config(
+            dir.path(),
+            r#"
+[models."openai-pro/gpt-5.5"]
+provider = "openai-pro"
+model = "gpt-5.5"
+"#,
+        );
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":19591,"output":39,"inputCacheRead":1024,"inputCacheCreation":0}}"#,
+        );
 
-        let messages = parse_kimi_file(file.path());
+        let messages = parse_kimi_file(&wire);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "kimi");
-        assert_eq!(messages[0].model_id, "kimi-for-coding");
-        assert_eq!(messages[0].provider_id, "moonshot");
-        assert_eq!(messages[0].tokens.input, 1562);
-        assert_eq!(messages[0].tokens.output, 2463);
-        assert_eq!(messages[0].tokens.cache_read, 0);
-        assert_eq!(messages[0].tokens.cache_write, 0);
-        // Timestamp: 1770983426.420942 * 1000 = 1770983426420
-        assert_eq!(messages[0].timestamp, 1770983426420);
-    }
-
-    #[test]
-    fn test_parse_kimi_multi_turn() {
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1770983400.0, "message": {"type": "TurnBegin", "payload": {"user_input": "hello"}}}
-{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 100, "output": 200, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-1"}}}
-{"timestamp": 1770983420.0, "message": {"type": "TurnBegin", "payload": {"user_input": "world"}}}
-{"timestamp": 1770983430.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 300, "output": 400, "input_cache_read": 50, "input_cache_creation": 0}, "message_id": "msg-2"}}}"#;
-        let file = create_test_file(content);
-
-        let messages = parse_kimi_file(file.path());
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].tokens.input, 100);
-        assert_eq!(messages[0].tokens.output, 200);
-        assert_eq!(messages[1].tokens.input, 300);
-        assert_eq!(messages[1].tokens.output, 400);
-        assert_eq!(messages[1].tokens.cache_read, 50);
-    }
-
-    #[test]
-    fn test_parse_kimi_skip_non_status_update() {
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1770983400.0, "message": {"type": "TurnBegin", "payload": {"user_input": "hello"}}}
-{"timestamp": 1770983410.0, "message": {"type": "ContentPart", "payload": {"type": "text", "text": "response"}}}
-{"timestamp": 1770983420.0, "message": {"type": "ToolCall", "payload": {"type": "function", "id": "tool_1", "function": {"name": "ReadFile", "arguments": "{}"}}}}"#;
-        let file = create_test_file(content);
-
-        let messages = parse_kimi_file(file.path());
-
-        assert!(messages.is_empty());
-    }
-
-    #[test]
-    fn test_parse_kimi_empty_file() {
-        let file = create_test_file("");
-
-        let messages = parse_kimi_file(file.path());
-
-        assert!(messages.is_empty());
-    }
-
-    #[test]
-    fn test_parse_kimi_tool_call_multi_step() {
-        // Simulates a tool-call scenario with multiple StatusUpdate messages in one turn
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1770983400.0, "message": {"type": "TurnBegin", "payload": {"user_input": "read file"}}}
-{"timestamp": 1770983405.0, "message": {"type": "StepBegin", "payload": {"n": 1}}}
-{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 500, "output": 100, "input_cache_read": 200, "input_cache_creation": 0}, "message_id": "msg-step1"}}}
-{"timestamp": 1770983415.0, "message": {"type": "ToolCall", "payload": {"type": "function", "id": "tool_1", "function": {"name": "ReadFile", "arguments": "{}"}}}}
-{"timestamp": 1770983420.0, "message": {"type": "StepBegin", "payload": {"n": 2}}}
-{"timestamp": 1770983425.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 800, "output": 300, "input_cache_read": 400, "input_cache_creation": 100}, "message_id": "msg-step2"}}}"#;
-        let file = create_test_file(content);
-
-        let messages = parse_kimi_file(file.path());
-
-        assert_eq!(messages.len(), 2);
-        // Step 1
-        assert_eq!(messages[0].tokens.input, 500);
-        assert_eq!(messages[0].tokens.output, 100);
-        assert_eq!(messages[0].tokens.cache_read, 200);
-        assert_eq!(messages[0].tokens.cache_write, 0);
-        // Step 2
-        assert_eq!(messages[1].tokens.input, 800);
-        assert_eq!(messages[1].tokens.output, 300);
-        assert_eq!(messages[1].tokens.cache_read, 400);
-        assert_eq!(messages[1].tokens.cache_write, 100);
-    }
-
-    #[test]
-    fn test_parse_kimi_with_cache_tokens() {
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1771123711.615454, "message": {"type": "StatusUpdate", "payload": {"context_usage": 0.024, "token_usage": {"input_other": 1508, "output": 205, "input_cache_read": 4864, "input_cache_creation": 0}, "message_id": "chatcmpl-2tNw2mhUNfdPMP0Jyie7gDhD"}}}"#;
-        let file = create_test_file(content);
-
-        let messages = parse_kimi_file(file.path());
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].tokens.input, 1508);
-        assert_eq!(messages[0].tokens.output, 205);
-        assert_eq!(messages[0].tokens.cache_read, 4864);
+        assert_eq!(messages[0].provider_id, "openai-pro");
+        assert_eq!(messages[0].model_id, "gpt-5.5");
+        assert_eq!(messages[0].session_id, "session_123");
+        assert_eq!(messages[0].agent.as_deref(), Some("main"));
+        assert_eq!(messages[0].timestamp, 1780942009099);
+        assert_eq!(messages[0].tokens.input, 19591);
+        assert_eq!(messages[0].tokens.output, 39);
+        assert_eq!(messages[0].tokens.cache_read, 1024);
         assert_eq!(messages[0].tokens.cache_write, 0);
     }
 
     #[test]
-    fn test_parse_kimi_deduplicates_repeated_status_updates_by_message_id() {
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 100, "output": 10, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-progressive"}}}
-{"timestamp": 1770983420.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 120, "output": 30, "input_cache_read": 5, "input_cache_creation": 0}, "message_id": "msg-progressive"}}}"#;
-        let file = create_test_file(content);
+    fn ignores_step_end_to_avoid_double_counting_usage_record() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"context.append_loop_event","time":1780942009099,"event":{"type":"step.end","usage":{"inputOther":19591,"output":39,"inputCacheRead":1024,"inputCacheCreation":0}}}
+{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":19591,"output":39,"inputCacheRead":1024,"inputCacheCreation":0}}"#,
+        );
 
-        let messages = parse_kimi_file(file.path());
+        let messages = parse_kimi_file(&wire);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].dedup_key.as_deref(), Some("msg-progressive"));
-        assert_eq!(messages[0].tokens.input, 120);
-        assert_eq!(messages[0].tokens.output, 30);
-        assert_eq!(messages[0].tokens.cache_read, 5);
-        assert_eq!(messages[0].timestamp, 1770983420000);
+        assert_eq!(messages[0].tokens.total(), 20654);
     }
 
     #[test]
-    fn test_parse_kimi_keeps_distinct_and_missing_message_ids_separate() {
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 10, "output": 1, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-1"}}}
-{"timestamp": 1770983420.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 20, "output": 2, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-2"}}}
-{"timestamp": 1770983430.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 30, "output": 3, "input_cache_read": 0, "input_cache_creation": 0}}}}
-{"timestamp": 1770983440.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 40, "output": 4, "input_cache_read": 0, "input_cache_creation": 0}}}}"#;
-        let file = create_test_file(content);
+    fn keeps_raw_model_visible_when_config_mapping_is_missing() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}"#,
+        );
 
-        let messages = parse_kimi_file(file.path());
+        let messages = parse_kimi_file(&wire);
 
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].dedup_key.as_deref(), Some("msg-1"));
-        assert_eq!(messages[1].dedup_key.as_deref(), Some("msg-2"));
-        assert!(messages[2].dedup_key.is_none());
-        assert!(messages[3].dedup_key.is_none());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "unresolved");
+        assert_eq!(messages[0].model_id, "openai-pro/gpt-5.5");
     }
 
     #[test]
-    fn test_parse_kimi_skips_zero_token_entries() {
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 0, "output": 0, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-empty"}}}"#;
-        let file = create_test_file(content);
+    fn skips_zero_token_usage_records() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009099,"model":"gpt-5.5","usage":{"inputOther":0,"output":0,"inputCacheRead":0,"inputCacheCreation":0}}"#,
+        );
 
-        let messages = parse_kimi_file(file.path());
+        let messages = parse_kimi_file(&wire);
 
         assert!(messages.is_empty());
-    }
-
-    #[test]
-    fn test_parse_kimi_malformed_lines() {
-        let content = r#"{"type": "metadata", "protocol_version": "1.3"}
-not valid json at all
-{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 100, "output": 200, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "msg-1"}}}"#;
-        let file = create_test_file(content);
-
-        let messages = parse_kimi_file(file.path());
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].tokens.input, 100);
     }
 }

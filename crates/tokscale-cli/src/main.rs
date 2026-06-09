@@ -3623,7 +3623,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     ClientId::Copilot => "Copilot CLI",
                     ClientId::Gemini => "Gemini CLI",
                     ClientId::Cursor => "Cursor IDE",
-                    ClientId::Kimi => "Kimi CLI",
+                    ClientId::Kimi => "Kimi",
                     _ => client_ui::display_name(client),
                 }
                 .to_string();

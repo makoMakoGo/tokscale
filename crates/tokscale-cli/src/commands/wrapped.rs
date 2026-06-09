@@ -1443,7 +1443,7 @@ fn client_display_name(client: &str) -> Option<&'static str> {
         "hermes" => Some("Hermes Agent"),
         "pi" => Some("Pi"),
         "omp" => Some("OMP"),
-        "kimi" => Some("Kimi CLI"),
+        "kimi" => Some("Kimi"),
         "qwen" => Some("Qwen CLI"),
         "roocode" => Some("Roo Code"),
         "kilocode" => Some("Kilo"),
@@ -1479,7 +1479,7 @@ fn client_logo_url(client_name: &str) -> Option<&'static str> {
         "Pi" => Some("https://tokscale.ai/assets/logos/pi.png"),
         // OMP has no dedicated logo asset yet; keep id/display handling separate.
         "OMP" => Some("https://tokscale.ai/assets/logos/pi.png"),
-        "Kimi CLI" => Some("https://tokscale.ai/assets/logos/kimi.png"),
+        "Kimi" => Some("https://tokscale.ai/assets/logos/kimi.png"),
         "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
         "Roo Code" => Some("https://tokscale.ai/assets/logos/roocode.png"),
         "Kilo" => Some("https://tokscale.ai/assets/logos/kilocode.png"),

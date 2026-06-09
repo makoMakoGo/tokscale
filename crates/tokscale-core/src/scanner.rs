@@ -1465,10 +1465,10 @@ mod tests {
     }
 
     fn setup_mock_kimi_dir(base: &std::path::Path) {
-        let kimi_session = base.join(".kimi/sessions/group1/session-uuid-1");
+        let kimi_session = base.join(".kimi-code/sessions/wd-project/session-uuid-1/agents/main");
         fs::create_dir_all(&kimi_session).unwrap();
         let mut file = File::create(kimi_session.join("wire.jsonl")).unwrap();
-        file.write_all(b"{\"type\": \"metadata\", \"protocol_version\": \"1.3\"}\n")
+        file.write_all(b"{\"type\":\"metadata\",\"protocol_version\":\"1.5\"}\n")
             .unwrap();
     }
 

@@ -58,12 +58,24 @@ struct Membership {
     level: Option<String>,
 }
 
+fn kimi_code_home() -> std::path::PathBuf {
+    if let Some(home) = std::env::var_os("KIMI_CODE_HOME") {
+        if !home.is_empty() {
+            return std::path::PathBuf::from(home);
+        }
+    }
+
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".kimi-code")
+}
+
+fn credentials_path() -> std::path::PathBuf {
+    kimi_code_home().join("credentials").join("kimi-code.json")
+}
+
 fn read_credentials() -> Result<Credentials> {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path = home
-        .join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json");
+    let path = credentials_path();
     if !path.exists() {
         anyhow::bail!("No Kimi credentials found. Run 'kimi' to log in.");
     }
@@ -72,11 +84,7 @@ fn read_credentials() -> Result<Credentials> {
 }
 
 fn save_credentials(access_token: &str, refresh_token: &str, expires_in: i64) {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path = home
-        .join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json");
+    let path = credentials_path();
     let expires_at = chrono::Utc::now().timestamp() as f64 + expires_in as f64;
     let json = serde_json::json!({
         "access_token": access_token,
@@ -158,11 +166,7 @@ fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> 
 }
 
 pub fn has_credentials() -> bool {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json")
-        .exists()
+    credentials_path().exists()
 }
 
 pub fn fetch() -> Result<UsageOutput> {

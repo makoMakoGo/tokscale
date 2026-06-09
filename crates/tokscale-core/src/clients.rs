@@ -267,8 +267,8 @@ define_clients!(
     },
     Kimi = 10 => {
         id: "kimi",
-        root: PathRoot::Home,
-        relative: ".kimi/sessions",
+        root: PathRoot::EnvVar { var: "KIMI_CODE_HOME", fallback_relative: ".kimi-code" },
+        relative: "sessions",
         pattern: "wire.jsonl",
         headless: false,
         parse_local: true,
