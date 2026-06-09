@@ -109,7 +109,7 @@ jobs:
           PY
           echo "✅ Updated Cargo.toml workspace version"
 
-          cargo update --workspace --offline
+          cargo update --workspace
           echo "✅ Updated Cargo.lock workspace package versions"
           
           # Verify all versions are updated

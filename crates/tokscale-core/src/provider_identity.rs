@@ -19,6 +19,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "fireworks" | "fireworks_ai" => "fireworks_ai",
         "google" | "gemini" => "google",
         "openai" | "openai_codex" => "openai",
+        "github_copilot" => "github-copilot",
         s if s == "opencode" || s.starts_with("opencode_") => "opencode",
         "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
@@ -550,5 +551,29 @@ mod tests {
         assert!(!matches_provider_hint("openai/gpt-4", None));
         assert!(!matches_provider_hint("openai/gpt-4", Some("")));
         assert!(!matches_provider_hint("openai/gpt-4", Some("unknown")));
+    }
+
+    #[test]
+    fn test_gjc_unknown_provider_passthrough() {
+        // gjc's common providers ARE known and canonicalize as usual.
+        assert_eq!(canonical_provider("anthropic"), Some("anthropic".into()));
+        assert_eq!(canonical_provider("openai"), Some("openai".into()));
+        assert_eq!(canonical_provider("openai-codex"), Some("openai".into()));
+        assert_eq!(canonical_provider("google"), Some("google".into()));
+        assert_eq!(
+            canonical_provider("github-copilot"),
+            Some("github-copilot".into())
+        );
+        assert_eq!(
+            canonical_provider("github_copilot"),
+            Some("github-copilot".into())
+        );
+
+        // A gjc provider value that looks like a model fragment (contains
+        // digits) or a placeholder is NOT treated as a provider: canonical_provider
+        // yields None so the aggregator keeps the raw value verbatim rather than
+        // misattributing it. This guards the unknown-provider passthrough path.
+        assert_eq!(canonical_provider("gjc-model-4o"), None);
+        assert_eq!(canonical_provider("<unset>"), None);
     }
 }

@@ -1542,7 +1542,7 @@ mod tests {
             .unwrap();
         assert_eq!(clients[pi_index + 1], ClientId::Omp);
         assert_eq!(clients[pi_index + 2], ClientId::Kimi);
-        assert_eq!(clients.last(), Some(&ClientId::Cline));
+        assert_eq!(clients.last(), Some(&ClientId::Gjc));
     }
 
     #[test]
@@ -1652,6 +1652,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), 'i');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), 'y');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), 'n');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gjc), 'g');
     }
 
     #[test]

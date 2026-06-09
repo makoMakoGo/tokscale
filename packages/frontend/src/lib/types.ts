@@ -26,6 +26,7 @@ export const SUPPORTED_CLIENT_TYPES = [
   "trae",
   "warp",
   "cline",
+  "gjc",
 ] as const;
 
 export type CcMirrorClientType = `cc-mirror/${string}`;

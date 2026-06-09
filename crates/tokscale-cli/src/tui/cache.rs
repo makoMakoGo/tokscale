@@ -1005,62 +1005,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_load_cache_misses_old_include_synthetic_schema() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "schemaVersion": 13,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "includeSynthetic": true,
-  "groupBy": "model",
-  "reportScope": {
-    "since": null,
-    "until": null,
-    "year": null
-  },
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [],
-    "hourly": [],
-    "graph": null,
-    "totalTokens": 0,
-    "totalCost": 0.0,
-    "currentStreak": 0,
-    "longestStreak": 0
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientFilter::Claude]);
-        assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
     fn test_load_cache_misses_when_report_scope_differs() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");

@@ -423,6 +423,18 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Gjc = 27 => {
+        id: "gjc",
+        root: PathRoot::EnvVar {
+            var: "GJC_CODING_AGENT_DIR",
+            fallback_relative: ".gjc/agent",
+        },
+        relative: "sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -475,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 27);
+        assert_eq!(ClientId::COUNT, 28);
     }
 
     #[test]
@@ -724,6 +736,34 @@ mod tests {
                 fallback_relative: ".codex",
             }
         );
+    }
+
+    #[test]
+    fn test_gjc_data_dir_path() {
+        let _guard = env_lock().lock().unwrap();
+        let var = "GJC_CODING_AGENT_DIR";
+        let previous = std::env::var(var).ok();
+        // Env unset (cleared): resolves under home/.gjc/agent/sessions.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            ClientId::Gjc.data().resolve_path("/tmp/home"),
+            "/tmp/home/.gjc/agent/sessions"
+        );
+        assert_eq!(ClientId::Gjc.data().pattern, "*.jsonl");
+        assert!(ClientId::Gjc.data().parse_local);
+        assert!(ClientId::Gjc.data().submit_default);
+        assert_eq!(ClientId::from_str("gjc"), Some(ClientId::Gjc));
+
+        // Env set but env roots disabled: falls back to home, ignoring env.
+        unsafe { std::env::set_var(var, "/tmp/custom-gjc") };
+        assert_eq!(
+            ClientId::Gjc
+                .data()
+                .resolve_path_with_env_strategy("/tmp/home", false),
+            "/tmp/home/.gjc/agent/sessions"
+        );
+
+        restore_env(var, previous);
     }
 
     #[test]

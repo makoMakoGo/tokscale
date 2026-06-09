@@ -845,6 +845,7 @@ pub enum ClientFilter {
     Trae,
     Warp,
     Cline,
+    Gjc,
 }
 
 impl ClientFilter {
@@ -880,6 +881,7 @@ impl ClientFilter {
             Self::Trae => "trae",
             Self::Warp => "warp",
             Self::Cline => "cline",
+            Self::Gjc => "gjc",
         }
     }
 
@@ -917,6 +919,7 @@ impl ClientFilter {
             Self::Trae => Some(ClientId::Trae),
             Self::Warp => Some(ClientId::Warp),
             Self::Cline => Some(ClientId::Cline),
+            Self::Gjc => Some(ClientId::Gjc),
         }
     }
 
@@ -952,6 +955,7 @@ impl ClientFilter {
             ClientId::Trae => Self::Trae,
             ClientId::Warp => Self::Warp,
             ClientId::Cline => Self::Cline,
+            ClientId::Gjc => Self::Gjc,
         }
     }
 
@@ -1046,6 +1050,8 @@ pub struct ClientFlags {
     pub warp: bool,
     #[arg(long, hide = true)]
     pub cline: bool,
+    #[arg(long, hide = true)]
+    pub gjc: bool,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -1101,7 +1107,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 26] = [
+    let legacy: [(bool, ClientFilter); 27] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1128,6 +1134,7 @@ fn build_client_filter_with_defaults(
         (flags.trae, ClientFilter::Trae),
         (flags.warp, ClientFilter::Warp),
         (flags.cline, ClientFilter::Cline),
+        (flags.gjc, ClientFilter::Gjc),
     ];
 
     let mut legacy_used: Vec<&'static str> = Vec::new();
@@ -3973,6 +3980,8 @@ struct TsTokenContributionData {
     contributions: Vec<TsDailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     time_metrics: Option<TsTimeMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_servers: Option<Vec<String>>,
 }
 
 fn to_ts_token_contribution_data(
@@ -4064,6 +4073,14 @@ fn to_ts_token_contribution_data(
             max_concurrent_sessions: tm.max_concurrent_sessions,
             session_count: tm.session_count,
         }),
+        mcp_servers: {
+            let servers = tokscale_core::mcp::discover_mcp_server_names(None);
+            if servers.is_empty() {
+                None
+            } else {
+                Some(servers)
+            }
+        },
     }
 }
 
@@ -5834,6 +5851,7 @@ mod tests {
             trae: true,
             warp: true,
             cline: true,
+            gjc: true,
             ..ClientFlags::default()
         };
         let result = build_client_filter_with_defaults(flags, &[]).unwrap();
@@ -5866,6 +5884,7 @@ mod tests {
             "trae",
             "warp",
             "cline",
+            "gjc",
         ];
 
         let expected_len = required.len();
@@ -5970,6 +5989,20 @@ mod tests {
                 filter
             );
         }
+    }
+
+    #[test]
+    fn test_client_filter_gjc_round_trip() {
+        use tokscale_core::ClientId;
+        // gjc parses as the canonical lowercase id and round-trips through
+        // both the ClientId<->ClientFilter conversions and the id string.
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
+        assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
+        assert_eq!(
+            ClientFilter::from_client_id(ClientId::Gjc),
+            ClientFilter::Gjc
+        );
+        assert_eq!(ClientFilter::Gjc.as_filter_str(), ClientId::Gjc.as_str());
     }
 
     #[test]
