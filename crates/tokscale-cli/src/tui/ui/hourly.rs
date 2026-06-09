@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDateTime, Timelike};
+use chrono::{Local, NaiveDate, NaiveDateTime, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
@@ -10,7 +10,7 @@ use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_clie
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
 const TABLE_COLUMN_SPACING: u16 = 1;
-const HOUR_WIDTH: u16 = 11;
+const HOUR_WIDTH: u16 = 7;
 const SOURCE_MIN_WIDTH: u16 = 12;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
@@ -158,7 +158,11 @@ fn hourly_column_sort_field(column: HourlyColumn) -> Option<SortField> {
 }
 
 fn format_hour_label(datetime: NaiveDateTime) -> String {
-    datetime.format("%m-%d %H:00").to_string()
+    datetime.format("%H:00").to_string()
+}
+
+fn format_date_separator(date: NaiveDate) -> String {
+    date.format("%m/%d").to_string()
 }
 
 fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -177,7 +181,6 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
-    app.set_max_visible_items(visible_height);
 
     let hourly = app.get_sorted_hourly();
     if hourly.is_empty() {
@@ -243,82 +246,106 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let hourly_len = hourly.len();
     let start = scroll_offset.min(hourly_len);
-    let end = (start + visible_height).min(hourly_len);
 
     if start >= hourly_len {
         return;
     }
 
-    let rows: Vec<Row> = hourly[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, hour)| {
-            let idx = i + start;
-            let is_selected = idx == selected_index;
-            let is_striped = idx % 2 == 1;
-            let is_current = hour.datetime == current_hour;
+    let separator_style = Style::default()
+        .fg(theme_accent)
+        .bg(Color::Rgb(24, 28, 36))
+        .add_modifier(Modifier::BOLD);
 
-            let clients_str = hourly_source_text(hour.clients.iter());
-            let hour_label = format_hour_label(hour.datetime);
-            let hour_style = if is_current {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().add_modifier(Modifier::BOLD)
-            };
-            let turn_str = if hour.turn_count > 0 {
-                hour.turn_count.to_string()
-            } else {
-                "\u{2014}".to_string()
-            };
+    let mut rows: Vec<Row> = Vec::with_capacity(visible_height.saturating_add(1));
+    let mut lines_used = 0usize;
+    let mut prev_date: Option<NaiveDate> = None;
+    let mut data_idx = start;
 
-            let cell_for_column = |column: HourlyColumn| -> Cell {
-                match column {
-                    HourlyColumn::Hour => Cell::from(hour_label.clone()).style(hour_style),
-                    HourlyColumn::Source => Cell::from(clients_str.clone()),
-                    HourlyColumn::Turn => Cell::from(turn_str.clone()),
-                    HourlyColumn::Messages => Cell::from(hour.message_count.to_string()),
-                    HourlyColumn::Input => {
-                        Cell::from(format_tokens(hour.tokens.input)).style(metric_input_style)
-                    }
-                    HourlyColumn::Output => {
-                        Cell::from(format_tokens(hour.tokens.output)).style(metric_output_style)
-                    }
-                    HourlyColumn::CacheRead => Cell::from(format_tokens(hour.tokens.cache_read))
-                        .style(metric_cache_read_style),
-                    HourlyColumn::CacheWrite => Cell::from(format_tokens(hour.tokens.cache_write))
-                        .style(metric_cache_write_style),
-                    HourlyColumn::CacheRate => Cell::from(format_cache_hit_rate(
-                        hour.tokens.cache_read,
-                        hour.tokens.input,
-                        hour.tokens.cache_write,
-                    ))
-                    .style(Style::default().fg(Color::Cyan)),
-                    HourlyColumn::Total => Cell::from(format_tokens(hour.tokens.total())),
-                    HourlyColumn::Cost => {
-                        Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green))
-                    }
+    while data_idx < hourly_len && lines_used < visible_height {
+        let hour = hourly[data_idx];
+        let row_date = hour.datetime.date();
+
+        if prev_date != Some(row_date) && lines_used + 1 < visible_height {
+            let mut separator_cells = Vec::with_capacity(columns.len());
+            separator_cells.push(Cell::from(format_date_separator(row_date)));
+            separator_cells.extend((1..columns.len()).map(|_| Cell::from("")));
+            rows.push(Row::new(separator_cells).style(separator_style).height(1));
+            lines_used += 1;
+        }
+        prev_date = Some(row_date);
+
+        let idx = data_idx;
+        let is_selected = idx == selected_index;
+        let is_striped = idx % 2 == 1;
+        let is_current = hour.datetime == current_hour;
+
+        let clients_str = hourly_source_text(hour.clients.iter());
+        let hour_label = format_hour_label(hour.datetime);
+        let hour_style = if is_current {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        let turn_str = if hour.turn_count > 0 {
+            hour.turn_count.to_string()
+        } else {
+            "\u{2014}".to_string()
+        };
+
+        let cell_for_column = |column: HourlyColumn| -> Cell {
+            match column {
+                HourlyColumn::Hour => Cell::from(hour_label.clone()).style(hour_style),
+                HourlyColumn::Source => Cell::from(clients_str.clone()),
+                HourlyColumn::Turn => Cell::from(turn_str.clone()),
+                HourlyColumn::Messages => Cell::from(hour.message_count.to_string()),
+                HourlyColumn::Input => {
+                    Cell::from(format_tokens(hour.tokens.input)).style(metric_input_style)
                 }
-            };
-            let cells: Vec<Cell> = columns
-                .iter()
-                .map(|column| cell_for_column(*column))
-                .collect();
+                HourlyColumn::Output => {
+                    Cell::from(format_tokens(hour.tokens.output)).style(metric_output_style)
+                }
+                HourlyColumn::CacheRead => {
+                    Cell::from(format_tokens(hour.tokens.cache_read)).style(metric_cache_read_style)
+                }
+                HourlyColumn::CacheWrite => Cell::from(format_tokens(hour.tokens.cache_write))
+                    .style(metric_cache_write_style),
+                HourlyColumn::CacheRate => Cell::from(format_cache_hit_rate(
+                    hour.tokens.cache_read,
+                    hour.tokens.input,
+                    hour.tokens.cache_write,
+                ))
+                .style(Style::default().fg(Color::Cyan)),
+                HourlyColumn::Total => Cell::from(format_tokens(hour.tokens.total())),
+                HourlyColumn::Cost => {
+                    Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green))
+                }
+            }
+        };
+        let cells: Vec<Cell> = columns
+            .iter()
+            .map(|column| cell_for_column(*column))
+            .collect();
 
-            let row_style = if is_selected {
-                Style::default().bg(theme_selection)
-            } else if is_current {
-                current_row_style
-            } else if is_striped {
-                striped_row_style
-            } else {
-                Style::default()
-            };
+        let row_style = if is_selected {
+            Style::default().bg(theme_selection)
+        } else if is_current {
+            current_row_style
+        } else if is_striped {
+            striped_row_style
+        } else {
+            Style::default()
+        };
 
-            Row::new(cells).style(row_style).height(1)
-        })
-        .collect();
+        rows.push(Row::new(cells).style(row_style).height(1));
+        lines_used += 1;
+        data_idx += 1;
+    }
+
+    let data_rows_shown = data_idx - start;
+    drop(hourly);
+    app.set_max_visible_items(data_rows_shown.max(1));
 
     let widths = table_layout.widths;
 
@@ -357,12 +384,77 @@ fn hourly_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::{Tab, TuiConfig};
+    use crate::tui::data::{HourlyUsage, TokenBreakdown};
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn length_at(widths: &[Constraint], index: usize) -> u16 {
         match widths[index] {
             Constraint::Length(width) => width,
             other => panic!("expected Length at index {index}, got {other:?}"),
         }
+    }
+
+    fn hour(date: NaiveDate, h: u32) -> HourlyUsage {
+        let mut clients = BTreeSet::new();
+        clients.insert("claude".to_string());
+        HourlyUsage {
+            datetime: date.and_hms_opt(h, 0, 0).unwrap(),
+            tokens: TokenBreakdown::default(),
+            cost: 1.0,
+            clients,
+            models: BTreeMap::new(),
+            message_count: 5,
+            turn_count: 2,
+        }
+    }
+
+    fn make_hourly_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.terminal_width = width;
+        app.current_tab = Tab::Hourly;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        let newer = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
+        let older = NaiveDate::from_ymd_opt(2026, 5, 28).unwrap();
+        app.data.hourly = vec![
+            hour(newer, 14),
+            hour(newer, 13),
+            hour(newer, 12),
+            hour(older, 23),
+            hour(older, 22),
+        ];
+        app
+    }
+
+    fn render_lines(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
     }
 
     #[test]
@@ -425,6 +517,52 @@ mod tests {
         let datetime =
             NaiveDateTime::parse_from_str("2026-03-02 18:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
 
-        assert_eq!(format_hour_label(datetime), "03-02 18:00");
+        assert_eq!(format_hour_label(datetime), "18:00");
+    }
+
+    #[test]
+    fn date_separator_uses_month_slash_day() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
+
+        assert_eq!(format_date_separator(date), "03/02");
+    }
+
+    #[test]
+    fn compact_time_with_day_separators() {
+        let mut app = make_hourly_app(120);
+        let body = render_lines(&mut app, 120, 20).join("\n");
+
+        assert!(body.contains("14:00"), "expected HH:00 bucket\n{body}");
+        assert!(
+            !body.contains("05-29 14:00"),
+            "date must not repeat on every hourly row\n{body}"
+        );
+        assert!(body.contains("05/29"), "expected 05/29 separator\n{body}");
+        assert!(body.contains("05/28"), "expected 05/28 separator\n{body}");
+    }
+
+    #[test]
+    fn selected_row_visible_in_single_line_viewport() {
+        let mut app = make_hourly_app(120);
+        app.scroll_offset = 3;
+        app.selected_index = 3;
+
+        let body = render_lines(&mut app, 120, 4).join("\n");
+
+        assert!(
+            body.contains("23:00"),
+            "selected row must stay visible when its date separator cannot fit\n{body}"
+        );
+    }
+
+    #[test]
+    fn window_never_overflows_height_and_reports_data_rows() {
+        let mut app = make_hourly_app(120);
+        let height = 6u16;
+        let lines = render_lines(&mut app, 120, height);
+
+        assert_eq!(lines.len(), height as usize);
+        assert!(app.max_visible_items >= 1);
+        assert!(app.max_visible_items <= (height as usize).saturating_sub(3));
     }
 }
