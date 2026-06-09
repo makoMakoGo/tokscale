@@ -10,7 +10,9 @@ use super::model_usage_layout::{
     ModelUsageTableLayout as DailyDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
     MODEL_MIN_WIDTH,
 };
-use super::table_layout::{allocate_widths, display_width, spaced_width, ColumnWidthSpec};
+use super::table_layout::{
+    allocate_widths, display_width, spaced_width, ColumnWidthSpec, PRIMARY_TABLE_FLEX,
+};
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
     get_provider_display_name, truncate_model_display_name_to,
@@ -480,6 +482,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .flex(PRIMARY_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
     frame.render_widget(table, inner);
@@ -688,6 +691,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .flex(PRIMARY_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
     frame.render_widget(table, inner);

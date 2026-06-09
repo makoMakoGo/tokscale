@@ -1,7 +1,9 @@
+use ratatui::layout::Flex;
 use ratatui::prelude::Constraint;
 use unicode_width::UnicodeWidthStr;
 
 pub(crate) const TABLE_COLUMN_SPACING: u16 = 1;
+pub(crate) const PRIMARY_TABLE_FLEX: Flex = Flex::SpaceBetween;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ColumnWidthSpec {
@@ -111,6 +113,9 @@ pub(crate) fn constraint_lengths(widths: &[Constraint]) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::widgets::{Row, Table};
+    use ratatui::Terminal;
 
     #[test]
     fn exact_fit_returns_base_widths() {
@@ -167,5 +172,46 @@ mod tests {
     fn display_width_uses_terminal_columns_for_unicode() {
         assert_eq!(display_width("模型"), 4);
         assert_eq!(display_width("e\u{301}"), 1);
+    }
+
+    #[test]
+    fn primary_table_flex_spreads_surplus_width_between_columns() {
+        let backend = TestBackend::new(20, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let widths = [
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ];
+
+        terminal
+            .draw(|frame| {
+                let table =
+                    Table::new([Row::new(["A", "B", "C"])], widths).flex(PRIMARY_TABLE_FLEX);
+                frame.render_widget(table, frame.area());
+            })
+            .unwrap();
+
+        let line = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let b_index = line.find('B').expect("middle column should render");
+
+        assert!(
+            line.starts_with('A'),
+            "first column should stay at start: {line}"
+        );
+        assert!(
+            line.trim_end().ends_with('C'),
+            "last column should not leave trailing surplus: {line}"
+        );
+        assert!(
+            (4..=15).contains(&b_index),
+            "middle column should receive balanced spacing: {line}"
+        );
     }
 }

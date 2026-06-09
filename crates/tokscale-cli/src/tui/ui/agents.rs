@@ -3,7 +3,7 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
 };
 
-use super::table_layout::{allocate_widths, display_width, ColumnWidthSpec};
+use super::table_layout::{allocate_widths, display_width, ColumnWidthSpec, PRIMARY_TABLE_FLEX};
 use super::widgets::{format_cost, format_tokens, get_client_display_name, truncate_display_width};
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::ClientFilter;
@@ -193,6 +193,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .flex(PRIMARY_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
     frame.render_widget(table, inner);
