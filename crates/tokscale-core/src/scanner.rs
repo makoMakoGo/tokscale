@@ -314,6 +314,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.settings.json" => file_name.ends_with(".settings.json"),
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
+                "updates.jsonl" => file_name == "updates.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
@@ -715,6 +716,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Zed
                 | ClientId::Crush
                 | ClientId::Codebuff
+                | ClientId::Kimi
                 | ClientId::Gjc
         ) {
             continue;
@@ -787,6 +789,14 @@ fn scan_all_clients_with_env_strategy_inner(
             ClientId::OpenCode,
             opencode_path,
         );
+    }
+
+    if enabled.contains(&ClientId::Kimi) {
+        // Kimi Code: ~/.kimi-code/sessions/**/wire.jsonl (supports KIMI_CODE_HOME)
+        let kimi_path = ClientId::Kimi
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Kimi, kimi_path);
     }
 
     if enabled.contains(&ClientId::Codex) {
@@ -1133,6 +1143,13 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
+    if enabled.contains(&ClientId::Grok) {
+        let grok_path = ClientId::Grok
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Grok, grok_path);
+    }
+
     // Execute scans in parallel
     let scan_results: Vec<(ClientId, Vec<PathBuf>)> = tasks
         .into_par_iter()
@@ -1308,6 +1325,22 @@ mod tests {
         assert!(jsonl_files
             .iter()
             .all(|p| p.extension().unwrap() == "jsonl"));
+    }
+
+    #[test]
+    fn test_scan_directory_updates_jsonl_pattern() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+        let session_dir = path.join("workspace/session-1");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        File::create(session_dir.join("updates.jsonl")).unwrap();
+        File::create(session_dir.join("events.jsonl")).unwrap();
+        File::create(session_dir.join("updates.json")).unwrap();
+
+        let updates_files = scan_directory(path.to_str().unwrap(), "updates.jsonl");
+        assert_eq!(updates_files.len(), 1);
+        assert!(updates_files[0].ends_with("updates.jsonl"));
     }
 
     #[test]
@@ -1526,6 +1559,14 @@ mod tests {
         fs::create_dir_all(&kimi_session).unwrap();
         let mut file = File::create(kimi_session.join("wire.jsonl")).unwrap();
         file.write_all(b"{\"type\":\"metadata\",\"protocol_version\":\"1.5\"}\n")
+            .unwrap();
+    }
+
+    fn setup_mock_grok_dir(base: &std::path::Path) {
+        let grok_session = base.join(".grok/sessions/%2Ftmp%2Fproject/session-uuid-1");
+        fs::create_dir_all(&grok_session).unwrap();
+        let mut file = File::create(grok_session.join("updates.jsonl")).unwrap();
+        file.write_all(b"{\"method\":\"session/update\"}\n")
             .unwrap();
     }
 
@@ -2800,6 +2841,23 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_all_clients_grok() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_grok_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["grok".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Grok).len(), 1);
+        assert!(result.get(ClientId::Grok)[0].ends_with("updates.jsonl"));
+        assert!(result.get(ClientId::OpenCode).is_empty());
+        assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
     fn test_scan_all_clients_roocode() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -3236,7 +3294,7 @@ mod tests {
 
         let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert!(
-            result.get(ClientId::Gjc).len() >= 1,
+            !result.get(ClientId::Gjc).is_empty(),
             "expected at least 1 file from GJC_CONFIG_DIR root, got {:?}",
             result.get(ClientId::Gjc)
         );
@@ -3281,7 +3339,7 @@ mod tests {
 
         let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert!(
-            result.get(ClientId::Gjc).len() >= 1,
+            !result.get(ClientId::Gjc).is_empty(),
             "expected at least 1 file from PI_CONFIG_DIR root, got {:?}",
             result.get(ClientId::Gjc)
         );
@@ -3328,7 +3386,7 @@ mod tests {
 
         let result = scan_all_clients(home_dir.path().to_str().unwrap(), &["gjc".to_string()]);
         assert!(
-            result.get(ClientId::Gjc).len() >= 1,
+            !result.get(ClientId::Gjc).is_empty(),
             "expected at least 1 file from XDG_DATA_HOME/gjc/sessions, got {:?}",
             result.get(ClientId::Gjc)
         );

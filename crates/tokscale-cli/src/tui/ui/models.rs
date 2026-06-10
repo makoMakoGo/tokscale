@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
 use super::model_usage_layout::{
@@ -10,8 +10,9 @@ use super::model_usage_layout::{
 };
 use super::table_layout::{display_width, distributed_table_area, DISTRIBUTED_TABLE_FLEX};
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_ms_per_1k, format_tokens, get_client_display_name,
-    get_provider_display_name, truncate_model_display_name_to,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
+    get_client_display_name, get_provider_display_name, truncate_model_display_name_to,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -39,7 +40,7 @@ fn model_content_width(models: &[&crate::tui::data::ModelUsage], group_by: &Grou
         .unwrap_or(MODEL_MIN_WIDTH)
 }
 
-const MODEL_OPTIONAL_COLUMNS: [ModelsColumn; 9] = [
+const MODEL_OPTIONAL_COLUMNS: [ModelsColumn; 10] = [
     ModelsColumn::Cost,
     ModelsColumn::Source,
     ModelsColumn::Provider,
@@ -49,6 +50,7 @@ const MODEL_OPTIONAL_COLUMNS: [ModelsColumn; 9] = [
     ModelsColumn::CacheRead,
     ModelsColumn::CacheWrite,
     ModelsColumn::Performance,
+    ModelsColumn::CostPerMillion,
 ];
 
 fn models_table_layout(
@@ -96,6 +98,7 @@ fn model_column_header(
         ModelsColumn::Total => "Tokens",
         ModelsColumn::Performance => "ms/1K",
         ModelsColumn::Cost => "Cost",
+        ModelsColumn::CostPerMillion => "Cost/1M",
     }
 }
 
@@ -103,6 +106,7 @@ fn model_column_sort_field(column: ModelsColumn) -> Option<SortField> {
     match column {
         ModelsColumn::Total => Some(SortField::Tokens),
         ModelsColumn::Cost => Some(SortField::Cost),
+        ModelsColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -263,6 +267,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ModelsColumn::Cost => {
                         Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green))
                     }
+                    ModelsColumn::CostPerMillion => {
+                        Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
+                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                    }
                 }
             };
             let cells: Vec<Cell> = columns
@@ -296,7 +304,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(models_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(models_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,

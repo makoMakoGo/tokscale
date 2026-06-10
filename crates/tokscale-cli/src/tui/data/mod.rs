@@ -1542,7 +1542,8 @@ mod tests {
             .unwrap();
         assert_eq!(clients[pi_index + 1], ClientId::Omp);
         assert_eq!(clients[pi_index + 2], ClientId::Kimi);
-        assert_eq!(clients.last(), Some(&ClientId::Gjc));
+        assert_eq!(clients[clients.len() - 2], ClientId::Gjc);
+        assert_eq!(clients.last(), Some(&ClientId::Grok));
     }
 
     #[test]

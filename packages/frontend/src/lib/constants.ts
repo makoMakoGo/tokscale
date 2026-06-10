@@ -55,6 +55,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   warp: "Warp",
   cline: "Cline",
   gjc: "Gajae Code",
+  grok: "Grok Build",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -89,6 +90,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   warp: "https://github.com/warpdotdev.png",
   cline: "https://github.com/cline.png",
   gjc: "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
+  grok: "https://github.com/xai-org.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -121,6 +123,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   warp: "#01A4A4",
   cline: "#5B8DEF",
   gjc: "#FF6B6B",
+  grok: "#171717",
 };
 
 export const SOURCE_TEXT_COLORS: Partial<Record<ClientType, string>> = {

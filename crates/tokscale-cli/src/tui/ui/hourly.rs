@@ -1,7 +1,7 @@
 use chrono::{Local, NaiveDate, NaiveDateTime, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
 use super::hourly_profile;
@@ -9,7 +9,10 @@ use super::table_layout::{
     allocate_widths, choose_priority_columns, display_width, distributed_table_area, spaced_width,
     ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
 };
-use super::widgets::{format_cache_hit_rate, format_cost, format_tokens, get_client_display_name};
+use super::widgets::{
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
+    get_client_display_name, viewport_scrollbar_state,
+};
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
 const HOUR_WIDTH: u16 = 7;
@@ -21,6 +24,7 @@ const NUMERIC_WIDTH: u16 = 10;
 const TOTAL_WIDTH: u16 = 9;
 const CACHE_RATE_WIDTH: u16 = 8;
 const COST_WIDTH: u16 = 10;
+const COST_PER_MILLION_WIDTH: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HourlyColumn {
@@ -35,6 +39,7 @@ enum HourlyColumn {
     CacheRate,
     Total,
     Cost,
+    CostPerMillion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +68,7 @@ fn hourly_column_width(column: HourlyColumn, source_width: u16) -> u16 {
         HourlyColumn::CacheRate => CACHE_RATE_WIDTH,
         HourlyColumn::Total => TOTAL_WIDTH,
         HourlyColumn::Cost => COST_WIDTH,
+        HourlyColumn::CostPerMillion => COST_PER_MILLION_WIDTH,
     }
 }
 
@@ -88,9 +94,28 @@ fn hourly_insert_index(candidate: &[HourlyColumn], column: HourlyColumn) -> usiz
             .unwrap_or(candidate.len());
     }
 
+    if column == HourlyColumn::CostPerMillion {
+        return candidate
+            .iter()
+            .position(|existing| *existing == HourlyColumn::Cost)
+            .map(|index| index + 1)
+            .or_else(|| {
+                candidate
+                    .iter()
+                    .position(|existing| *existing == HourlyColumn::Total)
+                    .map(|index| index + 1)
+            })
+            .unwrap_or(candidate.len());
+    }
+
     candidate
         .iter()
-        .position(|existing| matches!(existing, HourlyColumn::Total | HourlyColumn::Cost))
+        .position(|existing| {
+            matches!(
+                existing,
+                HourlyColumn::Total | HourlyColumn::Cost | HourlyColumn::CostPerMillion
+            )
+        })
         .unwrap_or(candidate.len())
 }
 
@@ -111,6 +136,7 @@ fn hourly_table_layout(
         HourlyColumn::CacheRead,
         HourlyColumn::CacheWrite,
         HourlyColumn::CacheRate,
+        HourlyColumn::CostPerMillion,
     ]);
 
     let source_width = source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH);
@@ -144,6 +170,7 @@ fn hourly_column_header(column: HourlyColumn) -> &'static str {
         HourlyColumn::CacheRate => "Cache×",
         HourlyColumn::Total => "Total",
         HourlyColumn::Cost => "Cost",
+        HourlyColumn::CostPerMillion => "Cost/1M",
     }
 }
 
@@ -152,6 +179,7 @@ fn hourly_column_sort_field(column: HourlyColumn) -> Option<SortField> {
         HourlyColumn::Hour => Some(SortField::Date),
         HourlyColumn::Total => Some(SortField::Tokens),
         HourlyColumn::Cost => Some(SortField::Cost),
+        HourlyColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -321,6 +349,10 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 HourlyColumn::Cost => {
                     Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green))
                 }
+                HourlyColumn::CostPerMillion => {
+                    Cell::from(format_cost_per_million(hour.cost, hour.tokens.total()))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                }
             }
         };
         let cells: Vec<Cell> = columns
@@ -361,7 +393,8 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(hourly_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(hourly_len, scroll_offset, data_rows_shown.max(1));
 
         frame.render_stateful_widget(
             scrollbar,

@@ -1,7 +1,7 @@
 use chrono::{Datelike, Local, NaiveDate};
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
 use super::model_usage_layout::{
@@ -15,8 +15,9 @@ use super::table_layout::{
     DISTRIBUTED_TABLE_FLEX,
 };
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_tokens, get_client_display_name,
-    get_provider_display_name, truncate_model_display_name_to,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
+    get_client_display_name, get_provider_display_name, truncate_model_display_name_to,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 
@@ -26,6 +27,7 @@ const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
 const CACHE_RATE_WIDTH: u16 = 8;
 const COST_WIDTH: u16 = 10;
+const COST_PER_MILLION_WIDTH: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DailyTableDensity {
@@ -47,9 +49,10 @@ enum DailyColumn {
     CacheRate,
     Total,
     Cost,
+    CostPerMillion,
 }
 
-const DAILY_DETAIL_OPTIONAL_COLUMNS: [DailyDetailColumn; 9] = [
+const DAILY_DETAIL_OPTIONAL_COLUMNS: [DailyDetailColumn; 10] = [
     DailyDetailColumn::Cost,
     DailyDetailColumn::Source,
     DailyDetailColumn::Provider,
@@ -59,6 +62,7 @@ const DAILY_DETAIL_OPTIONAL_COLUMNS: [DailyDetailColumn; 9] = [
     DailyDetailColumn::CacheRate,
     DailyDetailColumn::CacheRead,
     DailyDetailColumn::CacheWrite,
+    DailyDetailColumn::CostPerMillion,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +99,7 @@ fn daily_full_min_width(has_turn_data: bool) -> u16 {
         CACHE_RATE_WIDTH,
         NUMERIC_WIDTH,
         COST_WIDTH,
+        COST_PER_MILLION_WIDTH,
     ];
     if has_turn_data {
         widths.insert(1, TURN_WIDTH);
@@ -115,6 +120,7 @@ fn daily_column_width(column: DailyColumn) -> u16 {
         | DailyColumn::Total => NUMERIC_WIDTH,
         DailyColumn::CacheRate => CACHE_RATE_WIDTH,
         DailyColumn::Cost => COST_WIDTH,
+        DailyColumn::CostPerMillion => COST_PER_MILLION_WIDTH,
     }
 }
 
@@ -168,6 +174,7 @@ fn daily_table_layout(
             DailyColumn::CacheRate,
             DailyColumn::Total,
             DailyColumn::Cost,
+            DailyColumn::CostPerMillion,
         ]);
 
         return daily_layout_from_columns(table_width, columns, DailyTableDensity::Full);
@@ -232,6 +239,7 @@ fn daily_detail_column_header(
         DailyDetailColumn::Total if density == DailyDetailTableDensity::Full => "Total",
         DailyDetailColumn::Total => "Tokens",
         DailyDetailColumn::Cost => "Cost",
+        DailyDetailColumn::CostPerMillion => "Cost/1M",
         DailyDetailColumn::Performance => "ms/1K",
     }
 }
@@ -240,6 +248,7 @@ fn daily_detail_column_sort_field(column: DailyDetailColumn) -> Option<SortField
     match column {
         DailyDetailColumn::Total => Some(SortField::Tokens),
         DailyDetailColumn::Cost => Some(SortField::Cost),
+        DailyDetailColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -257,6 +266,7 @@ fn daily_column_header(column: DailyColumn, density: DailyTableDensity) -> &'sta
         DailyColumn::Total if density == DailyTableDensity::Full => "Total",
         DailyColumn::Total => "Tokens",
         DailyColumn::Cost => "Cost",
+        DailyColumn::CostPerMillion => "Cost/1M",
     }
 }
 
@@ -265,6 +275,7 @@ fn daily_column_sort_field(column: DailyColumn) -> Option<SortField> {
         DailyColumn::Date => Some(SortField::Date),
         DailyColumn::Total => Some(SortField::Tokens),
         DailyColumn::Cost => Some(SortField::Cost),
+        DailyColumn::CostPerMillion => None,
         _ => None,
     }
 }
@@ -435,6 +446,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 DailyColumn::Cost => {
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green))
                 }
+                DailyColumn::CostPerMillion => {
+                    Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                }
             }
         };
         let cells: Vec<Cell> = columns
@@ -474,7 +489,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(daily_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(daily_len, scroll_offset, data_rows_shown.max(1));
 
         frame.render_stateful_widget(
             scrollbar,
@@ -647,6 +663,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyDetailColumn::Cost => {
                         Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green))
                     }
+                    DailyDetailColumn::CostPerMillion => {
+                        Cell::from(format_cost_per_million(row.cost, row.tokens.total()))
+                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                    }
                     // daily_detail_table_layout never includes Performance; panic if the layout drifts.
                     DailyDetailColumn::Performance => {
                         unreachable!("daily detail rows have no timing data")
@@ -684,7 +704,8 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(detail_len).position(scroll_offset);
+        let mut scrollbar_state =
+            viewport_scrollbar_state(detail_len, scroll_offset, visible_height);
 
         frame.render_stateful_widget(
             scrollbar,
@@ -919,6 +940,7 @@ mod tests {
                 DailyDetailColumn::CacheWrite,
                 DailyDetailColumn::Total,
                 DailyDetailColumn::Cost,
+                DailyDetailColumn::CostPerMillion,
             ]
         );
     }

@@ -274,6 +274,7 @@ pub fn fetch() -> Result<UsageOutput> {
             provider: "Kimi".into(),
             plan,
             email: None,
+            account: None,
             metrics,
         })
     })

@@ -1,4 +1,5 @@
 use ratatui::prelude::*;
+use ratatui::widgets::ScrollbarState;
 use tokscale_core::{normalize_provider_for_grouping, ClientId};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -44,6 +45,15 @@ pub fn format_cost(cost: f64) -> String {
     }
 }
 
+pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
+    if total_tokens == 0 || !cost.is_finite() || cost < 0.0 {
+        return "\u{2014}".to_string();
+    }
+
+    let per_million = cost / (total_tokens as f64) * 1_000_000.0;
+    format!("${:.2}", per_million)
+}
+
 /// Cache reuse multiplier: cached reads per full-price input token.
 /// `cache_read / (input + cache_write)` — how many low-cost reads you
 /// got for every token you paid full price (fresh input or cache write).
@@ -70,6 +80,27 @@ pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
         format!("{:.1}s", value / 1000.0)
     } else {
         format!("{:.0}ms", value)
+    }
+}
+
+pub fn viewport_scrollbar_state(
+    content_len: usize,
+    scroll_offset: usize,
+    viewport_len: usize,
+) -> ScrollbarState {
+    let viewport_len = viewport_len.max(1);
+    ScrollbarState::new(content_len)
+        .position(scrollbar_position(scroll_offset, content_len, viewport_len))
+        .viewport_content_length(viewport_len)
+}
+
+fn scrollbar_position(scroll_offset: usize, content_len: usize, viewport_len: usize) -> usize {
+    let max_scroll = content_len.saturating_sub(viewport_len);
+    if max_scroll == 0 {
+        0
+    } else {
+        ((scroll_offset.min(max_scroll) as u128) * (content_len.saturating_sub(1) as u128)
+            / (max_scroll as u128)) as usize
     }
 }
 
@@ -394,6 +425,55 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollbar_position_maps_bottom_offset_to_last_position() {
+        assert_eq!(scrollbar_position(15, 20, 5), 19);
+    }
+
+    #[test]
+    fn scrollbar_position_keeps_top_at_zero() {
+        assert_eq!(scrollbar_position(0, 20, 5), 0);
+    }
+
+    #[test]
+    fn scrollbar_position_clamps_overscroll_to_bottom() {
+        assert_eq!(scrollbar_position(999, 20, 5), 19);
+    }
+
+    #[test]
+    fn scrollbar_position_single_page_stays_at_zero() {
+        assert_eq!(scrollbar_position(0, 5, 10), 0);
+    }
+
+    #[test]
+    fn scrollbar_position_uses_wide_math_for_large_lengths() {
+        let content_len = usize::MAX;
+        let viewport_len = 2;
+        let max_scroll = content_len - viewport_len;
+
+        assert_eq!(scrollbar_position(0, content_len, viewport_len), 0);
+        assert_eq!(
+            scrollbar_position(max_scroll, content_len, viewport_len),
+            usize::MAX - 1
+        );
+        assert_eq!(
+            scrollbar_position(usize::MAX, content_len, viewport_len),
+            usize::MAX - 1
+        );
+    }
+
+    #[test]
+    fn viewport_scrollbar_state_handles_zero_viewport() {
+        let state = viewport_scrollbar_state(20, 5, 0);
+
+        assert_eq!(
+            state,
+            ScrollbarState::new(20)
+                .position(5)
+                .viewport_content_length(1)
+        );
+    }
 
     #[test]
     fn shade_from_base_rank_0_equals_base() {

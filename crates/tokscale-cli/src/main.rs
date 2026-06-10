@@ -273,6 +273,11 @@ enum Commands {
         #[arg(long, help = "Light terminal output (no TUI)")]
         light: bool,
     },
+    #[command(about = "Codex account integration commands")]
+    Codex {
+        #[command(subcommand)]
+        subcommand: CodexSubcommand,
+    },
     #[command(about = "Cursor API cache integration commands")]
     Cursor {
         #[command(subcommand)]
@@ -310,6 +315,37 @@ enum Commands {
     },
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
     WarmTuiCache,
+}
+
+#[derive(Subcommand)]
+enum CodexSubcommand {
+    #[command(about = "Import the current Codex OAuth credentials as a saved account")]
+    Import {
+        #[arg(long, help = "Label for this Codex account (e.g., work, personal)")]
+        name: Option<String>,
+    },
+    #[command(about = "List saved Codex accounts")]
+    Accounts {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Switch active Codex account and write Codex auth.json")]
+    Switch {
+        #[arg(help = "Account label or id")]
+        name: String,
+    },
+    #[command(about = "Remove a saved Codex account")]
+    Remove {
+        #[arg(help = "Account label or id")]
+        name: String,
+    },
+    #[command(about = "Check Codex subscription usage for an account")]
+    Status {
+        #[arg(long, help = "Account label or id")]
+        name: Option<String>,
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -705,6 +741,10 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "usage")?;
             commands::usage::run(json, light)
         }
+        Some(Commands::Codex { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "codex")?;
+            run_codex_command(subcommand)
+        }
         Some(Commands::Trae { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "trae")?;
             run_trae_command(subcommand)
@@ -846,6 +886,7 @@ pub enum ClientFilter {
     Warp,
     Cline,
     Gjc,
+    Grok,
 }
 
 impl ClientFilter {
@@ -882,6 +923,7 @@ impl ClientFilter {
             Self::Warp => "warp",
             Self::Cline => "cline",
             Self::Gjc => "gjc",
+            Self::Grok => "grok",
         }
     }
 
@@ -920,6 +962,7 @@ impl ClientFilter {
             Self::Warp => Some(ClientId::Warp),
             Self::Cline => Some(ClientId::Cline),
             Self::Gjc => Some(ClientId::Gjc),
+            Self::Grok => Some(ClientId::Grok),
         }
     }
 
@@ -956,6 +999,7 @@ impl ClientFilter {
             ClientId::Warp => Self::Warp,
             ClientId::Cline => Self::Cline,
             ClientId::Gjc => Self::Gjc,
+            ClientId::Grok => Self::Grok,
         }
     }
 
@@ -1052,6 +1096,8 @@ pub struct ClientFlags {
     pub cline: bool,
     #[arg(long, hide = true)]
     pub gjc: bool,
+    #[arg(long, hide = true)]
+    pub grok: bool,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -1107,7 +1153,7 @@ fn build_client_filter_with_defaults(
         }
     }
 
-    let legacy: [(bool, ClientFilter); 27] = [
+    let legacy: [(bool, ClientFilter); 28] = [
         (flags.opencode, ClientFilter::Opencode),
         (flags.claude, ClientFilter::Claude),
         (flags.codex, ClientFilter::Codex),
@@ -1135,6 +1181,7 @@ fn build_client_filter_with_defaults(
         (flags.warp, ClientFilter::Warp),
         (flags.cline, ClientFilter::Cline),
         (flags.gjc, ClientFilter::Gjc),
+        (flags.grok, ClientFilter::Grok),
     ];
 
     let mut legacy_used: Vec<&'static str> = Vec::new();
@@ -5280,6 +5327,18 @@ fn run_warm_tui_cache() -> Result<()> {
     Ok(())
 }
 
+fn run_codex_command(subcommand: CodexSubcommand) -> Result<()> {
+    match subcommand {
+        CodexSubcommand::Import { name } => commands::usage::codex::run_codex_import(name),
+        CodexSubcommand::Accounts { json } => commands::usage::codex::run_codex_accounts(json),
+        CodexSubcommand::Switch { name } => commands::usage::codex::run_codex_switch(&name),
+        CodexSubcommand::Remove { name } => commands::usage::codex::run_codex_remove(&name),
+        CodexSubcommand::Status { name, json } => {
+            commands::usage::codex::run_codex_status(name, json)
+        }
+    }
+}
+
 fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
     match subcommand {
         CursorSubcommand::Login { name } => cursor::run_cursor_login(name),
@@ -5852,6 +5911,7 @@ mod tests {
             warp: true,
             cline: true,
             gjc: true,
+            grok: true,
             ..ClientFlags::default()
         };
         let result = build_client_filter_with_defaults(flags, &[]).unwrap();
@@ -5885,6 +5945,7 @@ mod tests {
             "warp",
             "cline",
             "gjc",
+            "grok",
         ];
 
         let expected_len = required.len();
@@ -7108,6 +7169,23 @@ mod tests {
         assert_eq!(
             ClientFilter::from_client_id(tokscale_core::ClientId::Warp),
             ClientFilter::Warp
+        );
+    }
+
+    #[test]
+    fn client_filter_round_trips_grok() {
+        assert_eq!(
+            ClientFilter::from_filter_str("grok"),
+            Some(ClientFilter::Grok)
+        );
+        assert_eq!(ClientFilter::Grok.as_filter_str(), "grok");
+        assert_eq!(
+            ClientFilter::Grok.to_client_id(),
+            Some(tokscale_core::ClientId::Grok)
+        );
+        assert_eq!(
+            ClientFilter::from_client_id(tokscale_core::ClientId::Grok),
+            ClientFilter::Grok
         );
     }
 

@@ -18,6 +18,7 @@ pub(crate) const DETAIL_NUMERIC_WIDTH: u16 = 8;
 pub(crate) const DETAIL_TOTAL_WIDTH: u16 = 9;
 pub(crate) const DETAIL_PERFORMANCE_WIDTH: u16 = 10;
 pub(crate) const DETAIL_COST_WIDTH: u16 = 9;
+pub(crate) const DETAIL_COST_PER_MILLION_WIDTH: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelUsageTableDensity {
@@ -41,12 +42,13 @@ pub(crate) enum ModelUsageColumn {
     Total,
     Performance,
     Cost,
+    CostPerMillion,
 }
 
 pub(crate) const MODEL_USAGE_REQUIRED_COLUMNS: [ModelUsageColumn; 2] =
     [ModelUsageColumn::Model, ModelUsageColumn::Total];
 
-pub(crate) const MODEL_USAGE_DISPLAY_ORDER: [ModelUsageColumn; 12] = [
+pub(crate) const MODEL_USAGE_DISPLAY_ORDER: [ModelUsageColumn; 13] = [
     ModelUsageColumn::Model,
     ModelUsageColumn::Source,
     ModelUsageColumn::Provider,
@@ -58,6 +60,7 @@ pub(crate) const MODEL_USAGE_DISPLAY_ORDER: [ModelUsageColumn; 12] = [
     ModelUsageColumn::CacheWrite,
     ModelUsageColumn::Total,
     ModelUsageColumn::Cost,
+    ModelUsageColumn::CostPerMillion,
     ModelUsageColumn::Performance,
 ];
 
@@ -134,6 +137,7 @@ fn column_base_width(
         ModelUsageColumn::Total => DETAIL_TOTAL_WIDTH,
         ModelUsageColumn::Performance => DETAIL_PERFORMANCE_WIDTH,
         ModelUsageColumn::Cost => DETAIL_COST_WIDTH,
+        ModelUsageColumn::CostPerMillion => DETAIL_COST_PER_MILLION_WIDTH,
         ModelUsageColumn::Source => source_width,
         ModelUsageColumn::Provider => provider_width,
         ModelUsageColumn::Messages => DETAIL_MESSAGES_WIDTH,
@@ -156,6 +160,7 @@ fn column_width_spec(
         ModelUsageColumn::Total => ColumnWidthSpec::fixed(DETAIL_TOTAL_WIDTH),
         ModelUsageColumn::Performance => ColumnWidthSpec::fixed(DETAIL_PERFORMANCE_WIDTH),
         ModelUsageColumn::Cost => ColumnWidthSpec::fixed(DETAIL_COST_WIDTH),
+        ModelUsageColumn::CostPerMillion => ColumnWidthSpec::fixed(DETAIL_COST_PER_MILLION_WIDTH),
         ModelUsageColumn::Messages => ColumnWidthSpec::fixed(DETAIL_MESSAGES_WIDTH),
         ModelUsageColumn::Input | ModelUsageColumn::Output => {
             ColumnWidthSpec::fixed(DETAIL_NUMERIC_WIDTH)
@@ -198,7 +203,9 @@ fn density_for_columns(columns: &[ModelUsageColumn]) -> ModelUsageTableDensity {
         )
     }) {
         ModelUsageTableDensity::Detail
-    } else if columns.contains(&ModelUsageColumn::Cost) {
+    } else if columns.contains(&ModelUsageColumn::Cost)
+        || columns.contains(&ModelUsageColumn::CostPerMillion)
+    {
         ModelUsageTableDensity::Core
     } else {
         ModelUsageTableDensity::VeryCompact
