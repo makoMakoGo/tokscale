@@ -69,6 +69,25 @@ where
     columns
 }
 
+fn display_rank<T: PartialEq>(column: T, display_order: &[T]) -> usize {
+    display_order
+        .iter()
+        .position(|candidate| *candidate == column)
+        .unwrap_or(display_order.len())
+}
+
+pub(crate) fn insert_by_display_order<T: Copy + PartialEq>(
+    candidate: &[T],
+    column: T,
+    display_order: &[T],
+) -> usize {
+    let column_rank = display_rank(column, display_order);
+    candidate
+        .iter()
+        .position(|existing| display_rank(*existing, display_order) > column_rank)
+        .unwrap_or(candidate.len())
+}
+
 pub(crate) fn allocate_widths(_table_width: u16, specs: &[ColumnWidthSpec]) -> Vec<Constraint> {
     specs
         .iter()
@@ -118,6 +137,23 @@ mod tests {
     fn display_width_uses_terminal_columns_for_unicode() {
         assert_eq!(display_width("模型"), 4);
         assert_eq!(display_width("e\u{301}"), 1);
+    }
+
+    #[test]
+    fn display_order_insert_uses_ranked_position() {
+        let order = ['a', 'b', 'c', 'd'];
+        let candidate = ['a', 'd'];
+
+        assert_eq!(insert_by_display_order(&candidate, 'b', &order), 1);
+        assert_eq!(insert_by_display_order(&candidate, 'c', &order), 1);
+    }
+
+    #[test]
+    fn display_order_insert_puts_unknown_columns_last() {
+        let order = ['a', 'b'];
+        let candidate = ['a', 'b'];
+
+        assert_eq!(insert_by_display_order(&candidate, 'z', &order), 2);
     }
 
     #[test]

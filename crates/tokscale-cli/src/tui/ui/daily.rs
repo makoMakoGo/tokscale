@@ -3,6 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
+use std::collections::BTreeMap;
 
 use super::model_usage_layout::{
     model_usage_table_layout, ModelUsageColumn as DailyDetailColumn, ModelUsageLayoutProfile,
@@ -11,15 +12,16 @@ use super::model_usage_layout::{
     MODEL_MIN_WIDTH,
 };
 use super::table_layout::{
-    allocate_widths, display_width, distributed_table_area, spaced_width, ColumnWidthSpec,
-    DISTRIBUTED_TABLE_FLEX,
+    allocate_widths, choose_priority_columns, display_width, distributed_table_area,
+    insert_by_display_order, spaced_width, ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name, truncate_model_display_name_to,
-    viewport_scrollbar_state,
+    get_client_display_name, get_provider_display_name, truncate_display_width,
+    truncate_model_display_name_to, viewport_scrollbar_state, MODEL_DISPLAY_MAX_WIDTH,
 };
 use crate::tui::app::{App, SortDirection, SortField};
+use crate::tui::data::DailyUsage;
 
 const DATE_WIDTH: u16 = 7;
 const TURN_WIDTH: u16 = 6;
@@ -28,6 +30,10 @@ const NUMERIC_WIDTH: u16 = 10;
 const CACHE_RATE_WIDTH: u16 = 8;
 const COST_WIDTH: u16 = 10;
 const COST_PER_MILLION_WIDTH: u16 = 10;
+const SOURCE_TOP_MIN_WIDTH: u16 = 10;
+const SOURCE_TOP_MAX_WIDTH: u16 = 20;
+const MODEL_TOP_MIN_WIDTH: u16 = 12;
+const MODEL_TOP_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DailyTableDensity {
@@ -40,6 +46,8 @@ enum DailyTableDensity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DailyColumn {
     Date,
+    TopSource,
+    TopModel,
     Turn,
     Messages,
     Input,
@@ -51,6 +59,50 @@ enum DailyColumn {
     Cost,
     CostPerMillion,
 }
+
+const DAILY_DISPLAY_ORDER: [DailyColumn; 13] = [
+    DailyColumn::Date,
+    DailyColumn::TopSource,
+    DailyColumn::TopModel,
+    DailyColumn::Turn,
+    DailyColumn::Messages,
+    DailyColumn::Input,
+    DailyColumn::Output,
+    DailyColumn::CacheRead,
+    DailyColumn::CacheWrite,
+    DailyColumn::CacheRate,
+    DailyColumn::Total,
+    DailyColumn::Cost,
+    DailyColumn::CostPerMillion,
+];
+
+const DAILY_REQUIRED_COLUMNS: [DailyColumn; 3] =
+    [DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost];
+
+const DAILY_OPTIONAL_COLUMNS_WITH_TURN: [DailyColumn; 10] = [
+    DailyColumn::Turn,
+    DailyColumn::Messages,
+    DailyColumn::TopSource,
+    DailyColumn::TopModel,
+    DailyColumn::Input,
+    DailyColumn::Output,
+    DailyColumn::CacheRead,
+    DailyColumn::CacheWrite,
+    DailyColumn::CacheRate,
+    DailyColumn::CostPerMillion,
+];
+
+const DAILY_OPTIONAL_COLUMNS_WITHOUT_TURN: [DailyColumn; 9] = [
+    DailyColumn::Messages,
+    DailyColumn::TopSource,
+    DailyColumn::TopModel,
+    DailyColumn::Input,
+    DailyColumn::Output,
+    DailyColumn::CacheRead,
+    DailyColumn::CacheWrite,
+    DailyColumn::CacheRate,
+    DailyColumn::CostPerMillion,
+];
 
 const DAILY_DETAIL_OPTIONAL_COLUMNS: [DailyDetailColumn; 10] = [
     DailyDetailColumn::Cost,
@@ -69,48 +121,16 @@ const DAILY_DETAIL_OPTIONAL_COLUMNS: [DailyDetailColumn; 10] = [
 struct DailyTableLayout {
     columns: Vec<DailyColumn>,
     widths: Vec<Constraint>,
+    top_source_width: usize,
+    top_model_width: usize,
     density: DailyTableDensity,
 }
 
-fn daily_detail_min_width(has_turn_data: bool) -> u16 {
-    let mut widths = vec![
-        DATE_WIDTH,
-        MSGS_WIDTH,
-        NUMERIC_WIDTH,
-        NUMERIC_WIDTH,
-        NUMERIC_WIDTH,
-        COST_WIDTH,
-    ];
-    if has_turn_data {
-        widths.insert(1, TURN_WIDTH);
-    }
-
-    spaced_width(&widths)
-}
-
-fn daily_full_min_width(has_turn_data: bool) -> u16 {
-    let mut widths = vec![
-        DATE_WIDTH,
-        MSGS_WIDTH,
-        NUMERIC_WIDTH,
-        NUMERIC_WIDTH,
-        NUMERIC_WIDTH,
-        NUMERIC_WIDTH,
-        CACHE_RATE_WIDTH,
-        NUMERIC_WIDTH,
-        COST_WIDTH,
-        COST_PER_MILLION_WIDTH,
-    ];
-    if has_turn_data {
-        widths.insert(1, TURN_WIDTH);
-    }
-
-    spaced_width(&widths)
-}
-
-fn daily_column_width(column: DailyColumn) -> u16 {
+fn daily_column_width(column: DailyColumn, top_source_width: u16, top_model_width: u16) -> u16 {
     match column {
         DailyColumn::Date => DATE_WIDTH,
+        DailyColumn::TopSource => top_source_width,
+        DailyColumn::TopModel => top_model_width,
         DailyColumn::Turn => TURN_WIDTH,
         DailyColumn::Messages => MSGS_WIDTH,
         DailyColumn::Input
@@ -124,85 +144,120 @@ fn daily_column_width(column: DailyColumn) -> u16 {
     }
 }
 
-fn daily_column_spec(column: DailyColumn) -> ColumnWidthSpec {
-    ColumnWidthSpec::fixed(daily_column_width(column))
+fn daily_column_spec(
+    column: DailyColumn,
+    top_source_width: u16,
+    top_model_width: u16,
+) -> ColumnWidthSpec {
+    ColumnWidthSpec::fixed(daily_column_width(
+        column,
+        top_source_width,
+        top_model_width,
+    ))
+}
+
+fn daily_layout_width(columns: &[DailyColumn], top_source_width: u16, top_model_width: u16) -> u16 {
+    let widths: Vec<u16> = columns
+        .iter()
+        .map(|column| daily_column_width(*column, top_source_width, top_model_width))
+        .collect();
+
+    spaced_width(&widths)
+}
+
+fn daily_density_for_columns(columns: &[DailyColumn]) -> DailyTableDensity {
+    if columns.contains(&DailyColumn::CacheWrite) {
+        DailyTableDensity::Full
+    } else if columns.iter().any(|column| {
+        matches!(
+            column,
+            DailyColumn::Input
+                | DailyColumn::Output
+                | DailyColumn::CacheRead
+                | DailyColumn::CacheRate
+        )
+    }) {
+        DailyTableDensity::Detail
+    } else if columns.iter().any(|column| {
+        matches!(
+            column,
+            DailyColumn::TopSource
+                | DailyColumn::TopModel
+                | DailyColumn::Turn
+                | DailyColumn::Messages
+                | DailyColumn::CostPerMillion
+        )
+    }) {
+        DailyTableDensity::Core
+    } else {
+        DailyTableDensity::VeryCompact
+    }
 }
 
 fn daily_layout_from_columns(
     table_width: u16,
     columns: Vec<DailyColumn>,
     density: DailyTableDensity,
+    top_source_width: u16,
+    top_model_width: u16,
 ) -> DailyTableLayout {
     let specs: Vec<ColumnWidthSpec> = columns
         .iter()
-        .map(|column| daily_column_spec(*column))
+        .map(|column| daily_column_spec(*column, top_source_width, top_model_width))
         .collect();
     let widths = allocate_widths(table_width, &specs);
 
     DailyTableLayout {
         columns,
         widths,
+        top_source_width: top_source_width as usize,
+        top_model_width: top_model_width as usize,
         density,
     }
 }
 
 fn daily_table_layout(
     table_width: u16,
-    is_narrow: bool,
     is_very_narrow: bool,
     has_turn_data: bool,
+    top_source_content_width: u16,
+    top_model_content_width: u16,
 ) -> DailyTableLayout {
+    let top_source_width =
+        top_source_content_width.clamp(SOURCE_TOP_MIN_WIDTH, SOURCE_TOP_MAX_WIDTH);
+    let top_model_width = top_model_content_width.clamp(MODEL_TOP_MIN_WIDTH, MODEL_TOP_MAX_WIDTH);
+
     if is_very_narrow {
         return daily_layout_from_columns(
             table_width,
-            vec![DailyColumn::Date, DailyColumn::Total, DailyColumn::Cost],
+            DAILY_REQUIRED_COLUMNS.to_vec(),
             DailyTableDensity::VeryCompact,
+            top_source_width,
+            top_model_width,
         );
     }
 
-    if !is_narrow && table_width >= daily_full_min_width(has_turn_data) {
-        let mut columns = vec![DailyColumn::Date];
-        if has_turn_data {
-            columns.push(DailyColumn::Turn);
-        }
-        columns.extend([
-            DailyColumn::Messages,
-            DailyColumn::Input,
-            DailyColumn::Output,
-            DailyColumn::CacheRead,
-            DailyColumn::CacheWrite,
-            DailyColumn::CacheRate,
-            DailyColumn::Total,
-            DailyColumn::Cost,
-            DailyColumn::CostPerMillion,
-        ]);
+    let optional_columns = if has_turn_data {
+        &DAILY_OPTIONAL_COLUMNS_WITH_TURN[..]
+    } else {
+        &DAILY_OPTIONAL_COLUMNS_WITHOUT_TURN[..]
+    };
+    let columns = choose_priority_columns(
+        table_width,
+        &DAILY_REQUIRED_COLUMNS,
+        optional_columns,
+        |candidate, column| insert_by_display_order(candidate, column, &DAILY_DISPLAY_ORDER),
+        |candidate| daily_layout_width(candidate, top_source_width, top_model_width),
+    );
+    let density = daily_density_for_columns(&columns);
 
-        return daily_layout_from_columns(table_width, columns, DailyTableDensity::Full);
-    }
-
-    if !is_narrow && table_width >= daily_detail_min_width(has_turn_data) {
-        let mut columns = vec![DailyColumn::Date];
-        if has_turn_data {
-            columns.push(DailyColumn::Turn);
-        }
-        columns.extend([
-            DailyColumn::Messages,
-            DailyColumn::Input,
-            DailyColumn::Output,
-            DailyColumn::Total,
-            DailyColumn::Cost,
-        ]);
-
-        return daily_layout_from_columns(table_width, columns, DailyTableDensity::Detail);
-    }
-
-    let mut columns = vec![DailyColumn::Date];
-    if has_turn_data {
-        columns.push(DailyColumn::Turn);
-    }
-    columns.extend([DailyColumn::Messages, DailyColumn::Total, DailyColumn::Cost]);
-
-    daily_layout_from_columns(table_width, columns, DailyTableDensity::Core)
+    daily_layout_from_columns(
+        table_width,
+        columns,
+        density,
+        top_source_width,
+        top_model_width,
+    )
 }
 
 fn daily_detail_table_layout(
@@ -256,6 +311,8 @@ fn daily_detail_column_sort_field(column: DailyDetailColumn) -> Option<SortField
 fn daily_column_header(column: DailyColumn, density: DailyTableDensity) -> &'static str {
     match column {
         DailyColumn::Date => "Date",
+        DailyColumn::TopSource => "Source*",
+        DailyColumn::TopModel => "Model*",
         DailyColumn::Turn => "Turn",
         DailyColumn::Messages => "Msgs",
         DailyColumn::Input => "Input",
@@ -275,6 +332,7 @@ fn daily_column_sort_field(column: DailyColumn) -> Option<SortField> {
         DailyColumn::Date => Some(SortField::Date),
         DailyColumn::Total => Some(SortField::Tokens),
         DailyColumn::Cost => Some(SortField::Cost),
+        DailyColumn::TopSource | DailyColumn::TopModel => None,
         DailyColumn::CostPerMillion => None,
         _ => None,
     }
@@ -286,6 +344,94 @@ fn format_daily_row_date(date: NaiveDate) -> String {
 
 fn format_month_separator(date: NaiveDate) -> String {
     date.format("%Y/%m").to_string()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TopDailySource {
+    key: String,
+    label: String,
+    tokens: u64,
+    cost: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TopDailyModel {
+    key: String,
+    label: String,
+    provider: String,
+    color_key: String,
+    tokens: u64,
+    cost: f64,
+}
+
+fn top_daily_source(day: &DailyUsage) -> Option<TopDailySource> {
+    let mut candidates: Vec<TopDailySource> = day
+        .source_breakdown
+        .iter()
+        .filter_map(|(source, info)| {
+            let tokens = info.tokens.total();
+            (tokens > 0).then(|| TopDailySource {
+                key: source.clone(),
+                label: get_client_display_name(source),
+                tokens,
+                cost: info.cost,
+            })
+        })
+        .collect();
+
+    candidates.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| right.cost.total_cmp(&left.cost))
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    candidates.into_iter().next()
+}
+
+fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
+    let mut models: BTreeMap<String, TopDailyModel> = BTreeMap::new();
+
+    for source in day.source_breakdown.values() {
+        for (model_key, model) in &source.models {
+            let tokens = model.tokens.total();
+            if tokens == 0 {
+                continue;
+            }
+
+            let label = if model.display_name.is_empty() {
+                model_key.clone()
+            } else {
+                model.display_name.clone()
+            };
+            models
+                .entry(model_key.clone())
+                .and_modify(|entry| {
+                    entry.tokens = entry.tokens.saturating_add(tokens);
+                    entry.cost += model.cost;
+                })
+                .or_insert_with(|| TopDailyModel {
+                    key: model_key.clone(),
+                    label,
+                    provider: model.provider.clone(),
+                    color_key: model.color_key.clone(),
+                    tokens,
+                    cost: model.cost,
+                });
+        }
+    }
+
+    let mut candidates: Vec<TopDailyModel> = models.into_values().collect();
+    candidates.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| right.cost.total_cmp(&left.cost))
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    candidates.into_iter().next()
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -320,14 +466,24 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let is_narrow = app.is_narrow();
     let is_very_narrow = app.is_very_narrow();
     let has_turn_data = daily.iter().any(|d| d.turn_count > 0);
+    let top_source_content_width = daily
+        .iter()
+        .filter_map(|day| top_daily_source(day).map(|source| display_width(&source.label)))
+        .max()
+        .unwrap_or(SOURCE_TOP_MIN_WIDTH);
+    let top_model_content_width = daily
+        .iter()
+        .filter_map(|day| top_daily_model(day).map(|model| display_width(&model.label)))
+        .max()
+        .unwrap_or(MODEL_TOP_MIN_WIDTH);
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let theme_accent = app.theme.accent;
+    let theme_muted = app.theme.muted;
     let theme_selection = app.theme.selection;
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
@@ -336,8 +492,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let current_row_style = app.theme.current_row_style();
     let striped_row_style = app.theme.striped_row_style();
     let today = Local::now().date_naive();
-    let table_layout =
-        daily_table_layout(table_area.width, is_narrow, is_very_narrow, has_turn_data);
+    let table_layout = daily_table_layout(
+        table_area.width,
+        is_very_narrow,
+        has_turn_data,
+        top_source_content_width,
+        top_model_content_width,
+    );
     let columns = table_layout.columns.clone();
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -420,9 +581,38 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             "\u{2014}".to_string()
         };
+        let top_source = top_daily_source(day);
+        let top_model = top_daily_model(day);
         let cell_for_column = |column: DailyColumn| -> Cell {
             match column {
                 DailyColumn::Date => Cell::from(date_text.clone()).style(date_style),
+                DailyColumn::TopSource => {
+                    if let Some(source) = top_source.as_ref() {
+                        Cell::from(truncate_display_width(
+                            &source.label,
+                            table_layout.top_source_width,
+                        ))
+                        .style(Style::default().fg(theme_muted))
+                    } else {
+                        Cell::from("\u{2014}").style(Style::default().fg(theme_muted))
+                    }
+                }
+                DailyColumn::TopModel => {
+                    if let Some(model) = top_model.as_ref() {
+                        let model_color = app.model_color_for(&model.provider, &model.color_key);
+                        Cell::from(truncate_model_display_name_to(
+                            &model.label,
+                            table_layout.top_model_width,
+                        ))
+                        .style(
+                            Style::default()
+                                .fg(model_color)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Cell::from("\u{2014}").style(Style::default().fg(theme_muted))
+                    }
+                }
                 DailyColumn::Turn => Cell::from(turn_str.clone()),
                 DailyColumn::Messages => Cell::from(day.message_count.to_string()),
                 DailyColumn::Input => {
@@ -723,9 +913,48 @@ mod tests {
     use super::super::model_usage_layout::MODEL_MAX_WIDTH;
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
-    use crate::tui::data::{DailyUsage, TokenBreakdown};
+    use crate::tui::data::{DailyModelInfo, DailySourceInfo, DailyUsage, TokenBreakdown};
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::BTreeMap;
+
+    fn token_breakdown(input: u64) -> TokenBreakdown {
+        TokenBreakdown {
+            input,
+            ..TokenBreakdown::default()
+        }
+    }
+
+    fn daily_model(
+        display_name: &str,
+        provider: &str,
+        color_key: &str,
+        tokens: u64,
+        cost: f64,
+    ) -> DailyModelInfo {
+        DailyModelInfo {
+            provider: provider.to_string(),
+            display_name: display_name.to_string(),
+            color_key: color_key.to_string(),
+            tokens: token_breakdown(tokens),
+            cost,
+            messages: 1,
+        }
+    }
+
+    fn daily_source(
+        tokens: u64,
+        cost: f64,
+        models: Vec<(&str, DailyModelInfo)>,
+    ) -> DailySourceInfo {
+        DailySourceInfo {
+            tokens: token_breakdown(tokens),
+            cost,
+            models: models
+                .into_iter()
+                .map(|(key, model)| (key.to_string(), model))
+                .collect(),
+        }
+    }
 
     fn day(date: &str, cost: f64) -> DailyUsage {
         DailyUsage {
@@ -791,7 +1020,8 @@ mod tests {
 
     #[test]
     fn narrow_daily_layout_keeps_date_tokens_and_cost_without_cache_columns() {
-        let layout = daily_table_layout(74, true, false, false);
+        let layout =
+            daily_table_layout(36, false, false, SOURCE_TOP_MIN_WIDTH, MODEL_TOP_MIN_WIDTH);
 
         assert_eq!(layout.density, DailyTableDensity::Core);
         assert_eq!(
@@ -811,7 +1041,7 @@ mod tests {
 
     #[test]
     fn narrow_daily_layout_preserves_turn_after_date_when_available() {
-        let layout = daily_table_layout(74, true, false, true);
+        let layout = daily_table_layout(43, false, true, SOURCE_TOP_MIN_WIDTH, MODEL_TOP_MIN_WIDTH);
 
         assert_eq!(layout.density, DailyTableDensity::Core);
         assert_eq!(
@@ -827,21 +1057,24 @@ mod tests {
     }
 
     #[test]
-    fn portrait_daily_layout_drops_cache_before_input_output() {
-        let layout = daily_table_layout(74, false, false, false);
+    fn portrait_daily_layout_prioritizes_top_source_and_model_before_token_details() {
+        let layout =
+            daily_table_layout(74, false, false, SOURCE_TOP_MIN_WIDTH, MODEL_TOP_MIN_WIDTH);
 
         assert_eq!(layout.density, DailyTableDensity::Detail);
         assert_eq!(
             layout.columns,
             vec![
                 DailyColumn::Date,
+                DailyColumn::TopSource,
+                DailyColumn::TopModel,
                 DailyColumn::Messages,
                 DailyColumn::Input,
-                DailyColumn::Output,
                 DailyColumn::Total,
                 DailyColumn::Cost,
             ]
         );
+        assert!(!layout.columns.contains(&DailyColumn::Output));
         assert!(!layout.columns.contains(&DailyColumn::CacheRead));
         assert!(!layout.columns.contains(&DailyColumn::CacheWrite));
         assert!(!layout.columns.contains(&DailyColumn::CacheRate));
@@ -849,7 +1082,7 @@ mod tests {
 
     #[test]
     fn very_narrow_daily_layout_keeps_date_tokens_and_cost() {
-        let layout = daily_table_layout(54, true, true, true);
+        let layout = daily_table_layout(54, true, true, SOURCE_TOP_MIN_WIDTH, MODEL_TOP_MIN_WIDTH);
 
         assert_eq!(layout.density, DailyTableDensity::VeryCompact);
         assert_eq!(
@@ -861,14 +1094,73 @@ mod tests {
 
     #[test]
     fn cache_columns_only_appear_in_full_daily_layout() {
-        let detail = daily_table_layout(74, false, false, false);
-        let full = daily_table_layout(120, false, false, false);
+        let detail =
+            daily_table_layout(74, false, false, SOURCE_TOP_MIN_WIDTH, MODEL_TOP_MIN_WIDTH);
+        let full = daily_table_layout(130, false, false, SOURCE_TOP_MIN_WIDTH, MODEL_TOP_MIN_WIDTH);
 
         assert_eq!(detail.density, DailyTableDensity::Detail);
         assert_eq!(full.density, DailyTableDensity::Full);
         assert!(full.columns.contains(&DailyColumn::CacheRead));
         assert!(full.columns.contains(&DailyColumn::CacheWrite));
         assert!(full.columns.contains(&DailyColumn::CacheRate));
+        assert!(full.columns.contains(&DailyColumn::CostPerMillion));
+    }
+
+    #[test]
+    fn top_daily_source_uses_token_total_then_cost_then_label() {
+        let mut usage = day("2026-06-09", 0.0);
+        usage
+            .source_breakdown
+            .insert("codex".to_string(), daily_source(100, 10.0, Vec::new()));
+        usage
+            .source_breakdown
+            .insert("kimi".to_string(), daily_source(200, 1.0, Vec::new()));
+        usage
+            .source_breakdown
+            .insert("opencode".to_string(), daily_source(200, 2.0, Vec::new()));
+
+        let source = top_daily_source(&usage).expect("top source should be selected");
+
+        assert_eq!(source.key, "opencode");
+        assert_eq!(source.tokens, 200);
+    }
+
+    #[test]
+    fn top_daily_model_aggregates_matching_model_keys_across_sources() {
+        let mut usage = day("2026-06-09", 0.0);
+        usage.source_breakdown.insert(
+            "codex".to_string(),
+            daily_source(
+                130,
+                1.0,
+                vec![
+                    ("gpt-5", daily_model("gpt-5", "openai", "gpt-5", 120, 1.0)),
+                    (
+                        "claude-opus-4.7",
+                        daily_model("claude-opus-4.7", "anthropic", "claude-opus-4.7", 10, 5.0),
+                    ),
+                ],
+            ),
+        );
+        usage.source_breakdown.insert(
+            "kimi".to_string(),
+            daily_source(
+                290,
+                2.0,
+                vec![
+                    ("gpt-5", daily_model("gpt-5", "openai", "gpt-5", 90, 0.5)),
+                    (
+                        "kimi-k2.5",
+                        daily_model("kimi-k2.5", "moonshot", "kimi-k2.5", 200, 1.0),
+                    ),
+                ],
+            ),
+        );
+
+        let model = top_daily_model(&usage).expect("top model should be selected");
+
+        assert_eq!(model.key, "gpt-5");
+        assert_eq!(model.tokens, 210);
     }
 
     #[test]
@@ -960,6 +1252,31 @@ mod tests {
             !body.contains("2026-06-09"),
             "full date must not repeat on daily rows\n{body}"
         );
+    }
+
+    #[test]
+    fn daily_rows_render_top_source_and_model_columns_when_space_allows() {
+        let mut app = make_daily_app(130);
+        let mut usage = day("2026-06-09", 30.0);
+        usage.source_breakdown.insert(
+            "codex".to_string(),
+            daily_source(
+                300,
+                3.0,
+                vec![("gpt-5", daily_model("gpt-5", "openai", "gpt-5", 300, 3.0))],
+            ),
+        );
+        app.data.daily = vec![usage];
+
+        let body = render_body(&mut app, 130, 8);
+
+        assert!(
+            body.contains("Source*"),
+            "expected top source header\n{body}"
+        );
+        assert!(body.contains("Model*"), "expected top model header\n{body}");
+        assert!(body.contains("Codex"), "expected top source value\n{body}");
+        assert!(body.contains("gpt-5"), "expected top model value\n{body}");
     }
 
     #[test]

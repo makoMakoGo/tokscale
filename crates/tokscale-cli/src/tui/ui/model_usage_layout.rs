@@ -1,7 +1,8 @@
 use ratatui::prelude::Constraint;
 
 use super::table_layout::{
-    allocate_widths, choose_priority_columns, spaced_width, ColumnWidthSpec,
+    allocate_widths, choose_priority_columns, insert_by_display_order, spaced_width,
+    ColumnWidthSpec,
 };
 use super::widgets::MODEL_DISPLAY_MAX_WIDTH;
 
@@ -210,25 +211,6 @@ fn density_for_columns(columns: &[ModelUsageColumn]) -> ModelUsageTableDensity {
     } else {
         ModelUsageTableDensity::VeryCompact
     }
-}
-
-fn display_rank(column: ModelUsageColumn, display_order: &[ModelUsageColumn]) -> usize {
-    display_order
-        .iter()
-        .position(|candidate| *candidate == column)
-        .unwrap_or(display_order.len())
-}
-
-fn insert_by_display_order(
-    candidate: &[ModelUsageColumn],
-    column: ModelUsageColumn,
-    display_order: &[ModelUsageColumn],
-) -> usize {
-    let column_rank = display_rank(column, display_order);
-    candidate
-        .iter()
-        .position(|existing| display_rank(*existing, display_order) > column_rank)
-        .unwrap_or(candidate.len())
 }
 
 pub(crate) fn model_usage_table_layout(
