@@ -8,55 +8,75 @@ use super::widgets::{
 use crate::tui::app::{App, ClickAction};
 
 const CELL_WIDTH: u16 = 2;
+const GRAPH_PANEL_H: u16 = 12;
+const STATS_PANEL_H: u16 = 12;
+const STATS_COMPACT_H: u16 = 8;
+const BREAKDOWN_MIN_H: u16 = 6;
 const MONTH_LABELS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 const DAY_LABELS: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatsLayoutMode {
+    GraphStats,
+    GraphStatsBreakdown,
+    GraphBreakdown,
+}
+
+fn stats_layout_mode(area_height: u16, has_selected_cell: bool) -> StatsLayoutMode {
+    if !has_selected_cell {
+        return StatsLayoutMode::GraphStats;
+    }
+
+    if area_height >= GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H {
+        StatsLayoutMode::GraphStatsBreakdown
+    } else {
+        StatsLayoutMode::GraphBreakdown
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let has_selected_cell = app.selected_graph_cell.is_some();
-    let stats_compact_h: u16 = 8;
-    let min_breakdown_h: u16 = 6;
-    let min_graph_h: u16 = 12;
-    let sufficient_for_both = area.height >= min_graph_h + stats_compact_h + min_breakdown_h;
+    match stats_layout_mode(area.height, has_selected_cell) {
+        StatsLayoutMode::GraphStatsBreakdown => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(GRAPH_PANEL_H),
+                    Constraint::Length(STATS_COMPACT_H),
+                    Constraint::Min(BREAKDOWN_MIN_H),
+                ])
+                .split(area);
 
-    if has_selected_cell && sufficient_for_both {
-        // Three-zone layout: graph + compact stats + breakdown
-        let non_stats = area.height.saturating_sub(stats_compact_h);
-        let surplus = non_stats.saturating_sub(min_graph_h + min_breakdown_h);
-        let graph_h = min_graph_h + (surplus * 3 / 5); // 60% of surplus to graph
-        let breakdown_h = non_stats.saturating_sub(graph_h); // 40% to breakdown
+            render_graph(frame, app, chunks[0]);
+            render_stats_panel(frame, app, chunks[1]);
+            render_breakdown_panel(frame, app, chunks[2]);
+        }
+        StatsLayoutMode::GraphBreakdown => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(GRAPH_PANEL_H),
+                    Constraint::Min(BREAKDOWN_MIN_H),
+                ])
+                .split(area);
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(graph_h),
-                Constraint::Length(stats_compact_h),
-                Constraint::Length(breakdown_h),
-            ])
-            .split(area);
+            render_graph(frame, app, chunks[0]);
+            render_breakdown_panel(frame, app, chunks[1]);
+        }
+        StatsLayoutMode::GraphStats => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(GRAPH_PANEL_H),
+                    Constraint::Min(STATS_PANEL_H),
+                ])
+                .split(area);
 
-        render_graph(frame, app, chunks[0]);
-        render_stats_panel(frame, app, chunks[1]);
-        render_breakdown_panel(frame, app, chunks[2]);
-    } else if has_selected_cell {
-        // Not enough room for both: graph + breakdown only
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(12), Constraint::Length(12)])
-            .split(area);
-
-        render_graph(frame, app, chunks[0]);
-        render_breakdown_panel(frame, app, chunks[1]);
-    } else {
-        // No cell selected: graph + full stats
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(12), Constraint::Length(12)])
-            .split(area);
-
-        render_graph(frame, app, chunks[0]);
-        render_stats_panel(frame, app, chunks[1]);
+            render_graph(frame, app, chunks[0]);
+            render_stats_panel(frame, app, chunks[1]);
+        }
     }
 }
 
@@ -190,6 +210,37 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_layout_without_selection_keeps_graph_fixed() {
+        assert_eq!(stats_layout_mode(24, false), StatsLayoutMode::GraphStats);
+        assert_eq!(stats_layout_mode(60, false), StatsLayoutMode::GraphStats);
+    }
+
+    #[test]
+    fn stats_layout_with_selection_keeps_all_panels_when_roomy() {
+        assert_eq!(
+            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H, true),
+            StatsLayoutMode::GraphStatsBreakdown
+        );
+        assert_eq!(
+            stats_layout_mode(60, true),
+            StatsLayoutMode::GraphStatsBreakdown
+        );
+    }
+
+    #[test]
+    fn stats_layout_with_selection_drops_stats_when_constrained() {
+        assert_eq!(
+            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H - 1, true),
+            StatsLayoutMode::GraphBreakdown
+        );
     }
 }
 
