@@ -18,7 +18,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "together" | "together_ai" => "together_ai",
         "fireworks" | "fireworks_ai" => "fireworks_ai",
         "google" | "gemini" => "google",
-        "openai" | "openai_codex" => "openai",
+        "openai" | "openai_codex" | "openai_pro" => "openai",
         "github_copilot" => "github-copilot",
         s if s == "opencode" || s.starts_with("opencode_") => "opencode",
         "minimax" | "minimaxai" | "minimax_ai" => "minimax",
@@ -45,6 +45,7 @@ pub fn normalize_provider_for_grouping(raw: &str) -> String {
     let normalized = trimmed.to_lowercase().replace('-', "_");
 
     match normalized.as_str() {
+        s if is_owl_usage_provider(s) => "owl".to_string(),
         s if s.starts_with("zai") || s.starts_with("zhipu") => "zai".to_string(),
         s if s.starts_with("xiaomi") => "xiaomi".to_string(),
         s if s.starts_with("minimax") => "minimax".to_string(),
@@ -63,6 +64,11 @@ pub fn normalize_provider_for_grouping(raw: &str) -> String {
             .map(|provider| provider_group_from_canonical(&provider).to_string())
             .unwrap_or(normalized),
     }
+}
+
+pub(crate) fn is_owl_usage_provider(raw: &str) -> bool {
+    let lower = raw.trim().to_lowercase();
+    contains_delimited(&lower, "owl") || contains_delimited(&lower, "owlc")
 }
 
 fn provider_group_from_canonical(provider: &str) -> &str {
@@ -296,6 +302,7 @@ mod tests {
             ("stepfun-coding-plan", vec!["stepfun"]),
             ("opencode-go", vec!["opencode"]),
             ("opencode-zen", vec!["opencode"]),
+            ("openai-pro", vec!["openai"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
         ];
@@ -316,6 +323,7 @@ mod tests {
             canonical_provider("pandora-deepseek"),
             Some("deepseek".into())
         );
+        assert_eq!(canonical_provider("openai-pro"), Some("openai".into()));
         assert_eq!(canonical_provider("<synthetic>"), None);
         assert_eq!(canonical_provider("unknown"), None);
     }
@@ -349,7 +357,16 @@ mod tests {
             ("Meta-Llama", "meta"),
             ("fireworks-ai", "fireworks"),
             ("together_ai", "together"),
-            ("openai-pro", "openai-pro"),
+            ("openai-pro", "openai"),
+            ("openai_owl", "owl"),
+            ("openai-owl", "owl"),
+            ("openai-owlc", "owl"),
+            ("foo/owl/bar", "owl"),
+            ("provider.owlc", "owl"),
+            ("bowl", "bowl"),
+            ("scowl", "scowl"),
+            ("owlish", "owlish"),
+            ("owlc2", "owlc2"),
             ("opencode", "opencode"),
             ("opencode-go", "opencode"),
             ("opencode-zen", "opencode"),

@@ -28,6 +28,7 @@ notepad.md
 ai-todolist.md
 *.tgz
 .sisyphus
+.omo/
 crates/tokscale-cli/tokscale-export-*.json
 
 # Beads / Dolt files (added by bd init)

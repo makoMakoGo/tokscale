@@ -398,6 +398,7 @@ fn get_single_provider_display_name(provider: &str) -> String {
         "mistral" => "Mistral".to_string(),
         "cohere" => "Cohere".to_string(),
         "opencode" => "OpenCode".to_string(),
+        "owl" => "Owl".to_string(),
         "github-copilot" => "GitHub Copilot".to_string(),
         _ => provider.to_string(),
     }
@@ -559,6 +560,9 @@ mod tests {
             ("alibaba-coding-plan-cn", "Alibaba"),
             ("tencent-coding-plan", "Tencent"),
             ("tecent-coding-plan", "Tencent"),
+            ("openai-pro", "OpenAI"),
+            ("openai-owl", "Owl"),
+            ("openai-owlc", "Owl"),
             ("opencode", "OpenCode"),
             ("opencode-go", "OpenCode"),
             ("opencode-zen", "OpenCode"),
