@@ -27,6 +27,16 @@ fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
     tokscale_core::scanner::ScannerSettings::default()
 }
 
+/// Return freed allocator pages to the OS after the parse peak. glibc
+/// otherwise keeps the high-water mark resident in arena free lists, which
+/// is most of the TUI's idle RSS (ADR 0008).
+fn trim_allocator() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TokenBreakdown {
     pub input: u64,
@@ -342,7 +352,9 @@ impl DataLoader {
         }
         .map_err(anyhow::Error::msg)?;
 
-        self.aggregate_messages(messages, group_by)
+        let result = self.aggregate_messages(messages, group_by);
+        trim_allocator();
+        result
     }
 
     #[cfg(test)]
