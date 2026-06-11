@@ -25,7 +25,7 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
         .fold(
             || HashMap::with_capacity(estimated_days),
             |mut acc: HashMap<String, DayAccumulator>, msg| {
-                let entry = acc.entry(msg.date.clone()).or_default();
+                let entry = acc.entry(msg.date_string()).or_default();
                 entry.add_message(&msg);
                 acc
             },
@@ -732,7 +732,6 @@ fn calculate_intensities(contributions: &mut [DailyContribution]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
 
     // Helper function to create mock UnifiedMessage
     fn mock_unified_message(
@@ -742,11 +741,16 @@ mod tests {
         model: &str,
         client: &str,
     ) -> UnifiedMessage {
-        // Parse date string to timestamp
-        let datetime = format!("{}T00:00:00Z", date)
-            .parse::<DateTime<Utc>>()
-            .unwrap();
-        let timestamp = datetime.timestamp_millis();
+        // Local noon keeps the derived local date equal to `date` in every
+        // timezone (dates are derived from timestamps since schema v24).
+        let timestamp = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .earliest()
+            .unwrap()
+            .timestamp_millis();
 
         UnifiedMessage {
             client: client.to_string(),
@@ -756,7 +760,6 @@ mod tests {
             workspace_key: None,
             workspace_label: None,
             timestamp,
-            date: date.to_string(),
             tokens: TokenBreakdown {
                 input: tokens / 2,
                 output: tokens / 2,
@@ -1376,7 +1379,6 @@ mod tests {
         client: &str,
         provider: &str,
         model: &str,
-        date: &str,
         timestamp_ms: i64,
         tokens: TokenBreakdown,
         cost: f64,
@@ -1389,7 +1391,6 @@ mod tests {
             workspace_key: None,
             workspace_label: None,
             timestamp: timestamp_ms,
-            date: date.to_string(),
             tokens,
             cost,
             message_count: 1,
@@ -1422,7 +1423,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_001_000,
                 t.clone(),
                 0.01,
@@ -1432,7 +1432,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_002_000,
                 t.clone(),
                 0.01,
@@ -1442,7 +1441,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_003_000,
                 t.clone(),
                 0.01,
@@ -1452,7 +1450,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_004_000,
                 t.clone(),
                 0.01,
@@ -1462,7 +1459,6 @@ mod tests {
                 "amp",
                 "anthropic",
                 "claude-haiku-4-5",
-                "2026-05-10",
                 1_700_000_005_000,
                 t.clone(),
                 0.02,
@@ -1472,7 +1468,6 @@ mod tests {
                 "amp",
                 "anthropic",
                 "claude-haiku-4-5",
-                "2026-05-10",
                 1_700_000_006_000,
                 t.clone(),
                 0.02,
@@ -1482,7 +1477,6 @@ mod tests {
                 "amp",
                 "anthropic",
                 "claude-haiku-4-5",
-                "2026-05-10",
                 1_700_000_007_000,
                 t.clone(),
                 0.02,
@@ -1492,7 +1486,6 @@ mod tests {
                 "claude",
                 "anthropic",
                 "claude-sonnet-4-5",
-                "2026-05-11",
                 1_700_000_100_000,
                 t.clone(),
                 0.05,
@@ -1502,7 +1495,6 @@ mod tests {
                 "claude",
                 "anthropic",
                 "claude-sonnet-4-5",
-                "2026-05-11",
                 1_700_000_101_000,
                 t.clone(),
                 0.05,
@@ -1512,7 +1504,6 @@ mod tests {
                 "claude",
                 "anthropic",
                 "claude-sonnet-4-5",
-                "2026-05-11",
                 1_700_000_102_000,
                 t.clone(),
                 0.05,
@@ -1573,7 +1564,6 @@ mod tests {
                 "amp",
                 "anthropic",
                 "claude-haiku-4-5",
-                "2026-05-10",
                 1_700_000_001_000,
                 small,
                 0.001,
@@ -1583,7 +1573,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_002_000,
                 big,
                 0.50,

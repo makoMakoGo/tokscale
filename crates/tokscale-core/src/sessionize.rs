@@ -383,7 +383,6 @@ mod tests {
             workspace_key: None,
             workspace_label: None,
             timestamp,
-            date: "2024-01-01".to_string(),
             tokens: TokenBreakdown {
                 input: 100,
                 output: 50,

@@ -1952,25 +1952,39 @@ fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Unified
     deduped
 }
 
+/// Date-range retain shared by the report and local-parse filters. One
+/// `date_string()` per message, only when a date filter is active.
+fn retain_messages_in_date_range(
+    filtered: &mut Vec<UnifiedMessage>,
+    year: Option<&String>,
+    since: Option<&String>,
+    until: Option<&String>,
+) {
+    if year.is_none() && since.is_none() && until.is_none() {
+        return;
+    }
+    let year_prefix = year.map(|year| format!("{}-", year));
+    filtered.retain(|m| {
+        let date = m.date_string();
+        year_prefix
+            .as_ref()
+            .is_none_or(|prefix| date.starts_with(prefix))
+            && since.is_none_or(|since| date.as_str() >= since.as_str())
+            && until.is_none_or(|until| date.as_str() <= until.as_str())
+    });
+}
+
 fn filter_unified_messages(
     messages: Vec<UnifiedMessage>,
     options: &LocalParseOptions,
 ) -> Vec<UnifiedMessage> {
     let mut filtered = messages;
-
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        filtered.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if let Some(since) = &options.since {
-        filtered.retain(|m| m.date.as_str() >= since.as_str());
-    }
-
-    if let Some(until) = &options.until {
-        filtered.retain(|m| m.date.as_str() <= until.as_str());
-    }
-
+    retain_messages_in_date_range(
+        &mut filtered,
+        options.year.as_ref(),
+        options.since.as_ref(),
+        options.until.as_ref(),
+    );
     filtered
 }
 
@@ -2208,8 +2222,9 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
 
     for msg in filtered {
-        let month = if msg.date.len() >= 7 {
-            msg.date[..7].to_string()
+        let date = msg.date_string();
+        let month = if date.len() >= 7 {
+            date[..7].to_string()
         } else {
             continue;
         };
@@ -2309,10 +2324,10 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
             let ts_secs = msg.timestamp / 1000;
             match Local.timestamp_opt(ts_secs, 0) {
                 chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
-                _ => format!("{} 00:00", msg.date),
+                _ => format!("{} 00:00", msg.date_string()),
             }
         } else {
-            format!("{} 00:00", msg.date)
+            format!("{} 00:00", msg.date_string())
         };
 
         let entry = hour_map.entry(hour_key).or_default();
@@ -2468,20 +2483,12 @@ fn filter_messages_for_report(
     options: &ReportOptions,
 ) -> Vec<UnifiedMessage> {
     let mut filtered = messages;
-
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        filtered.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if let Some(since) = &options.since {
-        filtered.retain(|m| m.date.as_str() >= since.as_str());
-    }
-
-    if let Some(until) = &options.until {
-        filtered.retain(|m| m.date.as_str() <= until.as_str());
-    }
-
+    retain_messages_in_date_range(
+        &mut filtered,
+        options.year.as_ref(),
+        options.since.as_ref(),
+        options.until.as_ref(),
+    );
     filtered
 }
 
@@ -3163,7 +3170,7 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         workspace_key: msg.workspace_key.clone(),
         workspace_label: msg.workspace_label.clone(),
         timestamp: msg.timestamp,
-        date: msg.date.clone(),
+        date: msg.date_string(),
         input: msg.tokens.input,
         output: msg.tokens.output,
         cache_read: msg.tokens.cache_read,
@@ -3220,7 +3227,6 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         workspace_key: msg.workspace_key.clone(),
         workspace_label: msg.workspace_label.clone(),
         timestamp: msg.timestamp,
-        date: msg.date.clone(),
         tokens: TokenBreakdown {
             input: msg.input,
             output: msg.output,
@@ -4561,7 +4567,7 @@ model = "gpt-5.5"
 
     #[test]
     #[serial_test::serial]
-    fn test_source_cache_refreshes_stale_date_on_cache_hit() {
+    fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
@@ -4580,10 +4586,14 @@ model = "gpt-5.5"
             .unwrap();
 
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
-            let mut stale_message = UnifiedMessage::new(
+            // Provider deliberately wrong for the model: the cache-hit path
+            // must re-run refresh_derived_fields (dates are derived from
+            // timestamps since schema v24, so provider identity is the
+            // remaining derived field).
+            let stale_message = UnifiedMessage::new(
                 "opencode",
-                "accounts/fireworks/models/deepseek-v3-0324",
-                "fireworks",
+                "gpt-5.5",
+                "anthropic",
                 "session-1",
                 1_733_011_200_000,
                 TokenBreakdown {
@@ -4595,7 +4605,6 @@ model = "gpt-5.5"
                 },
                 0.0,
             );
-            stale_message.date = "1900-01-01".to_string();
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
@@ -4615,25 +4624,9 @@ model = "gpt-5.5"
             .unwrap();
 
             assert_eq!(messages.len(), 1);
-            assert_ne!(messages[0].date, "1900-01-01");
             assert_eq!(
-                messages[0].date,
-                UnifiedMessage::new(
-                    "opencode",
-                    "accounts/fireworks/models/deepseek-v3-0324",
-                    "fireworks",
-                    "session-1",
-                    1_733_011_200_000,
-                    TokenBreakdown {
-                        input: 10,
-                        output: 5,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
-                    0.0,
-                )
-                .date
+                messages[0].provider_id, "openai",
+                "cache hits must refresh derived provider identity"
             );
         }
 
@@ -5770,7 +5763,6 @@ model = "gpt-5.5"
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             let mut stale_message = expected[0].clone();
             stale_message.timestamp = 0;
-            stale_message.date = "1900-01-01".to_string();
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(

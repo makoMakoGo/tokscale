@@ -20,7 +20,9 @@ use std::time::UNIX_EPOCH;
 // path-derived Main/Agent N labels must be rebuilt.
 // 23: Claude transcripts no longer estimate tool_result text without usage
 // metadata, so cached transcript messages must be rebuilt.
-const CACHE_SCHEMA_VERSION: u32 = 23;
+// 24: UnifiedMessage drops the stored date string (derived from timestamp)
+// and Phase B shrinks per-message data; serialized layout changed.
+const CACHE_SCHEMA_VERSION: u32 = 24;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

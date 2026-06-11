@@ -43,7 +43,6 @@ pub struct UnifiedMessage {
     pub workspace_key: Option<String>,
     pub workspace_label: Option<String>,
     pub timestamp: i64,
-    pub date: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     #[serde(default)]
@@ -280,7 +279,6 @@ impl UnifiedMessage {
         agent: Option<String>,
         dedup_key: Option<String>,
     ) -> Self {
-        let date = timestamp_to_date(timestamp);
         Self {
             client: client.into(),
             model_id: model_id.into(),
@@ -289,7 +287,6 @@ impl UnifiedMessage {
             workspace_key: None,
             workspace_label: None,
             timestamp,
-            date,
             tokens,
             cost,
             duration_ms: None,
@@ -299,6 +296,22 @@ impl UnifiedMessage {
             dedup_key,
             is_turn_start: false,
         }
+    }
+
+    /// Local calendar date derived from `timestamp`; `None` when the
+    /// timestamp is outside the representable range.
+    pub fn local_date(&self) -> Option<chrono::NaiveDate> {
+        use chrono::TimeZone;
+        match chrono::Local.timestamp_millis_opt(self.timestamp) {
+            chrono::LocalResult::Single(dt) => Some(dt.date_naive()),
+            _ => None,
+        }
+    }
+
+    /// Local `YYYY-MM-DD` string derived from `timestamp` (empty when out of
+    /// range). Allocates; prefer [`Self::local_date`] in hot paths.
+    pub fn date_string(&self) -> String {
+        timestamp_to_date(self.timestamp)
     }
 
     pub fn set_workspace(
@@ -315,7 +328,6 @@ impl UnifiedMessage {
     }
 
     pub(crate) fn refresh_derived_fields(&mut self) {
-        self.date = timestamp_to_date(self.timestamp);
         if let Some(provider) = crate::provider_identity::provider_override_from_model_and_provider(
             &self.model_id,
             &self.provider_id,
@@ -515,7 +527,7 @@ mod tests {
         assert_eq!(msg.client, "opencode");
         assert_eq!(msg.model_id, "claude-3-5-sonnet");
         assert_eq!(msg.session_id, "test-session-id");
-        assert_eq!(msg.date, timestamp_to_date(1733011200000));
+        assert_eq!(msg.date_string(), timestamp_to_date(1733011200000));
         assert_eq!(msg.cost, 0.05);
         assert_eq!(msg.agent, None);
         assert_eq!(msg.workspace_key, None);
