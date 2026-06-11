@@ -1842,10 +1842,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     Ok(all_messages)
 }
 
-/// Stable digest over every scannable source's (path, size, mtime) plus the
+/// Digest over every scannable source's (path, size, mtime) plus the
 /// requested client set. Two equal digests mean a fresh parse would see
 /// byte-identical inputs, so refresh work can be skipped entirely (ADR 0008).
-/// The value is process-local and never persisted.
+/// The value is only comparable within one process (`DefaultHasher`) and is
+/// never persisted.
 pub fn compute_source_digest(
     home_dir: &str,
     clients: &[String],
