@@ -276,10 +276,10 @@ after"#;
 
         let messages = parse_roocode_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "roocode");
-        assert_eq!(messages[0].model_id, "claude-sonnet-4");
-        assert_eq!(messages[0].provider_id, "anthropic");
-        assert_eq!(messages[0].session_id, "task-abc");
+        assert_eq!(messages[0].client.as_ref(), "roocode");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(messages[0].session_id.as_ref(), "task-abc");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 20);
@@ -309,8 +309,8 @@ after"#;
 
         let messages = parse_roocode_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "openai");
-        assert_eq!(messages[0].model_id, "unknown");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(messages[0].model_id.as_ref(), "unknown");
         assert_eq!(messages[0].agent, None);
     }
 
@@ -334,7 +334,7 @@ after"#;
 
         let messages = parse_roocode_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "bedrock/anthropic");
+        assert_eq!(messages[0].provider_id.as_ref(), "bedrock/anthropic");
     }
 
     #[test]

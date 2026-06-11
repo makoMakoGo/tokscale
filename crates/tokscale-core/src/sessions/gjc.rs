@@ -240,18 +240,18 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let m = &messages[0];
-        assert_eq!(m.client, "gjc");
-        assert_eq!(m.session_id, "gjc_ses_001");
-        assert_eq!(m.model_id, "claude-sonnet-4");
-        assert_eq!(m.provider_id, "anthropic");
+        assert_eq!(m.client.as_ref(), "gjc");
+        assert_eq!(m.session_id.as_ref(), "gjc_ses_001");
+        assert_eq!(m.model_id.as_ref(), "claude-sonnet-4");
+        assert_eq!(m.provider_id.as_ref(), "anthropic");
         assert_eq!(m.tokens.input, 100);
         assert_eq!(m.tokens.output, 50);
         assert_eq!(m.tokens.cache_read, 10);
         assert_eq!(m.tokens.cache_write, 5);
         assert_eq!(m.tokens.reasoning, 0);
         assert_eq!(m.timestamp, 1767225601000);
-        assert_eq!(m.workspace_key, Some("/work/pi".to_string()));
-        assert_eq!(m.workspace_label, Some("pi".to_string()));
+        assert_eq!(m.workspace_key.as_deref(), Some("/work/pi"));
+        assert_eq!(m.workspace_label.as_deref(), Some("pi"));
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-4o");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o");
     }
 
     #[test]
@@ -273,7 +273,7 @@ not valid json at all
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-4o-mini");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
     }
 
     #[test]
@@ -374,8 +374,8 @@ not valid json at all
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 2, "expected exactly 2 valid messages");
-        assert_eq!(messages[0].model_id, "model-a");
-        assert_eq!(messages[1].model_id, "model-b");
+        assert_eq!(messages[0].model_id.as_ref(), "model-a");
+        assert_eq!(messages[1].model_id.as_ref(), "model-b");
     }
 
     /// (d) Message missing model -> skipped, no panic.

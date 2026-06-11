@@ -64,11 +64,11 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
     assert_eq!(messages.len(), 1);
 
     let msg = &messages[0];
-    assert_eq!(msg.client, "hermes");
+    assert_eq!(msg.client.as_ref(), "hermes");
     assert_eq!(msg.agent.as_deref(), Some("Hermes Agent"));
-    assert_eq!(msg.session_id, "session-1");
-    assert_eq!(msg.model_id, "claude-sonnet-4");
-    assert_eq!(msg.provider_id, "anthropic");
+    assert_eq!(msg.session_id.as_ref(), "session-1");
+    assert_eq!(msg.model_id.as_ref(), "claude-sonnet-4");
+    assert_eq!(msg.provider_id.as_ref(), "anthropic");
     assert_eq!(msg.timestamp, 1_750_000_000_250_i64);
     assert_eq!(msg.message_count, 42);
     assert_eq!(msg.tokens.input, 1200);
@@ -172,8 +172,8 @@ fn test_parse_hermes_sqlite_skips_empty_sessions_and_falls_back_to_estimated_cos
     assert_eq!(messages.len(), 1);
 
     let msg = &messages[0];
-    assert_eq!(msg.session_id, "session-valid");
-    assert_eq!(msg.provider_id, "openai");
+    assert_eq!(msg.session_id.as_ref(), "session-valid");
+    assert_eq!(msg.provider_id.as_ref(), "openai");
     assert_eq!(msg.cost, 1.25);
     assert_eq!(msg.message_count, 3);
 }
@@ -212,5 +212,5 @@ fn test_parse_hermes_sqlite_ignores_unknown_billing_provider_and_falls_back_to_m
 
     let messages = parse_hermes_sqlite(&db_path);
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].provider_id, "openai");
+    assert_eq!(messages[0].provider_id.as_ref(), "openai");
 }

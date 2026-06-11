@@ -583,9 +583,9 @@ mod tests {
         let messages = parse_codebuff_file(&msgs_path);
         assert_eq!(messages.len(), 1);
         let only = &messages[0];
-        assert_eq!(only.client, "codebuff");
-        assert_eq!(only.model_id, "claude-sonnet-4-20250514");
-        assert_eq!(only.provider_id, "anthropic");
+        assert_eq!(only.client.as_ref(), "codebuff");
+        assert_eq!(only.model_id.as_ref(), "claude-sonnet-4-20250514");
+        assert_eq!(only.provider_id.as_ref(), "anthropic");
         assert!(only.session_id.ends_with("/proj/2025-12-20T12-00-00.000Z"));
         assert_eq!(only.tokens.input, 10);
         assert_eq!(only.tokens.output, 5);

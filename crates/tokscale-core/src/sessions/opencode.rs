@@ -532,7 +532,7 @@ mod tests {
         let mut bytes = json.as_bytes().to_vec();
         let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).unwrap();
 
-        assert_eq!(msg.agent, Some("OmO".to_string()));
+        assert_eq!(msg.agent.as_deref(), Some("OmO"));
     }
 
     /// Verify negative token values are clamped to 0 (defense-in-depth for PR #147)
@@ -738,7 +738,7 @@ mod tests {
             Some(crate::sessions::dedup_hash_str("msg_sqlite_001")),
             "SQLite dedup_key should fall back to the row id when no embedded id exists"
         );
-        assert_eq!(messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4");
         assert_eq!(messages[0].tokens.input, 1000);
     }
 

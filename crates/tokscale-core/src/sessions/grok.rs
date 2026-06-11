@@ -438,10 +438,10 @@ mod tests {
 
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].client, "grok");
-        assert_eq!(messages[0].model_id, "grok-composer-2.5-fast");
-        assert_eq!(messages[0].provider_id, "xai");
-        assert_eq!(messages[0].session_id, "session-1");
+        assert_eq!(messages[0].client.as_ref(), "grok");
+        assert_eq!(messages[0].model_id.as_ref(), "grok-composer-2.5-fast");
+        assert_eq!(messages[0].provider_id.as_ref(), "xai");
+        assert_eq!(messages[0].session_id.as_ref(), "session-1");
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 0);
         assert_eq!(messages[0].timestamp, 1700000003000);
@@ -463,7 +463,7 @@ mod tests {
 
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "grok-composer-2.5-fast");
+        assert_eq!(messages[0].model_id.as_ref(), "grok-composer-2.5-fast");
         assert_eq!(messages[0].tokens.input, 220);
     }
 
@@ -494,7 +494,7 @@ mod tests {
 
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, UNKNOWN_MODEL);
+        assert_eq!(messages[0].model_id.as_ref(), UNKNOWN_MODEL);
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].timestamp, 1700000000000);
     }
@@ -509,7 +509,7 @@ mod tests {
 
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, UNKNOWN_MODEL);
+        assert_eq!(messages[0].model_id.as_ref(), UNKNOWN_MODEL);
         assert_eq!(messages[0].tokens.input, 150);
         assert_eq!(messages[0].timestamp, 1700000002000);
     }

@@ -650,6 +650,6 @@ mod tests {
 
         let messages = parse_amp_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "unknown");
+        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
     }
 }

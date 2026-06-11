@@ -1320,7 +1320,7 @@ mod tests {
             let entry = loaded
                 .get(&path)
                 .expect("recreated source cache entry should survive stale delete");
-            assert_eq!(entry.messages[0].session_id, "fresh-session");
+            assert_eq!(entry.messages[0].session_id.as_ref(), "fresh-session");
         }
 
         restore_cache_env(prev_env);

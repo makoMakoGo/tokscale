@@ -346,7 +346,9 @@ fn parse_pi_format_file(
             0.0,
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
-        unified.agent = omp_subagent_label.clone();
+        unified.agent = omp_subagent_label
+            .as_deref()
+            .map(crate::sessions::intern::intern);
         unified.set_agent_instance(child_stem.clone());
         messages.push(unified);
     }
@@ -403,16 +405,16 @@ mod tests {
 
         // then
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "pi");
-        assert_eq!(messages[0].session_id, "pi_ses_001");
-        assert_eq!(messages[0].model_id, "claude-3-5-sonnet");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].client.as_ref(), "pi");
+        assert_eq!(messages[0].session_id.as_ref(), "pi_ses_001");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-3-5-sonnet");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 10);
         assert_eq!(messages[0].tokens.cache_write, 5);
-        assert_eq!(messages[0].workspace_key, Some("/tmp".to_string()));
-        assert_eq!(messages[0].workspace_label, Some("tmp".to_string()));
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("/tmp"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("tmp"));
     }
 
     #[test]
@@ -427,10 +429,10 @@ mod tests {
 
         // then
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "omp");
-        assert_eq!(messages[0].session_id, "omp_ses_001");
-        assert_eq!(messages[0].model_id, "gpt-5.5");
-        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].client.as_ref(), "omp");
+        assert_eq!(messages[0].session_id.as_ref(), "omp_ses_001");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
         assert_eq!(messages[0].tokens.total(), 30);
     }
 
@@ -552,7 +554,7 @@ not valid json
 
         // then
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-4o-mini");
-        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
     }
 }

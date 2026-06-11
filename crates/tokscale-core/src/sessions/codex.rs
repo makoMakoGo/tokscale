@@ -837,7 +837,7 @@ fn flush_pending_model_messages(
             let upstream_session_id = message.session_id.clone();
             set_codex_dedup_key(&mut message, model, &upstream_session_id, None);
         }
-        message.model_id = model.to_string();
+        message.model_id = crate::sessions::intern::intern(model);
         messages.push(message);
         if used_fallback_timestamp {
             fallback_timestamp_indices.push(messages.len() - 1);
@@ -1213,7 +1213,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-4o-mini");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 30);
         assert_eq!(messages[0].tokens.cache_read, 20);
@@ -1227,7 +1227,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-4o");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o");
         assert_eq!(messages[0].tokens.input, 45);
         assert_eq!(messages[0].tokens.output, 12);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -1314,7 +1314,7 @@ mod tests {
         assert_eq!(
             messages
                 .iter()
-                .map(|message| message.model_id.as_str())
+                .map(|message| message.model_id.as_ref())
                 .collect::<Vec<_>>(),
             vec!["gpt-5.5", "gpt-5.5", "gpt-5.5"]
         );
@@ -1360,7 +1360,7 @@ mod tests {
         assert!(parsed.parse_succeeded);
         assert!(parsed.unresolved_model_events);
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].model_id, "unknown");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "unknown");
     }
 
     #[test]
@@ -1379,7 +1379,7 @@ mod tests {
         assert!(parsed.parse_succeeded);
         assert!(!parsed.unresolved_model_events);
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].model_id, "gpt-5.5");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.5");
     }
 
     #[test]
@@ -1436,7 +1436,7 @@ mod tests {
 
         let messages = parse_codex_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.4");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
         assert_eq!(messages[0].tokens.input, 8);
         assert_eq!(messages[0].tokens.output, 3);
         assert_eq!(messages[0].tokens.cache_read, 2);
@@ -1730,7 +1730,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "o3-pro");
+        assert_eq!(messages[0].model_id.as_ref(), "o3-pro");
         assert_eq!(messages[0].duration_ms, Some(1000));
     }
 
@@ -1745,7 +1745,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "azure");
+        assert_eq!(messages[0].provider_id.as_ref(), "azure");
         assert_eq!(messages[0].agent.as_deref(), Some("Codex Agent"));
     }
 
@@ -1763,7 +1763,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
         assert_eq!(messages[0].agent.as_deref(), Some("Codex Subagent"));
         assert_eq!(
             messages[0].workspace_key.as_deref(),
@@ -1794,8 +1794,8 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.5");
-        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
         assert_eq!(messages[0].agent.as_deref(), Some("Codex Subagent"));
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/repo-child"));
         assert_eq!(messages[0].tokens.input, 500);
@@ -1824,7 +1824,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.5");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 2);
     }
@@ -1849,7 +1849,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.5");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 500);
         assert_eq!(messages[0].tokens.cache_read, 1000);
         assert_eq!(messages[0].tokens.output, 200);
@@ -1874,7 +1874,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.5");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 2);
     }
@@ -2091,7 +2091,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "azure");
+        assert_eq!(messages[0].provider_id.as_ref(), "azure");
         assert_eq!(messages[0].agent.as_deref(), Some("Codex Agent"));
     }
 
@@ -2104,7 +2104,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
         assert!(messages[0].agent.is_none());
     }
 
@@ -2120,7 +2120,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-4o");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o");
     }
 
     #[test]
@@ -2143,8 +2143,8 @@ mod tests {
         assert!(parsed.parse_succeeded);
         assert!(parsed.unresolved_model_events);
         assert_eq!(parsed.messages.len(), 2);
-        assert_eq!(parsed.messages[0].model_id, "unknown");
-        assert_eq!(parsed.messages[1].model_id, "gpt-5.5");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "unknown");
+        assert_eq!(parsed.messages[1].model_id.as_ref(), "gpt-5.5");
     }
 
     #[test]
@@ -2163,7 +2163,7 @@ mod tests {
         assert!(parsed.parse_succeeded);
         assert!(!parsed.unresolved_model_events);
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].model_id, "gpt-5.5");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.5");
     }
 
     #[test]

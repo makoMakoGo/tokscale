@@ -186,10 +186,10 @@ const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
 
 fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
+        (Some(key), Some(label)) => (key.to_string(), Some(key.to_string()), label.to_string()),
         (Some(key), None) => (
-            key.clone(),
-            Some(key.clone()),
+            key.to_string(),
+            Some(key.to_string()),
             tokscale_core::sessions::workspace_label_from_key(key)
                 .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
         ),
@@ -466,7 +466,7 @@ impl DataLoader {
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
                 provider: provider.clone(),
-                client: msg.client.clone(),
+                client: msg.client.to_string(),
                 workspace_key: if *group_by == GroupBy::WorkspaceModel {
                     workspace_key.clone()
                 } else {
@@ -486,12 +486,12 @@ impl DataLoader {
             if merge_clients {
                 let client_totals = client_totals_by_model.entry(key.clone()).or_default();
                 let client_count = client_totals.len();
-                let totals = client_totals.entry(msg.client.clone()).or_insert_with(|| {
-                    ClientContributionOrder {
+                let totals = client_totals
+                    .entry(msg.client.to_string())
+                    .or_insert_with(|| ClientContributionOrder {
                         first_seen: client_count,
                         total_tokens: 0,
-                    }
-                });
+                    });
                 totals.total_tokens = totals
                     .total_tokens
                     .saturating_add(msg.tokens.total().max(0) as u64);
@@ -540,7 +540,7 @@ impl DataLoader {
             }
 
             if let Some(agent) = msg.agent.as_ref() {
-                let normalized_agent = if msg.client == "opencode" {
+                let normalized_agent = if msg.client.as_ref() == "opencode" {
                     sessions::normalize_opencode_agent_name(agent)
                 } else {
                     sessions::normalize_agent_name(agent)
@@ -584,11 +584,12 @@ impl DataLoader {
                 agent_clients
                     .entry(normalized_agent.clone())
                     .or_default()
-                    .insert(msg.client.clone());
+                    .insert(msg.client.to_string());
 
                 let instance_key = msg
                     .agent_instance
-                    .clone()
+                    .as_deref()
+                    .map(str::to_string)
                     .unwrap_or_else(|| format!("{}:{}", msg.client, msg.session_id));
                 agent_instances
                     .entry(normalized_agent)
@@ -639,7 +640,7 @@ impl DataLoader {
 
                 let source_entry = daily_entry
                     .source_breakdown
-                    .entry(msg.client.clone())
+                    .entry(msg.client.to_string())
                     .or_insert_with(|| DailySourceInfo {
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
@@ -762,7 +763,7 @@ impl DataLoader {
                 if msg.is_turn_start {
                     hourly_entry.turn_count += 1;
                 }
-                hourly_entry.clients.insert(msg.client.clone());
+                hourly_entry.clients.insert(msg.client.to_string());
 
                 let hourly_model_key = hourly_model_key(group_by, &provider, &normalized_model);
                 let h_model = hourly_entry
@@ -851,7 +852,7 @@ impl DataLoader {
                 if msg.is_turn_start {
                     minutely_entry.turn_count += 1;
                 }
-                minutely_entry.clients.insert(msg.client.clone());
+                minutely_entry.clients.insert(msg.client.to_string());
 
                 let m_model_key = hourly_model_key(group_by, &provider, &normalized_model);
                 let m_model =

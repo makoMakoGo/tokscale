@@ -128,10 +128,10 @@ async fn test_gjc_cost_precedence_end_to_end() {
     let msg_b = &sorted[1]; // timestamp 1767225721000
 
     // Both messages should be gjc client with the right model.
-    assert_eq!(msg_a.client, "gjc");
-    assert_eq!(msg_a.model_id, "gjc-priceable-model");
-    assert_eq!(msg_b.client, "gjc");
-    assert_eq!(msg_b.model_id, "gjc-priceable-model");
+    assert_eq!(msg_a.client.as_ref(), "gjc");
+    assert_eq!(msg_a.model_id.as_ref(), "gjc-priceable-model");
+    assert_eq!(msg_b.client.as_ref(), "gjc");
+    assert_eq!(msg_b.model_id.as_ref(), "gjc-priceable-model");
 
     // G7 / A1: message A embedded cost MUST be preserved (0.3), NOT repriced.
     // If this fails, the N1 binding is violated: the Hermes guard is overwriting

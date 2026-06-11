@@ -1907,10 +1907,10 @@ pub fn compute_source_digest(
 }
 
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
-    let mut latest_by_session: HashMap<String, UnifiedMessage> = HashMap::new();
+    let mut latest_by_session: HashMap<std::sync::Arc<str>, UnifiedMessage> = HashMap::new();
 
     for message in messages.drain(..) {
-        let session_id = message.session_id.clone();
+        let session_id = std::sync::Arc::clone(&message.session_id);
         match latest_by_session.get_mut(&session_id) {
             Some(existing) => {
                 let should_replace = message.timestamp > existing.timestamp
@@ -1978,10 +1978,10 @@ fn filter_unified_messages(
 
 fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
+        (Some(key), Some(label)) => (key.to_string(), Some(key.to_string()), label.to_string()),
         (Some(key), None) => (
-            key.clone(),
-            Some(key.clone()),
+            key.to_string(),
+            Some(key.to_string()),
             sessions::workspace_label_from_key(key)
                 .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
         ),
@@ -2020,9 +2020,9 @@ fn aggregate_model_usage_entries(
         };
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
-            client: msg.client.clone(),
+            client: msg.client.to_string(),
             merged_clients: if merge_clients {
-                Some(msg.client.clone())
+                Some(msg.client.to_string())
             } else {
                 None
             },
@@ -2037,7 +2037,7 @@ fn aggregate_model_usage_entries(
                 None
             },
             session_id: if session_grouped {
-                Some(msg.session_id.clone())
+                Some(msg.session_id.to_string())
             } else {
                 None
             },
@@ -2056,12 +2056,12 @@ fn aggregate_model_usage_entries(
         if merge_clients {
             let client_totals = client_totals_by_entry.entry(key.clone()).or_default();
             let client_count = client_totals.len();
-            let totals = client_totals.entry(msg.client.clone()).or_insert_with(|| {
-                ClientContributionOrder {
+            let totals = client_totals
+                .entry(msg.client.to_string())
+                .or_insert_with(|| ClientContributionOrder {
                     first_seen: client_count,
                     total_tokens: 0,
-                }
-            });
+                });
             totals.total_tokens = totals
                 .total_tokens
                 .saturating_add(msg.tokens.total().max(0) as u64);
@@ -2320,7 +2320,7 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 
         let entry = hour_map.entry(hour_key).or_default();
 
-        entry.clients.insert(msg.client.clone());
+        entry.clients.insert(msg.client.to_string());
         entry
             .models
             .insert(normalize_model_for_grouping(&msg.model_id));
@@ -2486,7 +2486,7 @@ fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
 
 fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     if is_headless && message.agent.is_none() {
-        message.agent = Some("headless".to_string());
+        message.agent = Some(sessions::intern::intern("headless"));
     }
 }
 
@@ -2501,7 +2501,7 @@ fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
     // LiteLLM update adds rows under provider `zed.dev` that already include
     // Zed's markup, this function would double-bill — revisit by threading
     // the matched-price provenance through `apply_pricing_if_available`.
-    if message.client == "zed"
+    if message.client.as_ref() == "zed"
         && message
             .provider_id
             .eq_ignore_ascii_case(sessions::zed::ZED_HOSTED_PROVIDER)
@@ -3146,12 +3146,12 @@ pub async fn parse_local_unified_messages(
 
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     ParsedMessage {
-        client: msg.client.clone(),
-        model_id: msg.model_id.clone(),
-        provider_id: msg.provider_id.clone(),
-        session_id: msg.session_id.clone(),
-        workspace_key: msg.workspace_key.clone(),
-        workspace_label: msg.workspace_label.clone(),
+        client: msg.client.to_string(),
+        model_id: msg.model_id.to_string(),
+        provider_id: msg.provider_id.to_string(),
+        session_id: msg.session_id.to_string(),
+        workspace_key: msg.workspace_key.as_deref().map(str::to_string),
+        workspace_label: msg.workspace_label.as_deref().map(str::to_string),
         timestamp: msg.timestamp,
         date: msg.date_string(),
         input: msg.tokens.input,
@@ -3161,7 +3161,7 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         reasoning: msg.tokens.reasoning,
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
-        agent: msg.agent.clone(),
+        agent: msg.agent.as_deref().map(str::to_string),
     }
 }
 
@@ -3200,12 +3200,12 @@ fn filter_parsed_messages(
 
 pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
     UnifiedMessage {
-        client: msg.client.clone(),
-        model_id: msg.model_id.clone(),
-        provider_id: msg.provider_id.clone(),
-        session_id: msg.session_id.clone(),
-        workspace_key: msg.workspace_key.clone(),
-        workspace_label: msg.workspace_label.clone(),
+        client: sessions::intern::intern(&msg.client),
+        model_id: sessions::intern::intern(&msg.model_id),
+        provider_id: sessions::intern::intern(&msg.provider_id),
+        session_id: sessions::intern::intern(&msg.session_id),
+        workspace_key: msg.workspace_key.as_deref().map(sessions::intern::intern),
+        workspace_label: msg.workspace_label.as_deref().map(sessions::intern::intern),
         timestamp: msg.timestamp,
         tokens: TokenBreakdown {
             input: msg.input,
@@ -3217,7 +3217,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         cost,
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
-        agent: msg.agent.clone(),
+        agent: msg.agent.as_deref().map(sessions::intern::intern),
         agent_instance: None,
         dedup_key: None,
         is_turn_start: false,
@@ -4447,8 +4447,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "cursor");
-        assert_eq!(messages[0].model_id, "Composer 1.5");
+        assert_eq!(messages[0].client.as_ref(), "cursor");
+        assert_eq!(messages[0].model_id.as_ref(), "Composer 1.5");
         assert!(messages[0].cost > 0.0);
     }
 
@@ -4495,8 +4495,8 @@ model = "gpt-5.5"
             .unwrap();
 
             assert_eq!(messages.len(), 2);
-            assert_eq!(messages[0].provider_id, "openai-pro");
-            assert_eq!(messages[0].model_id, "gpt-5.5");
+            assert_eq!(messages[0].provider_id.as_ref(), "openai-pro");
+            assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
             assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 30);
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 3);
             assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 5);
@@ -4605,7 +4605,8 @@ model = "gpt-5.5"
 
             assert_eq!(messages.len(), 1);
             assert_eq!(
-                messages[0].provider_id, "openai",
+                messages[0].provider_id.as_ref(),
+                "openai",
                 "cache hits must refresh derived provider identity"
             );
         }
@@ -5523,7 +5524,7 @@ model = "gpt-5.5"
             )
             .unwrap();
             assert_eq!(initial_messages.len(), 1);
-            assert_eq!(initial_messages[0].model_id, "gpt-5.4");
+            assert_eq!(initial_messages[0].model_id.as_ref(), "gpt-5.4");
             assert!(message_cache::SourceMessageCache::load()
                 .get(&path)
                 .and_then(|entry| entry.codex_incremental.as_ref())
@@ -5561,7 +5562,7 @@ model = "gpt-5.5"
             assert_eq!(warm_messages.len(), 2);
             assert!(warm_messages
                 .iter()
-                .all(|message| message.model_id == "gpt-5.5"));
+                .all(|message| message.model_id.as_ref() == "gpt-5.5"));
         }
 
         match original_home {
@@ -5863,7 +5864,7 @@ model = "gpt-5.5"
             )
             .unwrap();
             assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].model_id, "gpt-5.4");
+            assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
 
             let cache = message_cache::SourceMessageCache::load();
             assert!(cache.get(&path).is_none());
@@ -5906,7 +5907,7 @@ model = "gpt-5.5"
             )
             .unwrap();
             assert_eq!(initial_messages.len(), 1);
-            assert_eq!(initial_messages[0].model_id, "unknown");
+            assert_eq!(initial_messages[0].model_id.as_ref(), "unknown");
             assert!(message_cache::SourceMessageCache::load()
                 .get(&path)
                 .is_none());
@@ -5943,7 +5944,7 @@ model = "gpt-5.5"
 
             assert_eq!(resumed_messages, fresh_messages);
             assert_eq!(resumed_messages.len(), 1);
-            assert_eq!(resumed_messages[0].model_id, "gpt-5.5");
+            assert_eq!(resumed_messages[0].model_id.as_ref(), "gpt-5.5");
 
             std::env::set_var("HOME", cache_home.path());
             assert!(message_cache::SourceMessageCache::load()
@@ -6935,7 +6936,7 @@ model = "gpt-5.5"
         assert_eq!(deduped.len(), 2);
         let stable = deduped
             .iter()
-            .find(|msg| msg.session_id == "session-stable")
+            .find(|msg| msg.session_id.as_ref() == "session-stable")
             .expect("session-stable should remain after dedupe");
         assert_eq!(stable.timestamp, 1_700_000_003_000);
         assert_eq!(stable.cost, 0.3);
@@ -7011,9 +7012,12 @@ model = "gpt-5.5"
         .unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "opencode");
-        assert_eq!(messages[0].model_id, "hf:deepseek-ai/DeepSeek-V3-0324");
-        assert_eq!(messages[0].provider_id, "unknown");
+        assert_eq!(messages[0].client.as_ref(), "opencode");
+        assert_eq!(
+            messages[0].model_id.as_ref(),
+            "hf:deepseek-ai/DeepSeek-V3-0324"
+        );
+        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
     }
 
     #[test]

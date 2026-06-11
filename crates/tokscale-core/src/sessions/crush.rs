@@ -330,9 +330,9 @@ mod tests {
         let messages = parse_crush_sqlite(&db_path);
         assert_eq!(messages.len(), 2);
 
-        assert_eq!(messages[0].client, "crush");
-        assert_eq!(messages[0].model_id, CRUSH_MODEL_ID);
-        assert_eq!(messages[0].provider_id, CRUSH_PROVIDER_ID);
+        assert_eq!(messages[0].client.as_ref(), "crush");
+        assert_eq!(messages[0].model_id.as_ref(), CRUSH_MODEL_ID);
+        assert_eq!(messages[0].provider_id.as_ref(), CRUSH_PROVIDER_ID);
         assert_eq!(messages[0].timestamp, day_one * 1000);
         assert_eq!(messages[0].message_count, 1);
         assert!((messages[0].cost - 7.5).abs() < 1e-9);

@@ -696,10 +696,10 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client, "copilot");
-        assert_eq!(message.model_id, "claude-sonnet-4");
-        assert_eq!(message.provider_id, "anthropic");
-        assert_eq!(message.session_id, "conv-1");
+        assert_eq!(message.client.as_ref(), "copilot");
+        assert_eq!(message.model_id.as_ref(), "claude-sonnet-4");
+        assert_eq!(message.provider_id.as_ref(), "anthropic");
+        assert_eq!(message.session_id.as_ref(), "conv-1");
         assert_eq!(message.tokens.input, 19_329);
         assert_eq!(message.tokens.output, 281);
         assert_eq!(message.tokens.cache_read, 123);
@@ -738,8 +738,8 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "github-copilot");
-        assert_eq!(messages[0].session_id, "trace-fallback");
+        assert_eq!(messages[0].provider_id.as_ref(), "github-copilot");
+        assert_eq!(messages[0].session_id.as_ref(), "trace-fallback");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].tokens.output, 9);
     }
@@ -805,9 +805,9 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4.5");
-        assert_eq!(messages[0].provider_id, "anthropic");
-        assert_eq!(messages[0].session_id, "conv-vscode");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(messages[0].session_id.as_ref(), "conv-vscode");
         assert_eq!(messages[0].tokens.input, 800);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 200);
@@ -827,8 +827,8 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.4-mini");
-        assert_eq!(messages[0].session_id, "response-log");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4-mini");
+        assert_eq!(messages[0].session_id.as_ref(), "response-log");
         assert_eq!(messages[0].tokens.input, 42);
         assert_eq!(messages[0].tokens.output, 7);
         assert_eq!(messages[0].timestamp, 1_775_934_264_967);
@@ -864,8 +864,8 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4.5");
-        assert_eq!(messages[0].session_id, "conv-turn");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.5");
+        assert_eq!(messages[0].session_id.as_ref(), "conv-turn");
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 9);
         assert_eq!(
@@ -971,7 +971,7 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id, "conv-mixed");
+        assert_eq!(messages[0].session_id.as_ref(), "conv-mixed");
         assert_eq!(messages[0].tokens.input, 40);
         assert_eq!(messages[0].tokens.output, 7);
     }
@@ -1049,7 +1049,7 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4.5");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.5");
         assert_eq!(
             messages[0].dedup_key,
             Some(crate::sessions::dedup_hash_str(
@@ -1087,8 +1087,8 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4.5");
-        assert_eq!(messages[0].session_id, "durable-session-id");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.5");
+        assert_eq!(messages[0].session_id.as_ref(), "durable-session-id");
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 9);
         assert_eq!(

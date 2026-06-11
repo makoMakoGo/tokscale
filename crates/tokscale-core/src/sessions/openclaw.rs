@@ -276,8 +276,8 @@ mod tests {
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.2");
-        assert_eq!(messages[0].provider_id, "openai-codex");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.2");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai-codex");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 200);
@@ -319,9 +319,9 @@ mod tests {
         let messages = parse_openclaw_transcript(Path::new(&session_path));
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id, "my-session-123");
-        assert_eq!(messages[0].model_id, "gpt-5.2");
-        assert_eq!(messages[0].provider_id, "openai-codex");
+        assert_eq!(messages[0].session_id.as_ref(), "my-session-123");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.2");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai-codex");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 5);
     }
@@ -337,9 +337,9 @@ mod tests {
         let messages = parse_openclaw_transcript(Path::new(&session_path));
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id, "my-session-123");
-        assert_eq!(messages[0].model_id, "gpt-5.2");
-        assert_eq!(messages[0].provider_id, "openai-codex");
+        assert_eq!(messages[0].session_id.as_ref(), "my-session-123");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.2");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai-codex");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 5);
     }
@@ -358,9 +358,9 @@ mod tests {
         let messages = parse_openclaw_transcript(Path::new(&session_path));
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id, "my-session-123");
-        assert_eq!(messages[0].model_id, "claude-opus-4-6");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].session_id.as_ref(), "my-session-123");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
     #[test]
@@ -373,8 +373,8 @@ mod tests {
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-opus-4-6");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 25);
@@ -390,8 +390,8 @@ mod tests {
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 20);
@@ -408,8 +408,8 @@ mod tests {
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
-        assert_eq!(messages[0].provider_id, "unknown");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
     }
 
     #[test]
@@ -422,8 +422,8 @@ mod tests {
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-opus-4-6");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
     fn create_test_index(dir: &TempDir, content: &str) -> PathBuf {
@@ -454,8 +454,8 @@ mod tests {
 
         let messages = parse_openclaw_index(&index_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-3.5-sonnet");
-        assert_eq!(messages[0].session_id, "abc-123");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-3.5-sonnet");
+        assert_eq!(messages[0].session_id.as_ref(), "abc-123");
     }
 
     #[test]
@@ -476,8 +476,8 @@ mod tests {
 
         let messages = parse_openclaw_index(&index_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-3.5-sonnet");
-        assert_eq!(messages[0].session_id, "relative-123");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-3.5-sonnet");
+        assert_eq!(messages[0].session_id.as_ref(), "relative-123");
     }
 
     #[test]
@@ -497,7 +497,7 @@ mod tests {
 
         let messages = parse_openclaw_index(&index_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-3.5-sonnet");
-        assert_eq!(messages[0].session_id, "fallback-123");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-3.5-sonnet");
+        assert_eq!(messages[0].session_id.as_ref(), "fallback-123");
     }
 }

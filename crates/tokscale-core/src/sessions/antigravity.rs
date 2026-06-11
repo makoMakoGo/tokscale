@@ -147,8 +147,8 @@ mod tests {
 
         let messages = parse_antigravity_file(path.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "antigravity");
-        assert_eq!(messages[0].model_id, "claude-sonnet-4.6");
+        assert_eq!(messages[0].client.as_ref(), "antigravity");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].tokens.input, 12);
         assert_eq!(messages[0].tokens.reasoning, 1);
         assert_eq!(
@@ -167,8 +167,8 @@ mod tests {
 
         let messages = parse_antigravity_file(path.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-opus-4.6");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
 
         let messages = parse_antigravity_file(path.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-3-flash-c");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3-flash-c");
     }
 
     #[test]
@@ -195,9 +195,9 @@ mod tests {
 
         let messages = parse_antigravity_file(path.path());
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].model_id, "model_placeholder_m84");
-        assert_eq!(messages[0].provider_id, "antigravity");
-        assert_eq!(messages[1].model_id, "model_placeholder_m16");
-        assert_eq!(messages[1].provider_id, "antigravity");
+        assert_eq!(messages[0].model_id.as_ref(), "model_placeholder_m84");
+        assert_eq!(messages[0].provider_id.as_ref(), "antigravity");
+        assert_eq!(messages[1].model_id.as_ref(), "model_placeholder_m16");
+        assert_eq!(messages[1].provider_id.as_ref(), "antigravity");
     }
 }

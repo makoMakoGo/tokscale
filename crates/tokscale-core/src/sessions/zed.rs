@@ -472,10 +472,10 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client, "zed");
-        assert_eq!(message.provider_id, ZED_HOSTED_PROVIDER);
-        assert_eq!(message.model_id, "claude-sonnet-4-5");
-        assert_eq!(message.session_id, "thread-1");
+        assert_eq!(message.client.as_ref(), "zed");
+        assert_eq!(message.provider_id.as_ref(), ZED_HOSTED_PROVIDER);
+        assert_eq!(message.model_id.as_ref(), "claude-sonnet-4-5");
+        assert_eq!(message.session_id.as_ref(), "thread-1");
         assert_eq!(
             message.timestamp,
             parse_timestamp_str("2026-05-01T12:00:00Z").unwrap()

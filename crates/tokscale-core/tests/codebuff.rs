@@ -72,9 +72,9 @@ fn test_parse_codebuff_emits_one_event_per_assistant_message_with_usage() {
     assert_eq!(msgs.len(), 2);
 
     let first = &msgs[0];
-    assert_eq!(first.client, "codebuff");
-    assert_eq!(first.model_id, "claude-sonnet-4-20250514");
-    assert_eq!(first.provider_id, "anthropic");
+    assert_eq!(first.client.as_ref(), "codebuff");
+    assert_eq!(first.model_id.as_ref(), "claude-sonnet-4-20250514");
+    assert_eq!(first.provider_id.as_ref(), "anthropic");
     assert_eq!(first.tokens.input, 500);
     assert_eq!(first.tokens.output, 200);
     assert_eq!(first.tokens.cache_write, 300);
@@ -85,8 +85,8 @@ fn test_parse_codebuff_emits_one_event_per_assistant_message_with_usage() {
         .ends_with("/my-project/2025-12-20T12-00-00.000Z"));
 
     let second = &msgs[1];
-    assert_eq!(second.model_id, "openai/gpt-5");
-    assert_eq!(second.provider_id, "openai");
+    assert_eq!(second.model_id.as_ref(), "openai/gpt-5");
+    assert_eq!(second.provider_id.as_ref(), "openai");
     assert_eq!(second.tokens.input, 750);
     assert_eq!(second.tokens.output, 80);
     assert_eq!(second.tokens.cache_read, 100);
@@ -136,8 +136,8 @@ fn test_parse_codebuff_recovers_usage_from_run_state_history_when_metadata_is_em
     let msgs = parse_codebuff_file(&path);
     assert_eq!(msgs.len(), 1);
     let m = &msgs[0];
-    assert_eq!(m.model_id, "openrouter/anthropic/claude-opus-4-1");
-    assert_eq!(m.provider_id, "anthropic");
+    assert_eq!(m.model_id.as_ref(), "openrouter/anthropic/claude-opus-4-1");
+    assert_eq!(m.provider_id.as_ref(), "anthropic");
     assert_eq!(m.tokens.input, 2000);
     assert_eq!(m.tokens.output, 800);
     assert_eq!(m.tokens.cache_read, 400);
@@ -204,9 +204,10 @@ fn test_parse_codebuff_unknown_model_falls_back_to_unknown_provider() {
 
     let msgs = parse_codebuff_file(&path);
     assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0].model_id, "codebuff-unknown");
+    assert_eq!(msgs[0].model_id.as_ref(), "codebuff-unknown");
     assert_eq!(
-        msgs[0].provider_id, "unknown",
+        msgs[0].provider_id.as_ref(),
+        "unknown",
         "unknown models must not be silently attributed to anthropic"
     );
 }
@@ -331,7 +332,7 @@ fn test_parse_codebuff_run_state_skips_entries_missing_provider_options() {
     );
     assert_eq!(msgs[0].tokens.input, 1234);
     assert_eq!(msgs[0].tokens.output, 56);
-    assert_eq!(msgs[0].model_id, "claude-sonnet-4-20250514");
+    assert_eq!(msgs[0].model_id.as_ref(), "claude-sonnet-4-20250514");
 }
 
 #[test]
@@ -387,7 +388,7 @@ fn test_parse_codebuff_run_state_accumulates_across_entries_when_newest_has_mode
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].tokens.input, 4242);
     assert_eq!(msgs[0].tokens.output, 99);
-    assert_eq!(msgs[0].model_id, "openai/gpt-5-newer");
+    assert_eq!(msgs[0].model_id.as_ref(), "openai/gpt-5-newer");
 }
 
 #[test]

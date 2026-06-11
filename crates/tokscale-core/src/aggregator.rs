@@ -73,7 +73,7 @@ pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContrib
         .fold(
             HashMap::new,
             |mut acc: HashMap<String, SessionAccumulator>, msg| {
-                let entry = acc.entry(msg.session_id.clone()).or_default();
+                let entry = acc.entry(msg.session_id.to_string()).or_default();
                 entry.add_message(&msg);
                 acc
             },
@@ -284,7 +284,7 @@ impl DayAccumulator {
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
-                client: msg.client.clone(),
+                client: msg.client.to_string(),
                 model_id: crate::normalize_model_for_grouping(&msg.model_id),
                 provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
@@ -517,7 +517,7 @@ impl SessionAccumulator {
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
-                client: msg.client.clone(),
+                client: msg.client.to_string(),
                 model_id: normalized_model.clone(),
                 provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
@@ -753,10 +753,10 @@ mod tests {
             .timestamp_millis();
 
         UnifiedMessage {
-            client: client.to_string(),
-            model_id: model.to_string(),
-            provider_id: "test-provider".to_string(),
-            session_id: "test-session".to_string(),
+            client: client.into(),
+            model_id: model.into(),
+            provider_id: "test-provider".into(),
+            session_id: "test-session".into(),
             workspace_key: None,
             workspace_label: None,
             timestamp,
@@ -806,10 +806,10 @@ mod tests {
     fn test_aggregate_by_date_normalizes_provider_display_aliases() {
         let mut first =
             mock_unified_message("2024-01-01", 1000, 0.05, "xiaomi/mimo-v2.5-pro", "opencode");
-        first.provider_id = "xiaomi".to_string();
+        first.provider_id = "xiaomi".into();
         let mut second =
             mock_unified_message("2024-01-01", 2000, 0.10, "xiaomi/mimo-v2.5-pro", "opencode");
-        second.provider_id = "xiaomi-token-plan-cn".to_string();
+        second.provider_id = "xiaomi-token-plan-cn".into();
 
         let result = aggregate_by_date(vec![first, second]);
 
@@ -823,13 +823,13 @@ mod tests {
     fn test_aggregate_by_session_normalizes_provider_display_aliases() {
         let mut first =
             mock_unified_message("2024-01-01", 1000, 0.05, "xiaomi/mimo-v2.5-pro", "opencode");
-        first.provider_id = "xiaomi".to_string();
-        first.session_id = "session-shared".to_string();
+        first.provider_id = "xiaomi".into();
+        first.session_id = "session-shared".into();
 
         let mut second =
             mock_unified_message("2024-01-01", 2000, 0.10, "xiaomi/mimo-v2.5-pro", "opencode");
-        second.provider_id = "xiaomi-token-plan-cn".to_string();
-        second.session_id = "session-shared".to_string();
+        second.provider_id = "xiaomi-token-plan-cn".into();
+        second.session_id = "session-shared".into();
 
         let result = aggregate_by_session(vec![first, second]);
 
@@ -1384,10 +1384,10 @@ mod tests {
         cost: f64,
     ) -> UnifiedMessage {
         UnifiedMessage {
-            client: client.to_string(),
-            model_id: model.to_string(),
-            provider_id: provider.to_string(),
-            session_id: session_id.to_string(),
+            client: client.into(),
+            model_id: model.into(),
+            provider_id: provider.into(),
+            session_id: session_id.into(),
             workspace_key: None,
             workspace_label: None,
             timestamp: timestamp_ms,
@@ -1593,8 +1593,8 @@ mod tests {
     #[test]
     fn test_session_contribution_serde_round_trip() {
         let contrib = SessionContribution {
-            session_id: "019e1e27-af49-7cd1-89b7-7bad1c3f3be2".to_string(),
-            client: "codex".to_string(),
+            session_id: "019e1e27-af49-7cd1-89b7-7bad1c3f3be2".into(),
+            client: "codex".into(),
             provider: "openai".to_string(),
             model: "gpt-5".to_string(),
             totals: DailyTotals {
@@ -1610,9 +1610,9 @@ mod tests {
                 reasoning: 40,
             },
             clients: vec![ClientContribution {
-                client: "codex".to_string(),
-                model_id: "gpt-5".to_string(),
-                provider_id: "openai".to_string(),
+                client: "codex".into(),
+                model_id: "gpt-5".into(),
+                provider_id: "openai".into(),
                 tokens: TokenBreakdown {
                     input: 25_251,
                     output: 47,

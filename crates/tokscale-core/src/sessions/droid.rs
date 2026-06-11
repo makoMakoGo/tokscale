@@ -405,8 +405,8 @@ mod tests {
         let messages = parse_droid_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-opus-4.5");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
     #[test]
@@ -430,7 +430,7 @@ mod tests {
         let messages = parse_droid_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "glm-5.1");
-        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].model_id.as_ref(), "glm-5.1");
+        assert_eq!(messages[0].provider_id.as_ref(), "zai");
     }
 }
