@@ -52,7 +52,7 @@ pub struct UnifiedMessage {
     pub agent: Option<String>,
     #[serde(default)]
     pub agent_instance: Option<String>,
-    pub dedup_key: Option<String>,
+    pub dedup_key: Option<u64>,
     /// True if this message is the first assistant response after a user turn.
     /// Used to count user interaction turns (as opposed to API message count).
     #[serde(default)]
@@ -61,6 +61,19 @@ pub struct UnifiedMessage {
 
 const fn default_message_count() -> i32 {
     1
+}
+
+/// Stable FNV-1a over a dedup key string. The value is persisted in the
+/// source-message cache, so the algorithm must never change across releases
+/// (it would silently break dedup between cached and freshly parsed
+/// messages). Hash inputs keep their legacy string formats.
+pub fn dedup_hash_str(key: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 pub fn normalize_agent_name(agent: &str) -> String {
@@ -252,7 +265,7 @@ impl UnifiedMessage {
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
-        dedup_key: Option<String>,
+        dedup_key: Option<u64>,
     ) -> Self {
         Self::new_full(
             client,
@@ -277,7 +290,7 @@ impl UnifiedMessage {
         tokens: TokenBreakdown,
         cost: f64,
         agent: Option<String>,
-        dedup_key: Option<String>,
+        dedup_key: Option<u64>,
     ) -> Self {
         Self {
             client: client.into(),

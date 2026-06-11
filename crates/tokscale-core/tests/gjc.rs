@@ -291,15 +291,14 @@ async fn test_gjc_recursive_glob_depth1_and_depth2() {
         2,
         "expected depth1 + depth2 messages: {messages:#?}"
     );
-    let mut ids: Vec<String> = messages
+    let mut ids: Vec<u64> = messages.iter().filter_map(|m| m.dedup_key).collect();
+    ids.sort_unstable();
+    let mut expected: Vec<u64> = ["s_depth1:d1_m1", "s_depth2:d2_m1"]
         .iter()
-        .map(|m| m.dedup_key.clone().unwrap_or_default())
+        .map(|key| tokscale_core::sessions::dedup_hash_str(key))
         .collect();
-    ids.sort();
-    assert_eq!(
-        ids,
-        vec!["s_depth1:d1_m1".to_string(), "s_depth2:d2_m1".to_string()]
-    );
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
 }
 
 /// G9b: message-level dedup collapses a replayed parent message id across files.
@@ -358,5 +357,8 @@ async fn test_gjc_message_dedup_across_replayed_files() {
         1,
         "replayed message id must be deduped to one: {messages:#?}"
     );
-    assert_eq!(messages[0].dedup_key.as_deref(), Some("S:SHARED"));
+    assert_eq!(
+        messages[0].dedup_key,
+        Some(tokscale_core::sessions::dedup_hash_str("S:SHARED"))
+    );
 }

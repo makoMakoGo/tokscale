@@ -779,13 +779,13 @@ fn codex_token_count_dedup_key(
     model: &str,
     upstream_session_id: &str,
     total_usage: Option<CodexTotals>,
-) -> String {
+) -> u64 {
     if let Some(total) = total_usage {
         // Codex fork/subagent logs can replay the same upstream token_count
         // history into many child files with child-local timestamps. The
         // cumulative total is the stable upstream identity; timestamp is only
         // a fallback when older rows do not carry totals.
-        return format!(
+        return crate::sessions::dedup_hash_str(&format!(
             "codex:token_count-total:{}:{}:{}:{}:{}:{}:{}",
             upstream_session_id,
             message.provider_id,
@@ -794,10 +794,10 @@ fn codex_token_count_dedup_key(
             total.output,
             total.cached,
             total.reasoning
-        );
+        ));
     }
 
-    format!(
+    crate::sessions::dedup_hash_str(&format!(
         "codex:token_count:{}:{}:{}:{}:{}:{}:{}:{}",
         message.timestamp,
         message.provider_id,
@@ -807,7 +807,7 @@ fn codex_token_count_dedup_key(
         message.tokens.cache_read,
         message.tokens.cache_write,
         message.tokens.reasoning
-    )
+    ))
 }
 
 fn set_codex_dedup_key(

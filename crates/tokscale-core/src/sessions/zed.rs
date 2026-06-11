@@ -190,7 +190,7 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
         0.0,
     );
     message.message_count = message_count;
-    message.dedup_key = Some(format!("zed:{}", row.id));
+    message.dedup_key = Some(crate::sessions::dedup_hash_str(&format!("zed:{}", row.id)));
 
     if let Some(workspace_key) = workspace_key_from_folders(
         row.folder_paths.as_deref(),
@@ -487,7 +487,10 @@ mod tests {
         assert_eq!(message.message_count, 2);
         assert_eq!(message.workspace_key.as_deref(), Some("/workspace/b"));
         assert_eq!(message.workspace_label.as_deref(), Some("b"));
-        assert_eq!(message.dedup_key.as_deref(), Some("zed:thread-1"));
+        assert_eq!(
+            message.dedup_key,
+            Some(crate::sessions::dedup_hash_str("zed:thread-1"))
+        );
     }
 
     #[test]

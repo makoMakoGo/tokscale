@@ -161,11 +161,11 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
     let session_id = msg.session_id.unwrap_or_else(|| "unknown".to_string());
 
     // Use message ID from JSON or derive from filename for deduplication
-    let dedup_key = msg.id.or_else(|| {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
-    });
+    let dedup_key = msg
+        .id
+        .as_deref()
+        .or_else(|| path.file_stem().and_then(|s| s.to_str()))
+        .map(crate::sessions::dedup_hash_str);
 
     let mut unified = UnifiedMessage::new_with_agent(
         "opencode",
@@ -308,7 +308,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             agent,
         );
         unified.duration_ms = opencode_duration_ms(&msg.time);
-        unified.dedup_key = Some(dedup_key);
+        unified.dedup_key = Some(crate::sessions::dedup_hash_str(&dedup_key));
         let workspace_root = row_workspace_root
             .as_deref()
             .or(embedded_workspace_root.as_deref());
@@ -614,7 +614,7 @@ mod tests {
         let msg = parse_opencode_file(temp_file.path()).expect("Should parse");
         assert_eq!(
             msg.dedup_key,
-            Some("msg_dedup_001".to_string()),
+            Some(crate::sessions::dedup_hash_str("msg_dedup_001")),
             "dedup_key should use msg.id from JSON"
         );
     }
@@ -671,7 +671,7 @@ mod tests {
         let msg = parse_opencode_file(&file_path).expect("Should parse");
         assert_eq!(
             msg.dedup_key,
-            Some("msg_fallback_999".to_string()),
+            Some(crate::sessions::dedup_hash_str("msg_fallback_999")),
             "dedup_key should fall back to file stem when id is missing"
         );
     }
@@ -735,7 +735,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].dedup_key,
-            Some("msg_sqlite_001".to_string()),
+            Some(crate::sessions::dedup_hash_str("msg_sqlite_001")),
             "SQLite dedup_key should fall back to the row id when no embedded id exists"
         );
         assert_eq!(messages[0].model_id, "claude-sonnet-4");
@@ -981,7 +981,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].dedup_key,
-            Some("embedded_msg_001".to_string()),
+            Some(crate::sessions::dedup_hash_str("embedded_msg_001")),
             "SQLite dedup_key should prefer the embedded message id for cross-source overlap"
         );
     }
@@ -1037,7 +1037,10 @@ mod tests {
             1,
             "Should only parse valid assistant message"
         );
-        assert_eq!(messages[0].dedup_key, Some("msg_valid".to_string()));
+        assert_eq!(
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("msg_valid"))
+        );
     }
 
     /// Forked SQLite sessions should not count copied history more than once.
@@ -1241,10 +1244,10 @@ mod tests {
         assert_eq!(sqlite_messages.len(), 2);
 
         // Build seen set from SQLite (same as lib.rs)
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<u64> = HashSet::new();
         for msg in &sqlite_messages {
-            if let Some(ref key) = msg.dedup_key {
-                seen.insert(key.clone());
+            if let Some(key) = msg.dedup_key {
+                seen.insert(key);
             }
         }
         assert_eq!(seen.len(), 2);
@@ -1257,11 +1260,7 @@ mod tests {
         let json_messages = vec![json_msg_shared, json_msg_only];
         let deduped: Vec<UnifiedMessage> = json_messages
             .into_iter()
-            .filter(|msg| {
-                msg.dedup_key
-                    .as_ref()
-                    .is_none_or(|key| seen.insert(key.clone()))
-            })
+            .filter(|msg| msg.dedup_key.is_none_or(|key| seen.insert(key)))
             .collect();
 
         // msg_shared_001 should be filtered (duplicate), msg_json_only should survive
@@ -1272,7 +1271,7 @@ mod tests {
         );
         assert_eq!(
             deduped[0].dedup_key,
-            Some("msg_json_only".to_string()),
+            Some(crate::sessions::dedup_hash_str("msg_json_only")),
             "Surviving message should be the JSON-only one"
         );
 

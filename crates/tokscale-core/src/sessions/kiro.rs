@@ -252,7 +252,10 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
                     reasoning: 0,
                 },
                 0.0,
-                Some(format!("{}:{}", session_id, index)),
+                Some(crate::sessions::dedup_hash_str(&format!(
+                    "{}:{}",
+                    session_id, index
+                ))),
             );
             message.message_count = turn.total_request_count.unwrap_or(1).max(1);
             message.duration_ms = duration_ms;
@@ -425,7 +428,10 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                     reasoning: 0,
                 },
                 0.0,
-                Some(format!("{}:{}", conversation_id, index)),
+                Some(crate::sessions::dedup_hash_str(&format!(
+                    "{}:{}",
+                    conversation_id, index
+                ))),
             );
             message.message_count = 1;
             message.duration_ms = duration_ms;

@@ -82,7 +82,10 @@ impl ActiveTurn {
                 reasoning: 0,
             },
             0.0,
-            Some(format!("grok:{}:{}", metadata.session_id, self.turn_index)),
+            Some(crate::sessions::dedup_hash_str(&format!(
+                "grok:{}:{}",
+                metadata.session_id, self.turn_index
+            ))),
         );
         message.set_workspace(
             metadata.workspace_key.clone(),

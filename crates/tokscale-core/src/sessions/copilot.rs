@@ -117,7 +117,7 @@ impl CopilotUsageCandidate {
             self.timestamp_ms,
             self.tokens,
             0.0,
-            Some(self.dedup_key),
+            Some(crate::sessions::dedup_hash_str(&self.dedup_key)),
         );
         message.duration_ms = self.duration_ms;
         message
@@ -706,7 +706,10 @@ mod tests {
         assert_eq!(message.tokens.reasoning, 128);
         assert_eq!(message.timestamp, 1_775_934_264_967);
         assert_eq!(message.duration_ms, Some(4834));
-        assert_eq!(message.dedup_key.as_deref(), Some("trace-1:span-1"));
+        assert_eq!(
+            message.dedup_key,
+            Some(crate::sessions::dedup_hash_str("trace-1:span-1"))
+        );
     }
 
     #[test]
@@ -719,7 +722,10 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].dedup_key.as_deref(), Some("trace-1:chat-1"));
+        assert_eq!(
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("trace-1:chat-1"))
+        );
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 5);
     }
@@ -808,8 +814,8 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 75);
         assert_eq!(messages[0].tokens.reasoning, 12);
         assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some("trace-vscode:span-vscode")
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("trace-vscode:span-vscode"))
         );
     }
 
@@ -827,8 +833,8 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 7);
         assert_eq!(messages[0].timestamp, 1_775_934_264_967);
         assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some("log:trace-log:span-log")
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("log:trace-log:span-log"))
         );
     }
 
@@ -841,7 +847,10 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].dedup_key.as_deref(), Some("trace-dupe:chat-1"));
+        assert_eq!(
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("trace-dupe:chat-1"))
+        );
         assert_eq!(messages[0].tokens.input, 60);
         assert_eq!(messages[0].tokens.output, 10);
     }
@@ -860,8 +869,8 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 9);
         assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some("agent-turn:trace-turn:3")
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("agent-turn:trace-turn:3"))
         );
     }
 
@@ -874,7 +883,10 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].dedup_key.as_deref(), Some("trace-mix:chat-mix"));
+        assert_eq!(
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("trace-mix:chat-mix"))
+        );
         assert_eq!(messages[0].tokens.input, 50);
         assert_eq!(messages[0].tokens.output, 8);
     }
@@ -910,19 +922,18 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 2);
-        let mut keys: Vec<String> = messages
-            .iter()
-            .filter_map(|m| m.dedup_key.clone())
-            .collect();
-        keys.sort();
+        let keys: Vec<u64> = messages.iter().filter_map(|m| m.dedup_key).collect();
         assert_eq!(keys.len(), 2);
         assert_ne!(keys[0], keys[1], "dedup keys must be unique: {keys:?}");
-        for key in &keys {
-            assert!(
-                key.starts_with("agent-turn:trace-noidx:idx-"),
-                "expected line-index fallback shape in {key}",
-            );
-        }
+        // Line-index fallback keys hash the legacy "agent-turn:<trace>:idx-<n>" format.
+        assert_eq!(
+            keys[0],
+            crate::sessions::dedup_hash_str("agent-turn:trace-noidx:idx-0")
+        );
+        assert_eq!(
+            keys[1],
+            crate::sessions::dedup_hash_str("agent-turn:trace-noidx:idx-1")
+        );
     }
 
     #[test]
@@ -978,8 +989,8 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some("trace-chat-inv:chat-inv"),
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("trace-chat-inv:chat-inv")),
         );
         assert_eq!(messages[0].tokens.input, 33);
         assert_eq!(messages[0].tokens.output, 5);
@@ -1017,15 +1028,14 @@ mod tests {
         let messages = parse_copilot_file(file.path());
 
         assert_eq!(messages.len(), 2);
-        let mut keys: Vec<String> = messages
+        let mut keys: Vec<u64> = messages.iter().filter_map(|m| m.dedup_key).collect();
+        keys.sort_unstable();
+        let mut expected: Vec<u64> = ["trace-A:chat-A", "trace-B:chat-B"]
             .iter()
-            .filter_map(|m| m.dedup_key.clone())
+            .map(|key| crate::sessions::dedup_hash_str(key))
             .collect();
-        keys.sort();
-        assert_eq!(
-            keys,
-            vec!["trace-A:chat-A".to_string(), "trace-B:chat-B".to_string()],
-        );
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
     }
 
     #[test]
@@ -1041,8 +1051,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "claude-sonnet-4.5");
         assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some("agent-turn:trace-toplevel:5"),
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str(
+                "agent-turn:trace-toplevel:5"
+            )),
         );
     }
 
@@ -1080,8 +1092,10 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 9);
         assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some("agent-turn:trace-session-upgrade:4")
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str(
+                "agent-turn:trace-session-upgrade:4"
+            ))
         );
     }
 }

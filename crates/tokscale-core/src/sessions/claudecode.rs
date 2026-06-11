@@ -410,7 +410,7 @@ pub fn parse_claude_file_with_cache_and_home(
     // response streams in; later entries often carry more complete token counts.
     // We merge duplicates using per-field max to always keep the highest value seen
     // for each token type, ensuring we capture the most complete record.
-    let mut processed_hashes: HashMap<String, usize> = HashMap::new();
+    let mut processed_hashes: HashMap<u64, usize> = HashMap::new();
     let mut headless_state = ClaudeHeadlessState::default();
     let mut buffer = Vec::with_capacity(4096);
     // Tracks whether the previous entry was a user message,
@@ -515,7 +515,7 @@ pub fn parse_claude_file_with_cache_and_home(
                             }
                             continue;
                         }
-                        processed_hashes.insert(dedup_key.clone(), messages.len());
+                        processed_hashes.insert(*dedup_key, messages.len());
                     }
                     let provider_confidence =
                         stored_claude_provider_confidence(&tool_message.provider_id);
@@ -565,7 +565,8 @@ pub fn parse_claude_file_with_cache_and_home(
                 // complete token counts across all duplicate entries.
                 let pending_hash = match (&message.id, &entry.request_id) {
                     (Some(msg_id), Some(req_id)) => {
-                        let hash = format!("{}:{}", msg_id, req_id);
+                        let hash =
+                            crate::sessions::dedup_hash_str(&format!("{}:{}", msg_id, req_id));
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
                             let duplicate_provider_choice = claude_provider_choice_from_parts(
                                 message
@@ -595,7 +596,7 @@ pub fn parse_claude_file_with_cache_and_home(
                         Some(hash)
                     }
                     (Some(msg_id), None) => {
-                        let hash = format!("message:{}", msg_id);
+                        let hash = crate::sessions::dedup_hash_str(&format!("message:{}", msg_id));
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
                             let duplicate_provider_choice = claude_provider_choice_from_parts(
                                 message
@@ -642,7 +643,7 @@ pub fn parse_claude_file_with_cache_and_home(
 
                 // Insert dedup index only after all checks pass, right before push
                 let dedup_key = pending_hash.inspect(|hash| {
-                    processed_hashes.insert(hash.clone(), messages.len());
+                    processed_hashes.insert(*hash, messages.len());
                 });
 
                 let mut unified = UnifiedMessage::new_with_dedup(
@@ -1002,10 +1003,10 @@ fn extract_claude_tool_result_message(
         },
         0.0,
         usage.dedup_key.map(|key| {
-            format!(
+            crate::sessions::dedup_hash_str(&format!(
                 "{}:tool_result:{}:{key}",
                 context.client_id, context.session_id
-            )
+            ))
         }),
     );
     message.message_count = 0;
@@ -1912,7 +1913,10 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 250);
         assert_eq!(messages[0].timestamp, 1_733_047_203_500);
         assert_eq!(messages[0].duration_ms, Some(3500));
-        assert_eq!(messages[0].dedup_key.as_deref(), Some("message:msg_stream"));
+        assert_eq!(
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("message:msg_stream"))
+        );
     }
 
     #[test]
@@ -2103,14 +2107,11 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 0);
         assert_eq!(messages[0].tokens.cache_read, 0);
         assert_eq!(messages[0].tokens.cache_write, 0);
-        let expected_dedup_key = format!(
+        let expected_dedup_key = crate::sessions::dedup_hash_str(&format!(
             "claude:tool_result:{}:tool_result:toolu_input",
             messages[0].session_id
-        );
-        assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some(expected_dedup_key.as_str())
-        );
+        ));
+        assert_eq!(messages[0].dedup_key, Some(expected_dedup_key));
         assert_eq!(messages[0].message_count, 0);
     }
 

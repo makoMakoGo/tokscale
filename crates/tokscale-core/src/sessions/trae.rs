@@ -88,7 +88,10 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
         return None;
     }
 
-    let dedup_key = Some(format!("trae:{}:{}", session_id, usage_time));
+    let dedup_key = Some(crate::sessions::dedup_hash_str(&format!(
+        "trae:{}:{}",
+        session_id, usage_time
+    )));
 
     Some(UnifiedMessage::new_with_dedup(
         client,

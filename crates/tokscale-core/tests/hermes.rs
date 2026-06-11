@@ -77,7 +77,10 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
     assert_eq!(msg.tokens.cache_write, 20);
     assert_eq!(msg.tokens.reasoning, 10);
     assert_eq!(msg.cost, 0.34);
-    assert_eq!(msg.dedup_key.as_deref(), Some("session-1"));
+    assert_eq!(
+        msg.dedup_key,
+        Some(tokscale_core::sessions::dedup_hash_str("session-1"))
+    );
 }
 
 #[test]

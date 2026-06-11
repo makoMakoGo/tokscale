@@ -88,7 +88,7 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
                 reasoning: 0,
             },
             usage.credits.max(0.0),
-            Some(dedup_key),
+            Some(crate::sessions::dedup_hash_str(&dedup_key)),
         ));
     }
 

@@ -1220,7 +1220,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
     // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
     // suppress legacy JSON overlap by message identity.
-    let mut opencode_seen: HashSet<String> = HashSet::new();
+    let mut opencode_seen: HashSet<u64> = HashSet::new();
 
     for db_path in &scan_result.opencode_dbs {
         let CachedParseOutcome {
@@ -1239,8 +1239,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(messages.into_iter().filter(|message| {
             message
                 .dedup_key
-                .as_ref()
-                .is_none_or(|key| opencode_seen.insert(key.clone()))
+                .is_none_or(|key| opencode_seen.insert(key))
         }));
 
         if let Some(entry) = cache_entry.or(extra_entry) {
@@ -1265,8 +1264,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(messages.into_iter().filter(|message| {
             message
                 .dedup_key
-                .as_ref()
-                .is_none_or(|key| opencode_seen.insert(key.clone()))
+                .is_none_or(|key| opencode_seen.insert(key))
         }));
         if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
@@ -1292,24 +1290,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             )
         })
         .collect();
-    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut seen_keys: HashSet<u64> = HashSet::new();
     for outcome in claude_outcomes {
         let (messages, extra_entry) =
             resolve_messages(outcome.messages, &mut source_cache, pricing);
         all_messages.extend(
             messages
                 .into_iter()
-                .filter(|msg| match msg.dedup_key.as_deref() {
-                    None | Some("") => true,
-                    Some(key) => {
-                        if seen_keys.contains(key) {
-                            false
-                        } else {
-                            seen_keys.insert(key.to_string());
-                            true
-                        }
-                    }
-                }),
+                .filter(|msg| msg.dedup_key.is_none_or(|key| seen_keys.insert(key))),
         );
         if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
@@ -1326,7 +1314,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             )
         })
         .collect();
-    let mut codex_seen: HashSet<String> = HashSet::new();
+    let mut codex_seen: HashSet<u64> = HashSet::new();
     for (path, outcome) in codex_outcomes {
         let (messages, extra_entry) =
             resolve_messages(outcome.messages, &mut source_cache, pricing);
@@ -1588,7 +1576,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     // and overwrite gjc's authoritative embedded cost, silently downgrading to
     // A2 on the dominant cached path. Message-level dedup via
     // should_keep_deduped_message collapses depth-1/depth-2 replays.
-    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let mut gjc_seen: HashSet<u64> = HashSet::new();
     let gjc_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Gjc)
         .par_iter()
@@ -1731,7 +1719,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(kilo_messages);
     }
 
-    let mut hermes_seen: HashSet<String> = HashSet::new();
+    let mut hermes_seen: HashSet<u64> = HashSet::new();
     for db_path in scan_result.hermes_db_paths() {
         let hermes_messages = parse_hermes_sqlite_with_pricing(&db_path, pricing);
         all_messages.extend(
@@ -2655,43 +2643,41 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mut counts = ClientCounts::new();
 
     let opencode_count: i32 = {
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<u64> = HashSet::new();
         let mut count: i32 = 0;
 
         for db_path in &scan_result.opencode_dbs {
-            let sqlite_msgs: Vec<(String, ParsedMessage)> =
+            let sqlite_msgs: Vec<ParsedMessage> =
                 sessions::opencode::parse_opencode_sqlite(db_path)
                     .into_iter()
                     .filter_map(|msg| {
-                        let key = msg.dedup_key.clone().unwrap_or_default();
                         // Dedup across multiple channel-suffixed dbs: the
                         // same session can end up in both `opencode.db` and
                         // `opencode-<channel>.db` if the user switches
                         // channels mid-session.
-                        if !key.is_empty() && !seen.insert(key.clone()) {
-                            return None;
+                        if let Some(key) = msg.dedup_key {
+                            if !seen.insert(key) {
+                                return None;
+                            }
                         }
-                        Some((key, unified_to_parsed(&msg)))
+                        Some(unified_to_parsed(&msg))
                     })
                     .collect();
             count += sqlite_msgs.len() as i32;
-            for (_key, parsed) in sqlite_msgs {
-                messages.push(parsed);
-            }
+            messages.extend(sqlite_msgs);
         }
 
-        let json_msgs: Vec<(String, ParsedMessage)> = scan_result
+        let json_msgs: Vec<(Option<u64>, ParsedMessage)> = scan_result
             .get(ClientId::OpenCode)
             .par_iter()
             .filter_map(|path| {
                 let msg = sessions::opencode::parse_opencode_file(path)?;
-                let key = msg.dedup_key.clone().unwrap_or_default();
-                Some((key, unified_to_parsed(&msg)))
+                Some((msg.dedup_key, unified_to_parsed(&msg)))
             })
             .collect();
         let deduped: Vec<ParsedMessage> = json_msgs
             .into_iter()
-            .filter(|(key, _)| key.is_empty() || seen.insert(key.clone()))
+            .filter(|(key, _)| key.is_none_or(|key| seen.insert(key)))
             .map(|(_, msg)| msg)
             .collect();
         count += deduped.len() as i32;
@@ -2702,7 +2688,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::OpenCode, opencode_count);
 
     let claude_home = PathBuf::from(&home_dir);
-    let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
+    let claude_msgs_raw: Vec<(Option<u64>, ParsedMessage)> = scan_result
         .get(ClientId::Claude)
         .par_iter()
         .map_init(std::collections::HashMap::new, |parent_cache, path| {
@@ -2712,19 +2698,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 Some(&claude_home),
             )
             .into_iter()
-            .map(|msg| {
-                let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-                (dedup_key, unified_to_parsed(&msg))
-            })
+            .map(|msg| (msg.dedup_key, unified_to_parsed(&msg)))
             .collect::<Vec<_>>()
         })
         .flatten()
         .collect();
 
-    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut seen_keys: HashSet<u64> = HashSet::new();
     let claude_msgs: Vec<ParsedMessage> = claude_msgs_raw
         .into_iter()
-        .filter(|(key, _)| key.is_empty() || seen_keys.insert(key.clone()))
+        .filter(|(key, _)| key.is_none_or(|key| seen_keys.insert(key)))
         .map(|(_, msg)| msg)
         .collect();
     let claude_count = claude_msgs.len() as i32;
@@ -2745,7 +2728,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 .collect::<Vec<_>>()
         })
         .collect();
-    let mut codex_seen: HashSet<String> = HashSet::new();
+    let mut codex_seen: HashSet<u64> = HashSet::new();
     let codex_msgs: Vec<ParsedMessage> = codex_msgs_raw
         .into_iter()
         .filter(|message| should_keep_deduped_message(&mut codex_seen, message))
@@ -2882,7 +2865,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .par_iter()
         .flat_map(|path| sessions::gjc::parse_gjc_file(path))
         .collect();
-    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let mut gjc_seen: HashSet<u64> = HashSet::new();
     let gjc_msgs: Vec<ParsedMessage> = gjc_msgs_raw
         .into_iter()
         .filter(|message| should_keep_deduped_message(&mut gjc_seen, message))
@@ -2994,7 +2977,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     let hermes_db_paths = scan_result.hermes_db_paths();
     if !hermes_db_paths.is_empty() {
-        let mut hermes_seen: HashSet<String> = HashSet::new();
+        let mut hermes_seen: HashSet<u64> = HashSet::new();
         let hermes_msgs: Vec<ParsedMessage> = hermes_db_paths
             .iter()
             .flat_map(|db_path| sessions::hermes::parse_hermes_sqlite(db_path))
@@ -3182,11 +3165,8 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     }
 }
 
-fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &UnifiedMessage) -> bool {
-    message
-        .dedup_key
-        .as_ref()
-        .is_none_or(|key| seen_keys.insert(key.clone()))
+fn should_keep_deduped_message(seen_keys: &mut HashSet<u64>, message: &UnifiedMessage) -> bool {
+    message.dedup_key.is_none_or(|key| seen_keys.insert(key))
 }
 
 fn summed_parsed_message_count(messages: &[ParsedMessage]) -> i32 {
@@ -3310,7 +3290,7 @@ mod tests {
                 reasoning: 0,
             },
             cost,
-            dedup_key.map(str::to_string),
+            dedup_key.map(crate::sessions::dedup_hash_str),
         )
     }
 
@@ -5004,12 +4984,14 @@ model = "gpt-5.5"
                 "expected 3 unique messages (shared + latest-only + stable-only), got {}",
                 messages.len()
             );
-            let mut ids: Vec<String> = messages
+            let mut ids: Vec<u64> = messages.iter().filter_map(|m| m.dedup_key).collect();
+            ids.sort_unstable();
+            let mut expected: Vec<u64> = ["latest-only", "shared-msg", "stable-only"]
                 .iter()
-                .filter_map(|m| m.dedup_key.clone())
+                .map(|key| crate::sessions::dedup_hash_str(key))
                 .collect();
-            ids.sort();
-            assert_eq!(ids, vec!["latest-only", "shared-msg", "stable-only"]);
+            expected.sort_unstable();
+            assert_eq!(ids, expected);
 
             let messages_warm = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
@@ -6958,8 +6940,10 @@ model = "gpt-5.5"
         assert_eq!(stable.timestamp, 1_700_000_003_000);
         assert_eq!(stable.cost, 0.3);
         assert_eq!(
-            stable.dedup_key.as_deref(),
-            Some("trae:session-stable:1_700_000_003")
+            stable.dedup_key,
+            Some(crate::sessions::dedup_hash_str(
+                "trae:session-stable:1_700_000_003"
+            ))
         );
     }
 
@@ -6988,10 +6972,21 @@ model = "gpt-5.5"
 
         let deduped = dedupe_latest_trae_messages(messages);
 
+        // Equal timestamps tiebreak on the greater dedup hash: arbitrary but
+        // stable across runs and machines (FNV-1a). Real trae keys embed
+        // usage_time = timestamp/1000, so production ties carry equal keys.
+        let key_a = crate::sessions::dedup_hash_str("dedupe-key-a");
+        let key_z = crate::sessions::dedup_hash_str("dedupe-key-z");
+        let (winning_key, winning_cost) = if key_z > key_a {
+            (key_z, 0.4)
+        } else {
+            (key_a, 0.2)
+        };
+
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].timestamp, 1_700_000_010_000);
-        assert_eq!(deduped[0].dedup_key.as_deref(), Some("dedupe-key-z"));
-        assert_eq!(deduped[0].cost, 0.4);
+        assert_eq!(deduped[0].dedup_key, Some(winning_key));
+        assert_eq!(deduped[0].cost, winning_cost);
     }
 
     #[test]

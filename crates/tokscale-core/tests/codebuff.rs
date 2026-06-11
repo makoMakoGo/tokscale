@@ -244,7 +244,10 @@ fn test_parse_codebuff_dedup_key_is_stable_for_same_history() {
         msgs_a[0].dedup_key, msgs_b[0].dedup_key,
         "same upstream message id should yield identical dedup keys across channels"
     );
-    assert_eq!(msgs_a[0].dedup_key.as_deref(), Some("msg_abc123"));
+    assert_eq!(
+        msgs_a[0].dedup_key,
+        Some(tokscale_core::sessions::dedup_hash_str("msg_abc123"))
+    );
 }
 
 #[test]
@@ -269,10 +272,12 @@ fn test_parse_codebuff_dedup_key_falls_back_when_id_missing() {
 
     let msgs = parse_codebuff_file(&path);
     assert_eq!(msgs.len(), 1);
-    let key = msgs[0].dedup_key.as_deref().expect("dedup_key required");
-    assert!(
-        key.starts_with("codebuff:"),
-        "fallback dedup key should be namespaced; got {key}"
+    let key = msgs[0].dedup_key.expect("dedup_key required");
+    let reparsed = parse_codebuff_file(&path);
+    assert_eq!(
+        reparsed[0].dedup_key,
+        Some(key),
+        "fallback dedup key must be deterministic across parses"
     );
 }
 
@@ -415,8 +420,8 @@ fn test_parse_codebuff_dedup_key_distinguishes_id_less_messages_by_ordinal() {
 
     let msgs = parse_codebuff_file(&path);
     assert_eq!(msgs.len(), 2);
-    let key_a = msgs[0].dedup_key.as_deref().unwrap();
-    let key_b = msgs[1].dedup_key.as_deref().unwrap();
+    let key_a = msgs[0].dedup_key.unwrap();
+    let key_b = msgs[1].dedup_key.unwrap();
     assert_ne!(
         key_a, key_b,
         "id-less messages with identical session/ts/model/tokens must use ordinal to stay distinct"

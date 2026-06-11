@@ -209,7 +209,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             timestamp,
             tokens,
             cost,
-            Some(dedup_key),
+            Some(crate::sessions::dedup_hash_str(&dedup_key)),
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
@@ -293,7 +293,7 @@ not valid json at all
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].dedup_key,
-            Some("gjc_ses_005:msg_abc".to_string())
+            Some(crate::sessions::dedup_hash_str("gjc_ses_005:msg_abc"))
         );
     }
 
@@ -304,11 +304,22 @@ not valid json at all
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        let key = messages[0].dedup_key.clone().unwrap();
-        assert!(
-            key.starts_with("gjc:gjc_ses_006:1767225601000:gpt-4o:10-5:"),
-            "key={key}"
-        );
+        // Fallback key hashes the derive_dedup_key format; the ordinal is the
+        // line index, and the message sits on line 1 after the session header.
+        let expected = crate::sessions::dedup_hash_str(&derive_dedup_key(
+            "gjc_ses_006",
+            1767225601000,
+            "gpt-4o",
+            &TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            1,
+        ));
+        assert_eq!(messages[0].dedup_key, Some(expected));
     }
 
     #[test]
@@ -468,7 +479,7 @@ not valid json at all
         );
         assert_eq!(
             messages[0].dedup_key,
-            Some("gjc_ses_replay:replay_msg".to_string())
+            Some(crate::sessions::dedup_hash_str("gjc_ses_replay:replay_msg"))
         );
     }
 

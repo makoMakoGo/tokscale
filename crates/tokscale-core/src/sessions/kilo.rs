@@ -109,7 +109,10 @@ pub fn parse_kilo_sqlite_with_fallback(
             None => continue,
         };
 
-        let dedup_key = msg.id.or(Some(row_id));
+        let dedup_key = msg
+            .id
+            .or(Some(row_id))
+            .map(|key| crate::sessions::dedup_hash_str(&key));
 
         let model_id = match msg.model_id {
             Some(m) => m,
@@ -249,7 +252,10 @@ mod tests {
         assert_eq!(msg.tokens.cache_write, 25);
         assert_eq!(msg.cost, 0.42);
         assert_eq!(msg.agent.as_deref(), Some("architect"));
-        assert_eq!(msg.dedup_key.as_deref(), Some("embedded-msg-1"));
+        assert_eq!(
+            msg.dedup_key,
+            Some(crate::sessions::dedup_hash_str("embedded-msg-1"))
+        );
     }
 
     #[test]
@@ -324,7 +330,10 @@ mod tests {
         assert_eq!(msg.tokens.cache_write, 0);
         assert_eq!(msg.cost, 0.0);
         assert_eq!(msg.agent.as_deref(), Some("debug"));
-        assert_eq!(msg.dedup_key.as_deref(), Some("row-valid"));
+        assert_eq!(
+            msg.dedup_key,
+            Some(crate::sessions::dedup_hash_str("row-valid"))
+        );
     }
 
     #[test]
