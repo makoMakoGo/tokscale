@@ -797,11 +797,115 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<Vec<UnifiedMessage>, String> {
+    /// Where a source's messages come from. Cache hits defer the move out of
+    /// the store to the serial fold (`resolve_messages`), so hit messages are
+    /// never cloned (ADR 0008).
+    #[derive(Debug)]
+    enum ParsedSource {
+        /// Fingerprint matched; messages still live in the cache store.
+        CacheHit(PathBuf),
+        /// Codex fingerprint match; finalization parameters captured for the
+        /// serial fold.
+        CodexCacheHit {
+            path: PathBuf,
+            is_headless: bool,
+            fallback_timestamp: i64,
+        },
+        /// Codex append: cached prefix stays in the store; only the tail was
+        /// parsed. Viability (fingerprint + incremental state) was already
+        /// established on the parallel path.
+        CodexAppend {
+            path: PathBuf,
+            is_headless: bool,
+            fallback_timestamp: i64,
+            tail_messages: Vec<UnifiedMessage>,
+            tail_fallback_indices: Vec<usize>,
+            fingerprint: message_cache::SourceFingerprint,
+            codex_incremental: message_cache::CodexIncrementalCache,
+        },
+        /// Freshly parsed (pricing already applied).
+        Fresh(Vec<UnifiedMessage>),
+    }
+
     #[derive(Debug)]
     struct CachedParseOutcome {
-        messages: Vec<UnifiedMessage>,
+        messages: ParsedSource,
         cache_entry: Option<message_cache::CachedSourceEntry>,
         invalidate_cache: bool,
+    }
+
+    /// Serial counterpart of the parallel parse: moves cache-hit messages out
+    /// of the store (no clone) and assembles deferred codex-append entries.
+    fn resolve_messages(
+        source: ParsedSource,
+        source_cache: &mut message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+    ) -> (
+        Vec<UnifiedMessage>,
+        Option<message_cache::CachedSourceEntry>,
+    ) {
+        match source {
+            ParsedSource::Fresh(messages) => (messages, None),
+            ParsedSource::CacheHit(path) => {
+                let mut messages = source_cache.take_messages(&path).unwrap_or_default();
+                apply_pricing_to_messages(&mut messages, pricing);
+                (messages, None)
+            }
+            ParsedSource::CodexCacheHit {
+                path,
+                is_headless,
+                fallback_timestamp,
+            } => {
+                let (messages, indices) = source_cache
+                    .take_messages_with_fallback(&path)
+                    .unwrap_or_default();
+                (
+                    finalize_codex_messages(
+                        messages,
+                        pricing,
+                        is_headless,
+                        &indices,
+                        fallback_timestamp,
+                    ),
+                    None,
+                )
+            }
+            ParsedSource::CodexAppend {
+                path,
+                is_headless,
+                fallback_timestamp,
+                tail_messages,
+                tail_fallback_indices,
+                fingerprint,
+                codex_incremental,
+            } => {
+                let (mut raw_messages, mut fallback_timestamp_indices) = source_cache
+                    .take_messages_with_fallback(&path)
+                    .unwrap_or_default();
+                let existing_len = raw_messages.len();
+                fallback_timestamp_indices.extend(
+                    tail_fallback_indices
+                        .iter()
+                        .map(|index| existing_len + index),
+                );
+                raw_messages.extend(tail_messages);
+                let cache_entry = message_cache::CachedSourceEntry::new(
+                    &path,
+                    fingerprint,
+                    raw_messages.clone(),
+                    fallback_timestamp_indices.clone(),
+                    Some(codex_incremental),
+                );
+                let messages = finalize_codex_messages(
+                    raw_messages,
+                    pricing,
+                    is_headless,
+                    &fallback_timestamp_indices,
+                    fallback_timestamp,
+                );
+                (messages, Some(cache_entry))
+            }
+        }
     }
 
     fn apply_pricing_to_messages(
@@ -812,15 +916,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             message.refresh_derived_fields();
             apply_pricing_if_available(message, pricing);
         }
-    }
-
-    fn cached_messages(
-        cached: &message_cache::CachedSourceEntry,
-        pricing: Option<&pricing::PricingService>,
-    ) -> Vec<UnifiedMessage> {
-        let mut messages = cached.messages.clone();
-        apply_pricing_to_messages(&mut messages, pricing);
-        messages
     }
 
     fn parse_full_log_source(
@@ -843,7 +938,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         );
         if !parsed.parse_succeeded {
             return CachedParseOutcome {
-                messages,
+                messages: ParsedSource::Fresh(messages),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -851,7 +946,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
         if parsed.unresolved_model_events {
             return CachedParseOutcome {
-                messages,
+                messages: ParsedSource::Fresh(messages),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -866,7 +961,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         );
 
         CachedParseOutcome {
-            messages,
+            messages: ParsedSource::Fresh(messages),
             cache_entry,
             invalidate_cache: false,
         }
@@ -930,7 +1025,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             let (mut messages, _) = parse(path);
             apply_pricing_to_messages(&mut messages, pricing);
             return CachedParseOutcome {
-                messages,
+                messages: ParsedSource::Fresh(messages),
                 cache_entry: None,
                 invalidate_cache: false,
             };
@@ -939,7 +1034,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         if let Some(cached) = source_cache.get(path) {
             if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
                 return CachedParseOutcome {
-                    messages: cached_messages(cached, pricing),
+                    messages: ParsedSource::CacheHit(path.to_path_buf()),
                     cache_entry: None,
                     invalidate_cache: false,
                 };
@@ -961,7 +1056,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         apply_pricing_to_messages(&mut messages, pricing);
 
         CachedParseOutcome {
-            messages,
+            messages: ParsedSource::Fresh(messages),
             cache_entry,
             invalidate_cache: !cacheable,
         }
@@ -1045,13 +1140,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             if cached.fingerprint == fingerprint {
                 if message_cache::codex_cache_entry_matches_fingerprint(cached, &fingerprint) {
                     return CachedParseOutcome {
-                        messages: finalize_codex_messages(
-                            cached.messages.clone(),
-                            pricing,
+                        messages: ParsedSource::CodexCacheHit {
+                            path: path.to_path_buf(),
                             is_headless,
-                            &cached.fallback_timestamp_indices,
                             fallback_timestamp,
-                        ),
+                        },
                         cache_entry: None,
                         invalidate_cache: false,
                     };
@@ -1070,36 +1163,36 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                         codex_incremental.state.clone(),
                     );
                     if parsed.parse_succeeded && !parsed.unresolved_model_events {
-                        let mut raw_messages = cached.messages.clone();
-                        let mut fallback_timestamp_indices =
-                            cached.fallback_timestamp_indices.clone();
-                        let existing_len = raw_messages.len();
-                        fallback_timestamp_indices.extend(
-                            parsed
-                                .fallback_timestamp_indices
-                                .iter()
-                                .map(|index| existing_len + index),
-                        );
-                        raw_messages.extend(parsed.messages.clone());
-                        let cache_entry = build_codex_cache_entry(
-                            path,
-                            raw_messages.clone(),
-                            parsed.consumed_offset,
-                            parsed.state,
-                            fallback_timestamp_indices.clone(),
-                        );
-                        if let Some(cache_entry) = cache_entry {
-                            let messages = finalize_codex_messages(
-                                raw_messages,
-                                pricing,
-                                is_headless,
-                                &fallback_timestamp_indices,
-                                fallback_timestamp,
-                            );
-
+                        // Viability checks from build_codex_cache_entry, done
+                        // here on the parallel path; the cached prefix is
+                        // merged without cloning in resolve_messages.
+                        let entry_fingerprint = message_cache::SourceFingerprint::from_path(path);
+                        let codex_incremental_cache = entry_fingerprint
+                            .as_ref()
+                            .filter(|entry_fingerprint| {
+                                entry_fingerprint.size == parsed.consumed_offset
+                            })
+                            .and_then(|_| {
+                                message_cache::build_codex_incremental_cache(
+                                    path,
+                                    parsed.consumed_offset,
+                                    parsed.state,
+                                )
+                            });
+                        if let (Some(entry_fingerprint), Some(codex_incremental_cache)) =
+                            (entry_fingerprint, codex_incremental_cache)
+                        {
                             return CachedParseOutcome {
-                                messages,
-                                cache_entry: Some(cache_entry),
+                                messages: ParsedSource::CodexAppend {
+                                    path: path.to_path_buf(),
+                                    is_headless,
+                                    fallback_timestamp,
+                                    tail_messages: parsed.messages,
+                                    tail_fallback_indices: parsed.fallback_timestamp_indices,
+                                    fingerprint: entry_fingerprint,
+                                    codex_incremental: codex_incremental_cache,
+                                },
+                                cache_entry: None,
                                 invalidate_cache: false,
                             };
                         }
@@ -1137,6 +1230,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
             sessions::opencode::parse_opencode_sqlite(path)
         });
+        let (messages, extra_entry) = resolve_messages(messages, &mut source_cache, pricing);
 
         // Dedup across channel-suffixed dbs: the same session can end up in
         // both `opencode.db` and `opencode-<channel>.db` if the user
@@ -1149,7 +1243,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 .is_none_or(|key| opencode_seen.insert(key.clone()))
         }));
 
-        if let Some(entry) = cache_entry {
+        if let Some(entry) = cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1166,13 +1260,15 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in opencode_outcomes {
-        all_messages.extend(outcome.messages.into_iter().filter(|message| {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages.into_iter().filter(|message| {
             message
                 .dedup_key
                 .as_ref()
                 .is_none_or(|key| opencode_seen.insert(key.clone()))
         }));
-        if let Some(entry) = outcome.cache_entry {
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1196,24 +1292,29 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             )
         })
         .collect();
-    let mut claude_messages_raw: Vec<(String, UnifiedMessage)> = Vec::new();
+    let mut seen_keys: HashSet<String> = HashSet::new();
     for outcome in claude_outcomes {
-        claude_messages_raw.extend(outcome.messages.into_iter().map(|msg| {
-            let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-            (dedup_key, msg)
-        }));
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(
+            messages
+                .into_iter()
+                .filter(|msg| match msg.dedup_key.as_deref() {
+                    None | Some("") => true,
+                    Some(key) => {
+                        if seen_keys.contains(key) {
+                            false
+                        } else {
+                            seen_keys.insert(key.to_string());
+                            true
+                        }
+                    }
+                }),
+        );
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
-
-    let mut seen_keys: HashSet<String> = HashSet::new();
-    let claude_messages: Vec<UnifiedMessage> = claude_messages_raw
-        .into_iter()
-        .filter(|(key, _)| key.is_empty() || seen_keys.insert(key.clone()))
-        .map(|(_, msg)| msg)
-        .collect();
-    all_messages.extend(claude_messages);
 
     let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Codex)
@@ -1227,13 +1328,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .collect();
     let mut codex_seen: HashSet<String> = HashSet::new();
     for (path, outcome) in codex_outcomes {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
         all_messages.extend(
-            outcome
-                .messages
+            messages
                 .into_iter()
                 .filter(|message| should_keep_deduped_message(&mut codex_seen, message)),
         );
-        if let Some(entry) = outcome.cache_entry {
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         } else if outcome.invalidate_cache {
             source_cache.remove(&path);
@@ -1250,8 +1352,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in copilot_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1274,8 +1378,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for (path, outcome) in gemini_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         } else if outcome.invalidate_cache {
             source_cache.remove(&path);
@@ -1292,8 +1398,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in cursor_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1308,8 +1416,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in grok_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1324,8 +1434,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in warp_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1340,8 +1452,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in amp_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1356,8 +1470,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in codebuff_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1372,8 +1488,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in droid_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1388,8 +1506,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in openclaw_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1404,8 +1524,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in pi_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1419,15 +1541,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             continue;
         };
 
-        if let Some(cached) = source_cache.get(path) {
-            if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
-                omp_outcomes.push(CachedParseOutcome {
-                    messages: cached_messages(cached, pricing),
-                    cache_entry: None,
-                    invalidate_cache: false,
-                });
-                continue;
-            }
+        let is_hit = source_cache
+            .get(path)
+            .is_some_and(|cached| cached.fingerprint == fingerprint && !cached.messages.is_empty());
+        if is_hit {
+            omp_outcomes.push(CachedParseOutcome {
+                messages: ParsedSource::CacheHit(path.clone()),
+                cache_entry: None,
+                invalidate_cache: false,
+            });
+            continue;
         }
 
         omp_miss_paths.push(path.clone());
@@ -1449,8 +1572,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     omp_outcomes.extend(omp_miss_outcomes);
 
     for outcome in omp_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1495,8 +1620,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in kimi_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1512,8 +1639,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in qwen_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1528,8 +1657,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in roocode_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1544,8 +1675,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in kilocode_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1560,8 +1693,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in cline_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1576,8 +1711,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in mux_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1619,8 +1756,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         let outcome = load_or_parse_sqlite_source(&db_path, &source_cache, pricing, |path| {
             sessions::zed::parse_zed_sqlite(path)
         });
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1635,8 +1774,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in kiro_outcomes {
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
+        let (messages, extra_entry) =
+            resolve_messages(outcome.messages, &mut source_cache, pricing);
+        all_messages.extend(messages);
+        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
         }
     }
@@ -1699,6 +1840,82 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     source_cache.save_if_dirty();
 
     Ok(all_messages)
+}
+
+/// Digest over every scannable source's (path, size, mtime) plus the
+/// requested client set. Two equal digests mean a fresh parse would see
+/// byte-identical inputs, so refresh work can be skipped entirely (ADR 0008).
+/// The value is only comparable within one process (`DefaultHasher`) and is
+/// never persisted.
+pub fn compute_source_digest(
+    home_dir: &str,
+    clients: &[String],
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+        home_dir,
+        clients,
+        use_env_roots,
+        scanner_settings,
+    );
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for files in &scan_result.files {
+        paths.extend(files.iter().cloned());
+    }
+    paths.extend(scan_result.opencode_dbs.iter().cloned());
+    paths.extend(scan_result.kilo_db.iter().cloned());
+    paths.extend(scan_result.hermes_db_paths());
+    paths.extend(scan_result.goose_db.iter().cloned());
+    paths.extend(scan_result.zed_db_paths());
+    paths.extend(scan_result.kiro_db.iter().cloned());
+    paths.extend(
+        scan_result
+            .crush_dbs
+            .iter()
+            .map(|source| source.db_path.clone()),
+    );
+
+    // SQLite writes may only touch the WAL sidecar between checkpoints.
+    let wal_paths: Vec<PathBuf> = paths
+        .iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+        .map(|path| {
+            let mut name = path.as_os_str().to_owned();
+            name.push("-wal");
+            PathBuf::from(name)
+        })
+        .collect();
+    paths.extend(wal_paths);
+    paths.sort_unstable();
+    paths.dedup();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
+    sorted_clients.sort_unstable();
+    sorted_clients.hash(&mut hasher);
+    for path in &paths {
+        path.hash(&mut hasher);
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                metadata.len().hash(&mut hasher);
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0);
+                mtime.hash(&mut hasher);
+            }
+            Err(_) => {
+                0u64.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
@@ -4417,6 +4634,96 @@ model = "gpt-5.5"
                     0.0,
                 )
                 .date
+            );
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_compute_source_digest_stable_and_sensitive() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let message_dir = source_home
+            .path()
+            .join(".local/share/opencode/storage/message/project-1");
+        std::fs::create_dir_all(&message_dir).unwrap();
+        let first = message_dir.join("msg_001.json");
+        std::fs::write(&first, r#"{"id":"msg-1"}"#).unwrap();
+
+        let home = source_home.path().to_str().unwrap();
+        let clients = ["opencode".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
+        let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
+        assert_eq!(digest_one, digest_two, "unchanged sources must hash equal");
+
+        std::fs::write(&first, r#"{"id":"msg-1","grew":true}"#).unwrap();
+        let digest_changed = crate::compute_source_digest(home, &clients, false, &settings);
+        assert_ne!(
+            digest_one, digest_changed,
+            "content growth must change digest"
+        );
+
+        std::fs::write(message_dir.join("msg_002.json"), r#"{"id":"msg-2"}"#).unwrap();
+        let digest_added = crate::compute_source_digest(home, &clients, false, &settings);
+        assert_ne!(digest_changed, digest_added, "new files must change digest");
+
+        let digest_other_clients =
+            crate::compute_source_digest(home, &["claude".to_string()], false, &settings);
+        assert_ne!(
+            digest_added, digest_other_clients,
+            "client set is part of the digest"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let message_dir = source_home
+                .path()
+                .join(".local/share/opencode/storage/message/project-1");
+            std::fs::create_dir_all(&message_dir).unwrap();
+            let path = message_dir.join("msg_001.json");
+            std::fs::write(
+                &path,
+                r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+            )
+            .unwrap();
+
+            let home = source_home.path().to_str().unwrap();
+            let clients = ["opencode".to_string()];
+
+            // Cold parse populates the cache; the two warm parses exercise the
+            // move-out (take) path and must return identical results without
+            // corrupting the saved store (ADR 0008).
+            let cold = parse_all_messages_with_pricing(home, &clients, None).unwrap();
+            let warm_first = parse_all_messages_with_pricing(home, &clients, None).unwrap();
+            let warm_second = parse_all_messages_with_pricing(home, &clients, None).unwrap();
+
+            assert_eq!(cold.len(), 1);
+            assert_eq!(cold, warm_first);
+            assert_eq!(warm_first, warm_second);
+
+            let mut cache = message_cache::SourceMessageCache::load();
+            assert_eq!(
+                cache.take_messages(&path).map(|messages| messages.len()),
+                Some(1),
+                "warm parses must leave the cached entry intact on disk"
+            );
+            assert_eq!(
+                cache.take_messages(std::path::Path::new("/nonexistent/source.json")),
+                None
             );
         }
 

@@ -294,6 +294,15 @@ struct CachedSourceStore {
     entries: Vec<CachedSourceEntry>,
 }
 
+/// Serialization view over borrowed entries; bincode encodes `Vec<&T>`
+/// identically to `Vec<T>`, so `CachedSourceStore` reads it back (ADR 0008:
+/// saving must not clone the corpus).
+#[derive(Serialize)]
+struct BorrowedSourceStore<'a> {
+    schema_version: u32,
+    entries: Vec<&'a CachedSourceEntry>,
+}
+
 #[derive(Default)]
 pub(crate) struct SourceMessageCache {
     pub entries: HashMap<CachedPath, CachedSourceEntry>,
@@ -367,6 +376,32 @@ impl SourceMessageCache {
         self.entries.get(&key)
     }
 
+    /// Move the messages out of a cache entry, leaving it empty. Safe for
+    /// clean entries: `save_if_dirty` merges clean entries from the on-disk
+    /// store, never from memory. Callers must not re-read the same path's
+    /// messages within one parse run.
+    pub(crate) fn take_messages(&mut self, path: &Path) -> Option<Vec<UnifiedMessage>> {
+        let key = CachedPath::from_path(path);
+        self.entries
+            .get_mut(&key)
+            .map(|entry| std::mem::take(&mut entry.messages))
+    }
+
+    /// Codex variant of [`Self::take_messages`]: also moves out the
+    /// fallback-timestamp indices needed by codex finalization.
+    pub(crate) fn take_messages_with_fallback(
+        &mut self,
+        path: &Path,
+    ) -> Option<(Vec<UnifiedMessage>, Vec<usize>)> {
+        let key = CachedPath::from_path(path);
+        self.entries.get_mut(&key).map(|entry| {
+            (
+                std::mem::take(&mut entry.messages),
+                std::mem::take(&mut entry.fallback_timestamp_indices),
+            )
+        })
+    }
+
     pub(crate) fn remove(&mut self, path: &Path) {
         let key = CachedPath::from_path(path);
         if self.entries.remove(&key).is_some() {
@@ -427,31 +462,28 @@ impl SourceMessageCache {
             return;
         }
 
-        let mut merged_entries: HashMap<CachedPath, CachedSourceEntry> =
-            read_store_from_path(&final_path)
-                .map(|store| {
-                    store
-                        .entries
-                        .into_iter()
-                        .map(|entry| (entry.path.clone(), entry))
-                        .collect()
-                })
-                .unwrap_or_default();
+        let disk_store = read_store_from_path(&final_path);
+        let mut merged: HashMap<&CachedPath, &CachedSourceEntry> = HashMap::new();
+        if let Some(store) = disk_store.as_ref() {
+            for entry in &store.entries {
+                merged.insert(&entry.path, entry);
+            }
+        }
 
         for path in &self.deleted_paths {
             if !path.to_path_buf().exists() {
-                merged_entries.remove(path);
+                merged.remove(path);
             }
         }
         for path in &self.dirty_keys {
             if let Some(entry) = self.entries.get(path) {
-                merged_entries.insert(path.clone(), entry.clone());
+                merged.insert(&entry.path, entry);
             }
         }
 
-        let store = CachedSourceStore {
+        let store = BorrowedSourceStore {
             schema_version: CACHE_SCHEMA_VERSION,
-            entries: merged_entries.values().cloned().collect(),
+            entries: merged.into_values().collect(),
         };
 
         let nanos = std::time::SystemTime::now()
@@ -489,7 +521,9 @@ impl SourceMessageCache {
             return;
         }
 
-        self.entries = merged_entries;
+        // In-memory entries intentionally do not absorb the merged union:
+        // every caller drops the cache right after saving, and a repeat save
+        // is a no-op because the dirty flags clear here.
         self.dirty = false;
         self.dirty_keys.clear();
         self.deleted_paths.clear();
