@@ -75,6 +75,11 @@ const fn default_message_count() -> i32 {
 /// source-message cache, so the algorithm must never change across releases
 /// (it would silently break dedup between cached and freshly parsed
 /// messages). Hash inputs keep their legacy string formats.
+///
+/// Collisions are possible but negligible at this scale: for ~10^6 distinct
+/// keys the birthday bound is ~3e-8, and a collision only drops one message
+/// as a perceived duplicate from usage totals. Do not treat the hash as a
+/// unique identifier.
 pub fn dedup_hash_str(key: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in key.as_bytes() {
