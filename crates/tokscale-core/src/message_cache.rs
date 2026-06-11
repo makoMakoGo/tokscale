@@ -18,7 +18,9 @@ use std::time::UNIX_EPOCH;
 // UnifiedMessage.agent values from older parsers must be rebuilt.
 // 22: Kimi agent labels now come from stable profileName values only; cached
 // path-derived Main/Agent N labels must be rebuilt.
-const CACHE_SCHEMA_VERSION: u32 = 22;
+// 23: Claude transcripts no longer estimate tool_result text without usage
+// metadata, so cached transcript messages must be rebuilt.
+const CACHE_SCHEMA_VERSION: u32 = 23;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

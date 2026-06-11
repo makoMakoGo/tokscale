@@ -365,6 +365,7 @@ pub fn parse_claude_file_with_cache_and_home(
     home_dir: Option<&Path>,
 ) -> Vec<UnifiedMessage> {
     let (workspace_key, workspace_label) = claude_workspace_from_path(path);
+    let is_transcript_path = is_claude_transcripts_path(path);
     let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir);
     let client_id = cc_mirror_metadata
         .as_ref()
@@ -470,23 +471,27 @@ pub fn parse_claude_file_with_cache_and_home(
                     &workspace_key,
                     &workspace_label,
                 );
-                let tool_result_message = extract_claude_tool_result_message(
-                    trimmed,
-                    ClaudeToolResultContext {
-                        entry: &entry,
-                        last_model: last_model.as_deref(),
-                        last_provider_hint: last_provider_hint.as_deref(),
-                        client_id: &client_id,
-                        default_provider_hint: metadata_provider_hint,
-                        session_id: &session_id,
-                        fallback_timestamp,
-                        suppress_unattributed: suppress_unattributed_tool_results,
-                        workspace_key: context_workspace_key,
-                        workspace_label: context_workspace_label,
-                        sidechain_agent: sidechain_agent.clone(),
-                        sidechain_agent_instance: sidechain_agent_instance.clone(),
-                    },
-                );
+                let tool_result_message = if is_transcript_path {
+                    None
+                } else {
+                    extract_claude_tool_result_message(
+                        trimmed,
+                        ClaudeToolResultContext {
+                            entry: &entry,
+                            last_model: last_model.as_deref(),
+                            last_provider_hint: last_provider_hint.as_deref(),
+                            client_id: &client_id,
+                            default_provider_hint: metadata_provider_hint,
+                            session_id: &session_id,
+                            fallback_timestamp,
+                            suppress_unattributed: suppress_unattributed_tool_results,
+                            workspace_key: context_workspace_key,
+                            workspace_label: context_workspace_label,
+                            sidechain_agent: sidechain_agent.clone(),
+                            sidechain_agent_instance: sidechain_agent_instance.clone(),
+                        },
+                    )
+                };
 
                 if let Some(timestamp_ms) = parse_claude_entry_timestamp(entry.timestamp.as_deref())
                 {
@@ -745,6 +750,17 @@ fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
     }
 
     (None, None)
+}
+
+fn is_claude_transcripts_path(path: &Path) -> bool {
+    let components: Vec<String> = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect();
+
+    components
+        .windows(2)
+        .any(|window| window[0] == ".claude" && window[1] == "transcripts")
 }
 
 fn workspace_options_from_key(raw: &str) -> (Option<String>, Option<String>) {
@@ -2472,7 +2488,7 @@ mod tests {
     fn test_wrapper_transcript_without_usage_is_skipped() {
         let content = r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
 {"type":"tool_use","timestamp":"2026-04-01T10:00:01.000Z","message":{"content":"Run tool"}}
-{"type":"tool_result","timestamp":"2026-04-01T10:00:02.000Z","message":{"content":"Tool result"}}"#;
+{"type":"tool_result","timestamp":"2026-04-01T10:00:02.000Z","tool_use_id":"toolu_wrapper","content":"Tool result with root-level output text"}"#;
         let (_dir, path) = create_transcript_file(content, "ses_765432109876543210987654321.jsonl");
 
         let messages = parse_claude_file(&path);
