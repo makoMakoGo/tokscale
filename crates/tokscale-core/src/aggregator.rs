@@ -768,6 +768,7 @@ mod tests {
             duration_ms: None,
             message_count: 1,
             agent: None,
+            agent_instance: None,
             dedup_key: None,
             is_turn_start: false,
         }
@@ -1393,6 +1394,7 @@ mod tests {
             cost,
             message_count: 1,
             agent: None,
+            agent_instance: None,
             dedup_key: None,
             is_turn_start: false,
             duration_ms: None,

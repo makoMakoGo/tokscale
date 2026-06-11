@@ -7,7 +7,7 @@ use super::utils::{
     read_file_or_none,
 };
 use super::{
-    normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
+    normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
 };
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -99,6 +99,34 @@ pub struct ClaudeUsage {
     pub cache_creation_input_tokens: Option<i64>,
 }
 
+fn normalize_claude_agent_label(agent_type: &str) -> Option<String> {
+    let normalized = agent_type.trim().to_ascii_lowercase();
+    let label = match normalized.as_str() {
+        "explore" => "Claude Explore",
+        "plan" => "Claude Plan",
+        "general-purpose" => "Claude General Purpose",
+        "claude-code-guide" => "Claude Code Guide",
+        "verification" => "Claude Verification",
+        "workflow-subagent" => "Claude Workflow Subagent",
+        "fork" => "Claude Fork",
+        _ => {
+            let stable_slug = !normalized.is_empty()
+                && normalized
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | ':'));
+            if !stable_slug {
+                return None;
+            }
+            return Some(format!(
+                "Claude {}",
+                super::normalize_agent_name(agent_type)
+            ));
+        }
+    };
+
+    Some(label.to_string())
+}
+
 /// Resolve the subagent display name for a sidechain transcript file.
 ///
 /// Tier 1: Read the sibling `.meta.json` sidecar for the `agentType` field.
@@ -112,7 +140,7 @@ fn resolve_subagent_name(
 ) -> String {
     let stem = match path.file_stem().and_then(|s| s.to_str()) {
         Some(s) => s,
-        None => return normalize_agent_name("claude-code-subagent"),
+        None => return "Claude Subagent".to_string(),
     };
 
     // Tier 1: sibling meta.json (e.g. agent-abc123.meta.json next to agent-abc123.jsonl)
@@ -121,7 +149,8 @@ fn resolve_subagent_name(
         if let Ok(meta) = serde_json::from_str::<AgentMetaFile>(&text) {
             if let Some(ref agent_type) = meta.agent_type {
                 if !agent_type.trim().is_empty() {
-                    return normalize_agent_name(agent_type);
+                    return normalize_claude_agent_label(agent_type)
+                        .unwrap_or_else(|| "Claude Subagent".to_string());
                 }
             }
         }
@@ -137,13 +166,14 @@ fn resolve_subagent_name(
             if let Some(subagent_type) =
                 lookup_subagent_type_in_parent(&parent_path, agent_id, parent_cache)
             {
-                return normalize_agent_name(&subagent_type);
+                return normalize_claude_agent_label(&subagent_type)
+                    .unwrap_or_else(|| "Claude Subagent".to_string());
             }
         }
     }
 
     // Tier 3: generic fallback (still visible in the Agents tab)
-    normalize_agent_name("claude-code-subagent")
+    "Claude Subagent".to_string()
 }
 
 /// Locate the parent main-session JSONL for a sidechain transcript.
@@ -403,6 +433,7 @@ pub fn parse_claude_file_with_cache_and_home(
     let mut suppress_unattributed_tool_results = false;
     // Sidechain detection state (resolved lazily on first parseable entry)
     let mut sidechain_agent: Option<String> = None;
+    let mut sidechain_agent_instance: Option<String> = None;
     let mut sidechain_detected = false;
 
     for line in reader.lines() {
@@ -431,6 +462,14 @@ pub fn parse_claude_file_with_cache_and_home(
                     if let Some(ref parent_id) = entry.session_id {
                         session_id = parent_id.clone();
                     }
+                    let stem_agent_id = path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .and_then(sidechain_agent_id_from_stem);
+                    sidechain_agent_instance = entry
+                        .agent_id
+                        .clone()
+                        .or(stem_agent_id);
                     sidechain_agent = Some(resolve_subagent_name(
                         path,
                         entry.session_id.as_deref(),
@@ -460,6 +499,7 @@ pub fn parse_claude_file_with_cache_and_home(
                         workspace_key: context_workspace_key,
                         workspace_label: context_workspace_label,
                         sidechain_agent: sidechain_agent.clone(),
+                        sidechain_agent_instance: sidechain_agent_instance.clone(),
                     },
                 );
 
@@ -633,6 +673,7 @@ pub fn parse_claude_file_with_cache_and_home(
                 );
                 unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent.clone();
+                unified.set_agent_instance(sidechain_agent_instance.clone());
                 let (message_workspace_key, message_workspace_label) = workspace_options_for_entry(
                     entry_workspace.as_ref(),
                     &workspace_key,
@@ -899,6 +940,7 @@ struct ClaudeToolResultContext<'a> {
     workspace_key: Option<String>,
     workspace_label: Option<String>,
     sidechain_agent: Option<String>,
+    sidechain_agent_instance: Option<String>,
 }
 
 fn extract_claude_tool_result_message(
@@ -967,6 +1009,7 @@ fn extract_claude_tool_result_message(
     );
     message.message_count = 0;
     message.agent = context.sidechain_agent;
+    message.set_agent_instance(context.sidechain_agent_instance);
     message.set_workspace(context.workspace_key, context.workspace_label);
     Some(message)
 }
@@ -2504,7 +2547,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Explore".to_string()),
+            Some("Claude Explore".to_string()),
             "Should resolve agent name from meta sidecar and normalize"
         );
         assert_eq!(
@@ -2528,7 +2571,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some("Claude Subagent".to_string()),
             "Without meta sidecar, should fall back to generic label"
         );
         assert_eq!(messages[0].session_id, "parent-uuid-002");
@@ -2546,7 +2589,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some("Claude Subagent".to_string()),
             "Legacy flat layout has no meta → Tier 3 fallback"
         );
         assert_eq!(
@@ -2597,9 +2640,9 @@ mod tests {
         assert_eq!(msgs3[0].session_id, "shared-parent-uuid");
 
         // Agent names should differ
-        assert_eq!(msgs1[0].agent, Some("Explore".to_string()));
-        assert_eq!(msgs2[0].agent, Some("Executor".to_string()));
-        assert_eq!(msgs3[0].agent, Some("Claude Code Subagent".to_string()));
+        assert_eq!(msgs1[0].agent, Some("Claude Explore".to_string()));
+        assert_eq!(msgs2[0].agent, Some("Claude Executor".to_string()));
+        assert_eq!(msgs3[0].agent, Some("Claude Subagent".to_string()));
     }
 
     #[test]
@@ -2631,8 +2674,8 @@ mod tests {
         assert_eq!(total_cache_write, 150, "cache_write: 100 + 50");
 
         // Both messages should have the same agent
-        assert_eq!(messages[0].agent, Some("Code Reviewer".to_string()));
-        assert_eq!(messages[1].agent, Some("Code Reviewer".to_string()));
+        assert_eq!(messages[0].agent, Some("Claude Code Reviewer".to_string()));
+        assert_eq!(messages[1].agent, Some("Claude Code Reviewer".to_string()));
     }
 
     #[test]
@@ -2695,7 +2738,7 @@ mod tests {
         );
         assert_eq!(
             messages[0].agent,
-            Some("Architect".to_string()),
+            Some("Claude Architect".to_string()),
             "Deduped message should retain agent"
         );
         assert_eq!(messages[0].session_id, "parent-dedup");
@@ -2719,7 +2762,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Code Reviewer".to_string()),
+            Some("Claude Code Reviewer".to_string()),
             "Should strip oh-my-claudecode: prefix and normalize"
         );
     }
@@ -2736,7 +2779,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some("Claude Subagent".to_string()),
             "Still detected as sidechain"
         );
         // session_id should be the file stem (fallback)
@@ -2783,7 +2826,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Document Specialist".to_string()),
+            Some("Claude Document Specialist".to_string()),
             "Tier 2 should recover agent name from parent tool_use"
         );
         assert_eq!(messages[0].session_id, parent_session_id);
@@ -2822,7 +2865,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Explore".to_string()),
+            Some("Claude Explore".to_string()),
             "Tier 2 should work for flat layout too"
         );
     }
@@ -2868,7 +2911,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Code Reviewer".to_string()),
+            Some("Claude Code Reviewer".to_string()),
             "Tier 1 (meta sidecar) should take precedence over Tier 2 (parent lookup)"
         );
     }
@@ -2934,7 +2977,7 @@ mod tests {
         let messages = parse_claude_file(&sidechain_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent, Some("Writer".to_string()));
+        assert_eq!(messages[0].agent, Some("Claude Writer".to_string()));
     }
 
     #[test]
@@ -3011,12 +3054,12 @@ mod tests {
 
         assert_eq!(
             msgs_a[0].agent,
-            Some("Explore".to_string()),
+            Some("Claude Explore".to_string()),
             "First agent should be explore"
         );
         assert_eq!(
             msgs_b[0].agent,
-            Some("Executor".to_string()),
+            Some("Claude Executor".to_string()),
             "Second agent should be executor"
         );
     }

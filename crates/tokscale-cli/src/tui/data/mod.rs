@@ -66,6 +66,7 @@ pub struct AgentUsage {
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub message_count: u32,
+    pub instance_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +404,7 @@ impl DataLoader {
         let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
         let mut agent_map: HashMap<String, AgentUsage> = HashMap::new();
         let mut agent_clients: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut agent_instances: HashMap<String, HashSet<String>> = HashMap::new();
         let mut daily_map: HashMap<NaiveDate, DailyUsage> = HashMap::new();
         let mut hourly_map: HashMap<NaiveDateTime, HourlyUsage> = HashMap::new();
         let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
@@ -522,6 +524,7 @@ impl DataLoader {
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                         message_count: 0,
+                        instance_count: 0,
                     });
 
                 agent_entry.tokens.input = agent_entry
@@ -550,9 +553,18 @@ impl DataLoader {
                     .saturating_add(msg.message_count.max(0) as u32);
 
                 agent_clients
-                    .entry(normalized_agent)
+                    .entry(normalized_agent.clone())
                     .or_default()
                     .insert(msg.client.clone());
+
+                let instance_key = msg
+                    .agent_instance
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:{}", msg.client, msg.session_id));
+                agent_instances
+                    .entry(normalized_agent)
+                    .or_default()
+                    .insert(instance_key);
             }
 
             if let Some(date) = parse_date(&msg.date) {
@@ -867,6 +879,12 @@ impl DataLoader {
         for (agent, clients) in agent_clients {
             if let Some(agent_entry) = agent_map.get_mut(&agent) {
                 agent_entry.clients = clients.into_iter().collect::<Vec<_>>().join(", ");
+            }
+        }
+
+        for (agent, instances) in agent_instances {
+            if let Some(agent_entry) = agent_map.get_mut(&agent) {
+                agent_entry.instance_count = instances.len() as u32;
             }
         }
 
