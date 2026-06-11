@@ -22,7 +22,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 15;
+const CACHE_SCHEMA_VERSION: u32 = 16;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -969,7 +969,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 15,
+  "schemaVersion": 16,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
@@ -1235,7 +1235,7 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         let mut cached: serde_json::Value = serde_json::from_str(
             r#"{
-  "schemaVersion": 15,
+  "schemaVersion": 16,
   "timestamp": 0,
   "enabledClients": ["claude", "cursor"],
   "groupBy": "model",

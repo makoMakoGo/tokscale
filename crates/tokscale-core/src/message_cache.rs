@@ -14,7 +14,9 @@ use std::time::UNIX_EPOCH;
 // messages store their dedup_key, so old entries must be reparsed.
 // 20: upstream codex dedup and personal/local-clients parser changes are both
 // present after the merge, so existing source-message caches must be rebuilt.
-const CACHE_SCHEMA_VERSION: u32 = 20;
+// 21: Claude sidechain agent labels now only preserve known stable types; cached
+// UnifiedMessage.agent values from older parsers must be rebuilt.
+const CACHE_SCHEMA_VERSION: u32 = 21;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
