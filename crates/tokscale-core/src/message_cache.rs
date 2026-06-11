@@ -294,6 +294,15 @@ struct CachedSourceStore {
     entries: Vec<CachedSourceEntry>,
 }
 
+/// Serialization view over borrowed entries; bincode encodes `Vec<&T>`
+/// identically to `Vec<T>`, so `CachedSourceStore` reads it back (ADR 0008:
+/// saving must not clone the corpus).
+#[derive(Serialize)]
+struct BorrowedSourceStore<'a> {
+    schema_version: u32,
+    entries: Vec<&'a CachedSourceEntry>,
+}
+
 #[derive(Default)]
 pub(crate) struct SourceMessageCache {
     pub entries: HashMap<CachedPath, CachedSourceEntry>,
@@ -453,31 +462,28 @@ impl SourceMessageCache {
             return;
         }
 
-        let mut merged_entries: HashMap<CachedPath, CachedSourceEntry> =
-            read_store_from_path(&final_path)
-                .map(|store| {
-                    store
-                        .entries
-                        .into_iter()
-                        .map(|entry| (entry.path.clone(), entry))
-                        .collect()
-                })
-                .unwrap_or_default();
+        let disk_store = read_store_from_path(&final_path);
+        let mut merged: HashMap<&CachedPath, &CachedSourceEntry> = HashMap::new();
+        if let Some(store) = disk_store.as_ref() {
+            for entry in &store.entries {
+                merged.insert(&entry.path, entry);
+            }
+        }
 
         for path in &self.deleted_paths {
             if !path.to_path_buf().exists() {
-                merged_entries.remove(path);
+                merged.remove(path);
             }
         }
         for path in &self.dirty_keys {
             if let Some(entry) = self.entries.get(path) {
-                merged_entries.insert(path.clone(), entry.clone());
+                merged.insert(&entry.path, entry);
             }
         }
 
-        let store = CachedSourceStore {
+        let store = BorrowedSourceStore {
             schema_version: CACHE_SCHEMA_VERSION,
-            entries: merged_entries.values().cloned().collect(),
+            entries: merged.into_values().collect(),
         };
 
         let nanos = std::time::SystemTime::now()
@@ -515,7 +521,9 @@ impl SourceMessageCache {
             return;
         }
 
-        self.entries = merged_entries;
+        // In-memory entries intentionally do not absorb the merged union:
+        // every caller drops the cache right after saving, and a repeat save
+        // is a no-op because the dirty flags clear here.
         self.dirty = false;
         self.dirty_keys.clear();
         self.deleted_paths.clear();
