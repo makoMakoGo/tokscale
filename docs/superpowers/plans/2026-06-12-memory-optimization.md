@@ -23,7 +23,7 @@
 - Modify: `crates/tokscale-core/src/message_cache.rs` (add `take_messages`, `take_messages_with_fallback`)
 - Modify: `crates/tokscale-core/src/lib.rs:793-1700` (`parse_all_messages_with_pricing_with_env_strategy` and its local helpers)
 
-- [ ] **Step 1: Add take methods to SourceMessageCache** (`message_cache.rs`, after `get()` ~line 368)
+- [x] **Step 1: Add take methods to SourceMessageCache** (`message_cache.rs`, after `get()` ~line 368)
 
 ```rust
 /// Move the messages out of a cache entry, leaving it empty. Safe for
@@ -53,7 +53,7 @@ pub(crate) fn take_messages_with_fallback(
 }
 ```
 
-- [ ] **Step 2: Replace `CachedParseOutcome.messages: Vec<UnifiedMessage>` with a deferred enum** (function-local in `lib.rs`)
+- [x] **Step 2: Replace `CachedParseOutcome.messages: Vec<UnifiedMessage>` with a deferred enum** (function-local in `lib.rs`)
 
 ```rust
 #[derive(Debug)]
@@ -99,7 +99,7 @@ Changes inside the existing local helpers:
     },
 ```
 
-- [ ] **Step 3: Add the serial resolver** (next to the helpers in `lib.rs`)
+- [x] **Step 3: Add the serial resolver** (next to the helpers in `lib.rs`)
 
 ```rust
 fn resolve_messages(
@@ -145,7 +145,7 @@ fn resolve_messages(
 
 Note: `CodexAppend` keeps exactly two copies of that one file (raw for cache entry, finalized for output) — necessary because the cache stores pre-pricing messages. Today it makes three.
 
-- [ ] **Step 4: Update every client fold loop.** Pattern (the `for outcome in ..._outcomes` loops; ~24 sites):
+- [x] **Step 4: Update every client fold loop.** Pattern (the `for outcome in ..._outcomes` loops; ~24 sites):
 
 ```rust
 for outcome in opencode_outcomes {
@@ -164,7 +164,7 @@ for outcome in opencode_outcomes {
 
 Keep each loop's existing dedup filter and `invalidate_cache` handling byte-for-byte; only the messages source changes. par_iter `collect()` preserves path order, so dedup tie-breaking is unchanged.
 
-- [ ] **Step 5: Fold Claude dedup inline (remove `claude_messages_raw`)** (lib.rs:1199-1216)
+- [x] **Step 5: Fold Claude dedup inline (remove `claude_messages_raw`)** (lib.rs:1199-1216)
 
 ```rust
 let mut seen_keys: HashSet<String> = HashSet::new();
@@ -189,12 +189,12 @@ for outcome in claude_outcomes {
 }
 ```
 
-- [ ] **Step 6: Run the full core test suite**
+- [x] **Step 6: Run the full core test suite**
 
 Run: `cargo test -p tokscale-core`
 Expected: PASS (existing cache round-trip and dedup tests cover the semantics)
 
-- [ ] **Step 7: Add a regression test for take semantics** (in `lib.rs` tests near the existing cache tests ~line 5200)
+- [x] **Step 7: Add a regression test for take semantics** (in `lib.rs` tests near the existing cache tests ~line 5200)
 
 ```rust
 #[test]
@@ -209,7 +209,7 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
 
 (Write it with the same fixture helpers the neighboring tests use; assert message equality between run 1 and run 2.)
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/tokscale-core/src/lib.rs crates/tokscale-core/src/message_cache.rs
@@ -221,7 +221,7 @@ git commit -m "perf(core): move cache-hit messages instead of cloning"
 **Files:**
 - Modify: `crates/tokscale-core/src/message_cache.rs:398-496`
 
-- [ ] **Step 1: Add the borrowed store type** (next to `CachedSourceStore`)
+- [x] **Step 1: Add the borrowed store type** (next to `CachedSourceStore`)
 
 ```rust
 #[derive(Serialize)]
@@ -233,7 +233,7 @@ struct BorrowedSourceStore<'a> {
 
 bincode encodes `Vec<&T>` identically to `Vec<T>`; the owned `CachedSourceStore` stays for deserialization.
 
-- [ ] **Step 2: Rewrite the merge to borrow instead of clone** (replace lines 430-455 and 492-495)
+- [x] **Step 2: Rewrite the merge to borrow instead of clone** (replace lines 430-455 and 492-495)
 
 ```rust
 let disk_store = read_store_from_path(&final_path);
@@ -270,12 +270,12 @@ self.deleted_paths.clear();
 
 Document on the method: after `save_if_dirty`, in-memory entries no longer reflect the merged union; every current caller drops the cache immediately after saving (`lib.rs:1699`, `lib.rs:4391`, `lib.rs:4515` — verify each still does).
 
-- [ ] **Step 3: Run cache tests**
+- [x] **Step 3: Run cache tests**
 
 Run: `cargo test -p tokscale-core message_cache`
 Expected: PASS. The existing cross-process merge tests (the ones constructing stale on-disk stores) must stay green.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/tokscale-core/src/message_cache.rs
@@ -288,7 +288,7 @@ git commit -m "perf(core): serialize message cache by reference on save"
 - Modify: `crates/tokscale-cli/Cargo.toml` (ensure `libc = { workspace = true }` in `[dependencies]`)
 - Modify: `crates/tokscale-cli/src/tui/data/mod.rs` (`DataLoader::load`)
 
-- [ ] **Step 1: Add the trim helper and call it after aggregation** (end of `DataLoader::load`, currently `self.aggregate_messages(messages, group_by)` at line 345)
+- [x] **Step 1: Add the trim helper and call it after aggregation** (end of `DataLoader::load`, currently `self.aggregate_messages(messages, group_by)` at line 345)
 
 ```rust
 let result = self.aggregate_messages(messages, group_by);
@@ -307,12 +307,12 @@ fn trim_allocator() {
 }
 ```
 
-- [ ] **Step 2: Build and run TUI smoke check**
+- [x] **Step 2: Build and run TUI smoke check**
 
 Run: `cargo build --release -p tokscale-cli` then sample a fresh `tokscale tui` instance's RSS after load completes (script/pty + /proc sampling).
 Expected: steady RSS drops well below the ~600MB baseline once the post-load trim runs.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/tokscale-cli/Cargo.toml crates/tokscale-cli/src/tui/data/mod.rs
@@ -327,9 +327,9 @@ git commit -m "perf(tui): trim allocator after data loads"
 - Modify: `crates/tokscale-cli/src/tui/app.rs` (force flag + digest field)
 - Test: digest unit tests in `tokscale-core`
 
-- [ ] **Step 1: Pre-check for self-invalidation.** Verify the local parse path does not write files into scanned directories during `parse_local_unified_messages` (grep `cc_mirror` and cursor cache writes; if any scanned dir is also written per refresh, exclude it from the digest or the skip will never fire). Record findings in the PR description.
+- [x] **Step 1: Pre-check for self-invalidation.** Verify the local parse path does not write files into scanned directories during `parse_local_unified_messages` (grep `cc_mirror` and cursor cache writes; if any scanned dir is also written per refresh, exclude it from the digest or the skip will never fire). Record findings in the PR description.
 
-- [ ] **Step 2: Implement `compute_source_digest` in core** (near `parse_all_messages_with_pricing_with_env_strategy`)
+- [x] **Step 2: Implement `compute_source_digest` in core** (near `parse_all_messages_with_pricing_with_env_strategy`)
 
 ```rust
 /// Stable digest of every scannable source's (path, size, mtime). Two equal
@@ -379,7 +379,7 @@ pub fn compute_source_digest(
 
 (Adjust the `crush_dbs` line to the actual `CrushDbSource` shape. DefaultHasher is process-local only — the digest is never persisted, so std hasher stability caveats don't apply.)
 
-- [ ] **Step 3: Unit tests for the digest**
+- [x] **Step 3: Unit tests for the digest**
 
 ```rust
 #[test]
@@ -392,7 +392,7 @@ fn test_source_digest_stable_and_sensitive() {
 
 Run: `cargo test -p tokscale-core compute_source_digest` — expected PASS.
 
-- [ ] **Step 4: Thread the probe through the TUI.**
+- [x] **Step 4: Thread the probe through the TUI.**
 - Channel payload becomes `Result<BackgroundLoad>` with:
 
 ```rust
@@ -430,12 +430,12 @@ thread::spawn(move || {
 - `run_loop_with_background` match arm: `Unchanged` → `app.set_background_loading(false); app.mark_refresh_checked();` (sets `last_refresh = Instant::now()`, no status spam). `Loaded { data, digest }` → existing `update_data` path plus `app.last_source_digest = digest`.
 - Initial startup load passes `force = true` (cache may be stale for other reasons) but still records the digest.
 
-- [ ] **Step 5: Full build + behavior check**
+- [x] **Step 5: Full build + behavior check**
 
 Run: `cargo test -p tokscale-cli && cargo build --release -p tokscale-cli`
 Manual: TUI with refresh enabled; idle for 2+ refresh intervals; confirm via logs/btop that no full parse runs (RSS flat), then `touch` a transcript and confirm the next tick reloads.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/tokscale-core/src/lib.rs crates/tokscale-cli/src/tui/
@@ -444,10 +444,10 @@ git commit -m "perf(tui): probe source fingerprints and skip unchanged refreshes
 
 ### Task A5: Phase A verification
 
-- [ ] `cargo fmt --check && cargo test` (workspace) — all green.
-- [ ] `/usr/bin/time -v target/release/tokscale --light --no-spinner` — record peak RSS; expect ~0.6-0.7GB (from 1.05GB). Totals in the report must match the baseline run byte-for-byte (same token/cost numbers).
-- [ ] TUI sample: fresh instance, steady RSS after load+trim; expect a large drop from 635MB.
-- [ ] Update issue, open PR `perf: single-copy parse pipeline and idle-refresh skip (phase A)` against `personal/local-clients` with before/after numbers.
+- [x] `cargo fmt --check && cargo test` (workspace) — all green.
+- [x] `/usr/bin/time -v target/release/tokscale --light --no-spinner` — record peak RSS; expect ~0.6-0.7GB (from 1.05GB). Totals in the report must match the baseline run byte-for-byte (same token/cost numbers).
+- [x] TUI sample: fresh instance, steady RSS after load+trim; expect a large drop from 635MB.
+- [x] Update issue, open PR `perf: single-copy parse pipeline and idle-refresh skip (phase A)` against `personal/local-clients` with before/after numbers.
 
 ---
 
