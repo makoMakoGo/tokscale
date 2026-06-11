@@ -367,6 +367,32 @@ impl SourceMessageCache {
         self.entries.get(&key)
     }
 
+    /// Move the messages out of a cache entry, leaving it empty. Safe for
+    /// clean entries: `save_if_dirty` merges clean entries from the on-disk
+    /// store, never from memory. Callers must not re-read the same path's
+    /// messages within one parse run.
+    pub(crate) fn take_messages(&mut self, path: &Path) -> Option<Vec<UnifiedMessage>> {
+        let key = CachedPath::from_path(path);
+        self.entries
+            .get_mut(&key)
+            .map(|entry| std::mem::take(&mut entry.messages))
+    }
+
+    /// Codex variant of [`Self::take_messages`]: also moves out the
+    /// fallback-timestamp indices needed by codex finalization.
+    pub(crate) fn take_messages_with_fallback(
+        &mut self,
+        path: &Path,
+    ) -> Option<(Vec<UnifiedMessage>, Vec<usize>)> {
+        let key = CachedPath::from_path(path);
+        self.entries.get_mut(&key).map(|entry| {
+            (
+                std::mem::take(&mut entry.messages),
+                std::mem::take(&mut entry.fallback_timestamp_indices),
+            )
+        })
+    }
+
     pub(crate) fn remove(&mut self, path: &Path) {
         let key = CachedPath::from_path(path);
         if self.entries.remove(&key).is_some() {
