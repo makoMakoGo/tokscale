@@ -3450,6 +3450,7 @@ dependencies = [
  "image",
  "imageproc",
  "indicatif",
+ "libc",
  "predicates",
  "qrcode",
  "ratatui",
