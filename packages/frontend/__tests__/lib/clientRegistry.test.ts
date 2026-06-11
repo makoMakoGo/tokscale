@@ -1,22 +1,27 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import {
-  SOURCE_COLORS,
-  SOURCE_DISPLAY_NAMES,
-  SOURCE_LOGOS,
-} from "../../src/lib/constants";
+import { CLIENT_REGISTRY, BASE_CLIENT_TYPES } from "../../src/lib/clientRegistry.generated";
 import { validateSubmission } from "../../src/lib/validation/submission";
 
-const coreClientsPath = fileURLToPath(
-  new URL("../../../../crates/tokscale-core/src/clients.rs", import.meta.url)
+type CatalogEntry = {
+  id: string;
+  displayName: string;
+  shortName: string;
+  logo: string;
+  color: string;
+  textColor?: string;
+  submitDefault: boolean;
+};
+
+const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
+const catalogPath = fileURLToPath(
+  new URL("../../../../crates/tokscale-core/client-catalog.json", import.meta.url)
 );
 
-function coreClientIds(): string[] {
-  const source = readFileSync(coreClientsPath, "utf8");
-  const registry = source.match(/define_clients!\(([\s\S]*?)\n\);/);
-  expect(registry).not.toBeNull();
-  return Array.from(registry![1].matchAll(/\bid:\s*"([^"]+)"/g), (match) => match[1]);
+function catalogEntries(): CatalogEntry[] {
+  return JSON.parse(readFileSync(catalogPath, "utf8")) as CatalogEntry[];
 }
 
 function payloadForClient(client: string) {
@@ -77,6 +82,31 @@ function payloadForClient(client: string) {
 }
 
 describe("frontend client registry", () => {
+  it("generated registry is up to date", () => {
+    expect(() => {
+      execFileSync("bun", ["scripts/generate-client-registry.ts", "--check"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+    }).not.toThrow();
+  });
+
+  it("matches the core client catalog", () => {
+    const catalog = catalogEntries();
+    expect(BASE_CLIENT_TYPES).toEqual(catalog.map((entry) => entry.id));
+
+    for (const entry of catalog) {
+      expect(CLIENT_REGISTRY[entry.id as keyof typeof CLIENT_REGISTRY]).toEqual({
+        displayName: entry.displayName,
+        shortName: entry.shortName,
+        logo: entry.logo,
+        color: entry.color,
+        textColor: entry.textColor,
+        submitDefault: entry.submitDefault,
+      });
+    }
+  });
+
   it("accepts trae submissions", () => {
     const result = validateSubmission(payloadForClient("trae"));
 
@@ -84,8 +114,8 @@ describe("frontend client registry", () => {
     expect(result.errors).toEqual([]);
   });
 
-  it("accepts every core client id in submission validation", () => {
-    const rejected = coreClientIds().filter((client) => {
+  it("accepts every base client id in submission validation", () => {
+    const rejected = BASE_CLIENT_TYPES.filter((client) => {
       const result = validateSubmission(payloadForClient(client));
       return !result.valid;
     });
@@ -93,18 +123,13 @@ describe("frontend client registry", () => {
     expect(rejected).toEqual([]);
   });
 
-  it("has labels, logos, and colors for every core client id", () => {
-    const displayNames: Record<string, string> = SOURCE_DISPLAY_NAMES;
-    const logos: Record<string, string> = SOURCE_LOGOS;
-    const colors: Record<string, string> = SOURCE_COLORS;
-    const missing = coreClientIds().flatMap((client) => {
-      const fields = [];
-      if (!displayNames[client]) fields.push(`${client}:display`);
-      if (!logos[client]) fields.push(`${client}:logo`);
-      if (!colors[client]) fields.push(`${client}:color`);
-      return fields;
-    });
+  it("preserves every base client id in submission validation", () => {
+    for (const client of BASE_CLIENT_TYPES) {
+      const result = validateSubmission(payloadForClient(client));
 
-    expect(missing).toEqual([]);
+      expect(result.valid).toBe(true);
+      expect(result.data?.summary.clients).toEqual([client]);
+      expect(result.data?.contributions[0]?.clients[0]?.client).toBe(client);
+    }
   });
 });

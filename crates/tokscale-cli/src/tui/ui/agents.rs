@@ -11,7 +11,7 @@ use super::widgets::{
     viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
-use crate::ClientFilter;
+use tokscale_core::ClientId;
 
 const RANK_WIDTH: u16 = 3;
 const AGENT_MIN_WIDTH: u16 = 16;
@@ -295,7 +295,7 @@ fn get_empty_message(app: &App) -> String {
     let only_codex = !enabled_clients.is_empty()
         && enabled_clients
             .iter()
-            .all(|client| *client == ClientFilter::Codex);
+            .all(|client| *client == ClientId::Codex);
 
     if only_codex {
         "No agent breakdown is available for the current sources.\nThe selected source usually does not record agent metadata for regular sessions.\nPress 's' to try a different source."
@@ -333,8 +333,8 @@ mod tests {
     };
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
-    use crate::ClientFilter;
     use ratatui::prelude::Constraint;
+    use tokscale_core::ClientId;
 
     fn length_at(widths: &[Constraint], index: usize) -> u16 {
         match widths[index] {
@@ -343,7 +343,7 @@ mod tests {
         }
     }
 
-    fn make_app(clients: Vec<ClientFilter>) -> App {
+    fn make_app(clients: Vec<ClientId>) -> App {
         let app = App::new_with_cached_data(
             TuiConfig {
                 theme: "tokscale".to_string(),
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_get_empty_message_for_codex_only() {
-        let app = make_app(vec![ClientFilter::Codex]);
+        let app = make_app(vec![ClientId::Codex]);
         let message = get_empty_message(&app);
 
         assert!(message.contains("selected source usually does not record"));
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_get_empty_message_for_mixed_sources() {
-        let app = make_app(vec![ClientFilter::Opencode, ClientFilter::Roocode]);
+        let app = make_app(vec![ClientId::OpenCode, ClientId::RooCode]);
         let message = get_empty_message(&app);
 
         assert!(message.contains("Only some sources record agent metadata"));

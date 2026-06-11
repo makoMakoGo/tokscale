@@ -9,11 +9,6 @@ import {
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
 
-const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
-function normalizeClientId(id: string): string {
-  return LEGACY_CLIENT_ALIASES[id] ?? id;
-}
-
 export const revalidate = 60; // ISR: revalidate every 60 seconds
 
 interface RouteParams {
@@ -176,8 +171,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
         existing.inputTokens += Number(day.inputTokens);
         existing.outputTokens += Number(day.outputTokens);
         if (day.sourceBreakdown) {
-          for (const [rawClient, data] of Object.entries(day.sourceBreakdown)) {
-            const client = normalizeClientId(rawClient);
+          for (const [client, data] of Object.entries(day.sourceBreakdown)) {
             const breakdown = data as ClientBreakdown;
             if (existing.clients[client]) {
               existing.clients[client].tokens += breakdown.tokens || 0;
@@ -254,11 +248,9 @@ export async function GET(_request: Request, { params }: RouteParams) {
         const clients: Record<string, ClientBreakdown> = {};
         const models: Record<string, { tokens: number; cost: number }> = {};
         if (day.sourceBreakdown) {
-          for (const [rawClient, data] of Object.entries(day.sourceBreakdown)) {
-            const client = normalizeClientId(rawClient);
+          for (const [client, data] of Object.entries(day.sourceBreakdown)) {
             const breakdown = data as ClientBreakdown;
             if (clients[client]) {
-              // Merge when normalization creates duplicate keys (e.g. kilocode + kilo → kilo)
               clients[client].tokens += breakdown.tokens || 0;
               clients[client].cost += breakdown.cost || 0;
               clients[client].input += breakdown.input || 0;

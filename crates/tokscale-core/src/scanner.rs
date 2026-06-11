@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 
 use crate::clients::ClientId;
 use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
+use crate::LocalClientDef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -25,6 +26,12 @@ fn warn_if_escapes_home(client_id: ClientId, path: &Path) {
             );
         }
     }
+}
+
+fn local_def(client_id: ClientId) -> &'static LocalClientDef {
+    client_id
+        .local_def()
+        .expect("scanner client must have local scan policy")
 }
 
 /// User-controlled scanner settings loaded from a config file.
@@ -533,9 +540,7 @@ fn scan_crush_registry(registry_path: &Path) -> Vec<CrushDbSource> {
 
 fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource> {
     let registry_path = PathBuf::from(
-        ClientId::Crush
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots),
+        local_def(ClientId::Crush).resolve_path_with_env_strategy(home_dir, use_env_roots),
     );
     let mut dbs = scan_crush_registry(&registry_path);
     dbs.sort_by(|a, b| a.db_path.cmp(&b.db_path));
@@ -593,7 +598,7 @@ fn push_unique_scan_task(
 
     let key = std::fs::canonicalize(&raw_path).unwrap_or_else(|_| raw_path.clone());
     if seen.insert((client_id, key)) {
-        let pattern = client_id.data().pattern;
+        let pattern = local_def(client_id).pattern;
         tasks.push((client_id, raw_path.to_string_lossy().to_string(), pattern));
     }
 }
@@ -722,7 +727,7 @@ fn scan_all_clients_with_env_strategy_inner(
             continue;
         }
 
-        let def = client_id.data();
+        let def = local_def(*client_id);
         let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
     }
@@ -767,8 +772,8 @@ fn scan_all_clients_with_env_strategy_inner(
 
         // Merge user-configured `scanner.opencodeDbPaths` here, INSIDE the
         // `enabled.contains(&ClientId::OpenCode)` guard, so a request like
-        // `tokscale --claude` does not pull in OpenCode dbs the user pinned
-        // for unrelated reasons. Inflated OpenCode `counts` and wasted
+        // `tokscale --client claude` does not pull in OpenCode dbs the user
+        // pinned for unrelated reasons. Inflated OpenCode `counts` and wasted
         // SQLite parsing work otherwise sneak past the message-level
         // client filter that runs much later in the pipeline.
         merge_user_opencode_db_paths(
@@ -779,9 +784,8 @@ fn scan_all_clients_with_env_strategy_inner(
         result.opencode_dbs.dedup();
 
         // OpenCode legacy: JSON files at ~/.local/share/opencode/storage/message/*/*.json
-        let opencode_path = ClientId::OpenCode
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let opencode_path =
+            local_def(ClientId::OpenCode).resolve_path_with_env_strategy(home_dir, use_env_roots);
         result.opencode_json_dir = Some(PathBuf::from(&opencode_path));
         push_unique_scan_task(
             &mut tasks,
@@ -793,9 +797,8 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::Kimi) {
         // Kimi Code: ~/.kimi-code/sessions/**/wire.jsonl (supports KIMI_CODE_HOME)
-        let kimi_path = ClientId::Kimi
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let kimi_path =
+            local_def(ClientId::Kimi).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Kimi, kimi_path);
     }
 
@@ -806,9 +809,8 @@ fn scan_all_clients_with_env_strategy_inner(
         } else {
             format!("{}/.codex", home_dir)
         };
-        let codex_path = ClientId::Codex
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let codex_path =
+            local_def(ClientId::Codex).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -838,9 +840,8 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::OpenClaw) {
         // OpenClaw transcripts: ~/.openclaw/agents/**/*.jsonl
-        let openclaw_path = ClientId::OpenClaw
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let openclaw_path =
+            local_def(ClientId::OpenClaw).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -875,9 +876,8 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::RooCode) {
-        let local_path = ClientId::RooCode
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let local_path =
+            local_def(ClientId::RooCode).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -898,9 +898,8 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::KiloCode) {
-        let local_path = ClientId::KiloCode
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let local_path =
+            local_def(ClientId::KiloCode).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -921,9 +920,8 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Cline) {
-        let local_path = ClientId::Cline
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let local_path =
+            local_def(ClientId::Cline).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -937,18 +935,16 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Kilo) {
-        let kilo_db_path = ClientId::Kilo
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let kilo_db_path =
+            local_def(ClientId::Kilo).resolve_path_with_env_strategy(home_dir, use_env_roots);
         if std::path::Path::new(&kilo_db_path).exists() {
             result.kilo_db = Some(PathBuf::from(kilo_db_path));
         }
     }
 
     if enabled.contains(&ClientId::Hermes) {
-        let hermes_db_path = ClientId::Hermes
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let hermes_db_path =
+            local_def(ClientId::Hermes).resolve_path_with_env_strategy(home_dir, use_env_roots);
         if std::path::Path::new(&hermes_db_path).exists() {
             result.hermes_db = Some(PathBuf::from(hermes_db_path));
         }
@@ -967,9 +963,8 @@ fn scan_all_clients_with_env_strategy_inner(
             }
         }
         if result.goose_db.is_none() {
-            let xdg_path = ClientId::Goose
-                .data()
-                .resolve_path_with_env_strategy(home_dir, use_env_roots);
+            let xdg_path =
+                local_def(ClientId::Goose).resolve_path_with_env_strategy(home_dir, use_env_roots);
             let xdg = PathBuf::from(xdg_path);
             if xdg.is_file() {
                 result.goose_db = Some(xdg);
@@ -1005,9 +1000,8 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Zed) {
-        let zed_db_path = ClientId::Zed
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let zed_db_path =
+            local_def(ClientId::Zed).resolve_path_with_env_strategy(home_dir, use_env_roots);
         let xdg = PathBuf::from(zed_db_path);
         if xdg.is_file() {
             result.zed_db = Some(xdg);
@@ -1104,9 +1098,8 @@ fn scan_all_clients_with_env_strategy_inner(
 
         // (1) GJC_CODING_AGENT_DIR/sessions (the PathRoot::EnvVar default also
         // resolves here; existence-gated push + dedup keep it single).
-        let agent_dir_root = ClientId::Gjc
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let agent_dir_root =
+            local_def(ClientId::Gjc).resolve_path_with_env_strategy(home_dir, use_env_roots);
         gjc_roots.push(PathBuf::from(agent_dir_root));
 
         if use_env_roots {
@@ -1144,9 +1137,8 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Grok) {
-        let grok_path = ClientId::Grok
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let grok_path =
+            local_def(ClientId::Grok).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Grok, grok_path);
     }
 
@@ -2135,8 +2127,8 @@ mod tests {
         // Regression guard: previously the scanner unconditionally
         // merged `scanner.opencodeDbPaths` after the inner scan, which
         // bypassed the existing `enabled.contains(&ClientId::OpenCode)`
-        // guard. A request like `tokscale --claude` would still pull in
-        // user-pinned OpenCode dbs and inflate `parse_local_clients`
+        // guard. A request like `tokscale --client claude` would still pull
+        // in user-pinned OpenCode dbs and inflate `parse_local_clients`
         // counts plus waste SQLite parsing work.
         //
         // The fix moves the merge inside the OpenCode-enabled block, so

@@ -1,8 +1,7 @@
 "use client";
 
 import styled from "styled-components";
-import { SOURCE_LOGOS } from "@/lib/constants";
-import type { ClientType } from "@/lib/types";
+import { getSourceLogo } from "@/lib/constants";
 
 interface SourceLogoProps {
   sourceId: string;
@@ -22,10 +21,7 @@ const StyledImg = styled.img<{ $height: number }>`
 `;
 
 export function SourceLogo({ sourceId, height = 14, className = "" }: SourceLogoProps) {
-  const normalizedId = sourceId.toLowerCase() as ClientType;
-  const src = Object.prototype.hasOwnProperty.call(SOURCE_LOGOS, normalizedId)
-    ? SOURCE_LOGOS[normalizedId]
-    : null;
+  const src = getSourceLogo(sourceId);
 
   if (!src) {
     return <span className={className}>{sourceId}</span>;

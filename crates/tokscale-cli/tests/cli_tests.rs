@@ -574,7 +574,7 @@ fn create_conflicting_codex_fixture_dir() -> TempDir {
     tmp
 }
 
-/// Build a Command pointing HOME at the given temp dir, with --no-spinner and --opencode flags.
+/// Build a Command pointing HOME at the given temp dir and hermetic scan env.
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
@@ -983,7 +983,7 @@ fn test_models_with_invalid_date_format() {
     cmd_with_home(tmp.path())
         .arg("models")
         .arg("--light")
-        .arg("--opencode")
+        .args(["--client", "opencode"])
         .arg("--no-spinner")
         .arg("--since")
         .arg("invalid-date")
@@ -997,7 +997,7 @@ fn test_models_with_invalid_year() {
     cmd_with_home(tmp.path())
         .arg("models")
         .arg("--light")
-        .arg("--opencode")
+        .args(["--client", "opencode"])
         .arg("--no-spinner")
         .arg("--year")
         .arg("not-a-year")
@@ -1027,7 +1027,7 @@ fn test_global_debug_flag() {
 fn test_models_with_since_until_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2024-06-01", "--until", "2024-06-30"])
         .assert()
         .success()
@@ -1039,7 +1039,7 @@ fn test_models_with_since_until_filter() {
 fn test_models_with_year_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .assert()
         .success()
@@ -1051,7 +1051,7 @@ fn test_models_with_year_filter() {
 fn test_monthly_with_date_filters() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2025-01-01", "--until", "2025-12-31"])
         .assert()
         .success()
@@ -1067,7 +1067,8 @@ fn test_models_home_override_ignores_conflicting_xdg_env() {
         .args([
             "models",
             "--json",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -1097,7 +1098,8 @@ fn test_monthly_home_override_ignores_conflicting_xdg_env() {
         .args([
             "monthly",
             "--json",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -1127,7 +1129,8 @@ fn test_graph_home_override_ignores_conflicting_xdg_env() {
     let output = cmd_with_conflicting_env(conflicting_home.path())
         .args([
             "graph",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -1157,7 +1160,8 @@ fn test_models_home_override_ignores_conflicting_codex_home_env() {
         .args([
             "models",
             "--json",
-            "--codex",
+            "--client",
+            "codex",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -1276,7 +1280,7 @@ fn test_clients_home_override_ignores_copilot_exporter_env() {
 fn test_models_with_since_only() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2025-01-01"])
         .assert()
         .success()
@@ -1288,7 +1292,7 @@ fn test_models_with_since_only() {
 fn test_models_with_until_only() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--until", "2024-12-31"])
         .assert()
         .success()
@@ -1300,7 +1304,7 @@ fn test_models_with_until_only() {
 fn test_models_with_no_matching_date() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2099-01-01", "--until", "2099-12-31"])
         .output()
         .unwrap();
@@ -1318,7 +1322,7 @@ fn test_graph_single_day_filter_uses_local_timezone_boundaries() {
     let tmp = create_timezone_boundary_fixture_dir();
     let output = cmd_with_home(tmp.path())
         .env("TZ", "America/Los_Angeles")
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .args(["--since", "2026-03-02", "--until", "2026-03-02"])
         .output()
         .unwrap();
@@ -1344,7 +1348,7 @@ fn test_graph_single_day_filter_uses_local_timezone_boundaries() {
 fn test_graph_with_year_filter() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .output()
         .unwrap();
@@ -1367,7 +1371,7 @@ fn test_graph_with_year_filter() {
 fn test_models_with_client_filter_opencode() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1382,7 +1386,15 @@ fn test_models_with_client_filter_opencode() {
 fn test_models_with_client_filter_multiple() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--claude", "--no-spinner"])
+        .args([
+            "models",
+            "--json",
+            "--client",
+            "opencode",
+            "--client",
+            "claude",
+            "--no-spinner",
+        ])
         .assert()
         .success();
 }
@@ -1654,22 +1666,31 @@ fn test_submit_cursor_explicit_missing_cache_reports_setup_warning_text() {
 }
 
 #[test]
-fn test_models_with_all_client_flags() {
+fn test_models_with_repeated_client_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
         .args([
             "models",
             "--json",
             "--no-spinner",
-            "--opencode",
-            "--claude",
-            "--codex",
-            "--gemini",
-            "--cursor",
-            "--amp",
-            "--droid",
-            "--openclaw",
-            "--pi",
+            "--client",
+            "opencode",
+            "--client",
+            "claude",
+            "--client",
+            "codex",
+            "--client",
+            "gemini",
+            "--client",
+            "cursor",
+            "--client",
+            "amp",
+            "--client",
+            "droid",
+            "--client",
+            "openclaw",
+            "--client",
+            "pi",
         ])
         .assert()
         .success();
@@ -1679,7 +1700,7 @@ fn test_models_with_all_client_flags() {
 fn test_models_client_and_date_combined() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2025"])
         .assert()
         .success()
@@ -1693,7 +1714,7 @@ fn test_models_client_and_date_combined() {
 fn test_models_json_output() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1746,7 +1767,7 @@ fn test_models_json_output() {
 fn test_models_json_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1771,7 +1792,7 @@ fn test_models_json_offline_without_pricing_cache_still_succeeds() {
 fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1796,7 +1817,7 @@ fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
 fn test_graph_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1820,7 +1841,7 @@ fn test_graph_offline_without_pricing_cache_still_succeeds() {
 fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
-        .args(["hourly", "--json", "--opencode", "--no-spinner"])
+        .args(["hourly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1875,9 +1896,9 @@ fn test_usage_text_reports_do_not_show_efficiency_column() {
     let forbidden_header = ["Cost", "/1M"].concat();
 
     for args in [
-        &["models", "--opencode", "--no-spinner"][..],
-        &["monthly", "--opencode", "--no-spinner"][..],
-        &["hourly", "--opencode", "--no-spinner"][..],
+        &["models", "--client", "opencode", "--no-spinner"][..],
+        &["monthly", "--client", "opencode", "--no-spinner"][..],
+        &["hourly", "--client", "opencode", "--no-spinner"][..],
     ] {
         let output = cmd_with_home(tmp.path()).args(args).output().unwrap();
         assert!(
@@ -1901,7 +1922,7 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
 
     let output = offline_cmd_with_home(tmp.path())
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1925,7 +1946,7 @@ fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
 
     let output = offline_cmd_with_home(tmp.path())
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1949,7 +1970,7 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
 
     let output = offline_cmd_with_home(tmp.path())
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -1973,7 +1994,7 @@ fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
 
     let output = offline_cmd_with_home(tmp.path())
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
-        .args(["hourly", "--json", "--opencode", "--no-spinner"])
+        .args(["hourly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(
@@ -2010,7 +2031,7 @@ fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
 fn test_models_json_total_consistency() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2036,7 +2057,7 @@ fn test_models_json_total_consistency() {
 fn test_monthly_json_output() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2098,7 +2119,8 @@ fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
         .args([
             "hourly",
             "--json",
-            "--codex",
+            "--client",
+            "codex",
             "--no-spinner",
             "--home",
             real_home.path().to_str().unwrap(),
@@ -2123,7 +2145,7 @@ fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
 fn test_monthly_json_with_client_filter() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--opencode", "--no-spinner"])
+        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .output()
         .unwrap();
@@ -2144,7 +2166,7 @@ fn test_monthly_json_with_client_filter() {
 fn test_graph_json_output() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2163,7 +2185,7 @@ fn test_graph_json_output() {
 fn test_graph_json_has_meta() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2181,7 +2203,7 @@ fn test_graph_json_has_meta() {
 fn test_graph_json_has_summary() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2213,7 +2235,7 @@ fn test_graph_json_has_summary() {
 fn test_models_group_by_default() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2225,7 +2247,7 @@ fn test_models_group_by_default() {
 fn test_models_group_by_model() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "model"])
         .output()
         .unwrap();
@@ -2250,7 +2272,7 @@ fn test_models_group_by_model() {
 fn test_models_group_by_client_provider_model() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "client,provider,model"])
         .output()
         .unwrap();
@@ -2270,7 +2292,7 @@ fn test_models_group_by_client_provider_model() {
 fn test_models_json_with_group_by_model() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "model"])
         .output()
         .unwrap();
@@ -2301,7 +2323,7 @@ fn test_models_json_with_group_by_model() {
 fn test_models_group_by_session_emits_session_id_per_entry() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "session,model"])
         .output()
         .unwrap();
@@ -2344,7 +2366,7 @@ fn test_models_group_by_session_emits_session_id_per_entry() {
 fn test_models_group_by_client_session_includes_client_and_session() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "client,session,model"])
         .output()
         .unwrap();
@@ -2365,7 +2387,7 @@ fn test_models_group_by_client_session_includes_client_and_session() {
 fn test_models_group_by_workspace_model_uses_unknown_bucket_for_unsupported_clients() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "workspace,model"])
         .output()
         .unwrap();
@@ -2396,7 +2418,7 @@ fn test_models_group_by_workspace_model_uses_unknown_bucket_for_unsupported_clie
 fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
     let tmp = create_qwen_workspace_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--qwen", "--no-spinner"])
+        .args(["models", "--json", "--client", "qwen", "--no-spinner"])
         .args(["--group-by", "workspace-model"])
         .output()
         .unwrap();
@@ -2421,7 +2443,7 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
 fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
     let tmp = create_codex_workspace_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--codex", "--no-spinner"])
+        .args(["models", "--json", "--client", "codex", "--no-spinner"])
         .args(["--group-by", "workspace,model"])
         .output()
         .unwrap();
@@ -2525,7 +2547,7 @@ fn test_models_client_filter_splits_pi_and_omp_sessions() {
 fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode() {
     let tmp = create_opencode_workspace_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "workspace,model"])
         .output()
         .unwrap();
@@ -2909,7 +2931,7 @@ fn test_clients_command_includes_settings_extra_paths_text() {
 fn test_models_light_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--opencode", "--no-spinner"])
+        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"))
@@ -2920,7 +2942,7 @@ fn test_models_light_output() {
 fn test_monthly_light_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["monthly", "--light", "--opencode", "--no-spinner"])
+        .args(["monthly", "--light", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Monthly Token Usage Report"));
@@ -2930,7 +2952,7 @@ fn test_monthly_light_output() {
 fn test_models_light_with_client_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--opencode", "--no-spinner"])
+        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .assert()
         .success()
@@ -2946,7 +2968,8 @@ fn test_models_benchmark_flag() {
         .args([
             "models",
             "--light",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--benchmark",
         ])
@@ -2962,7 +2985,8 @@ fn test_monthly_benchmark_flag() {
         .args([
             "monthly",
             "--light",
-            "--opencode",
+            "--client",
+            "opencode",
             "--no-spinner",
             "--benchmark",
         ])
@@ -2977,7 +3001,7 @@ fn test_monthly_benchmark_flag() {
 fn test_models_empty_fixture() {
     let tmp = create_empty_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--opencode", "--no-spinner"])
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2995,7 +3019,7 @@ fn test_models_empty_fixture() {
 fn test_graph_empty_contributions() {
     let tmp = create_empty_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -3013,7 +3037,7 @@ fn test_graph_empty_contributions() {
 fn test_models_no_spinner_flag() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--opencode", "--no-spinner"])
+        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
         .assert()
         .success();
 }
@@ -3022,7 +3046,7 @@ fn test_models_no_spinner_flag() {
 fn test_graph_no_spinner_flag() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .assert()
         .success();
 }
@@ -3033,7 +3057,7 @@ fn test_graph_no_spinner_flag() {
 fn test_graph_with_client_filter() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -3058,7 +3082,7 @@ fn test_graph_output_to_file() {
     let tmp = create_temp_fixture_dir();
     let output_file = tmp.path().join("graph-output.json");
     cmd_with_home(tmp.path())
-        .args(["graph", "--opencode", "--no-spinner"])
+        .args(["graph", "--client", "opencode", "--no-spinner"])
         .args(["--output", output_file.to_str().unwrap()])
         .assert()
         .success();
@@ -3075,7 +3099,7 @@ fn test_graph_output_to_file() {
 fn test_root_json_output() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["--json", "--opencode", "--no-spinner"])
+        .args(["--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -3088,7 +3112,7 @@ fn test_root_json_output() {
 fn test_root_light_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["--light", "--opencode", "--no-spinner"])
+        .args(["--light", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"));
@@ -3102,7 +3126,13 @@ fn light_with_write_cache_writes_to_canonical_path() {
 
     cmd_with_home(tmp.path())
         .env("TOKSCALE_CONFIG_DIR", &config_dir)
-        .args(["--light", "--opencode", "--write-cache", "--no-spinner"])
+        .args([
+            "--light",
+            "--client",
+            "opencode",
+            "--write-cache",
+            "--no-spinner",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"));
@@ -3117,7 +3147,7 @@ fn light_with_write_cache_writes_to_canonical_path() {
 fn test_root_with_date_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["--json", "--opencode", "--no-spinner"])
+        .args(["--json", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2025"])
         .assert()
         .success()
@@ -3128,7 +3158,7 @@ fn test_root_with_date_filter() {
 fn test_root_with_group_by() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
-        .args(["--json", "--opencode", "--no-spinner"])
+        .args(["--json", "--client", "opencode", "--no-spinner"])
         .args(["--group-by", "model"])
         .output()
         .unwrap();
@@ -3143,7 +3173,7 @@ fn test_submit_offline_without_pricing_cache_fails() {
     write_fake_credentials(tmp.path());
 
     let output = offline_cmd_with_home(tmp.path())
-        .args(["submit", "--opencode", "--dry-run"])
+        .args(["submit", "--client", "opencode", "--dry-run"])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -45,8 +45,6 @@ use crossterm::{
 use ratatui::prelude::*;
 use tokscale_core::ClientId;
 
-use crate::ClientFilter;
-
 fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
     match load_result {
         CacheResult::Fresh(data) => (Some(data), false),
@@ -111,13 +109,13 @@ pub fn run(
     // resolution rules App::new_with_cached_data uses so the cache
     // lookup and the in-app state always agree. Drift between them
     // makes every launch a stale-cache hit instead of a fresh one.
-    let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = clients {
+    let enabled_clients: HashSet<ClientId> = if let Some(ref cli_clients) = clients {
         cli_clients
             .iter()
-            .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
+            .filter_map(|s| ClientId::from_str(&s.to_lowercase()))
             .collect()
     } else {
-        ClientFilter::default_set()
+        ClientId::iter().collect()
     };
 
     // Single file read: load cache and check freshness in one pass.
@@ -173,11 +171,7 @@ pub fn run(
         app.set_background_loading(true);
 
         let tx = bg_tx.clone();
-        // Project the filter set into the client list the loader consumes.
-        let mut bg_clients: Vec<ClientId> = enabled_clients
-            .iter()
-            .filter_map(|f| f.to_client_id())
-            .collect();
+        let mut bg_clients: Vec<ClientId> = enabled_clients.iter().copied().collect();
         bg_clients.sort_by_key(|client| *client as usize);
         let bg_since = since.clone();
         let bg_until = until.clone();

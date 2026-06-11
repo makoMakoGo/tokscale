@@ -9,8 +9,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
-use crate::ClientFilter;
-
 use ratatui::style::Color;
 
 use super::data::{
@@ -180,7 +178,7 @@ pub struct App {
     pub data_loader: DataLoader,
 
     /// Set of clients currently selected in the source picker.
-    pub enabled_clients: Rc<RefCell<HashSet<ClientFilter>>>,
+    pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
@@ -253,21 +251,18 @@ impl App {
             .unwrap_or_else(|_| settings.theme_name());
         let theme = Theme::from_name_for_current_terminal(theme_name);
 
-        let enabled_clients: HashSet<ClientFilter> = if let Some(ref cli_clients) = config.clients {
+        let enabled_clients: HashSet<ClientId> = if let Some(ref cli_clients) = config.clients {
             // CLI-provided filter list. Each entry is the canonical
             // lowercase client id.
-            // Unknown ids are dropped silently; the CLI parser already
-            // validated against `ClientFilter` so this lookup should be
-            // total in practice.
             cli_clients
                 .iter()
-                .filter_map(|s| ClientFilter::from_filter_str(&s.to_lowercase()))
+                .filter_map(|s| ClientId::from_str(&s.to_lowercase()))
                 .collect()
         } else {
             // No filter → use the canonical default set. MUST stay in sync with
             // `run_warm_tui_cache()` so a fresh cache warm produces a
             // fresh hit on the next no-filter launch.
-            ClientFilter::default_set()
+            ClientId::iter().collect()
         };
 
         let auto_refresh_interval = if config.refresh > 0 {
@@ -1082,15 +1077,8 @@ impl App {
         self.dialog_stack.show(Box::new(dialog));
     }
 
-    /// Project the unified `HashSet<ClientFilter>` into the
-    /// `Vec<ClientId>` shape that `tokscale_core` scanners still consume.
     pub fn scan_clients(&self) -> Vec<ClientId> {
-        let mut out: Vec<ClientId> = self
-            .enabled_clients
-            .borrow()
-            .iter()
-            .filter_map(|f| f.to_client_id())
-            .collect();
+        let mut out: Vec<ClientId> = self.enabled_clients.borrow().iter().copied().collect();
         // Stable order for downstream cache key + log output. Sort by the
         // declaration index in ClientId::ALL so the projection mirrors
         // the canonical ordering used elsewhere.
@@ -1916,13 +1904,13 @@ mod tests {
         // default and the `submit` warm-cache filter set drifted apart,
         // making every TUI launch after submit a stale-cache reuse
         // instead of a fresh hit. Both paths now go through
-        // `ClientFilter::default_set()`; assert it stays that way.
+        // `ClientId::iter().collect()`; assert it stays that way.
         let app = make_app();
         let actual = app.enabled_clients.borrow().clone();
-        let expected = ClientFilter::default_set();
+        let expected: HashSet<ClientId> = ClientId::iter().collect();
         assert_eq!(
             actual, expected,
-            "no-filter App default drifted from ClientFilter::default_set() — \
+            "no-filter App default drifted from ClientId::iter() — \
              warm cache and TUI launch will mismatch"
         );
     }

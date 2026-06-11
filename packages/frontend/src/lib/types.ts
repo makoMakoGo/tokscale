@@ -1,37 +1,11 @@
-export const SUPPORTED_CLIENT_TYPES = [
-  "opencode",
-  "claude",
-  "codex",
-  "copilot",
-  "gemini",
-  "cursor",
-  "amp",
-  "codebuff",
-  "droid",
-  "openclaw",
-  "hermes",
-  "pi",
-  "omp",
-  "kimi",
-  "qwen",
-  "roocode",
-  "kilocode",
-  "kilo",
-  "mux",
-  "crush",
-  "goose",
-  "antigravity",
-  "kiro",
-  "zed",
-  "trae",
-  "warp",
-  "cline",
-  "gjc",
-  "grok",
-] as const;
+import type { ClientType } from "./clientRegistry.generated";
 
-export type CcMirrorClientType = `cc-mirror/${string}`;
-export type ClientType = typeof SUPPORTED_CLIENT_TYPES[number] | CcMirrorClientType;
+export { BASE_CLIENT_TYPES, CLIENT_REGISTRY } from "./clientRegistry.generated";
+export type {
+  BaseClientType,
+  CcMirrorClientType,
+  ClientType,
+} from "./clientRegistry.generated";
 
 export interface TokenBreakdown {
   input: number;

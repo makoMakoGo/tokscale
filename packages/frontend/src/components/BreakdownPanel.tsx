@@ -4,7 +4,7 @@ import styled from "styled-components";
 import type { DailyContribution, GraphColorPalette, ClientType } from "@/lib/types";
 import { formatCurrency, formatTokenCount, groupClientsByType, sortClientsByCost } from "@/lib/utils";
 import { formatContributionDateFull } from "@/lib/date-utils";
-import { SOURCE_DISPLAY_NAMES, SOURCE_COLORS } from "@/lib/constants";
+import { getSourceColor, getSourceDisplayName } from "@/lib/constants";
 import { SourceLogo } from "./SourceLogo";
 
 interface BreakdownPanelProps {
@@ -238,7 +238,8 @@ const ModelsList = styled.div`
 `;
 
 function ClientSection({ clientType, clients, totalCost, palette }: ClientSectionProps) {
-  const clientColor = SOURCE_COLORS[clientType] || palette.grade3;
+  const clientColor = getSourceColor(clientType) ?? palette.grade3;
+  const clientDisplayName = getSourceDisplayName(clientType);
 
   const modelEntries: Array<{ modelId: string; cost: number; messages: number; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number } }> = [];
   for (const client_contrib of clients) {
@@ -276,7 +277,7 @@ function ClientSection({ clientType, clients, totalCost, palette }: ClientSectio
           style={{ backgroundColor: `${clientColor}20`, color: clientColor }}
         >
           <SourceLogo sourceId={clientType} height={14} />
-          {SOURCE_DISPLAY_NAMES[clientType] || clientType}
+          {clientDisplayName}
         </SourceBadge>
         <SectionTotal style={{ color: "var(--color-fg-default)" }}>{formatCurrency(totalCost)}</SectionTotal>
       </SectionHeader>

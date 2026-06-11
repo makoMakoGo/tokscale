@@ -2,8 +2,10 @@
 
 mod aggregator;
 mod cc_mirror;
+mod client_catalog;
 pub mod clients;
 pub mod fs_atomic;
+mod local_clients;
 pub mod mcp;
 mod message_cache;
 mod model_aliases;
@@ -16,7 +18,7 @@ pub mod sessionize;
 pub mod sessions;
 
 pub use aggregator::*;
-pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
+pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
 pub use parser::*;
 pub use provider_identity::normalize_provider_for_grouping;
 pub use scanner::*;

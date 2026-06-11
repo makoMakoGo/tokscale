@@ -13,13 +13,14 @@ use crate::tui::{
     client_ui, get_client_display_name, get_provider_display_name, truncate_model_display_name,
 };
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tokscale_core::ClientId;
 use tui::Tab;
 
 #[derive(Parser)]
@@ -845,185 +846,6 @@ fn main() -> Result<()> {
     }
 }
 
-/// Client identifiers exposed via `--client`.
-///
-/// Mirrors `tokscale_core::ClientId`. We duplicate the variant set on the CLI
-/// side so `tokscale-core` stays free of CLI-parsing dependencies.
-///
-/// Variant order intentionally mirrors `ClientId::ALL` declaration order so
-/// the TUI source picker, `--help`'s `[possible values: ...]` listing, and
-/// any future iteration over `ClientFilter::value_variants()` agree on a
-/// single chronological ordering.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[value(rename_all = "lowercase")]
-pub enum ClientFilter {
-    Opencode,
-    Claude,
-    Codex,
-    Cursor,
-    Gemini,
-    Amp,
-    Droid,
-    Openclaw,
-    Pi,
-    Omp,
-    Kimi,
-    Qwen,
-    Roocode,
-    Kilocode,
-    Mux,
-    Kilo,
-    Crush,
-    Hermes,
-    Copilot,
-    Goose,
-    Codebuff,
-    Antigravity,
-    Zed,
-    Kiro,
-    #[value(name = "trae")]
-    Trae,
-    Warp,
-    Cline,
-    Gjc,
-    Grok,
-}
-
-impl ClientFilter {
-    /// Returns the canonical lowercase identifier consumed by
-    /// `tokscale_core` filter lists. Must match `ClientId::as_str` for every
-    /// variant that has a corresponding `ClientId`.
-    pub fn as_filter_str(&self) -> &'static str {
-        match self {
-            Self::Opencode => "opencode",
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Cursor => "cursor",
-            Self::Gemini => "gemini",
-            Self::Amp => "amp",
-            Self::Droid => "droid",
-            Self::Openclaw => "openclaw",
-            Self::Pi => "pi",
-            Self::Omp => "omp",
-            Self::Kimi => "kimi",
-            Self::Qwen => "qwen",
-            Self::Roocode => "roocode",
-            Self::Kilocode => "kilocode",
-            Self::Mux => "mux",
-            Self::Kilo => "kilo",
-            Self::Crush => "crush",
-            Self::Hermes => "hermes",
-            Self::Copilot => "copilot",
-            Self::Goose => "goose",
-            Self::Codebuff => "codebuff",
-            Self::Antigravity => "antigravity",
-            Self::Zed => "zed",
-            Self::Kiro => "kiro",
-            Self::Trae => "trae",
-            Self::Warp => "warp",
-            Self::Cline => "cline",
-            Self::Gjc => "gjc",
-            Self::Grok => "grok",
-        }
-    }
-
-    /// Convert to the corresponding `ClientId`.
-    ///
-    /// Used at boundaries where TUI state (`HashSet<ClientFilter>`) needs
-    /// to feed core APIs that still consume `Vec<ClientId>`.
-    pub fn to_client_id(self) -> Option<tokscale_core::ClientId> {
-        use tokscale_core::ClientId;
-        match self {
-            Self::Opencode => Some(ClientId::OpenCode),
-            Self::Claude => Some(ClientId::Claude),
-            Self::Codex => Some(ClientId::Codex),
-            Self::Cursor => Some(ClientId::Cursor),
-            Self::Gemini => Some(ClientId::Gemini),
-            Self::Amp => Some(ClientId::Amp),
-            Self::Droid => Some(ClientId::Droid),
-            Self::Openclaw => Some(ClientId::OpenClaw),
-            Self::Pi => Some(ClientId::Pi),
-            Self::Omp => Some(ClientId::Omp),
-            Self::Kimi => Some(ClientId::Kimi),
-            Self::Qwen => Some(ClientId::Qwen),
-            Self::Roocode => Some(ClientId::RooCode),
-            Self::Kilocode => Some(ClientId::KiloCode),
-            Self::Mux => Some(ClientId::Mux),
-            Self::Kilo => Some(ClientId::Kilo),
-            Self::Crush => Some(ClientId::Crush),
-            Self::Hermes => Some(ClientId::Hermes),
-            Self::Copilot => Some(ClientId::Copilot),
-            Self::Goose => Some(ClientId::Goose),
-            Self::Codebuff => Some(ClientId::Codebuff),
-            Self::Antigravity => Some(ClientId::Antigravity),
-            Self::Zed => Some(ClientId::Zed),
-            Self::Kiro => Some(ClientId::Kiro),
-            Self::Trae => Some(ClientId::Trae),
-            Self::Warp => Some(ClientId::Warp),
-            Self::Cline => Some(ClientId::Cline),
-            Self::Gjc => Some(ClientId::Gjc),
-            Self::Grok => Some(ClientId::Grok),
-        }
-    }
-
-    /// Lift a `ClientId` back into a `ClientFilter`. Total inverse of
-    /// `to_client_id`.
-    pub fn from_client_id(client: tokscale_core::ClientId) -> Self {
-        use tokscale_core::ClientId;
-        match client {
-            ClientId::OpenCode => Self::Opencode,
-            ClientId::Claude => Self::Claude,
-            ClientId::Codex => Self::Codex,
-            ClientId::Cursor => Self::Cursor,
-            ClientId::Gemini => Self::Gemini,
-            ClientId::Amp => Self::Amp,
-            ClientId::Droid => Self::Droid,
-            ClientId::OpenClaw => Self::Openclaw,
-            ClientId::Pi => Self::Pi,
-            ClientId::Omp => Self::Omp,
-            ClientId::Kimi => Self::Kimi,
-            ClientId::Qwen => Self::Qwen,
-            ClientId::RooCode => Self::Roocode,
-            ClientId::KiloCode => Self::Kilocode,
-            ClientId::Mux => Self::Mux,
-            ClientId::Kilo => Self::Kilo,
-            ClientId::Crush => Self::Crush,
-            ClientId::Hermes => Self::Hermes,
-            ClientId::Copilot => Self::Copilot,
-            ClientId::Goose => Self::Goose,
-            ClientId::Codebuff => Self::Codebuff,
-            ClientId::Antigravity => Self::Antigravity,
-            ClientId::Zed => Self::Zed,
-            ClientId::Kiro => Self::Kiro,
-            ClientId::Trae => Self::Trae,
-            ClientId::Warp => Self::Warp,
-            ClientId::Cline => Self::Cline,
-            ClientId::Gjc => Self::Gjc,
-            ClientId::Grok => Self::Grok,
-        }
-    }
-
-    /// Parse a canonical lowercase identifier (the same form
-    /// `as_filter_str` returns) into a `ClientFilter`. Returns `None` for
-    /// any unknown id; callers decide whether unknown input is a user-facing
-    /// configuration error or already-validated CLI data.
-    pub fn from_filter_str(s: &str) -> Option<Self> {
-        Self::value_variants()
-            .iter()
-            .copied()
-            .find(|f| f.as_filter_str() == s)
-    }
-
-    /// Single source of truth: every code path that needs a default
-    /// filter (TUI launch, `submit` warm cache, etc.) must consult this
-    /// so the cache key, the in-app state, and the loader filter all
-    /// agree. Drift between them produces stale-cache misses on every
-    /// launch.
-    pub fn default_set() -> std::collections::HashSet<Self> {
-        Self::value_variants().iter().copied().collect()
-    }
-}
-
 #[derive(Args, Clone, Debug, Default)]
 pub struct ClientFlags {
     /// Canonical client filter. Repeatable or comma-separated.
@@ -1031,73 +853,29 @@ pub struct ClientFlags {
     #[arg(
         long = "client",
         short = 'c',
-        value_enum,
+        value_parser = parse_client_id_arg,
         value_delimiter = ',',
         action = clap::ArgAction::Append,
-        ignore_case = true,
         help = "Filter by client(s). Repeatable or comma-separated (e.g. -c opencode,claude)."
     )]
-    pub clients: Vec<ClientFilter>,
+    pub clients: Vec<ClientId>,
+}
 
-    // ---- Deprecated legacy boolean flags ------------------------------
-    // Hidden from --help. Kept for backward compatibility; print a stderr
-    // deprecation warning when used. Slated for removal in the next major.
-    #[arg(long, hide = true)]
-    pub opencode: bool,
-    #[arg(long, hide = true)]
-    pub claude: bool,
-    #[arg(long, hide = true)]
-    pub codex: bool,
-    #[arg(long, hide = true)]
-    pub copilot: bool,
-    #[arg(long, hide = true)]
-    pub gemini: bool,
-    #[arg(long, hide = true)]
-    pub cursor: bool,
-    #[arg(long, hide = true)]
-    pub amp: bool,
-    #[arg(long, hide = true)]
-    pub codebuff: bool,
-    #[arg(long, hide = true)]
-    pub droid: bool,
-    #[arg(long, hide = true)]
-    pub openclaw: bool,
-    #[arg(long, hide = true)]
-    pub hermes: bool,
-    #[arg(long, hide = true)]
-    pub pi: bool,
-    #[arg(long, hide = true)]
-    pub kimi: bool,
-    #[arg(long, hide = true)]
-    pub qwen: bool,
-    #[arg(long, hide = true)]
-    pub roocode: bool,
-    #[arg(long, hide = true)]
-    pub kilocode: bool,
-    #[arg(long, hide = true)]
-    pub kilo: bool,
-    #[arg(long, hide = true)]
-    pub mux: bool,
-    #[arg(long, hide = true)]
-    pub crush: bool,
-    #[arg(long, hide = true)]
-    pub goose: bool,
-    #[arg(long, hide = true)]
-    pub antigravity: bool,
-    #[arg(long, hide = true)]
-    pub zed: bool,
-    #[arg(long, hide = true)]
-    pub kiro: bool,
-    #[arg(long, hide = true)]
-    pub trae: bool,
-    #[arg(long, hide = true)]
-    pub warp: bool,
-    #[arg(long, hide = true)]
-    pub cline: bool,
-    #[arg(long, hide = true)]
-    pub gjc: bool,
-    #[arg(long, hide = true)]
-    pub grok: bool,
+fn parse_client_id_arg(raw: &str) -> Result<ClientId, String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    ClientId::from_str(&normalized).ok_or_else(|| {
+        format!(
+            "invalid client id `{raw}`; use one of: {}",
+            valid_client_ids()
+        )
+    })
+}
+
+fn valid_client_ids() -> String {
+    ClientId::iter()
+        .map(ClientId::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -1120,11 +898,9 @@ pub struct DateRangeFlags {
 ///
 /// Resolution order:
 /// 1. Collect canonical `--client/-c` values (preserves user order).
-/// 2. Append any legacy `--<client>` boolean flags that are set, emitting a
-///    one-time stderr deprecation warning so existing scripts keep working.
-/// 3. If steps 1 and 2 produced nothing, fall back to user-configured
+/// 2. If step 1 produced nothing, fall back to user-configured
 ///    `defaultClients` from `~/.config/tokscale/settings.json` when present.
-/// 4. Deduplicate while preserving first-seen order.
+/// 3. Deduplicate while preserving first-seen order.
 ///
 /// Returns `None` when no filters are active *and* no defaults configured
 /// so the caller can scan all clients.
@@ -1147,62 +923,15 @@ fn build_client_filter_with_defaults(
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for client in &flags.clients {
-        let id = client.as_filter_str().to_string();
+        let id = client.as_str().to_string();
         if seen.insert(id.clone()) {
             ordered.push(id);
         }
     }
 
-    let legacy: [(bool, ClientFilter); 28] = [
-        (flags.opencode, ClientFilter::Opencode),
-        (flags.claude, ClientFilter::Claude),
-        (flags.codex, ClientFilter::Codex),
-        (flags.cursor, ClientFilter::Cursor),
-        (flags.gemini, ClientFilter::Gemini),
-        (flags.amp, ClientFilter::Amp),
-        (flags.codebuff, ClientFilter::Codebuff),
-        (flags.droid, ClientFilter::Droid),
-        (flags.openclaw, ClientFilter::Openclaw),
-        (flags.pi, ClientFilter::Pi),
-        (flags.kimi, ClientFilter::Kimi),
-        (flags.qwen, ClientFilter::Qwen),
-        (flags.roocode, ClientFilter::Roocode),
-        (flags.kilocode, ClientFilter::Kilocode),
-        (flags.mux, ClientFilter::Mux),
-        (flags.kilo, ClientFilter::Kilo),
-        (flags.crush, ClientFilter::Crush),
-        (flags.hermes, ClientFilter::Hermes),
-        (flags.copilot, ClientFilter::Copilot),
-        (flags.goose, ClientFilter::Goose),
-        (flags.antigravity, ClientFilter::Antigravity),
-        (flags.zed, ClientFilter::Zed),
-        (flags.kiro, ClientFilter::Kiro),
-        (flags.trae, ClientFilter::Trae),
-        (flags.warp, ClientFilter::Warp),
-        (flags.cline, ClientFilter::Cline),
-        (flags.gjc, ClientFilter::Gjc),
-        (flags.grok, ClientFilter::Grok),
-    ];
-
-    let mut legacy_used: Vec<&'static str> = Vec::new();
-    for (enabled, client) in legacy {
-        if !enabled {
-            continue;
-        }
-        let id = client.as_filter_str();
-        legacy_used.push(id);
-        if seen.insert(id.to_string()) {
-            ordered.push(id.to_string());
-        }
-    }
-
-    if !legacy_used.is_empty() {
-        emit_legacy_client_flag_warning(&legacy_used);
-    }
-
     if ordered.is_empty() {
         for client in parse_default_client_filters(defaults)? {
-            let id = client.as_filter_str().to_string();
+            let id = client.as_str().to_string();
             if seen.insert(id.clone()) {
                 ordered.push(id);
             }
@@ -1216,12 +945,12 @@ fn build_client_filter_with_defaults(
     }
 }
 
-fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<ClientFilter>> {
+fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<ClientId>> {
     let mut parsed = Vec::new();
     let mut invalid = Vec::new();
 
     for raw in defaults {
-        match ClientFilter::from_filter_str(raw) {
+        match ClientId::from_str(raw) {
             Some(client) => parsed.push(client),
             None => invalid.push(raw.as_str()),
         }
@@ -1231,31 +960,22 @@ fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<ClientFilter>
         return Ok(parsed);
     }
 
-    let valid = ClientFilter::value_variants()
-        .iter()
-        .map(ClientFilter::as_filter_str)
-        .collect::<Vec<_>>()
-        .join(", ");
     anyhow::bail!(
-        "invalid client id(s) in settings.json defaultClients: {}. Remove stale entries such as `synthetic` or use one of: {valid}",
-        invalid.join(", ")
+        "invalid client id(s) in settings.json defaultClients: {}. Remove stale entries such as `synthetic` or use one of: {}",
+        invalid.join(", "),
+        valid_client_ids()
     );
 }
 
-/// Emits a single stderr deprecation warning when legacy `--<client>` flags
-/// are used. Suppressed entirely when stderr is not a TTY (e.g. when piping
-/// JSON output through scripts) so machine-parseable output stays clean.
-fn emit_legacy_client_flag_warning(used: &[&'static str]) {
-    if !std::io::stderr().is_terminal() {
-        return;
-    }
-    let pretty: Vec<String> = used.iter().map(|id| format!("--{id}")).collect();
-    let replacement = used.join(",");
-    eprintln!(
-        "warning: {} is deprecated; use `--client {}` instead. The legacy flags will be removed in the next major release.",
-        pretty.join(", "),
-        replacement
-    );
+fn client_id_set_all() -> std::collections::HashSet<ClientId> {
+    ClientId::iter().collect()
+}
+
+fn parse_client_id_set(clients: &[String]) -> std::collections::HashSet<ClientId> {
+    clients
+        .iter()
+        .filter_map(|client| ClientId::from_str(&client.to_ascii_lowercase()))
+        .collect()
 }
 
 fn client_filter_includes_cursor(clients: &Option<Vec<String>>) -> bool {
@@ -3613,7 +3333,8 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
         ClientId::iter()
             .map(|client| {
                 let sessions_path = client
-                    .data()
+                    .local_def()
+                    .expect("client diagnostics require local scan policy")
                     .resolve_path_with_env_strategy(&home_dir_str, use_env_roots);
                 let sessions_path_exists = Path::new(&sessions_path).exists();
                 let additional_paths: Vec<AdditionalPath> = built_in_extra_paths
@@ -5189,15 +4910,14 @@ fn spawn_warm_tui_cache_detached() {
 ///
 /// 1. If `defaultClients` from `~/.config/tokscale/settings.json` is
 ///    set, use it after validating every id.
-/// 2. Otherwise fall back to `ClientFilter::default_set()` (every real
-///    client).
+/// 2. Otherwise use every catalog client.
 ///
 /// This **must** stay in lockstep with the resolution that
 /// `tui::run(.., clients = None, ..)` would compute. If it drifts, the
 /// `submit` warm cache uses one filter set while the next no-flag TUI
 /// launch wants another, the cache key mismatches, and the warming
 /// becomes a wasted background scan.
-fn resolve_default_tui_filter_set() -> Result<std::collections::HashSet<ClientFilter>> {
+fn resolve_default_tui_filter_set() -> Result<std::collections::HashSet<ClientId>> {
     resolve_default_tui_filter_set_with(&tui::settings::load_default_clients())
 }
 
@@ -5206,10 +4926,10 @@ fn resolve_default_tui_filter_set() -> Result<std::collections::HashSet<ClientFi
 /// from settings.json.
 fn resolve_default_tui_filter_set_with(
     configured: &[String],
-) -> Result<std::collections::HashSet<ClientFilter>> {
+) -> Result<std::collections::HashSet<ClientId>> {
     let parsed = parse_default_client_filters(configured)?;
     if parsed.is_empty() {
-        Ok(ClientFilter::default_set())
+        Ok(client_id_set_all())
     } else {
         Ok(parsed.into_iter().collect())
     }
@@ -5231,14 +4951,11 @@ fn resolve_should_write_cache(
 
 fn resolve_light_cache_filter_set(
     clients: &Option<Vec<String>>,
-) -> std::collections::HashSet<ClientFilter> {
+) -> std::collections::HashSet<ClientId> {
     if let Some(clients) = clients {
-        clients
-            .iter()
-            .filter_map(|client| ClientFilter::from_filter_str(client))
-            .collect()
+        parse_client_id_set(clients)
     } else {
-        ClientFilter::default_set()
+        client_id_set_all()
     }
 }
 
@@ -5264,10 +4981,7 @@ fn write_light_cache(
     }
 
     let enabled_set = resolve_light_cache_filter_set(clients);
-    let mut scan_clients: Vec<tokscale_core::ClientId> = enabled_set
-        .iter()
-        .filter_map(|filter| filter.to_client_id())
-        .collect();
+    let mut scan_clients: Vec<tokscale_core::ClientId> = enabled_set.iter().copied().collect();
     scan_clients.sort_by_key(|client| *client as usize);
 
     // The report has already been flushed to stdout by the time we reach
@@ -5311,10 +5025,7 @@ fn run_warm_tui_cache() -> Result<()> {
     // was written under a key the TUI never queried. Every submit
     // silently invalidated the next TUI launch.
     let enabled_set = resolve_default_tui_filter_set()?;
-    let mut scan_clients: Vec<ClientId> = enabled_set
-        .iter()
-        .filter_map(|f| f.to_client_id())
-        .collect();
+    let mut scan_clients: Vec<ClientId> = enabled_set.iter().copied().collect();
     scan_clients.sort_by_key(|client| *client as usize);
     let loader = DataLoader::with_filters(None, None, None, None);
     let data = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY)?;
@@ -5836,139 +5547,39 @@ mod tests {
 
     // Tests below call `build_client_filter_with_defaults` directly with
     // an explicit `defaults` slice instead of `build_client_filter`, which
-    // reads from `~/.config/tokscale/settings.json`. Reading host config
-    // makes tests non-hermetic — a developer with their own
-    // `defaultClients` set would break the assertions. The wrapper is
-    // covered separately by tests that pass an explicit `&[]`.
+    // reads from `~/.config/tokscale/settings.json`.
 
     #[test]
-    fn test_build_client_filter_all_false() {
+    fn test_parse_client_id_arg_accepts_catalog_ids_case_insensitive() {
+        assert_eq!(parse_client_id_arg("opencode").unwrap(), ClientId::OpenCode);
+        assert_eq!(parse_client_id_arg("OPENCODE").unwrap(), ClientId::OpenCode);
+        assert_eq!(parse_client_id_arg("grok").unwrap(), ClientId::Grok);
+    }
+
+    #[test]
+    fn test_parse_client_id_arg_rejects_unknown_ids() {
+        let err = parse_client_id_arg("not-a-client").unwrap_err();
+        assert!(err.contains("not-a-client"), "unexpected error: {err}");
+        assert!(
+            err.contains("opencode"),
+            "valid ids missing from error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_build_client_filter_no_flags_no_defaults_returns_none() {
         let flags = ClientFlags::default();
-        assert_eq!(build_client_filter_with_defaults(flags, &[]).unwrap(), None);
-    }
-
-    #[test]
-    fn test_build_client_filter_single_legacy_flag() {
-        let flags = ClientFlags {
-            opencode: true,
-            ..ClientFlags::default()
-        };
+        let defaults: Vec<String> = vec![];
         assert_eq!(
-            build_client_filter_with_defaults(flags, &[]).unwrap(),
-            Some(vec!["opencode".to_string()])
+            build_client_filter_with_defaults(flags, &defaults).unwrap(),
+            None
         );
-    }
-
-    #[test]
-    fn test_build_client_filter_multiple_legacy_flags_preserve_order() {
-        let flags = ClientFlags {
-            opencode: true,
-            claude: true,
-            pi: true,
-            ..ClientFlags::default()
-        };
-        // Legacy iteration order is the declaration order in `legacy[]`,
-        // not the order the user typed flags on the command line. This is
-        // a deliberate trade-off: legacy flags are deprecated, and the
-        // canonical `--client a,b,c` form preserves user order.
-        assert_eq!(
-            build_client_filter_with_defaults(flags, &[]).unwrap(),
-            Some(vec![
-                "opencode".to_string(),
-                "claude".to_string(),
-                "pi".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn test_build_client_filter_all_legacy_flags() {
-        let flags = ClientFlags {
-            opencode: true,
-            claude: true,
-            codex: true,
-            copilot: true,
-            gemini: true,
-            cursor: true,
-            amp: true,
-            codebuff: true,
-            droid: true,
-            openclaw: true,
-            hermes: true,
-            pi: true,
-            kimi: true,
-            qwen: true,
-            roocode: true,
-            kilocode: true,
-            kilo: true,
-            mux: true,
-            crush: true,
-            goose: true,
-            antigravity: true,
-            zed: true,
-            kiro: true,
-            trae: true,
-            warp: true,
-            cline: true,
-            gjc: true,
-            grok: true,
-            ..ClientFlags::default()
-        };
-        let result = build_client_filter_with_defaults(flags, &[]).unwrap();
-        assert!(result.is_some());
-        let sources = result.unwrap();
-        let required = [
-            "opencode",
-            "claude",
-            "codex",
-            "copilot",
-            "gemini",
-            "cursor",
-            "amp",
-            "codebuff",
-            "droid",
-            "openclaw",
-            "hermes",
-            "pi",
-            "kimi",
-            "qwen",
-            "roocode",
-            "kilocode",
-            "kilo",
-            "mux",
-            "crush",
-            "goose",
-            "antigravity",
-            "zed",
-            "kiro",
-            "trae",
-            "warp",
-            "cline",
-            "gjc",
-            "grok",
-        ];
-
-        let expected_len = required.len();
-        assert_eq!(sources.len(), expected_len);
-        for required in required {
-            assert!(
-                sources.contains(&required.to_string()),
-                "missing client filter id: {required}"
-            );
-        }
     }
 
     #[test]
     fn test_build_client_filter_canonical_clients_preserve_user_order() {
-        // `--client claude,opencode,pi` should keep user-typed order so
-        // downstream display (e.g. table grouping previews) is stable.
         let flags = ClientFlags {
-            clients: vec![
-                ClientFilter::Claude,
-                ClientFilter::Opencode,
-                ClientFilter::Pi,
-            ],
-            ..ClientFlags::default()
+            clients: vec![ClientId::Claude, ClientId::OpenCode, ClientId::Pi],
         };
         assert_eq!(
             build_client_filter_with_defaults(flags, &[]).unwrap(),
@@ -5983,129 +5594,11 @@ mod tests {
     #[test]
     fn test_build_client_filter_canonical_dedups_repeats() {
         let flags = ClientFlags {
-            clients: vec![
-                ClientFilter::Claude,
-                ClientFilter::Claude,
-                ClientFilter::Opencode,
-            ],
-            ..ClientFlags::default()
+            clients: vec![ClientId::Claude, ClientId::Claude, ClientId::OpenCode],
         };
         assert_eq!(
             build_client_filter_with_defaults(flags, &[]).unwrap(),
             Some(vec!["claude".to_string(), "opencode".to_string()])
-        );
-    }
-
-    #[test]
-    fn test_build_client_filter_canonical_and_legacy_dedup() {
-        // Mixing canonical `--client claude` with legacy `--claude` must not
-        // double-list claude. Canonical entries come first, legacy fills in
-        // anything missing.
-        let flags = ClientFlags {
-            clients: vec![ClientFilter::Claude],
-            opencode: true,
-            claude: true,
-            ..ClientFlags::default()
-        };
-        assert_eq!(
-            build_client_filter_with_defaults(flags, &[]).unwrap(),
-            Some(vec!["claude".to_string(), "opencode".to_string()])
-        );
-    }
-
-    #[test]
-    fn test_client_filter_as_filter_str_matches_client_id_for_overlap() {
-        // Every ClientFilter variant must agree with ClientId::as_str()
-        // so the core filter list stays consistent.
-        for filter in ClientFilter::value_variants() {
-            let id = filter.as_filter_str();
-            assert!(
-                tokscale_core::ClientId::from_str(id).is_some(),
-                "ClientFilter::{:?} -> {:?} has no matching ClientId",
-                filter,
-                id,
-            );
-        }
-    }
-
-    #[test]
-    fn test_client_filter_to_client_id_round_trip() {
-        // For every filter:
-        // from_client_id(to_client_id(filter).unwrap()) == filter
-        // and canonical id strings agree.
-        for filter in ClientFilter::value_variants() {
-            let id = filter
-                .to_client_id()
-                .expect("client filter must map to ClientId");
-            assert_eq!(
-                ClientFilter::from_client_id(id),
-                *filter,
-                "round-trip mismatch for {:?}",
-                filter
-            );
-            assert_eq!(
-                id.as_str(),
-                filter.as_filter_str(),
-                "id string drift between ClientId and ClientFilter for {:?}",
-                filter
-            );
-        }
-    }
-
-    #[test]
-    fn test_client_filter_gjc_round_trip() {
-        use tokscale_core::ClientId;
-        // gjc parses as the canonical lowercase id and round-trips through
-        // both the ClientId<->ClientFilter conversions and the id string.
-        assert_eq!(ClientFilter::Gjc.as_filter_str(), "gjc");
-        assert_eq!(ClientFilter::Gjc.to_client_id(), Some(ClientId::Gjc));
-        assert_eq!(
-            ClientFilter::from_client_id(ClientId::Gjc),
-            ClientFilter::Gjc
-        );
-        assert_eq!(ClientFilter::Gjc.as_filter_str(), ClientId::Gjc.as_str());
-    }
-
-    #[test]
-    fn test_client_filter_order_matches_client_id_all() {
-        // Picker rendering, --help possible-values listing, and any
-        // future iteration over `ClientFilter::value_variants()` all
-        // assume the variant order mirrors `ClientId::ALL`. Guard that
-        // invariant explicitly.
-        let filters: Vec<ClientFilter> = ClientFilter::value_variants().iter().copied().collect();
-        let ids: Vec<tokscale_core::ClientId> = tokscale_core::ClientId::ALL.to_vec();
-        assert_eq!(filters.len(), ids.len());
-        for (filter, id) in filters.iter().zip(ids.iter()) {
-            assert_eq!(
-                filter.to_client_id(),
-                Some(*id),
-                "ClientFilter declaration order diverged from ClientId::ALL at {:?}",
-                filter
-            );
-        }
-    }
-
-    #[test]
-    fn test_client_filter_from_filter_str_accepts_canonical_ids() {
-        for filter in ClientFilter::value_variants() {
-            let id = filter.as_filter_str();
-            assert_eq!(ClientFilter::from_filter_str(id), Some(*filter));
-        }
-        assert_eq!(ClientFilter::from_filter_str("not-a-client"), None);
-    }
-
-    #[test]
-    fn test_client_filter_default_set_includes_all_clients() {
-        let default = ClientFilter::default_set();
-        // Every client must be present so first-launch reports cover
-        // every integration the binary knows about.
-        for filter in ClientFilter::value_variants() {
-            assert!(default.contains(filter), "default_set() missing {filter:?}");
-        }
-        assert_eq!(
-            default.len(),
-            ClientFilter::value_variants().len(),
-            "default_set() size drifted from value_variants()"
         );
     }
 
@@ -6118,8 +5611,8 @@ mod tests {
         let configured = vec!["opencode".to_string(), "claude".to_string()];
         let set = resolve_default_tui_filter_set_with(&configured).unwrap();
         let mut expected = std::collections::HashSet::new();
-        expected.insert(ClientFilter::Opencode);
-        expected.insert(ClientFilter::Claude);
+        expected.insert(ClientId::OpenCode);
+        expected.insert(ClientId::Claude);
         assert_eq!(set, expected);
     }
 
@@ -6127,7 +5620,7 @@ mod tests {
     fn test_resolve_default_tui_filter_set_falls_back_when_empty() {
         // No defaultClients configured → use the canonical default set.
         let set = resolve_default_tui_filter_set_with(&[]).unwrap();
-        assert_eq!(set, ClientFilter::default_set());
+        assert_eq!(set, ClientId::iter().collect());
     }
 
     #[test]
@@ -6177,29 +5670,12 @@ mod tests {
         // (no merge). This is the predictable semantics: "I asked for X,
         // give me X" not "I asked for X but you also added Y from settings".
         let flags = ClientFlags {
-            clients: vec![ClientFilter::Codex],
-            ..ClientFlags::default()
+            clients: vec![ClientId::Codex],
         };
         let defaults = vec!["opencode".to_string(), "claude".to_string()];
         assert_eq!(
             build_client_filter_with_defaults(flags, &defaults).unwrap(),
             Some(vec!["codex".to_string()])
-        );
-    }
-
-    #[test]
-    fn test_build_client_filter_legacy_flag_overrides_defaults() {
-        // Legacy flags also count as "user passed something" → defaults
-        // ignored. Otherwise upgrading a script that uses --opencode
-        // would surprise users with extra clients from settings.
-        let flags = ClientFlags {
-            opencode: true,
-            ..ClientFlags::default()
-        };
-        let defaults = vec!["claude".to_string()];
-        assert_eq!(
-            build_client_filter_with_defaults(flags, &defaults).unwrap(),
-            Some(vec!["opencode".to_string()])
         );
     }
 
@@ -6229,28 +5705,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_client_filter_no_flags_no_defaults_returns_none() {
-        let flags = ClientFlags::default();
-        let defaults: Vec<String> = vec![];
-        assert_eq!(
-            build_client_filter_with_defaults(flags, &defaults).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_client_filter_parses_lowercase_canonical_names() {
-        // clap ValueEnum should accept the lowercase ids verbatim so
-        // `--client opencode,claude` mirrors the legacy flag spelling.
-        for filter in ClientFilter::value_variants() {
-            let id = filter.as_filter_str();
-            let parsed =
-                <ClientFilter as ValueEnum>::from_str(id, true).expect("variant should parse");
-            assert_eq!(parsed.as_filter_str(), id, "round-trip mismatch for {id}");
-        }
-    }
-
-    #[test]
     fn test_client_flags_parses_canonical_form() {
         // End-to-end smoke test: ensure clap derives accept the new
         // `--client a,b` and `-c a -c b` shapes through the CLI parser.
@@ -6258,14 +5712,14 @@ mod tests {
             Cli::try_parse_from(["tokscale", "--client", "opencode,claude"]).expect("parse ok");
         assert_eq!(
             cli.clients.clients,
-            vec![ClientFilter::Opencode, ClientFilter::Claude]
+            vec![ClientId::OpenCode, ClientId::Claude]
         );
 
         let cli =
             Cli::try_parse_from(["tokscale", "-c", "opencode", "-c", "claude"]).expect("parse ok");
         assert_eq!(
             cli.clients.clients,
-            vec![ClientFilter::Opencode, ClientFilter::Claude]
+            vec![ClientId::OpenCode, ClientId::Claude]
         );
     }
 
@@ -6302,7 +5756,7 @@ mod tests {
         else {
             panic!("expected wrapped command");
         };
-        assert_eq!(client_flags.clients, vec![ClientFilter::Opencode]);
+        assert_eq!(client_flags.clients, vec![ClientId::OpenCode]);
         assert!(!show_clients);
 
         let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients", "--client", "opencode"])
@@ -6315,29 +5769,27 @@ mod tests {
         else {
             panic!("expected wrapped command");
         };
-        assert_eq!(client_flags.clients, vec![ClientFilter::Opencode]);
+        assert_eq!(client_flags.clients, vec![ClientId::OpenCode]);
         assert!(show_clients);
     }
 
     #[test]
-    fn test_client_flags_legacy_still_parses() {
-        // Legacy `--claude` keeps working even though it is hidden in --help.
-        let cli = Cli::try_parse_from(["tokscale", "--claude"]).expect("parse ok");
-        assert!(cli.clients.claude);
-        assert!(cli.clients.clients.is_empty());
+    fn test_legacy_client_flags_are_removed() {
+        assert!(Cli::try_parse_from(["tokscale", "--claude"]).is_err());
+        assert!(Cli::try_parse_from(["tokscale", "--opencode"]).is_err());
     }
 
     #[test]
     fn test_client_flag_accepts_uppercase() {
         let cli =
             Cli::try_parse_from(["tokscale", "--client", "OPENCODE"]).expect("uppercase parses");
-        assert_eq!(cli.clients.clients, vec![ClientFilter::Opencode]);
+        assert_eq!(cli.clients.clients, vec![ClientId::OpenCode]);
 
         let cli = Cli::try_parse_from(["tokscale", "-c", "Codebuff,Antigravity"])
             .expect("mixed-case parses");
         assert_eq!(
             cli.clients.clients,
-            vec![ClientFilter::Codebuff, ClientFilter::Antigravity]
+            vec![ClientId::Codebuff, ClientId::Antigravity]
         );
     }
 
@@ -6345,15 +5797,6 @@ mod tests {
     fn test_client_flag_rejects_unknown_and_empty_values() {
         assert!(Cli::try_parse_from(["tokscale", "--client", "unknown"]).is_err());
         assert!(Cli::try_parse_from(["tokscale", "--client", ""]).is_err());
-    }
-
-    #[test]
-    fn test_legacy_bool_flag_rejects_duplicates() {
-        let result = Cli::try_parse_from(["tokscale", "--opencode", "--opencode"]);
-        assert!(
-            result.is_err(),
-            "clap rejects duplicated boolean flags by default; if this changes, document it explicitly"
-        );
     }
 
     #[test]
@@ -6377,49 +5820,6 @@ mod tests {
     fn test_build_client_filter_with_defaults_empty_defaults_returns_none() {
         let flags = ClientFlags::default();
         assert_eq!(build_client_filter_with_defaults(flags, &[]).unwrap(), None);
-    }
-
-    #[test]
-    fn test_client_filter_goose_round_trip() {
-        assert_eq!(
-            ClientFilter::from_filter_str("goose"),
-            Some(ClientFilter::Goose)
-        );
-        assert_eq!(ClientFilter::Goose.as_filter_str(), "goose");
-        assert_eq!(
-            ClientFilter::Goose.to_client_id(),
-            Some(tokscale_core::ClientId::Goose)
-        );
-        assert_eq!(
-            ClientFilter::from_client_id(tokscale_core::ClientId::Goose),
-            ClientFilter::Goose
-        );
-    }
-
-    #[test]
-    fn test_client_filter_zed_round_trip() {
-        assert_eq!(
-            ClientFilter::from_filter_str("zed"),
-            Some(ClientFilter::Zed)
-        );
-        assert_eq!(ClientFilter::Zed.as_filter_str(), "zed");
-        assert_eq!(
-            ClientFilter::Zed.to_client_id(),
-            Some(tokscale_core::ClientId::Zed)
-        );
-        assert_eq!(
-            ClientFilter::from_client_id(tokscale_core::ClientId::Zed),
-            ClientFilter::Zed
-        );
-    }
-
-    #[test]
-    fn test_client_filter_default_set_includes_goose() {
-        let default = ClientFilter::default_set();
-        assert!(
-            default.contains(&ClientFilter::Goose),
-            "default_set() must include Goose so the no-filter path scans it"
-        );
     }
 
     #[test]
@@ -7156,37 +6556,15 @@ mod tests {
     }
 
     #[test]
-    fn client_filter_round_trips_warp() {
-        assert_eq!(
-            ClientFilter::from_filter_str("warp"),
-            Some(ClientFilter::Warp)
-        );
-        assert_eq!(ClientFilter::Warp.as_filter_str(), "warp");
-        assert_eq!(
-            ClientFilter::Warp.to_client_id(),
-            Some(tokscale_core::ClientId::Warp)
-        );
-        assert_eq!(
-            ClientFilter::from_client_id(tokscale_core::ClientId::Warp),
-            ClientFilter::Warp
-        );
+    fn client_id_parses_warp() {
+        assert_eq!(ClientId::from_str("warp"), Some(ClientId::Warp));
+        assert_eq!(ClientId::Warp.as_str(), "warp");
     }
 
     #[test]
-    fn client_filter_round_trips_grok() {
-        assert_eq!(
-            ClientFilter::from_filter_str("grok"),
-            Some(ClientFilter::Grok)
-        );
-        assert_eq!(ClientFilter::Grok.as_filter_str(), "grok");
-        assert_eq!(
-            ClientFilter::Grok.to_client_id(),
-            Some(tokscale_core::ClientId::Grok)
-        );
-        assert_eq!(
-            ClientFilter::from_client_id(tokscale_core::ClientId::Grok),
-            ClientFilter::Grok
-        );
+    fn client_id_parses_grok() {
+        assert_eq!(ClientId::from_str("grok"), Some(ClientId::Grok));
+        assert_eq!(ClientId::Grok.as_str(), "grok");
     }
 
     #[test]

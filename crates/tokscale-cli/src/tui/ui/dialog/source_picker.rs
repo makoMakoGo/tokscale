@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use clap::ValueEnum;
 use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -11,23 +10,23 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
+use tokscale_core::ClientId;
 
 use crate::tui::client_ui;
 use crate::tui::themes::Theme;
-use crate::ClientFilter;
 
 use super::{DialogContent, DialogResult};
 
 /// TUI dialog that lets the user toggle which clients are included in reports.
 /// Backed by the same unified
-/// `Rc<RefCell<HashSet<ClientFilter>>>` the rest of the app sees, so
+/// `Rc<RefCell<HashSet<ClientId>>>` the rest of the app sees, so
 /// toggles propagate without a separate sync step.
 pub struct ClientPickerDialog {
     /// Every selectable filter in the same order they appear on screen.
-    /// Mirrors `ClientFilter::value_variants()` so the listing order is
+    /// Mirrors `ClientId::ALL` so the listing order is
     /// the canonical chronological order across the whole CLI/TUI.
-    sources: Vec<ClientFilter>,
-    enabled: Rc<RefCell<HashSet<ClientFilter>>>,
+    sources: Vec<ClientId>,
+    enabled: Rc<RefCell<HashSet<ClientId>>>,
     needs_reload: Rc<RefCell<bool>>,
     selected: usize,
     filter: String,
@@ -37,11 +36,8 @@ pub struct ClientPickerDialog {
 }
 
 impl ClientPickerDialog {
-    pub fn new(
-        enabled: Rc<RefCell<HashSet<ClientFilter>>>,
-        needs_reload: Rc<RefCell<bool>>,
-    ) -> Self {
-        let sources: Vec<ClientFilter> = ClientFilter::value_variants().to_vec();
+    pub fn new(enabled: Rc<RefCell<HashSet<ClientId>>>, needs_reload: Rc<RefCell<bool>>) -> Self {
+        let sources: Vec<ClientId> = ClientId::ALL.to_vec();
         let filtered_indices: Vec<usize> = (0..sources.len()).collect();
         Self {
             sources,
@@ -77,7 +73,7 @@ impl ClientPickerDialog {
         }
     }
 
-    fn toggle(&self, client: ClientFilter) {
+    fn toggle(&self, client: ClientId) {
         let mut enabled = self.enabled.borrow_mut();
         let total = enabled.len();
         let is_enabled = enabled.contains(&client);
@@ -235,11 +231,8 @@ impl DialogContent for ClientPickerDialog {
                 DialogResult::None
             }
             KeyCode::Char(c) => {
-                // Hotkey toggle: route through the centralized
-                // `ClientFilter` mapping so adding a new hotkey only
-                // requires editing `client_ui.rs`.
                 if let Some(client_id) = client_ui::from_hotkey(c) {
-                    self.toggle(ClientFilter::from_client_id(client_id));
+                    self.toggle(client_id);
                 } else {
                     self.filter.push(c);
                     self.rebuild_filter();
@@ -251,21 +244,10 @@ impl DialogContent for ClientPickerDialog {
     }
 }
 
-/// Display name for a `ClientFilter` row in the picker. Delegates to the
-/// existing `client_ui` registry.
-fn display_name(client: ClientFilter) -> &'static str {
-    client_ui::display_name(
-        client
-            .to_client_id()
-            .expect("client filter must map to ClientId"),
-    )
+fn display_name(client: ClientId) -> &'static str {
+    client_ui::display_name(client)
 }
 
-/// Hotkey for a `ClientFilter` row.
-fn hotkey(client: ClientFilter) -> char {
-    client_ui::hotkey(
-        client
-            .to_client_id()
-            .expect("client filter must map to ClientId"),
-    )
+fn hotkey(client: ClientId) -> char {
+    client_ui::hotkey(client).expect("source picker clients must have catalog hotkeys")
 }
