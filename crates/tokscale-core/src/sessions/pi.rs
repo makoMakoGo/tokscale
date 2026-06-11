@@ -6,7 +6,6 @@ use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -116,6 +115,35 @@ pub fn build_omp_parent_task_agent_index(paths: &[PathBuf]) -> OmpParentTaskAgen
 }
 
 fn omp_task_agent_map_from_parent(parent_path: &Path) -> HashMap<String, String> {
+    #[derive(Deserialize)]
+    struct OmpParentLine {
+        message: Option<OmpParentMessage>,
+    }
+
+    #[derive(Deserialize)]
+    struct OmpParentMessage {
+        content: Option<Vec<OmpParentContent>>,
+    }
+
+    #[derive(Deserialize)]
+    struct OmpParentContent {
+        #[serde(rename = "type")]
+        item_type: Option<String>,
+        name: Option<String>,
+        arguments: Option<OmpParentArguments>,
+    }
+
+    #[derive(Deserialize)]
+    struct OmpParentArguments {
+        agent: Option<String>,
+        tasks: Option<Vec<OmpParentTask>>,
+    }
+
+    #[derive(Deserialize)]
+    struct OmpParentTask {
+        id: Option<String>,
+    }
+
     let file = match std::fs::File::open(parent_path) {
         Ok(file) => file,
         Err(_) => return HashMap::new(),
@@ -133,44 +161,39 @@ fn omp_task_agent_map_from_parent(parent_path: &Path) -> HashMap<String, String>
             continue;
         }
 
-        let value: Value = match serde_json::from_str(trimmed) {
-            Ok(value) => value,
+        let entry: OmpParentLine = match serde_json::from_str(trimmed) {
+            Ok(entry) => entry,
             Err(_) => continue,
         };
-        let Some(content) = value
-            .get("message")
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_array)
-        else {
+
+        let Some(content) = entry.message.and_then(|message| message.content) else {
             continue;
         };
 
         for item in content {
-            if item.get("type").and_then(Value::as_str) != Some("toolCall")
-                || item.get("name").and_then(Value::as_str) != Some("task")
+            if item.item_type.as_deref() != Some("toolCall") || item.name.as_deref() != Some("task")
             {
                 continue;
             }
 
-            let Some(agent) = item
-                .get("arguments")
-                .and_then(|arguments| arguments.get("agent"))
-                .and_then(Value::as_str)
+            let Some(arguments) = item.arguments else {
+                continue;
+            };
+
+            let Some(agent) = arguments
+                .agent
+                .as_deref()
                 .and_then(normalize_omp_agent_label)
             else {
                 continue;
             };
 
-            let Some(tasks) = item
-                .get("arguments")
-                .and_then(|arguments| arguments.get("tasks"))
-                .and_then(Value::as_array)
-            else {
+            let Some(tasks) = arguments.tasks else {
                 continue;
             };
 
             for (index, task) in tasks.iter().enumerate() {
-                let Some(task_id) = task.get("id").and_then(Value::as_str) else {
+                let Some(task_id) = task.id.as_deref() else {
                     continue;
                 };
                 task_agents.insert(task_id.to_string(), agent.clone());

@@ -102,18 +102,17 @@ fn normalize_claude_agent_label(agent_type: &str) -> Option<String> {
     let normalized = normalized
         .strip_prefix("oh-my-claudecode:")
         .unwrap_or(&normalized);
-    let label = match normalized {
-        "explore" => "Claude Explore",
-        "plan" => "Claude Plan",
-        "general-purpose" => "Claude General Purpose",
-        "claude-code-guide" => "Claude Code Guide",
-        "verification" => "Claude Verification",
-        "workflow-subagent" => "Claude Workflow Subagent",
-        "fork" => "Claude Fork",
-        _ => return None,
-    };
 
-    Some(label.to_string())
+    match normalized {
+        "explore" => Some("Claude Explore".to_string()),
+        "plan" => Some("Claude Plan".to_string()),
+        "general-purpose" => Some("Claude General Purpose".to_string()),
+        "claude-code-guide" => Some("Claude Code Guide".to_string()),
+        "verification" => Some("Claude Verification".to_string()),
+        "workflow-subagent" => Some("Claude Workflow Subagent".to_string()),
+        "fork" => Some("Claude Fork".to_string()),
+        _ => None,
+    }
 }
 
 /// Resolve the subagent display name for a sidechain transcript file.
