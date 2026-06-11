@@ -67,7 +67,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     } else if is_narrow {
         vec!["Agent", "Tokens", "Cost"]
     } else {
-        vec!["#", "Agent", "Source", "Tokens", "Cost", "Msgs", "Instances"]
+        vec![
+            "#",
+            "Agent",
+            "Source",
+            "Tokens",
+            "Cost",
+            "Msgs",
+            "Instances",
+        ]
     };
 
     let sort_indicator = |field: SortField| -> &'static str {

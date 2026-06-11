@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+pub type OmpParentTaskAgentIndex = HashMap<PathBuf, HashMap<String, String>>;
+
 /// Pi session header (first line of JSONL)
 #[derive(Debug, Deserialize)]
 pub struct PiSessionHeader {
@@ -59,12 +61,19 @@ pub struct PiUsage {
 
 /// Parse a Pi JSONL session file
 pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
-    parse_pi_format_file(path, "pi")
+    parse_pi_format_file(path, "pi", None)
 }
 
 /// Parse an OMP JSONL session file.
 pub fn parse_omp_file(path: &Path) -> Vec<UnifiedMessage> {
-    parse_pi_format_file(path, "omp")
+    parse_pi_format_file(path, "omp", None)
+}
+
+pub fn parse_omp_file_with_parent_task_agent_index(
+    path: &Path,
+    parent_task_agent_index: &OmpParentTaskAgentIndex,
+) -> Vec<UnifiedMessage> {
+    parse_pi_format_file(path, "omp", Some(parent_task_agent_index))
 }
 
 fn normalize_omp_agent_label(agent: &str) -> Option<String> {
@@ -89,8 +98,28 @@ fn omp_parent_session_path(path: &Path) -> Option<PathBuf> {
     root.exists().then_some(root)
 }
 
-fn omp_subagent_label_from_parent(parent_path: &Path, child_stem: &str) -> Option<String> {
-    let file = std::fs::File::open(parent_path).ok()?;
+pub fn build_omp_parent_task_agent_index(paths: &[PathBuf]) -> OmpParentTaskAgentIndex {
+    let mut parent_paths: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|path| omp_parent_session_path(path))
+        .collect();
+    parent_paths.sort_unstable();
+    parent_paths.dedup();
+
+    parent_paths
+        .into_iter()
+        .filter_map(|parent_path| {
+            let task_agents = omp_task_agent_map_from_parent(&parent_path);
+            (!task_agents.is_empty()).then_some((parent_path, task_agents))
+        })
+        .collect()
+}
+
+fn omp_task_agent_map_from_parent(parent_path: &Path) -> HashMap<String, String> {
+    let file = match std::fs::File::open(parent_path) {
+        Ok(file) => file,
+        Err(_) => return HashMap::new(),
+    };
     let reader = BufReader::new(file);
     let mut task_agents: HashMap<String, String> = HashMap::new();
 
@@ -150,6 +179,18 @@ fn omp_subagent_label_from_parent(parent_path: &Path, child_stem: &str) -> Optio
         }
     }
 
+    task_agents
+}
+
+fn omp_subagent_label_from_parent(parent_path: &Path, child_stem: &str) -> Option<String> {
+    let task_agents = omp_task_agent_map_from_parent(parent_path);
+    omp_subagent_label_from_map(&task_agents, child_stem)
+}
+
+fn omp_subagent_label_from_map(
+    task_agents: &HashMap<String, String>,
+    child_stem: &str,
+) -> Option<String> {
     let suffix = child_stem
         .split_once('-')
         .map(|(_, suffix)| suffix)
@@ -161,7 +202,11 @@ fn omp_subagent_label_from_parent(parent_path: &Path, child_stem: &str) -> Optio
         .cloned()
 }
 
-fn parse_pi_format_file(path: &Path, client: &'static str) -> Vec<UnifiedMessage> {
+fn parse_pi_format_file(
+    path: &Path,
+    client: &'static str,
+    omp_parent_task_agent_index: Option<&OmpParentTaskAgentIndex>,
+) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
@@ -172,13 +217,20 @@ fn parse_pi_format_file(path: &Path, client: &'static str) -> Vec<UnifiedMessage
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
     let mut buffer = Vec::with_capacity(4096);
-    let child_stem = path.file_stem().and_then(|stem| stem.to_str()).map(str::to_string);
+    let child_stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_string);
     let omp_subagent_label = if client == "omp" {
-        child_stem
-            .as_deref()
-            .and_then(|stem| omp_parent_session_path(path).and_then(|parent| {
-                omp_subagent_label_from_parent(&parent, stem)
-            }))
+        child_stem.as_deref().and_then(|stem| {
+            let parent = omp_parent_session_path(path)?;
+            match omp_parent_task_agent_index {
+                Some(index) => index
+                    .get(&parent)
+                    .and_then(|task_agents| omp_subagent_label_from_map(task_agents, stem)),
+                None => omp_subagent_label_from_parent(&parent, stem),
+            }
+        })
     } else {
         None
     };
@@ -376,6 +428,44 @@ mod tests {
             messages[0].agent_instance.as_deref(),
             Some("0-ReviewFindings")
         );
+    }
+
+    #[test]
+    fn test_parse_omp_children_share_prebuilt_parent_task_agent_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir
+            .path()
+            .join(".omp")
+            .join("agent")
+            .join("sessions")
+            .join("--omp-test--");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let session_root = session_dir.join("root-session");
+        let root_jsonl = session_root.with_extension("jsonl");
+        std::fs::write(
+            &root_jsonl,
+            r#"{"type":"session","version":3,"id":"root-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"root_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_001","name":"task","arguments":{"agent":"reviewer","tasks":[{"id":"ReviewFindings","description":"Review findings","assignment":"Check the diff"},{"id":"ReviewTests","description":"Review tests","assignment":"Check coverage"}]}}],"model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&session_root).unwrap();
+
+        let child_content = r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"child_001","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
+        let first_child = session_root.join("0-ReviewFindings.jsonl");
+        let second_child = session_root.join("1-ReviewTests.jsonl");
+        std::fs::write(&first_child, child_content).unwrap();
+        std::fs::write(&second_child, child_content).unwrap();
+
+        let paths = vec![first_child.clone(), second_child.clone()];
+        let index = build_omp_parent_task_agent_index(&paths);
+
+        assert_eq!(index.len(), 1);
+        let first_messages = parse_omp_file_with_parent_task_agent_index(&first_child, &index);
+        let second_messages = parse_omp_file_with_parent_task_agent_index(&second_child, &index);
+        assert_eq!(first_messages[0].agent.as_deref(), Some("OMP Reviewer"));
+        assert_eq!(second_messages[0].agent.as_deref(), Some("OMP Reviewer"));
     }
 
     #[test]

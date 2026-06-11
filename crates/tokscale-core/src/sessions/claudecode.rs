@@ -6,9 +6,7 @@ use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
     read_file_or_none,
 };
-use super::{
-    normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
-};
+use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{pricing, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -111,9 +109,9 @@ fn normalize_claude_agent_label(agent_type: &str) -> Option<String> {
         "fork" => "Claude Fork",
         _ => {
             let stable_slug = !normalized.is_empty()
-                && normalized
-                    .chars()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | ':'));
+                && normalized.chars().all(|ch| {
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | ':')
+                });
             if !stable_slug {
                 return None;
             }
@@ -466,10 +464,7 @@ pub fn parse_claude_file_with_cache_and_home(
                         .file_stem()
                         .and_then(|stem| stem.to_str())
                         .and_then(sidechain_agent_id_from_stem);
-                    sidechain_agent_instance = entry
-                        .agent_id
-                        .clone()
-                        .or(stem_agent_id);
+                    sidechain_agent_instance = entry.agent_id.clone().or(stem_agent_id);
                     sidechain_agent = Some(resolve_subagent_name(
                         path,
                         entry.session_id.as_deref(),
