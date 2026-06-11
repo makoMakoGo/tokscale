@@ -16,7 +16,9 @@ use std::time::UNIX_EPOCH;
 // present after the merge, so existing source-message caches must be rebuilt.
 // 21: Claude sidechain agent labels now only preserve known stable types; cached
 // UnifiedMessage.agent values from older parsers must be rebuilt.
-const CACHE_SCHEMA_VERSION: u32 = 21;
+// 22: Kimi agent labels now come from stable profileName values only; cached
+// path-derived Main/Agent N labels must be rebuilt.
+const CACHE_SCHEMA_VERSION: u32 = 22;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
