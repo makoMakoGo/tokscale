@@ -405,6 +405,8 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(result.valid).toBe(true);
       expect(result.errors).toHaveLength(0);
+      expect(result.data?.summary.clients).toEqual(['kilo', 'kilocode']);
+      expect(result.data?.contributions[0].clients.map((client) => client.client)).toEqual(['kilo', 'kilocode']);
     });
 
     it('should pass validation for zed client submissions', () => {

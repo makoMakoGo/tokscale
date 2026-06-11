@@ -122,4 +122,14 @@ describe("frontend client registry", () => {
 
     expect(rejected).toEqual([]);
   });
+
+  it("preserves every base client id in submission validation", () => {
+    for (const client of BASE_CLIENT_TYPES) {
+      const result = validateSubmission(payloadForClient(client));
+
+      expect(result.valid).toBe(true);
+      expect(result.data?.summary.clients).toEqual([client]);
+      expect(result.data?.contributions[0]?.clients[0]?.client).toBe(client);
+    }
+  });
 });

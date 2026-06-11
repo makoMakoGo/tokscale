@@ -108,22 +108,9 @@ const SubmitDeviceSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
 });
 
-const LEGACY_CLIENT_ALIASES: Record<string, string> = {
-  kilocode: "kilo",
-};
-
-function normalizeLegacyClientId(id: unknown): unknown {
-  if (typeof id === "string" && id in LEGACY_CLIENT_ALIASES) {
-    return LEGACY_CLIENT_ALIASES[id];
-  }
-  return id;
-}
-
 /**
  * Normalize legacy payloads:
  * - "sources"/"source" → "clients"/"client" key renames
- * - "kilocode" → "kilo" client ID alias
- * This ensures older CLI versions can still submit data.
  */
 function normalizeLegacySources(data: unknown): unknown {
   if (!data || typeof data !== "object") return data;
@@ -134,9 +121,6 @@ function normalizeLegacySources(data: unknown): unknown {
     if ("sources" in summary && !("clients" in summary)) {
       summary.clients = summary.sources;
       delete summary.sources;
-    }
-    if (Array.isArray(summary.clients)) {
-      summary.clients = summary.clients.map(normalizeLegacyClientId);
     }
     d.summary = summary;
   }
@@ -150,19 +134,11 @@ function normalizeLegacySources(data: unknown): unknown {
         contrib.clients = (items as Record<string, unknown>[]).map((s) => {
           if (s && typeof s === "object" && "source" in s && !("client" in s)) {
             const { source, ...rest } = s;
-            return { client: normalizeLegacyClientId(source), ...rest };
+            return { client: source, ...rest };
           }
           return s;
         });
         delete contrib.sources;
-      }
-      if (Array.isArray(contrib.clients)) {
-        contrib.clients = (contrib.clients as Record<string, unknown>[]).map((cl) => {
-          if (cl && typeof cl === "object" && "client" in cl) {
-            return { ...cl, client: normalizeLegacyClientId(cl.client) };
-          }
-          return cl;
-        });
       }
       return contrib;
     });
