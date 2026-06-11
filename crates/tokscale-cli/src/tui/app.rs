@@ -217,6 +217,14 @@ pub struct App {
 
     pub needs_reload: bool,
 
+    /// Forces the next background reload to skip the source-digest probe
+    /// (manual refresh and filter changes must always re-aggregate).
+    pub reload_force: bool,
+
+    /// Digest of the scanned sources at the last completed load; auto-refresh
+    /// skips the parse when a fresh probe matches (ADR 0008).
+    pub last_source_digest: Option<u64>,
+
     pub dialog_stack: DialogStack,
 
     pub dialog_needs_reload: Rc<RefCell<bool>>,
@@ -335,6 +343,8 @@ impl App {
             background_loading: false,
             blocking_loading: false,
             needs_reload: false,
+            reload_force: false,
+            last_source_digest: None,
             dialog_stack,
             dialog_needs_reload,
             hourly_view_mode: HourlyViewMode::default(),
@@ -370,7 +380,14 @@ impl App {
 
     pub fn request_blocking_reload(&mut self) {
         self.needs_reload = true;
+        self.reload_force = true;
         self.blocking_loading = true;
+    }
+
+    /// Marks an auto-refresh probe that found no source changes: resets the
+    /// refresh clock without touching the data.
+    pub fn mark_refresh_checked(&mut self) {
+        self.last_refresh = Instant::now();
     }
 
     pub fn is_blocking_loading(&self) -> bool {
@@ -578,6 +595,7 @@ impl App {
                     self.set_status("Refresh already in progress");
                 } else {
                     self.needs_reload = true;
+                    self.reload_force = true;
                     self.fetch_subscription_usage();
                 }
             }

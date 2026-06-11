@@ -357,6 +357,23 @@ impl DataLoader {
         result
     }
 
+    /// Digest of the sources `load` would scan, used by the auto-refresh
+    /// probe to skip unchanged reloads (ADR 0008). Mirrors `load`'s home and
+    /// scanner-settings resolution.
+    pub fn source_digest(&self, enabled_clients: &[ClientId]) -> Option<u64> {
+        let home = dirs::home_dir()?.to_string_lossy().to_string();
+        let sources: Vec<String> = enabled_clients
+            .iter()
+            .map(|client| client.as_str().to_string())
+            .collect();
+        Some(tokscale_core::compute_source_digest(
+            &home,
+            &sources,
+            true,
+            &data_loader_scanner_settings(),
+        ))
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     fn load_with_pricing(

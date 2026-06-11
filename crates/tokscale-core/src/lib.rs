@@ -1842,6 +1842,81 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     Ok(all_messages)
 }
 
+/// Stable digest over every scannable source's (path, size, mtime) plus the
+/// requested client set. Two equal digests mean a fresh parse would see
+/// byte-identical inputs, so refresh work can be skipped entirely (ADR 0008).
+/// The value is process-local and never persisted.
+pub fn compute_source_digest(
+    home_dir: &str,
+    clients: &[String],
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+        home_dir,
+        clients,
+        use_env_roots,
+        scanner_settings,
+    );
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for files in &scan_result.files {
+        paths.extend(files.iter().cloned());
+    }
+    paths.extend(scan_result.opencode_dbs.iter().cloned());
+    paths.extend(scan_result.kilo_db.iter().cloned());
+    paths.extend(scan_result.hermes_db_paths());
+    paths.extend(scan_result.goose_db.iter().cloned());
+    paths.extend(scan_result.zed_db_paths());
+    paths.extend(scan_result.kiro_db.iter().cloned());
+    paths.extend(
+        scan_result
+            .crush_dbs
+            .iter()
+            .map(|source| source.db_path.clone()),
+    );
+
+    // SQLite writes may only touch the WAL sidecar between checkpoints.
+    let wal_paths: Vec<PathBuf> = paths
+        .iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+        .map(|path| {
+            let mut name = path.as_os_str().to_owned();
+            name.push("-wal");
+            PathBuf::from(name)
+        })
+        .collect();
+    paths.extend(wal_paths);
+    paths.sort_unstable();
+    paths.dedup();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
+    sorted_clients.sort_unstable();
+    sorted_clients.hash(&mut hasher);
+    for path in &paths {
+        path.hash(&mut hasher);
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                metadata.len().hash(&mut hasher);
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0);
+                mtime.hash(&mut hasher);
+            }
+            Err(_) => {
+                0u64.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
     let mut latest_by_session: HashMap<String, UnifiedMessage> = HashMap::new();
 
@@ -4565,6 +4640,44 @@ model = "gpt-5.5"
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_compute_source_digest_stable_and_sensitive() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let message_dir = source_home
+            .path()
+            .join(".local/share/opencode/storage/message/project-1");
+        std::fs::create_dir_all(&message_dir).unwrap();
+        let first = message_dir.join("msg_001.json");
+        std::fs::write(&first, r#"{"id":"msg-1"}"#).unwrap();
+
+        let home = source_home.path().to_str().unwrap();
+        let clients = ["opencode".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
+        let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
+        assert_eq!(digest_one, digest_two, "unchanged sources must hash equal");
+
+        std::fs::write(&first, r#"{"id":"msg-1","grew":true}"#).unwrap();
+        let digest_changed = crate::compute_source_digest(home, &clients, false, &settings);
+        assert_ne!(
+            digest_one, digest_changed,
+            "content growth must change digest"
+        );
+
+        std::fs::write(message_dir.join("msg_002.json"), r#"{"id":"msg-2"}"#).unwrap();
+        let digest_added = crate::compute_source_digest(home, &clients, false, &settings);
+        assert_ne!(digest_changed, digest_added, "new files must change digest");
+
+        let digest_other_clients =
+            crate::compute_source_digest(home, &["claude".to_string()], false, &settings);
+        assert_ne!(
+            digest_added, digest_other_clients,
+            "client set is part of the digest"
+        );
     }
 
     #[test]

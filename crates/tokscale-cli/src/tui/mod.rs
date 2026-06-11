@@ -62,7 +62,19 @@ fn background_data_loader(
     DataLoader::with_filters(None, since, until, year).with_minutely_enabled(minutely_enabled)
 }
 
-fn send_background_result(tx: &mpsc::Sender<Result<UsageData>>, result: Result<UsageData>) {
+/// Background loader result: a full reload, or proof that no source changed.
+enum BackgroundLoad {
+    Unchanged,
+    Loaded {
+        data: UsageData,
+        digest: Option<u64>,
+    },
+}
+
+fn send_background_result(
+    tx: &mpsc::Sender<Result<BackgroundLoad>>,
+    result: Result<BackgroundLoad>,
+) {
     if tx.send(result).is_err() {
         tracing::warn!("dropped TUI background load result because receiver is closed");
     }
@@ -165,7 +177,7 @@ pub fn run(
         }
     };
 
-    let (bg_tx, bg_rx) = mpsc::channel::<Result<UsageData>>();
+    let (bg_tx, bg_rx) = mpsc::channel::<Result<BackgroundLoad>>();
 
     if needs_background_load {
         app.set_background_loading(true);
@@ -183,6 +195,9 @@ pub fn run(
 
         thread::spawn(move || {
             let loader = background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
+            // Digest before the load: changes landing mid-parse stay visible
+            // to the next probe instead of being masked by a post-load hash.
+            let digest = loader.source_digest(&bg_clients);
             let result = loader.load(&bg_clients, &bg_group_by);
 
             if let Ok(ref data) = result {
@@ -193,7 +208,10 @@ pub fn run(
                 }
             }
 
-            send_background_result(&tx, result);
+            send_background_result(
+                &tx,
+                result.map(|data| BackgroundLoad::Loaded { data, digest }),
+            );
         });
     }
 
@@ -250,8 +268,8 @@ fn run_loop_with_background(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     events: &mut EventHandler,
-    bg_tx: mpsc::Sender<Result<UsageData>>,
-    bg_rx: mpsc::Receiver<Result<UsageData>>,
+    bg_tx: mpsc::Sender<Result<BackgroundLoad>>,
+    bg_rx: mpsc::Receiver<Result<BackgroundLoad>>,
     #[cfg(unix)] sigcont_flag: &Arc<AtomicBool>,
 ) -> Result<()> {
     loop {
@@ -272,9 +290,13 @@ fn run_loop_with_background(
             Ok(result) => {
                 app.set_background_loading(false);
                 match result {
-                    Ok(data) => {
+                    Ok(BackgroundLoad::Loaded { data, digest }) => {
                         app.update_data(data);
+                        app.last_source_digest = digest;
                         app.set_status("Data loaded");
+                    }
+                    Ok(BackgroundLoad::Unchanged) => {
+                        app.mark_refresh_checked();
                     }
                     Err(e) => {
                         app.set_error(Some(e.to_string()));
@@ -296,6 +318,8 @@ fn run_loop_with_background(
             app.needs_reload = false;
             app.set_background_loading(true);
 
+            let force = std::mem::take(&mut app.reload_force);
+            let last_digest = app.last_source_digest;
             let tx = bg_tx.clone();
             let clients = app.scan_clients();
             let since = app.data_loader.since.clone();
@@ -308,6 +332,13 @@ fn run_loop_with_background(
 
             thread::spawn(move || {
                 let loader = background_data_loader(since, until, year, minutely_enabled);
+                // Digest before the load: changes landing mid-parse stay
+                // visible to the next probe (ADR 0008).
+                let digest = loader.source_digest(&clients);
+                if !force && digest.is_some() && digest == last_digest {
+                    send_background_result(&tx, Ok(BackgroundLoad::Unchanged));
+                    return;
+                }
                 let result = loader.load(&clients, &group_by);
                 if let Ok(ref data) = result {
                     if let Err(err) =
@@ -316,7 +347,10 @@ fn run_loop_with_background(
                         tracing::error!("failed to save TUI cache: {err}");
                     }
                 }
-                send_background_result(&tx, result);
+                send_background_result(
+                    &tx,
+                    result.map(|data| BackgroundLoad::Loaded { data, digest }),
+                );
             });
         }
 
