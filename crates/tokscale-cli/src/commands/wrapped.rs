@@ -67,6 +67,7 @@ struct WrappedData {
 #[derive(Debug, Clone)]
 struct WrappedRankedEntry {
     name: String,
+    client_id: Option<String>,
     cost: f64,
     tokens: i64,
 }
@@ -267,6 +268,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                     .entry(model_name.clone())
                     .or_insert_with(|| WrappedRankedEntry {
                         name: model_name,
+                        client_id: None,
                         cost: 0.0,
                         tokens: 0,
                     });
@@ -279,14 +281,14 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
             let client_name = client_display_name(&client_contrib.client)
                 .unwrap_or(client_contrib.client.as_str())
                 .to_string();
-            let client_entry =
-                client_map
-                    .entry(client_name.clone())
-                    .or_insert_with(|| WrappedRankedEntry {
-                        name: client_name,
-                        cost: 0.0,
-                        tokens: 0,
-                    });
+            let client_entry = client_map
+                .entry(client_contrib.client.clone())
+                .or_insert_with(|| WrappedRankedEntry {
+                    name: client_name,
+                    client_id: Some(client_contrib.client.clone()),
+                    cost: 0.0,
+                    tokens: 0,
+                });
             client_entry.cost += client_contrib.cost;
             client_entry.tokens += client_contrib.tokens.input
                 + client_contrib.tokens.output
@@ -641,41 +643,39 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
                 &(index + 1).to_string(),
             );
 
-            if let Some(logo_url) = client_logo_url(&client_entry.name) {
+            if let Some(client_id) = client_entry.client_id.as_deref() {
+                let logo_url = client_logo_url(client_id);
                 let filename = format!(
                     "client-{}@2x.png",
-                    client_entry
-                        .name
-                        .to_lowercase()
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join("-")
+                    client_id.to_lowercase().replace('/', "-")
                 );
 
-                if let Ok(path) = fetch_and_cache_image(&client, logo_url, &filename).await {
-                    if let Ok(logo) = load_rgba_image(&path) {
-                        let logo_x = PADDING + 40 * SCALE;
-                        let logo_y = y_pos - logo_size + 6 * SCALE;
+                if let Some(logo_url) = logo_url {
+                    if let Ok(path) = fetch_and_cache_image(&client, logo_url, &filename).await {
+                        if let Ok(logo) = load_rgba_image(&path) {
+                            let logo_x = PADDING + 40 * SCALE;
+                            let logo_y = y_pos - logo_size + 6 * SCALE;
 
-                        draw_image_rounded(
-                            &mut canvas,
-                            &logo,
-                            logo_x,
-                            logo_y,
-                            logo_size,
-                            logo_size,
-                            logo_radius,
-                        );
-                        draw_rounded_border(
-                            &mut canvas,
-                            logo_x,
-                            logo_y,
-                            logo_size,
-                            logo_size,
-                            logo_radius,
-                            SCALE,
-                            COLOR_GRADE0,
-                        );
+                            draw_image_rounded(
+                                &mut canvas,
+                                &logo,
+                                logo_x,
+                                logo_y,
+                                logo_size,
+                                logo_size,
+                                logo_radius,
+                            );
+                            draw_rounded_border(
+                                &mut canvas,
+                                logo_x,
+                                logo_y,
+                                logo_size,
+                                logo_size,
+                                logo_radius,
+                                SCALE,
+                                COLOR_GRADE0,
+                            );
+                        }
                     }
                 }
             }
@@ -1429,77 +1429,11 @@ fn format_number_with_commas_i64(value: i64) -> String {
 }
 
 fn client_display_name(client: &str) -> Option<&'static str> {
-    match client {
-        "opencode" => Some("OpenCode"),
-        "claude" => Some("Claude Code"),
-        "codex" => Some("Codex CLI"),
-        "copilot" => Some("Copilot CLI"),
-        "gemini" => Some("Gemini CLI"),
-        s if s == ClientId::Cursor.as_str() => Some("Cursor IDE"),
-        "amp" => Some("Amp"),
-        "codebuff" => Some("Codebuff"),
-        "droid" => Some("Droid"),
-        "openclaw" => Some("OpenClaw"),
-        "hermes" => Some("Hermes Agent"),
-        "pi" => Some("Pi"),
-        "omp" => Some("OMP"),
-        "kimi" => Some("Kimi"),
-        "qwen" => Some("Qwen CLI"),
-        "roocode" => Some("Roo Code"),
-        "kilocode" => Some("Kilo"),
-        "kilo" => Some("Kilo CLI"),
-        "mux" => Some("Mux"),
-        "crush" => Some("Crush"),
-        "goose" => Some("Goose"),
-        "antigravity" => Some("Antigravity"),
-        "zed" => Some("Zed Agent"),
-        "warp" => Some("Warp"),
-        "cline" => Some("Cline"),
-        "gjc" => Some("Gajae-Code"),
-        _ => None,
-    }
+    ClientId::from_str(client).map(ClientId::display_name)
 }
 
-fn client_logo_url(client_name: &str) -> Option<&'static str> {
-    match client_name {
-        "OpenCode" => Some("https://tokscale.ai/assets/logos/opencode.png"),
-        "Claude Code" => Some("https://tokscale.ai/assets/logos/claude.jpg"),
-        "Codex CLI" => Some("https://tokscale.ai/assets/logos/openai.jpg"),
-        "Copilot CLI" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg",
-        ),
-        "Gemini CLI" => Some("https://tokscale.ai/assets/logos/gemini.png"),
-        "Cursor IDE" => Some("https://tokscale.ai/assets/logos/cursor.jpg"),
-        "Amp" => Some("https://tokscale.ai/assets/logos/amp.png"),
-        "Codebuff" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png",
-        ),
-        "Droid" => Some("https://tokscale.ai/assets/logos/droid.png"),
-        "OpenClaw" => Some("https://tokscale.ai/assets/logos/openclaw.png"),
-        "Hermes Agent" => Some("https://tokscale.ai/assets/logos/hermes.png"),
-        "Pi" => Some("https://tokscale.ai/assets/logos/pi.png"),
-        // OMP has no dedicated logo asset yet; keep id/display handling separate.
-        "OMP" => Some("https://tokscale.ai/assets/logos/pi.png"),
-        "Kimi" => Some("https://tokscale.ai/assets/logos/kimi.png"),
-        "Qwen CLI" => Some("https://tokscale.ai/assets/logos/qwen.png"),
-        "Roo Code" => Some("https://tokscale.ai/assets/logos/roocode.png"),
-        "Kilo" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
-        "Kilo CLI" => Some("https://tokscale.ai/assets/logos/kilocode.png"),
-        "Mux" => Some("https://tokscale.ai/assets/logos/mux.png"),
-        "Crush" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png",
-        ),
-        "Goose" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png",
-        ),
-        "Antigravity" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
-        ),
-        "Zed Agent" => Some(
-            "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
-        ),
-        _ => None,
-    }
+fn client_logo_url(client: &str) -> Option<&'static str> {
+    ClientId::from_str(client).map(|id| id.identity().logo_url)
 }
 
 fn provider_logo_url(provider: &str) -> Option<&'static str> {
@@ -1879,21 +1813,10 @@ fn truncate_username(username: &str, max_chars: usize) -> Option<String> {
 }
 
 fn default_clients() -> Vec<String> {
-    vec![
-        "opencode".to_string(),
-        "claude".to_string(),
-        "codex".to_string(),
-        "copilot".to_string(),
-        "gemini".to_string(),
-        ClientId::Cursor.as_str().to_string(),
-        "amp".to_string(),
-        "codebuff".to_string(),
-        "droid".to_string(),
-        "openclaw".to_string(),
-        "hermes".to_string(),
-        "pi".to_string(),
-        "omp".to_string(),
-    ]
+    ClientId::iter()
+        .filter(|client| client.submit_default())
+        .map(|client| client.as_str().to_string())
+        .collect()
 }
 
 #[cfg(test)]
@@ -2362,292 +2285,56 @@ mod tests {
         assert_eq!(date_diff_days("2024-01-01", "2024-02-01"), 31);
     }
 
-    // ========== client_display_name tests ==========
+    // ========== client catalog tests ==========
 
     #[test]
-    fn test_client_display_name_opencode() {
-        assert_eq!(client_display_name("opencode"), Some("OpenCode"));
+    fn client_display_name_uses_catalog_for_every_client() {
+        for client in ClientId::iter() {
+            assert_eq!(
+                client_display_name(client.as_str()),
+                Some(client.display_name())
+            );
+        }
     }
 
     #[test]
-    fn test_client_display_name_claude() {
-        assert_eq!(client_display_name("claude"), Some("Claude Code"));
-    }
-
-    #[test]
-    fn test_client_display_name_codex() {
-        assert_eq!(client_display_name("codex"), Some("Codex CLI"));
-    }
-
-    #[test]
-    fn test_client_display_name_copilot() {
-        assert_eq!(client_display_name("copilot"), Some("Copilot CLI"));
-    }
-
-    #[test]
-    fn test_client_display_name_gemini() {
-        assert_eq!(client_display_name("gemini"), Some("Gemini CLI"));
-    }
-
-    #[test]
-    fn test_client_display_name_cursor() {
-        assert_eq!(client_display_name("cursor"), Some("Cursor IDE"));
-    }
-
-    #[test]
-    fn test_client_display_name_amp() {
-        assert_eq!(client_display_name("amp"), Some("Amp"));
-    }
-
-    #[test]
-    fn test_client_display_name_droid() {
-        assert_eq!(client_display_name("droid"), Some("Droid"));
-    }
-
-    #[test]
-    fn test_client_display_name_openclaw() {
-        assert_eq!(client_display_name("openclaw"), Some("OpenClaw"));
-    }
-
-    #[test]
-    fn test_client_display_name_hermes() {
-        assert_eq!(client_display_name("hermes"), Some("Hermes Agent"));
-    }
-
-    #[test]
-    fn test_client_display_name_codebuff() {
-        assert_eq!(client_display_name("codebuff"), Some("Codebuff"));
-    }
-
-    #[test]
-    fn test_client_display_name_pi() {
-        assert_eq!(client_display_name("pi"), Some("Pi"));
-    }
-
-    #[test]
-    fn test_client_display_name_omp() {
-        assert_eq!(client_display_name("omp"), Some("OMP"));
-    }
-
-    #[test]
-    fn test_client_display_name_kilo() {
-        assert_eq!(client_display_name("kilo"), Some("Kilo CLI"));
-    }
-
-    #[test]
-    fn test_client_display_name_crush() {
-        assert_eq!(client_display_name("crush"), Some("Crush"));
-    }
-
-    #[test]
-    fn test_client_display_name_goose() {
-        assert_eq!(client_display_name("goose"), Some("Goose"));
-    }
-
-    #[test]
-    fn test_client_display_name_antigravity() {
-        assert_eq!(client_display_name("antigravity"), Some("Antigravity"));
-    }
-
-    #[test]
-    fn test_client_display_name_zed() {
-        assert_eq!(client_display_name("zed"), Some("Zed Agent"));
-    }
-
-    #[test]
-    fn test_client_display_name_unknown() {
+    fn client_display_name_rejects_unknown_ids() {
         assert_eq!(client_display_name("unknown"), None);
         assert_eq!(client_display_name(""), None);
-        assert_eq!(client_display_name("Claude"), None); // case-sensitive
+        assert_eq!(client_display_name("Claude"), None);
     }
 
     #[test]
-    fn test_default_clients_includes_hermes() {
+    fn default_clients_use_submit_policy_from_catalog() {
         let clients = default_clients();
-        assert!(clients.iter().any(|client| client == "hermes"));
+        let expected = ClientId::iter()
+            .filter(|client| client.submit_default())
+            .map(|client| client.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(clients, expected);
+        assert!(clients.iter().any(|client| client == "grok"));
+        assert!(clients.iter().any(|client| client == "kiro"));
+        assert!(!clients.iter().any(|client| client == "crush"));
+        assert!(!clients.iter().any(|client| client == "trae"));
+        assert!(!clients.iter().any(|client| client == "warp"));
     }
 
     #[test]
-    fn test_default_clients_includes_codebuff() {
-        let clients = default_clients();
-        assert!(clients.iter().any(|client| client == "codebuff"));
+    fn client_logo_url_uses_catalog_for_every_client() {
+        for client in ClientId::iter() {
+            assert_eq!(
+                client_logo_url(client.as_str()),
+                Some(client.identity().logo_url)
+            );
+        }
     }
 
     #[test]
-    fn test_default_clients_includes_copilot() {
-        let clients = default_clients();
-        assert!(clients.iter().any(|client| client == "copilot"));
-    }
-
-    #[test]
-    fn test_default_clients_includes_omp() {
-        let clients = default_clients();
-        assert!(clients.iter().any(|client| client == "omp"));
-    }
-
-    // ========== client_logo_url tests ==========
-
-    #[test]
-    fn test_client_logo_url_opencode() {
-        assert_eq!(
-            client_logo_url("OpenCode"),
-            Some("https://tokscale.ai/assets/logos/opencode.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_claude_code() {
-        assert_eq!(
-            client_logo_url("Claude Code"),
-            Some("https://tokscale.ai/assets/logos/claude.jpg")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_codex_cli() {
-        assert_eq!(
-            client_logo_url("Codex CLI"),
-            Some("https://tokscale.ai/assets/logos/openai.jpg")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_copilot_cli() {
-        assert_eq!(
-            client_logo_url("Copilot CLI"),
-            Some(
-                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg",
-            )
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_gemini_cli() {
-        assert_eq!(
-            client_logo_url("Gemini CLI"),
-            Some("https://tokscale.ai/assets/logos/gemini.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_cursor_ide() {
-        assert_eq!(
-            client_logo_url("Cursor IDE"),
-            Some("https://tokscale.ai/assets/logos/cursor.jpg")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_amp() {
-        assert_eq!(
-            client_logo_url("Amp"),
-            Some("https://tokscale.ai/assets/logos/amp.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_droid() {
-        assert_eq!(
-            client_logo_url("Droid"),
-            Some("https://tokscale.ai/assets/logos/droid.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_openclaw() {
-        assert_eq!(
-            client_logo_url("OpenClaw"),
-            Some("https://tokscale.ai/assets/logos/openclaw.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_hermes() {
-        assert_eq!(
-            client_logo_url("Hermes Agent"),
-            Some("https://tokscale.ai/assets/logos/hermes.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_codebuff() {
-        assert_eq!(
-            client_logo_url("Codebuff"),
-            Some(
-                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png"
-            )
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_pi() {
-        assert_eq!(
-            client_logo_url("Pi"),
-            Some("https://tokscale.ai/assets/logos/pi.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_omp() {
-        assert_eq!(
-            client_logo_url("OMP"),
-            Some("https://tokscale.ai/assets/logos/pi.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_kilo_cli() {
-        assert_eq!(
-            client_logo_url("Kilo CLI"),
-            Some("https://tokscale.ai/assets/logos/kilocode.png")
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_crush() {
-        assert_eq!(
-            client_logo_url("Crush"),
-            Some(
-                "https://raw.githubusercontent.com/junhoyeo/tokscale/6b483d0f2de3717266dec8faed13acd067f90ff3/.github/assets/client-crush.png"
-            )
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_goose() {
-        assert_eq!(
-            client_logo_url("Goose"),
-            Some(
-                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png"
-            )
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_antigravity() {
-        assert_eq!(
-            client_logo_url("Antigravity"),
-            Some(
-                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png"
-            )
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_zed() {
-        assert_eq!(
-            client_logo_url("Zed Agent"),
-            Some(
-                "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp"
-            )
-        );
-    }
-
-    #[test]
-    fn test_client_logo_url_unknown() {
+    fn client_logo_url_rejects_display_names_and_unknown_ids() {
+        assert_eq!(client_logo_url("OpenCode"), None);
         assert_eq!(client_logo_url("Unknown"), None);
         assert_eq!(client_logo_url(""), None);
-        assert_eq!(client_logo_url("opencode"), None); // case-sensitive: expects display name
     }
 
     // ========== provider_logo_url tests ==========

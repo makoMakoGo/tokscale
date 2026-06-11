@@ -1646,32 +1646,35 @@ mod tests {
 
     #[test]
     fn test_client_key() {
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenCode), '1');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Claude), '2');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codex), '3');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Copilot), 'c');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cursor), '4');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gemini), '5');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Amp), '6');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Droid), '7');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenClaw), '8');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Pi), '9');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Omp), 'm');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kimi), '0');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Qwen), 'w');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::RooCode), 'r');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::KiloCode), 'k');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mux), 'x');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), 'l');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), 'h');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hermes), 'e');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codebuff), 'b');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Antigravity), 'a');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zed), 'z');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), 'i');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), 'y');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), 'n');
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gjc), 'g');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenCode), Some('1'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Claude), Some('2'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codex), Some('3'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Copilot), Some('c'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cursor), Some('4'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gemini), Some('5'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Amp), Some('6'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Droid), Some('7'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenClaw), Some('8'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Pi), Some('9'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Omp), Some('m'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kimi), Some('0'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Qwen), Some('w'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::RooCode), Some('r'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::KiloCode), Some('k'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mux), Some('x'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), Some('l'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), Some('h'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hermes), Some('e'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codebuff), Some('b'));
+        assert_eq!(
+            crate::tui::client_ui::hotkey(ClientId::Antigravity),
+            Some('a')
+        );
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zed), Some('z'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), Some('i'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), Some('y'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), Some('n'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gjc), Some('g'));
     }
 
     #[test]

@@ -1254,7 +1254,7 @@ describe('POST /api/submit - Client-Level Merge', () => {
     });
 
     it('should handle day with no data for submitted client', () => {
-      // User submits --claude but a day only has opencode data
+      // User submits --client claude but a day only has opencode data
       const dayWithOnlyOpencode = {
         date: '2024-12-01',
         clients: [

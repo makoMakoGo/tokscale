@@ -69,10 +69,10 @@ pub struct Settings {
     /// Claude usage" without typing `--client opencode,claude` on every
     /// invocation.
     ///
-    /// Stored as canonical lowercase ids matching `ClientFilter::as_filter_str`
-    /// (e.g. `["opencode", "claude", "zed"]`). Unknown ids are dropped
-    /// silently at load time so a typo or stale entry never breaks tokscale.
-    /// CLI flags always override this list completely — no merging.
+    /// Stored as canonical lowercase ids matching `ClientId::as_str`
+    /// (e.g. `["opencode", "claude", "zed"]`). Validation against the
+    /// client catalog happens at the CLI/TUI boundary. CLI flags always
+    /// override this list completely.
     #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
     pub default_clients: Vec<String>,
     #[serde(default)]
@@ -160,8 +160,8 @@ pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> ScannerSetti
 }
 
 /// Returns the user's configured `defaultClients` list as raw lowercase
-/// ids. Validation against the live `ClientFilter` enum happens at the
-/// CLI boundary so this module stays independent of the CLI types.
+/// ids. Validation against the live client catalog happens at the CLI/TUI
+/// boundary so this module stays independent of CLI state.
 ///
 /// Returns an empty `Vec` when settings.json is missing, malformed, or
 /// the field is unset — never errors.

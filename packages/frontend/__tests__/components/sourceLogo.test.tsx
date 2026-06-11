@@ -1,8 +1,8 @@
 import { isValidElement, type ReactElement } from "react";
 import { describe, expect, it } from "vitest";
 import { SourceLogo } from "../../src/components/SourceLogo";
-import { SOURCE_LOGOS } from "../../src/lib/constants";
-import { SUPPORTED_CLIENT_TYPES } from "../../src/lib/types";
+import { getSourceLogo } from "../../src/lib/constants";
+import { BASE_CLIENT_TYPES } from "../../src/lib/clientRegistry.generated";
 
 type SourceLogoElementProps = {
   alt?: string;
@@ -20,11 +20,11 @@ function renderSourceLogo(sourceId: string): ReactElement<SourceLogoElementProps
 
 describe("SourceLogo", () => {
   it("uses the shared logo registry for every supported base client", () => {
-    for (const client of SUPPORTED_CLIENT_TYPES) {
+    for (const client of BASE_CLIENT_TYPES) {
       const element = renderSourceLogo(client);
 
       expect(element.type).not.toBe("span");
-      expect(element.props.src).toBe(SOURCE_LOGOS[client]);
+      expect(element.props.src).toBe(getSourceLogo(client));
       expect(element.props.alt).toBe(client);
       expect(element.props.className).toBe("source-logo");
     }
@@ -34,11 +34,11 @@ describe("SourceLogo", () => {
     const element = renderSourceLogo("CodeBuff");
 
     expect(element.type).not.toBe("span");
-    expect(element.props.src).toBe(SOURCE_LOGOS.codebuff);
+    expect(element.props.src).toBe(getSourceLogo("codebuff"));
     expect(element.props.alt).toBe("CodeBuff");
   });
 
-  it("falls back to text for unsupported variant ids", () => {
+  it("renders text for non-base variant ids", () => {
     const element = renderSourceLogo("cc-mirror/example");
 
     expect(element.type).toBe("span");

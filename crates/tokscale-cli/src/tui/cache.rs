@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokscale_core::{sessions, GroupBy, ModelPerformance};
 
-use crate::ClientFilter;
+use tokscale_core::ClientId;
 
 use super::data::{
     AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, GraphData,
@@ -617,11 +617,11 @@ pub enum CacheResult {
 /// Returns Fresh/Stale/Miss so the caller can decide whether to
 /// display cached data immediately and/or trigger a background refresh.
 ///
-/// `enabled_clients` is the unified `HashSet<ClientFilter>`. The cache key must
+/// `enabled_clients` is the unified `HashSet<ClientId>`. The cache key must
 /// match exactly; partial cache hits would show incomplete data before the
 /// background refresh.
 pub fn load_cache(
-    enabled_clients: &HashSet<ClientFilter>,
+    enabled_clients: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
     minutely_enabled: bool,
@@ -709,12 +709,12 @@ pub fn load_cache(
 
 /// Determine whether the cached client key exactly matches the current TUI request.
 fn cache_clients_match_exact(
-    enabled_clients: &HashSet<ClientFilter>,
+    enabled_clients: &HashSet<ClientId>,
     cached_clients: &[String],
 ) -> bool {
     let enabled: HashSet<&str> = enabled_clients
         .iter()
-        .map(ClientFilter::as_filter_str)
+        .map(|client| client.as_str())
         .collect();
     let cached: HashSet<&str> = cached_clients.iter().map(String::as_str).collect();
 
@@ -726,7 +726,7 @@ fn cache_clients_match_exact(
 /// The on-disk cache key stores the enabled client ids.
 pub fn save_cached_data(
     data: &UsageData,
-    enabled_clients: &HashSet<ClientFilter>,
+    enabled_clients: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
 ) -> anyhow::Result<()> {
@@ -740,7 +740,7 @@ pub fn save_cached_data(
 
     let mut clients_vec: Vec<String> = enabled_clients
         .iter()
-        .map(|f| f.as_filter_str().to_string())
+        .map(|client| client.as_str().to_string())
         .collect();
     // Sort so the cache key is deterministic across runs / HashSet
     // iteration order — otherwise unrelated runs would invalidate each
@@ -803,7 +803,7 @@ mod tests {
     use std::{env, fs};
     use tempfile::TempDir;
 
-    fn make_filters(filters: &[ClientFilter]) -> HashSet<ClientFilter> {
+    fn make_filters(filters: &[ClientId]) -> HashSet<ClientId> {
         filters.iter().copied().collect()
     }
 
@@ -864,18 +864,14 @@ mod tests {
 
     #[test]
     fn test_exact_match() {
-        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Opencode]);
+        let enabled = make_filters(&[ClientId::Claude, ClientId::OpenCode]);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert!(cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
     fn test_new_client_added_is_not_exact_match() {
-        let enabled = make_filters(&[
-            ClientFilter::Claude,
-            ClientFilter::Opencode,
-            ClientFilter::Qwen,
-        ]);
+        let enabled = make_filters(&[ClientId::Claude, ClientId::OpenCode, ClientId::Qwen]);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert!(!cache_clients_match_exact(&enabled, &cached));
     }
@@ -883,28 +879,28 @@ mod tests {
     #[test]
     fn test_mismatch_superset() {
         // Cache has more clients than enabled (user narrowed filter)
-        let enabled = make_filters(&[ClientFilter::Claude]);
+        let enabled = make_filters(&[ClientId::Claude]);
         let cached = vec!["claude".to_string(), "opencode".to_string()];
         assert!(!cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
     fn test_mismatch_disjoint() {
-        let enabled = make_filters(&[ClientFilter::Claude]);
+        let enabled = make_filters(&[ClientId::Claude]);
         let cached = vec!["opencode".to_string()];
         assert!(!cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
     fn test_new_client_is_not_exact_match() {
-        let enabled = make_filters(&[ClientFilter::Claude, ClientFilter::Qwen]);
+        let enabled = make_filters(&[ClientId::Claude, ClientId::Qwen]);
         let cached = vec!["claude".to_string()];
         assert!(!cache_clients_match_exact(&enabled, &cached));
     }
 
     #[test]
     fn test_empty_cache_is_not_exact_match() {
-        let enabled = make_filters(&[ClientFilter::Claude]);
+        let enabled = make_filters(&[ClientId::Claude]);
         let cached: Vec<String> = vec![];
         assert!(!cache_clients_match_exact(&enabled, &cached));
     }
@@ -938,7 +934,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -993,7 +989,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1019,7 +1015,7 @@ mod tests {
             env::set_var("HOME", temp_dir.path());
         }
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         let filtered_scope = CacheReportScope::new(
             Some("2026-05-01".to_string()),
             Some("2026-05-07".to_string()),
@@ -1063,7 +1059,7 @@ mod tests {
             env::set_var("HOME", temp_dir.path());
         }
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         let scope = CacheReportScope::default();
         save_cached_data(&UsageData::default(), &clients, &GroupBy::Model, &scope).unwrap();
 
@@ -1132,7 +1128,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1205,7 +1201,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1332,7 +1328,7 @@ mod tests {
         cached["timestamp"] = serde_json::Value::from(fresh_timestamp_ms());
         fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude, ClientFilter::Cursor]);
+        let clients = make_filters(&[ClientId::Claude, ClientId::Cursor]);
         match load_cache(
             &clients,
             &GroupBy::Model,
@@ -1367,7 +1363,7 @@ mod tests {
             env::set_var("HOME", temp_dir.path());
         }
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         save_cached_data(
             &UsageData::default(),
             &clients,
@@ -1456,7 +1452,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1529,7 +1525,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1583,7 +1579,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1644,7 +1640,7 @@ mod tests {
         )
         .unwrap();
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
             load_cache(
                 &clients,
@@ -1707,7 +1703,7 @@ mod tests {
         .unwrap();
         assert!(fs::metadata(&cache_path).is_ok());
 
-        let clients = make_filters(&[ClientFilter::Claude]);
+        let clients = make_filters(&[ClientId::Claude]);
         save_cached_data(
             &UsageData::default(),
             &clients,
@@ -1770,7 +1766,7 @@ mod tests {
             env::remove_var("TOKSCALE_CONFIG_DIR");
         }
 
-        let enabled = ClientFilter::default_set();
+        let enabled = ClientId::iter().collect();
         let scope = CacheReportScope::default();
 
         // Write with the canonical key (mirrors what `run_warm_tui_cache`
@@ -1820,7 +1816,7 @@ mod tests {
             env::remove_var("TOKSCALE_CONFIG_DIR");
         }
 
-        let enabled = ClientFilter::default_set();
+        let enabled = ClientId::iter().collect();
         let scope = CacheReportScope::default();
 
         // Pre-fix: writer used `GroupBy::default()`.

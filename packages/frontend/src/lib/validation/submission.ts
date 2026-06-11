@@ -8,7 +8,7 @@
 
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { SUPPORTED_CLIENT_TYPES } from "../types";
+import { BASE_CLIENT_TYPES } from "../clientRegistry.generated";
 
 // ============================================================================
 // SCHEMAS
@@ -47,7 +47,7 @@ const CcMirrorSourceSchema = z.string().regex(
   /^cc-mirror\/[a-z0-9][a-z0-9._-]{0,95}$/,
   "Invalid cc-mirror variant client id"
 );
-const SourceSchema = z.union([z.enum(SUPPORTED_CLIENT_TYPES), CcMirrorSourceSchema]);
+const SourceSchema = z.union([z.enum(BASE_CLIENT_TYPES), CcMirrorSourceSchema]);
 
 const ClientContributionSchema = z.object({
   client: SourceSchema,

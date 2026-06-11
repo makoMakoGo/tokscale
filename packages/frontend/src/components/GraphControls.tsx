@@ -3,7 +3,7 @@
 import styled from "styled-components";
 import type { ViewMode, ColorPaletteName, ClientType, GraphColorPalette } from "@/lib/types";
 import { getPaletteNames, colorPalettes } from "@/lib/themes";
-import { SOURCE_DISPLAY_NAMES, SOURCE_LOGOS } from "@/lib/constants";
+import { getSourceDisplayName, getSourceLogo } from "@/lib/constants";
 import { formatTokenCount } from "@/lib/utils";
 
 interface GraphControlsProps {
@@ -217,36 +217,6 @@ const ActionButton = styled.button`
   }
 `;
 
-const LegendContainer = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-
-  @media (max-width: 560px) {
-    margin-left: 0;
-    width: 100%;
-    justify-content: flex-end;
-    min-width: 0;
-  }
-`;
-
-const LegendText = styled.span`
-  font-size: 12px;
-  font-weight: 500;
-`;
-
-const LegendBox = styled.div`
-  width: 12px;
-  height: 12px;
-  border-radius: 6px;
-  transition: transform 200ms;
-  
-  &:hover {
-    transform: scale(1.1);
-  }
-`;
-
 export function GraphControls({
   view,
   onViewChange,
@@ -353,26 +323,28 @@ export function GraphControls({
             <FilterLabel id="client-filter-label" style={{ color: "var(--color-fg-muted)" }}>Filter:</FilterLabel>
             {availableClients.map((client) => {
               const isSelected = clientFilter.length === 0 || clientFilter.includes(client);
+              const displayName = getSourceDisplayName(client);
+              const logo = getSourceLogo(client);
               return (
                 <SourceFilterButton
                   key={client}
                   $isSelected={isSelected}
                   onClick={() => handleClientToggle(client)}
                   aria-pressed={isSelected}
-                  aria-label={`Filter by ${SOURCE_DISPLAY_NAMES[client] || client}`}
+                  aria-label={`Filter by ${displayName}`}
                   style={{
                     backgroundColor: isSelected ? `${palette.grade3}30` : "transparent",
                     color: "var(--color-fg-default)",
                     borderColor: isSelected ? palette.grade3 : "var(--color-border-default)",
                   }}
                 >
-                  {SOURCE_LOGOS[client] && (
+                  {logo && (
                     <SourceLogo
-                      src={SOURCE_LOGOS[client]}
-                      alt={`${SOURCE_DISPLAY_NAMES[client] || client} logo`}
+                      src={logo}
+                      alt={`${displayName} logo`}
                     />
                   )}
-                  {SOURCE_DISPLAY_NAMES[client] || client}
+                  {displayName}
                 </SourceFilterButton>
               );
             })}

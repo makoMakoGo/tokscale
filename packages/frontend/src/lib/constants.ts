@@ -1,4 +1,5 @@
-import type { ClientType } from "./types";
+import { BASE_CLIENT_TYPES, CLIENT_REGISTRY } from "./clientRegistry.generated";
+import type { BaseClientType } from "./clientRegistry.generated";
 
 // 2D Canvas
 export const BOX_WIDTH = 10;
@@ -26,109 +27,51 @@ export const DAY_LABELS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 export const MONTH_LABELS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // Source configuration
-export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
-  opencode: "OpenCode",
-  claude: "Claude Code",
-  codex: "Codex CLI",
-  copilot: "Copilot",
-  gemini: "Gemini CLI",
-  cursor: "Cursor",
-  amp: "Amp",
-  codebuff: "Codebuff",
-  droid: "Droid",
-  openclaw: "OpenClaw",
-  hermes: "Hermes Agent",
-  pi: "Pi",
-  omp: "OMP",
-  kimi: "Kimi",
-  qwen: "Qwen",
-  roocode: "Roo Code",
-  kilocode: "KiloCode",
-  kilo: "Kilo CLI",
-  mux: "Mux",
-  kiro: "Kiro",
-  crush: "Crush",
-  goose: "Goose",
-  antigravity: "Antigravity",
-  zed: "Zed Agent",
-  trae: "Trae",
-  warp: "Warp",
-  cline: "Cline",
-  gjc: "Gajae Code",
-  grok: "Grok Build",
-};
+export const SOURCE_DISPLAY_NAMES = Object.fromEntries(
+  BASE_CLIENT_TYPES.map((client) => [client, CLIENT_REGISTRY[client].displayName])
+) as Record<BaseClientType, string>;
 
-// Client logos from GitHub CDN (public repo)
-const GITHUB_CDN_BASE = "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets";
-export const SOURCE_LOGOS: Record<ClientType, string> = {
-  opencode: `${GITHUB_CDN_BASE}/client-opencode.png`,
-  claude: `${GITHUB_CDN_BASE}/client-claude.jpg`,
-  codex: `${GITHUB_CDN_BASE}/client-openai.jpg`,
-  copilot: `${GITHUB_CDN_BASE}/client-copilot.jpg`,
-  gemini: `${GITHUB_CDN_BASE}/client-gemini.png`,
-  cursor: `${GITHUB_CDN_BASE}/client-cursor.jpg`,
-  amp: `${GITHUB_CDN_BASE}/client-amp.png`,
-  codebuff: `${GITHUB_CDN_BASE}/client-codebuff.png`,
-  droid: `${GITHUB_CDN_BASE}/client-droid.png`,
-  openclaw: `${GITHUB_CDN_BASE}/client-openclaw.jpg`,
-  hermes: `${GITHUB_CDN_BASE}/client-hermes.png`,
-  pi: `${GITHUB_CDN_BASE}/client-pi.png`,
-  // OMP has no dedicated logo asset yet; only the image is shared with Pi.
-  omp: `${GITHUB_CDN_BASE}/client-pi.png`,
-  kimi: `${GITHUB_CDN_BASE}/client-kimi.png`,
-  qwen: `${GITHUB_CDN_BASE}/client-qwen.png`,
-  roocode: `${GITHUB_CDN_BASE}/client-roocode.png`,
-  kilocode: `${GITHUB_CDN_BASE}/client-kilocode.png`,
-  kilo: `${GITHUB_CDN_BASE}/client-kilocode.png`,
-  mux: `${GITHUB_CDN_BASE}/client-mux.png`,
-  kiro: "https://github.com/kirodotdev.png",
-  crush: `${GITHUB_CDN_BASE}/client-crush.png`,
-  goose: `${GITHUB_CDN_BASE}/client-goose.png`,
-  antigravity: `${GITHUB_CDN_BASE}/client-antigravity.png`,
-  zed: `${GITHUB_CDN_BASE}/client-zed.webp`,
-  trae: `${GITHUB_CDN_BASE}/client-trae.png`,
-  warp: "https://github.com/warpdotdev.png",
-  cline: "https://github.com/cline.png",
-  gjc: "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
-  grok: "https://github.com/xai-org.png",
-};
+export const SOURCE_LOGOS = Object.fromEntries(
+  BASE_CLIENT_TYPES.map((client) => [client, CLIENT_REGISTRY[client].logo])
+) as Record<BaseClientType, string>;
 
-export const SOURCE_COLORS: Record<ClientType, string> = {
-  opencode: "#00A8E8",
-  claude: "#f97316",
-  codex: "#3b82f6",
-  copilot: "#24292F",
-  gemini: "#8b5cf6",
-  cursor: "#22c55e",
-  amp: "#EC4899",
-  codebuff: "#7C3AED",
-  droid: "#1F1D1C",
-  openclaw: "#EF4444",
-  hermes: "#FFD700",
-  pi: "#6366F1",
-  // Match Pi's palette while OMP remains a separate client id/display label.
-  omp: "#6366F1",
-  kimi: "#8B5CF6",
-  qwen: "#1A73E8",
-  roocode: "#10B981",
-  kilocode: "#F59E0B",
-  kilo: "#F59E0B",
-  mux: "#171717",
-  kiro: "#00A67D",
-  crush: "#DC2626",
-  goose: "#64B4DC",
-  antigravity: "#6366F1",
-  zed: "#084CCF",
-  trae: "#00BFA5",
-  warp: "#01A4A4",
-  cline: "#5B8DEF",
-  gjc: "#FF6B6B",
-  grok: "#171717",
-};
+export const SOURCE_COLORS = Object.fromEntries(
+  BASE_CLIENT_TYPES.map((client) => [client, CLIENT_REGISTRY[client].color])
+) as Record<BaseClientType, string>;
 
-export const SOURCE_TEXT_COLORS: Partial<Record<ClientType, string>> = {
-  droid: "#FFFFFF",
-};
+export const SOURCE_TEXT_COLORS = Object.fromEntries(
+  BASE_CLIENT_TYPES.flatMap((client) => {
+    const textColor = CLIENT_REGISTRY[client].textColor;
+    return textColor === undefined ? [] : [[client, textColor]];
+  })
+) as Partial<Record<BaseClientType, string>>;
+
+export function getBaseClientType(sourceId: string): BaseClientType | null {
+  const normalized = sourceId.toLowerCase();
+  return Object.prototype.hasOwnProperty.call(CLIENT_REGISTRY, normalized)
+    ? (normalized as BaseClientType)
+    : null;
+}
+
+export function getSourceDisplayName(sourceId: string): string {
+  const client = getBaseClientType(sourceId);
+  return client === null ? sourceId : CLIENT_REGISTRY[client].displayName;
+}
+
+export function getSourceLogo(sourceId: string): string | undefined {
+  const client = getBaseClientType(sourceId);
+  return client === null ? undefined : CLIENT_REGISTRY[client].logo;
+}
+
+export function getSourceColor(sourceId: string): string | undefined {
+  const client = getBaseClientType(sourceId);
+  return client === null ? undefined : CLIENT_REGISTRY[client].color;
+}
+
+export function getSourceTextColor(sourceId: string): string | undefined {
+  const client = getBaseClientType(sourceId);
+  return client === null ? undefined : CLIENT_REGISTRY[client].textColor;
+}
 
 // Derived values
 export const CELL_SIZE = BOX_WIDTH + BOX_MARGIN;
