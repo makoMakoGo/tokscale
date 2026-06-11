@@ -92,236 +92,332 @@ impl LocalClientDef {
     }
 }
 
-pub const LOCAL_CLIENTS: [Option<LocalClientDef>; ClientId::COUNT] = [
-    Some(LocalClientDef {
-        root: PathRoot::XdgData,
-        relative_path: "opencode/storage/message",
-        pattern: "*.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".claude/projects",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::EnvVar {
-            var: "CODEX_HOME",
-            fallback_relative: ".codex",
+#[derive(Debug, Clone, Copy)]
+pub struct LocalClientEntry {
+    pub client: ClientId,
+    pub def: LocalClientDef,
+}
+
+pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
+    LocalClientEntry {
+        client: ClientId::OpenCode,
+        def: LocalClientDef {
+            root: PathRoot::XdgData,
+            relative_path: "opencode/storage/message",
+            pattern: "*.json",
+            headless: false,
+            parse_local: true,
         },
-        relative_path: "sessions",
-        pattern: "*.jsonl",
-        headless: true,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".config/tokscale/cursor-cache",
-        pattern: "usage*.csv",
-        headless: false,
-        parse_local: false,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::EnvVar {
-            var: "GEMINI_CLI_HOME",
-            fallback_relative: ".gemini",
+    },
+    LocalClientEntry {
+        client: ClientId::Claude,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".claude/projects",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
         },
-        relative_path: "tmp",
-        pattern: "*.json|*.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::XdgData,
-        relative_path: "amp/threads",
-        pattern: "T-*.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".factory/sessions",
-        pattern: "*.settings.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".openclaw/agents",
-        pattern: "*.jsonl*",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".pi/agent/sessions",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".omp/agent/sessions",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::EnvVar {
-            var: "KIMI_CODE_HOME",
-            fallback_relative: ".kimi-code",
+    },
+    LocalClientEntry {
+        client: ClientId::Codex,
+        def: LocalClientDef {
+            root: PathRoot::EnvVar {
+                var: "CODEX_HOME",
+                fallback_relative: ".codex",
+            },
+            relative_path: "sessions",
+            pattern: "*.jsonl",
+            headless: true,
+            parse_local: true,
         },
-        relative_path: "sessions",
-        pattern: "wire.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".qwen/projects",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
-        pattern: "ui_messages.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
-        pattern: "ui_messages.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".mux/sessions",
-        pattern: "session-usage.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::XdgData,
-        relative_path: "kilo/kilo.db",
-        pattern: "kilo.db",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::XdgData,
-        relative_path: "crush/projects.json",
-        pattern: "projects.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::EnvVar {
-            var: "HERMES_HOME",
-            fallback_relative: ".hermes",
+    },
+    LocalClientEntry {
+        client: ClientId::Cursor,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".config/tokscale/cursor-cache",
+            pattern: "usage*.csv",
+            headless: false,
+            parse_local: false,
         },
-        relative_path: "state.db",
-        pattern: "state.db",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".copilot/otel",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::XdgData,
-        relative_path: "goose/sessions/sessions.db",
-        pattern: "sessions.db",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::EnvVar {
-            var: "CODEBUFF_DATA_DIR",
-            fallback_relative: ".config/manicode",
+    },
+    LocalClientEntry {
+        client: ClientId::Gemini,
+        def: LocalClientDef {
+            root: PathRoot::EnvVar {
+                var: "GEMINI_CLI_HOME",
+                fallback_relative: ".gemini",
+            },
+            relative_path: "tmp",
+            pattern: "*.json|*.jsonl",
+            headless: false,
+            parse_local: true,
         },
-        relative_path: "projects",
-        pattern: "chat-messages.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Config,
-        relative_path: "antigravity-cache/sessions",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::XdgData,
-        relative_path: "zed/threads/threads.db",
-        pattern: "threads.db",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".kiro/sessions/cli",
-        pattern: "*.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Config,
-        relative_path: "trae-cache/sessions",
-        pattern: "*.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Config,
-        relative_path: "warp-cache",
-        pattern: "usage*.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::Home,
-        relative_path: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
-        pattern: "ui_messages.json",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::EnvVar {
-            var: "GJC_CODING_AGENT_DIR",
-            fallback_relative: ".gjc/agent",
+    },
+    LocalClientEntry {
+        client: ClientId::Amp,
+        def: LocalClientDef {
+            root: PathRoot::XdgData,
+            relative_path: "amp/threads",
+            pattern: "T-*.json",
+            headless: false,
+            parse_local: true,
         },
-        relative_path: "sessions",
-        pattern: "*.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
-    Some(LocalClientDef {
-        root: PathRoot::EnvVar {
-            var: "GROK_HOME",
-            fallback_relative: ".grok",
+    },
+    LocalClientEntry {
+        client: ClientId::Droid,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".factory/sessions",
+            pattern: "*.settings.json",
+            headless: false,
+            parse_local: true,
         },
-        relative_path: "sessions",
-        pattern: "updates.jsonl",
-        headless: false,
-        parse_local: true,
-    }),
+    },
+    LocalClientEntry {
+        client: ClientId::OpenClaw,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".openclaw/agents",
+            pattern: "*.jsonl*",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Pi,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".pi/agent/sessions",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Omp,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".omp/agent/sessions",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Kimi,
+        def: LocalClientDef {
+            root: PathRoot::EnvVar {
+                var: "KIMI_CODE_HOME",
+                fallback_relative: ".kimi-code",
+            },
+            relative_path: "sessions",
+            pattern: "wire.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Qwen,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".qwen/projects",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::RooCode,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
+            pattern: "ui_messages.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::KiloCode,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
+            pattern: "ui_messages.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Mux,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".mux/sessions",
+            pattern: "session-usage.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Kilo,
+        def: LocalClientDef {
+            root: PathRoot::XdgData,
+            relative_path: "kilo/kilo.db",
+            pattern: "kilo.db",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Crush,
+        def: LocalClientDef {
+            root: PathRoot::XdgData,
+            relative_path: "crush/projects.json",
+            pattern: "projects.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Hermes,
+        def: LocalClientDef {
+            root: PathRoot::EnvVar {
+                var: "HERMES_HOME",
+                fallback_relative: ".hermes",
+            },
+            relative_path: "state.db",
+            pattern: "state.db",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Copilot,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".copilot/otel",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Goose,
+        def: LocalClientDef {
+            root: PathRoot::XdgData,
+            relative_path: "goose/sessions/sessions.db",
+            pattern: "sessions.db",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Codebuff,
+        def: LocalClientDef {
+            root: PathRoot::EnvVar {
+                var: "CODEBUFF_DATA_DIR",
+                fallback_relative: ".config/manicode",
+            },
+            relative_path: "projects",
+            pattern: "chat-messages.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Antigravity,
+        def: LocalClientDef {
+            root: PathRoot::Config,
+            relative_path: "antigravity-cache/sessions",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Zed,
+        def: LocalClientDef {
+            root: PathRoot::XdgData,
+            relative_path: "zed/threads/threads.db",
+            pattern: "threads.db",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Kiro,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".kiro/sessions/cli",
+            pattern: "*.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Trae,
+        def: LocalClientDef {
+            root: PathRoot::Config,
+            relative_path: "trae-cache/sessions",
+            pattern: "*.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Warp,
+        def: LocalClientDef {
+            root: PathRoot::Config,
+            relative_path: "warp-cache",
+            pattern: "usage*.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Cline,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
+            pattern: "ui_messages.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Gjc,
+        def: LocalClientDef {
+            root: PathRoot::EnvVar {
+                var: "GJC_CODING_AGENT_DIR",
+                fallback_relative: ".gjc/agent",
+            },
+            relative_path: "sessions",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::Grok,
+        def: LocalClientDef {
+            root: PathRoot::EnvVar {
+                var: "GROK_HOME",
+                fallback_relative: ".grok",
+            },
+            relative_path: "sessions",
+            pattern: "updates.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
 ];
 
 impl ClientId {
     pub fn local_def(self) -> Option<&'static LocalClientDef> {
-        LOCAL_CLIENTS[self as usize].as_ref()
+        LOCAL_CLIENTS
+            .iter()
+            .find(|entry| entry.client == self)
+            .map(|entry| &entry.def)
     }
 
     pub fn file_pattern(self) -> Option<&'static str> {
@@ -356,16 +452,12 @@ mod tests {
     }
 
     #[test]
-    fn local_client_table_matches_client_count() {
-        assert_eq!(LOCAL_CLIENTS.len(), ClientId::COUNT);
-    }
+    fn local_client_defs_are_keyed_and_cover_current_catalog() {
+        let keyed: HashSet<ClientId> = LOCAL_CLIENTS.iter().map(|entry| entry.client).collect();
+        let catalog: HashSet<ClientId> = ClientId::iter().collect();
 
-    #[test]
-    fn local_client_defs_are_keyed_by_valid_client_ids() {
-        let keyed: HashSet<ClientId> = ClientId::iter()
-            .filter(|client| client.local_def().is_some())
-            .collect();
-        assert_eq!(keyed.len(), LOCAL_CLIENTS.iter().flatten().count());
+        assert_eq!(keyed.len(), LOCAL_CLIENTS.len());
+        assert_eq!(keyed, catalog);
     }
 
     #[test]

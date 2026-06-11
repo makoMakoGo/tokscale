@@ -11,7 +11,7 @@ struct CatalogEntry {
     id: String,
     display_name: String,
     short_name: String,
-    hotkey: Option<String>,
+    hotkey: String,
     submit_default: bool,
     logo: String,
     color: String,
@@ -83,22 +83,20 @@ fn validate_catalog(entries: &[CatalogEntry]) {
                 entry.id
             );
         }
-        if let Some(hotkey) = &entry.hotkey {
-            let mut chars = hotkey.chars();
-            let Some(ch) = chars.next() else {
-                panic!("hotkey must not be empty for {}", entry.id);
-            };
-            assert!(
-                chars.next().is_none(),
-                "hotkey must be one char for {}",
-                entry.id
-            );
-            assert!(
-                hotkeys.insert(ch),
-                "duplicate hotkey {} in client catalog",
-                ch
-            );
-        }
+        let mut chars = entry.hotkey.chars();
+        let Some(ch) = chars.next() else {
+            panic!("hotkey must not be empty for {}", entry.id);
+        };
+        assert!(
+            chars.next().is_none(),
+            "hotkey must be one char for {}",
+            entry.id
+        );
+        assert!(
+            hotkeys.insert(ch),
+            "duplicate hotkey {} in client catalog",
+            ch
+        );
     }
 }
 
@@ -138,7 +136,7 @@ fn generate_rust(entries: &[CatalogEntry]) -> String {
                 rust_string(&entry.id),
                 rust_string(&entry.display_name),
                 rust_string(&entry.short_name),
-                rust_hotkey(entry.hotkey.as_deref()),
+                rust_hotkey(&entry.hotkey),
                 entry.submit_default,
                 rust_string(&entry.logo),
                 rust_string(&entry.color),
@@ -222,15 +220,10 @@ fn rust_option_string(value: Option<&str>) -> String {
     }
 }
 
-fn rust_hotkey(value: Option<&str>) -> String {
-    match value {
-        Some(value) => {
-            let ch = value
-                .chars()
-                .next()
-                .expect("catalog validation rejects empty hotkeys");
-            format!("Some({ch:?})")
-        }
-        None => "None".to_string(),
-    }
+fn rust_hotkey(value: &str) -> String {
+    let ch = value
+        .chars()
+        .next()
+        .expect("catalog validation rejects empty hotkeys");
+    format!("Some({ch:?})")
 }

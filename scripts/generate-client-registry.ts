@@ -7,7 +7,7 @@ type CatalogEntry = {
   id: string;
   displayName: string;
   shortName: string;
-  hotkey?: string;
+  hotkey: string;
   submitDefault: boolean;
   logo: string;
   color: string;
@@ -51,6 +51,7 @@ function readCatalog(): CatalogEntry[] {
     assertString(record.id, "id", index);
     assertString(record.displayName, "displayName", index);
     assertString(record.shortName, "shortName", index);
+    assertString(record.hotkey, "hotkey", index);
     assertBoolean(record.submitDefault, "submitDefault", index);
     assertString(record.logo, "logo", index);
     assertString(record.color, "color", index);
@@ -63,8 +64,8 @@ function readCatalog(): CatalogEntry[] {
     }
     ids.add(record.id);
 
-    if (record.hotkey !== undefined) {
-      assertString(record.hotkey, "hotkey", index);
+    if ([...record.hotkey].length !== 1) {
+      throw new Error(`client-catalog[${index}].hotkey must be one character`);
     }
     if (record.textColor !== undefined) {
       assertString(record.textColor, "textColor", index);
