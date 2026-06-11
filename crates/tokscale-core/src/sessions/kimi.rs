@@ -30,6 +30,8 @@ struct WireLine {
     time: Option<i64>,
     model: Option<String>,
     usage: Option<TokenUsage>,
+    #[serde(rename = "profileName")]
+    profile_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +49,9 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let aliases = read_model_aliases(path);
     let session_id = extract_session_id(path);
-    let agent = extract_agent_id(path);
+    let agent_id = extract_agent_id(path);
+    let agent_instance = agent_id.map(|agent_id| format!("{session_id}:{agent_id}"));
+    let mut agent = None;
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
     let reader = BufReader::new(file);
@@ -69,6 +73,13 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
             Ok(wl) => wl,
             Err(_) => continue,
         };
+
+        if wire_line.line_type.as_deref() == Some("config.update") {
+            if let Some(profile_name) = wire_line.profile_name.as_deref() {
+                agent = normalize_kimi_agent_label(profile_name);
+            }
+            continue;
+        }
 
         if wire_line.line_type.as_deref() != Some("usage.record") {
             continue;
@@ -94,7 +105,7 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
         }
 
         let (provider_id, model_id) = resolve_model(raw_model, &aliases);
-        messages.push(UnifiedMessage::new_with_agent(
+        let mut message = UnifiedMessage::new_with_agent(
             CLIENT_ID,
             model_id,
             provider_id,
@@ -109,10 +120,25 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
             },
             0.0,
             agent.clone(),
-        ));
+        );
+        if agent.is_some() {
+            message.set_agent_instance(agent_instance.clone());
+        }
+        messages.push(message);
     }
 
     messages
+}
+
+fn normalize_kimi_agent_label(profile_name: &str) -> Option<String> {
+    let label = match profile_name.trim().to_ascii_lowercase().as_str() {
+        "agent" => "Kimi Agent",
+        "coder" => "Kimi Coder",
+        "explore" => "Kimi Explore",
+        "plan" => "Kimi Plan",
+        _ => return None,
+    };
+    Some(label.to_string())
 }
 
 fn resolve_model(raw_model: &str, aliases: &HashMap<String, ModelAlias>) -> (String, String) {
@@ -197,18 +223,22 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn write_wire(home: &Path, content: &str) -> PathBuf {
+    fn write_wire_for_agent(home: &Path, agent_id: &str, content: &str) -> PathBuf {
         let wire = home
             .join("sessions")
             .join("wd_project_abc123")
             .join("session_123")
             .join("agents")
-            .join("main")
+            .join(agent_id)
             .join("wire.jsonl");
         std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
         let mut file = std::fs::File::create(&wire).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         wire
+    }
+
+    fn write_wire(home: &Path, content: &str) -> PathBuf {
+        write_wire_for_agent(home, "main", content)
     }
 
     fn write_config(home: &Path, content: &str) {
@@ -229,6 +259,7 @@ model = "gpt-5.5"
         let wire = write_wire(
             dir.path(),
             r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"config.update","profileName":"agent"}
 {"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":19591,"output":39,"inputCacheRead":1024,"inputCacheCreation":0}}"#,
         );
 
@@ -239,12 +270,94 @@ model = "gpt-5.5"
         assert_eq!(messages[0].provider_id, "openai-pro");
         assert_eq!(messages[0].model_id, "gpt-5.5");
         assert_eq!(messages[0].session_id, "session_123");
-        assert_eq!(messages[0].agent.as_deref(), Some("main"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Kimi Agent"));
+        assert_eq!(
+            messages[0].agent_instance.as_deref(),
+            Some("session_123:main")
+        );
         assert_eq!(messages[0].timestamp, 1780942009099);
         assert_eq!(messages[0].tokens.input, 19591);
         assert_eq!(messages[0].tokens.output, 39);
         assert_eq!(messages[0].tokens.cache_read, 1024);
         assert_eq!(messages[0].tokens.cache_write, 0);
+    }
+
+    #[test]
+    fn parses_subagent_profile_name_as_stable_agent_label() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire_for_agent(
+            dir.path(),
+            "agent-0",
+            r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"config.update","profileName":"explore"}
+{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":10,"output":20,"inputCacheRead":30,"inputCacheCreation":40}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("Kimi Explore"));
+        assert_eq!(
+            messages[0].agent_instance.as_deref(),
+            Some("session_123:agent-0")
+        );
+    }
+
+    #[test]
+    fn leaves_agent_unset_without_profile_name() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire_for_agent(
+            dir.path(),
+            "main",
+            r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":10,"output":20,"inputCacheRead":30,"inputCacheCreation":40}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent, None);
+        assert_eq!(messages[0].agent_instance, None);
+    }
+
+    #[test]
+    fn keeps_agent_across_config_updates_without_profile_name() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire_for_agent(
+            dir.path(),
+            "main",
+            r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"config.update","profileName":"agent"}
+{"type":"config.update","modelAlias":"openai-pro/gpt-5.5","thinkingLevel":"xhigh"}
+{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":10,"output":20,"inputCacheRead":30,"inputCacheCreation":40}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("Kimi Agent"));
+        assert_eq!(
+            messages[0].agent_instance.as_deref(),
+            Some("session_123:main")
+        );
+    }
+
+    #[test]
+    fn leaves_agent_unset_for_unknown_profile_name() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire_for_agent(
+            dir.path(),
+            "agent-0",
+            r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"config.update","profileName":"one-off-specialist"}
+{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":10,"output":20,"inputCacheRead":30,"inputCacheCreation":40}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent, None);
+        assert_eq!(messages[0].agent_instance, None);
     }
 
     #[test]

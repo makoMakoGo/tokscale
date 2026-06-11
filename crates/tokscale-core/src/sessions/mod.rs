@@ -51,6 +51,8 @@ pub struct UnifiedMessage {
     #[serde(default = "default_message_count")]
     pub message_count: i32,
     pub agent: Option<String>,
+    #[serde(default)]
+    pub agent_instance: Option<String>,
     pub dedup_key: Option<String>,
     /// True if this message is the first assistant response after a user turn.
     /// Used to count user interaction turns (as opposed to API message count).
@@ -293,6 +295,7 @@ impl UnifiedMessage {
             duration_ms: None,
             message_count: default_message_count(),
             agent,
+            agent_instance: None,
             dedup_key,
             is_turn_start: false,
         }
@@ -305,6 +308,10 @@ impl UnifiedMessage {
     ) {
         self.workspace_key = workspace_key;
         self.workspace_label = workspace_label;
+    }
+
+    pub fn set_agent_instance(&mut self, agent_instance: Option<String>) {
+        self.agent_instance = agent_instance;
     }
 
     pub(crate) fn refresh_derived_fields(&mut self) {

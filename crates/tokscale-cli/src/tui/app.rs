@@ -1211,10 +1211,15 @@ impl App {
                 .get_sorted_models()
                 .get(self.selected_index)
                 .map(|m| format!("{}: {} tokens, ${:.4}", m.model, m.tokens.total(), m.cost)),
-            Tab::Agents => self
-                .get_sorted_agents()
-                .get(self.selected_index)
-                .map(|a| format!("{}: {} tokens, ${:.4}", a.agent, a.tokens.total(), a.cost)),
+            Tab::Agents => self.get_sorted_agents().get(self.selected_index).map(|a| {
+                format!(
+                    "{}: {} tokens, ${:.4}, {} instances",
+                    a.agent,
+                    a.tokens.total(),
+                    a.cost,
+                    a.instance_count
+                )
+            }),
             Tab::Daily if self.is_daily_detail_active() => self
                 .get_sorted_daily_detail_rows()
                 .get(self.selected_index)
@@ -2280,6 +2285,7 @@ mod tests {
                 },
                 cost: 3.0,
                 message_count: 1,
+                instance_count: 1,
             },
             AgentUsage {
                 agent: "reviewer".to_string(),
@@ -2293,6 +2299,7 @@ mod tests {
                 },
                 cost: 7.0,
                 message_count: 2,
+                instance_count: 2,
             },
         ];
 
@@ -2319,6 +2326,7 @@ mod tests {
                 },
                 cost: 1.0,
                 message_count: 1,
+                instance_count: 1,
             },
             AgentUsage {
                 agent: "reviewer".to_string(),
@@ -2332,6 +2340,7 @@ mod tests {
                 },
                 cost: 5.0,
                 message_count: 1,
+                instance_count: 1,
             },
         ];
 

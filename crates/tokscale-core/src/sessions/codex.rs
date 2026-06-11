@@ -40,6 +40,8 @@ pub struct CodexPayload {
     pub model_provider: Option<String>,
     /// Agent name from session_meta
     pub agent_nickname: Option<String>,
+    /// Stable agent role from session metadata or subagent thread_spawn.
+    pub agent_role: Option<String>,
     /// Free-text body of an `event_msg` `user_message` payload. Used to detect
     /// human turn boundaries: real human input is plain text, whereas
     /// system-injected context (`<environment_context>`, `<system-reminder>`,
@@ -176,6 +178,7 @@ pub(crate) struct CodexParseState {
     pub forked_child_replay_session_id: Option<String>,
     pub session_provider: Option<String>,
     pub session_agent: Option<String>,
+    pub session_agent_instance: Option<String>,
     pub session_workspace_key: Option<String>,
     pub session_workspace_label: Option<String>,
     pub forked_child_waiting_for_turn_context: bool,
@@ -360,9 +363,21 @@ fn parse_codex_reader<R: BufRead>(
                     if let Some(ref provider) = payload.model_provider {
                         state.session_provider = Some(provider.clone());
                     }
-                    if let Some(ref nickname) = payload.agent_nickname {
-                        state.session_agent = Some(nickname.clone());
-                    }
+                    let agent_role = payload
+                        .agent_role
+                        .as_deref()
+                        .or_else(|| codex_source_agent_role(payload.source.as_ref()));
+                    state.session_agent = codex_agent_label(
+                        payload.source.as_ref(),
+                        agent_role,
+                        payload.agent_nickname.as_deref(),
+                        state.session_is_headless,
+                    );
+                    state.session_agent_instance = payload
+                        .agent_nickname
+                        .as_ref()
+                        .map(|nickname| nickname.trim().to_string())
+                        .filter(|nickname| !nickname.is_empty());
                     if let Some(ref cwd) = payload.cwd {
                         let (workspace_key, workspace_label) = codex_workspace_from_cwd(cwd);
                         state.session_workspace_key = workspace_key;
@@ -505,12 +520,6 @@ fn parse_codex_reader<R: BufRead>(
                     let duration_ms =
                         duration_between_ms(state.current_turn_start_ms, parsed_timestamp);
 
-                    let agent = if state.session_is_headless {
-                        Some("headless".to_string())
-                    } else {
-                        state.session_agent.clone()
-                    };
-
                     let provider = state.session_provider.as_deref().unwrap_or("openai");
 
                     let mut message = UnifiedMessage::new_with_agent(
@@ -521,9 +530,15 @@ fn parse_codex_reader<R: BufRead>(
                         timestamp,
                         tokens,
                         0.0,
-                        agent,
+                        state.session_agent.clone(),
                     );
                     message.duration_ms = duration_ms;
+                    message.set_agent_instance(
+                        state
+                            .session_agent_instance
+                            .clone()
+                            .or_else(|| state.session_id_from_meta.clone()),
+                    );
                     // Apply a deferred human-turn marker from a preceding
                     // user_message to this assistant reply — the first
                     // token-bearing message after the human input.
@@ -592,6 +607,7 @@ fn parse_codex_reader<R: BufRead>(
             fallback_timestamp,
             state.session_provider.as_deref(),
             &state.session_agent,
+            &state.session_agent_instance,
             state.session_is_headless,
         );
         if !pending_model_messages.is_empty() {
@@ -650,6 +666,46 @@ fn parse_codex_reader<R: BufRead>(
 
 fn codex_source_is_exec(source: Option<&Value>) -> bool {
     source.and_then(Value::as_str) == Some("exec")
+}
+
+fn codex_source_is_subagent(source: Option<&Value>) -> bool {
+    source
+        .and_then(|value| value.get("subagent"))
+        .and_then(Value::as_object)
+        .is_some()
+}
+
+fn codex_source_agent_role(source: Option<&Value>) -> Option<&str> {
+    source?
+        .get("subagent")?
+        .get("thread_spawn")?
+        .get("agent_role")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+}
+
+fn codex_agent_label(
+    source: Option<&Value>,
+    agent_role: Option<&str>,
+    agent_nickname: Option<&str>,
+    is_headless: bool,
+) -> Option<String> {
+    if is_headless {
+        return Some("Codex Headless".to_string());
+    }
+
+    if codex_source_is_subagent(source) {
+        return Some(match agent_role {
+            Some(role) => format!("Codex {}", super::normalize_agent_name(role)),
+            None => "Codex Subagent".to_string(),
+        });
+    }
+
+    agent_nickname
+        .map(str::trim)
+        .filter(|nickname| !nickname.is_empty())
+        .map(|_| "Codex Agent".to_string())
 }
 
 fn forked_from_id_from_source(source: Option<&Value>) -> Option<&str> {
@@ -932,6 +988,7 @@ fn parse_codex_headless_line(
     fallback_timestamp: i64,
     session_provider: Option<&str>,
     session_agent: &Option<String>,
+    session_agent_instance: &Option<String>,
     session_is_headless: bool,
 ) -> Option<(UnifiedMessage, bool)> {
     let mut bytes = line.as_bytes().to_vec();
@@ -953,31 +1010,29 @@ fn parse_codex_headless_line(
     }
 
     let provider = session_provider.unwrap_or("openai");
-    let agent = if session_is_headless {
-        Some("headless".to_string())
-    } else {
-        session_agent.clone()
-    };
+    let mut message = UnifiedMessage::new_with_agent(
+        "codex",
+        model,
+        provider,
+        session_id.to_string(),
+        timestamp,
+        TokenBreakdown {
+            input: usage.input.max(0),
+            output: usage.output.max(0),
+            cache_read: usage.cached.max(0),
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+        if session_is_headless {
+            Some("Codex Headless".to_string())
+        } else {
+            session_agent.clone()
+        },
+    );
+    message.set_agent_instance(session_agent_instance.clone());
 
-    Some((
-        UnifiedMessage::new_with_agent(
-            "codex",
-            model,
-            provider,
-            session_id.to_string(),
-            timestamp,
-            TokenBreakdown {
-                input: usage.input.max(0),
-                output: usage.output.max(0),
-                cache_read: usage.cached.max(0),
-                cache_write: 0,
-                reasoning: 0,
-            },
-            0.0,
-            agent,
-        ),
-        usage.timestamp_ms.is_none(),
-    ))
+    Some((message, usage.timestamp_ms.is_none()))
 }
 
 fn extract_headless_usage(value: &Value) -> Option<CodexHeadlessUsage> {
@@ -1401,7 +1456,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Codex Headless"));
     }
 
     #[test]
@@ -1691,7 +1746,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "azure");
-        assert_eq!(messages[0].agent.as_deref(), Some("my-agent"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Codex Agent"));
     }
 
     #[test]
@@ -1709,7 +1764,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "openai");
-        assert_eq!(messages[0].agent.as_deref(), Some("worker"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Codex Subagent"));
         assert_eq!(
             messages[0].workspace_key.as_deref(),
             Some("/Users/alice/codex-fork")
@@ -1741,7 +1796,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gpt-5.5");
         assert_eq!(messages[0].provider_id, "openai");
-        assert_eq!(messages[0].agent.as_deref(), Some("worker"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Codex Subagent"));
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/repo-child"));
         assert_eq!(messages[0].tokens.input, 500);
         assert_eq!(messages[0].tokens.cache_read, 1000);
@@ -2037,7 +2092,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "azure");
-        assert_eq!(messages[0].agent.as_deref(), Some("my-bot"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Codex Agent"));
     }
 
     #[test]
@@ -2178,7 +2233,7 @@ mod tests {
             messages[0].is_turn_start,
             "an exec one-shot with a human prompt counts as one turn"
         );
-        assert_eq!(messages[0].agent.as_deref(), Some("headless"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Codex Headless"));
     }
 
     #[test]

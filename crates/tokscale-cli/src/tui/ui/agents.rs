@@ -21,6 +21,7 @@ const SOURCE_MAX_WIDTH: u16 = 40;
 const TOKENS_WIDTH: u16 = 10;
 const COST_WIDTH: u16 = 10;
 const MSGS_WIDTH: u16 = 6;
+const INSTANCES_WIDTH: u16 = 9;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -66,7 +67,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     } else if is_narrow {
         vec!["Agent", "Tokens", "Cost"]
     } else {
-        vec!["#", "Agent", "Source", "Tokens", "Cost", "Msgs"]
+        vec![
+            "#",
+            "Agent",
+            "Source",
+            "Tokens",
+            "Cost",
+            "Msgs",
+            "Instances",
+        ]
     };
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -178,6 +187,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
                     Cell::from(agent.message_count.to_string())
                         .style(Style::default().fg(theme_muted)),
+                    Cell::from(if agent.instance_count > 1 {
+                        agent.instance_count.to_string()
+                    } else {
+                        "-".to_string()
+                    })
+                    .style(Style::default().fg(theme_muted)),
                 ]
             };
 
@@ -260,6 +275,7 @@ fn agents_widths(
             ColumnWidthSpec::fixed(TOKENS_WIDTH),
             ColumnWidthSpec::fixed(COST_WIDTH),
             ColumnWidthSpec::fixed(MSGS_WIDTH),
+            ColumnWidthSpec::fixed(INSTANCES_WIDTH),
         ],
     )
 }
@@ -313,7 +329,7 @@ fn client_labels_display_width(clients: &str) -> u16 {
 mod tests {
     use super::{
         agents_widths, client_labels_display_width, get_empty_message, AGENT_MAX_WIDTH, COST_WIDTH,
-        MSGS_WIDTH, SOURCE_MAX_WIDTH, TOKENS_WIDTH,
+        INSTANCES_WIDTH, MSGS_WIDTH, SOURCE_MAX_WIDTH, TOKENS_WIDTH,
     };
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
@@ -383,6 +399,7 @@ mod tests {
         assert_eq!(length_at(&widths, 3), TOKENS_WIDTH);
         assert_eq!(length_at(&widths, 4), COST_WIDTH);
         assert_eq!(length_at(&widths, 5), MSGS_WIDTH);
+        assert_eq!(length_at(&widths, 6), INSTANCES_WIDTH);
     }
 
     #[test]

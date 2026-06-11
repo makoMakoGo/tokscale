@@ -34,7 +34,8 @@ pub fn build_export_json(data: &UsageData) -> Result<String> {
                 "total": a.tokens.total()
             },
             "cost": a.cost,
-            "messageCount": a.message_count
+            "messageCount": a.message_count,
+            "instanceCount": a.instance_count
         })).collect::<Vec<_>>(),
         "daily": data.daily.iter().map(|d| json!({
             "date": d.date.to_string(),

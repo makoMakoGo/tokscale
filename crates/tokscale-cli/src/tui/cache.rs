@@ -22,7 +22,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 14;
+const CACHE_SCHEMA_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,6 +130,8 @@ struct CachedAgentUsage {
     tokens: CachedTokenBreakdown,
     cost: f64,
     message_count: u32,
+    #[serde(default)]
+    instance_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +269,7 @@ impl From<&AgentUsage> for CachedAgentUsage {
             tokens: (&a.tokens).into(),
             cost: a.cost,
             message_count: a.message_count,
+            instance_count: a.instance_count,
         }
     }
 }
@@ -279,6 +282,7 @@ impl From<CachedAgentUsage> for AgentUsage {
             tokens: a.tokens.into(),
             cost: a.cost,
             message_count: a.message_count,
+            instance_count: a.instance_count,
         }
     }
 }
@@ -558,6 +562,7 @@ fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 message_count: 0,
+                instance_count: 0,
             });
 
         let tokens: TokenBreakdown = cached.tokens.into();
@@ -568,6 +573,7 @@ fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
         entry.tokens.reasoning = entry.tokens.reasoning.saturating_add(tokens.reasoning);
         entry.cost += cached.cost;
         entry.message_count = entry.message_count.saturating_add(cached.message_count);
+        entry.instance_count = entry.instance_count.saturating_add(cached.instance_count);
 
         let client_set = clients_by_agent.entry(normalized_agent).or_default();
         for client in cached
@@ -814,6 +820,7 @@ mod tests {
             },
             cost: total_seed as f64,
             message_count: 1,
+            instance_count: 1,
         }
     }
 
@@ -962,7 +969,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 14,
+  "schemaVersion": 17,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
@@ -1228,7 +1235,7 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         let mut cached: serde_json::Value = serde_json::from_str(
             r#"{
-  "schemaVersion": 14,
+  "schemaVersion": 17,
   "timestamp": 0,
   "enabledClients": ["claude", "cursor"],
   "groupBy": "model",

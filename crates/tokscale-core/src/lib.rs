@@ -1408,15 +1408,44 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let omp_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Omp)
+    let omp_paths = scan_result.get(ClientId::Omp);
+    let mut omp_outcomes: Vec<CachedParseOutcome> = Vec::new();
+    let mut omp_miss_paths: Vec<PathBuf> = Vec::new();
+    for path in omp_paths {
+        let Some(fingerprint) = message_cache::SourceFingerprint::from_path(path) else {
+            omp_miss_paths.push(path.clone());
+            continue;
+        };
+
+        if let Some(cached) = source_cache.get(path) {
+            if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
+                omp_outcomes.push(CachedParseOutcome {
+                    messages: cached_messages(cached, pricing),
+                    cache_entry: None,
+                    invalidate_cache: false,
+                });
+                continue;
+            }
+        }
+
+        omp_miss_paths.push(path.clone());
+    }
+
+    let omp_parent_task_agent_index =
+        sessions::pi::build_omp_parent_task_agent_index(&omp_miss_paths);
+    let omp_miss_outcomes: Vec<CachedParseOutcome> = omp_miss_paths
         .par_iter()
         .map(|path| {
             load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::pi::parse_omp_file(path)
+                sessions::pi::parse_omp_file_with_parent_task_agent_index(
+                    path,
+                    &omp_parent_task_agent_index,
+                )
             })
         })
         .collect();
+    omp_outcomes.extend(omp_miss_outcomes);
+
     for outcome in omp_outcomes {
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
@@ -2598,14 +2627,18 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
 
-    let omp_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Omp)
+    let omp_paths = scan_result.get(ClientId::Omp);
+    let omp_parent_task_agent_index = sessions::pi::build_omp_parent_task_agent_index(omp_paths);
+    let omp_msgs: Vec<ParsedMessage> = omp_paths
         .par_iter()
         .flat_map(|path| {
-            sessions::pi::parse_omp_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
+            sessions::pi::parse_omp_file_with_parent_task_agent_index(
+                path,
+                &omp_parent_task_agent_index,
+            )
+            .into_iter()
+            .map(|msg| unified_to_parsed(&msg))
+            .collect::<Vec<_>>()
         })
         .collect();
     let omp_count = omp_msgs.len() as i32;
@@ -2980,6 +3013,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
         agent: msg.agent.clone(),
+        agent_instance: None,
         dedup_key: None,
         is_turn_start: false,
     }
