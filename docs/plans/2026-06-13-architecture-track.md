@@ -1,6 +1,6 @@
 # Unified Architecture Track (C1-C5) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans per phase. Each phase is one PR with an output-parity gate. Write the code-level task breakdown for a phase at the start of that phase's working session (same pattern as the 2026-06-12 plan); this document fixes the architecture, order, and gates.
+> **For agentic workers:** Each phase is one PR with an output-parity gate. Write the code-level task breakdown for a phase at the start of that phase's working session (same pattern as the 2026-06-12 plan); this document fixes the architecture, order, and gates.
 
 **Goal:** One campaign combining ADR 0008's Phase C (streaming fold + sharded cache, #54) with the clean-architecture issues (#36 client adapters, #37 deep aggregation module) under the #33 umbrella, now that ADR 0009 removed the upstream merge constraint.
 

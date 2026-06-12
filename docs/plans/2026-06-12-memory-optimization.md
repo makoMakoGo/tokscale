@@ -1,6 +1,6 @@
 # Memory Optimization (Phase A + B) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement task-by-task in order. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cut tokscale peak RSS from ~1.05GB to ~0.6GB (Phase A) then ~0.35GB (Phase B), and TUI steady-state from ~600MB to near live-data size, with zero feature loss.
 

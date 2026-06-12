@@ -47,3 +47,8 @@ deep-module cleanup this fork exists for (#33).
   for portable fixes.
 - `git merge origin/main` on this branch is an error from now on; if one
   is attempted it will conflict structurally and should be aborted.
+- The "behind upstream" counter grows indefinitely and is not a health
+  signal anymore — ports do not decrement it (different SHAs). To remove
+  the GitHub compare banner entirely, leave the fork network in repo
+  Settings (standalone repo); contributing upstream afterwards requires a
+  fresh throwaway fork.
