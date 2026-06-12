@@ -22,8 +22,24 @@ deep-module cleanup this fork exists for (#33).
 
 ## Decision
 
-- The branch is **ahead-only** from 2026-06-13. We do not merge
-  `origin/main` wholesale anymore.
+- The branch is **content-ahead-only** from 2026-06-13. We do not take
+  upstream content via merge anymore.
+- The "behind" counter is kept at zero with **ancestry-only merges**
+  (established practice on this branch since 2026-05):
+
+  ```
+  git fetch origin
+  git merge -s ours --no-ff origin/main \
+    -m "chore: record upstream ancestry without content (ADR 0009)"
+  ```
+
+  `-s ours` keeps the tree byte-identical to ours (no conflicts are
+  possible) while recording upstream commits as ancestors, which is what
+  resets the GitHub behind counter. Run it whenever the compare banner
+  reappears. Side effects, accepted: upstream commits show in the
+  branch's full history (use `git log --first-parent` for the
+  personal-only view), and those commits can never be content-merged
+  afterwards — which enforces this policy by construction.
 - Upstream changes are **ported, not merged**: cherry-pick or hand-port
   leaf-level fixes we want (pricing data and lookup fixes, parser format
   fixes for clients we use, security fixes). Port commits reference the
@@ -45,10 +61,10 @@ deep-module cleanup this fork exists for (#33).
 - Upstream fixes arrive only when we notice and port them. Periodically
   review `git log origin/main` (e.g. when something breaks or monthly)
   for portable fixes.
-- `git merge origin/main` on this branch is an error from now on; if one
-  is attempted it will conflict structurally and should be aborted.
-- The "behind upstream" counter grows indefinitely and is not a health
-  signal anymore — ports do not decrement it (different SHAs). To remove
-  the GitHub compare banner entirely, leave the fork network in repo
-  Settings (standalone repo); contributing upstream afterwards requires a
-  fresh throwaway fork.
+- A plain `git merge origin/main` (without `-s ours`) is an error from
+  now on; if one is attempted it will conflict structurally and should
+  be aborted. Only the ancestry-only form above is permitted.
+- With periodic ancestry merges the compare banner stays at
+  "ahead only, 0 behind"; the behind counter is no longer a content
+  signal either way. Leaving the fork network remains the nuclear option
+  if the fork relationship itself becomes unwanted.
