@@ -186,10 +186,10 @@ const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
 
 fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
+        (Some(key), Some(label)) => (key.to_string(), Some(key.to_string()), label.to_string()),
         (Some(key), None) => (
-            key.clone(),
-            Some(key.clone()),
+            key.to_string(),
+            Some(key.to_string()),
             tokscale_core::sessions::workspace_label_from_key(key)
                 .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
         ),
@@ -466,7 +466,7 @@ impl DataLoader {
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
                 provider: provider.clone(),
-                client: msg.client.clone(),
+                client: msg.client.to_string(),
                 workspace_key: if *group_by == GroupBy::WorkspaceModel {
                     workspace_key.clone()
                 } else {
@@ -486,12 +486,12 @@ impl DataLoader {
             if merge_clients {
                 let client_totals = client_totals_by_model.entry(key.clone()).or_default();
                 let client_count = client_totals.len();
-                let totals = client_totals.entry(msg.client.clone()).or_insert_with(|| {
-                    ClientContributionOrder {
+                let totals = client_totals
+                    .entry(msg.client.to_string())
+                    .or_insert_with(|| ClientContributionOrder {
                         first_seen: client_count,
                         total_tokens: 0,
-                    }
-                });
+                    });
                 totals.total_tokens = totals
                     .total_tokens
                     .saturating_add(msg.tokens.total().max(0) as u64);
@@ -540,7 +540,7 @@ impl DataLoader {
             }
 
             if let Some(agent) = msg.agent.as_ref() {
-                let normalized_agent = if msg.client == "opencode" {
+                let normalized_agent = if msg.client.as_ref() == "opencode" {
                     sessions::normalize_opencode_agent_name(agent)
                 } else {
                     sessions::normalize_agent_name(agent)
@@ -584,11 +584,12 @@ impl DataLoader {
                 agent_clients
                     .entry(normalized_agent.clone())
                     .or_default()
-                    .insert(msg.client.clone());
+                    .insert(msg.client.to_string());
 
                 let instance_key = msg
                     .agent_instance
-                    .clone()
+                    .as_deref()
+                    .map(str::to_string)
                     .unwrap_or_else(|| format!("{}:{}", msg.client, msg.session_id));
                 agent_instances
                     .entry(normalized_agent)
@@ -596,7 +597,7 @@ impl DataLoader {
                     .insert(instance_key);
             }
 
-            if let Some(date) = parse_date(&msg.date) {
+            if let Some(date) = msg.local_date() {
                 let daily_entry = daily_map.entry(date).or_insert_with(|| DailyUsage {
                     date,
                     tokens: TokenBreakdown::default(),
@@ -639,7 +640,7 @@ impl DataLoader {
 
                 let source_entry = daily_entry
                     .source_breakdown
-                    .entry(msg.client.clone())
+                    .entry(msg.client.to_string())
                     .or_insert_with(|| DailySourceInfo {
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
@@ -718,9 +719,10 @@ impl DataLoader {
             }
 
             // Hourly aggregation: derive hour from timestamp (Unix ms),
-            // falling back to msg.date 00:00 when timestamp is missing/zero
-            // so we don't silently drop messages (matches CLI bucketing).
-            if let Some(hour_dt) = hour_bucket_with_fallback(msg.timestamp, &msg.date) {
+            // falling back to the local-date 00:00 bucket when the timestamp
+            // is missing/zero so we don't silently drop messages (matches
+            // CLI bucketing).
+            if let Some(hour_dt) = hour_bucket_with_fallback(msg.timestamp, msg.local_date()) {
                 let hourly_entry = hourly_map.entry(hour_dt).or_insert_with(|| HourlyUsage {
                     datetime: hour_dt,
                     tokens: TokenBreakdown::default(),
@@ -761,7 +763,7 @@ impl DataLoader {
                 if msg.is_turn_start {
                     hourly_entry.turn_count += 1;
                 }
-                hourly_entry.clients.insert(msg.client.clone());
+                hourly_entry.clients.insert(msg.client.to_string());
 
                 let hourly_model_key = hourly_model_key(group_by, &provider, &normalized_model);
                 let h_model = hourly_entry
@@ -802,7 +804,7 @@ impl DataLoader {
             // on `Settings::minutely_tab_enabled` so users who never open
             // the tab do not pay the per-minute bucketing cost.
             let minute_bucket = if self.minutely_enabled {
-                minute_bucket_with_fallback(msg.timestamp, &msg.date)
+                minute_bucket_with_fallback(msg.timestamp, msg.local_date())
             } else {
                 None
             };
@@ -850,7 +852,7 @@ impl DataLoader {
                 if msg.is_turn_start {
                     minutely_entry.turn_count += 1;
                 }
-                minutely_entry.clients.insert(msg.client.clone());
+                minutely_entry.clients.insert(msg.client.to_string());
 
                 let m_model_key = hourly_model_key(group_by, &provider, &normalized_model);
                 let m_model =
@@ -960,10 +962,6 @@ impl DataLoader {
     }
 }
 
-fn parse_date(date_str: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
-}
-
 /// Convert Unix ms timestamp to a NaiveDateTime truncated to the hour (local tz).
 fn timestamp_to_hour(timestamp_ms: i64) -> Option<NaiveDateTime> {
     use chrono::TimeZone;
@@ -986,14 +984,17 @@ fn timestamp_to_hour(timestamp_ms: i64) -> Option<NaiveDateTime> {
 }
 
 /// Derive an hour-truncated NaiveDateTime from `msg.timestamp` when present,
-/// otherwise fall back to `msg.date`'s 00:00 bucket so messages with missing
-/// timestamps are not silently dropped from hourly aggregation. Mirrors the
-/// CLI hourly bucketing behavior in `tokscale-core::lib::get_hourly_report`.
-fn hour_bucket_with_fallback(timestamp_ms: i64, date_str: &str) -> Option<NaiveDateTime> {
+/// otherwise fall back to the message's local-date 00:00 bucket so messages
+/// with missing timestamps are not silently dropped from hourly aggregation.
+/// Mirrors the CLI hourly bucketing in `tokscale-core::lib::get_hourly_report`.
+fn hour_bucket_with_fallback(
+    timestamp_ms: i64,
+    fallback_date: Option<NaiveDate>,
+) -> Option<NaiveDateTime> {
     if let Some(dt) = timestamp_to_hour(timestamp_ms) {
         return Some(dt);
     }
-    parse_date(date_str).and_then(|d| d.and_hms_opt(0, 0, 0))
+    fallback_date.and_then(|d| d.and_hms_opt(0, 0, 0))
 }
 
 /// Convert Unix ms timestamp to a NaiveDateTime truncated to the minute (local tz).
@@ -1018,13 +1019,16 @@ fn timestamp_to_minute(timestamp_ms: i64) -> Option<NaiveDateTime> {
 }
 
 /// Derive a minute-truncated NaiveDateTime from `msg.timestamp` when present,
-/// otherwise fall back to `msg.date`'s 00:00 bucket so messages with missing
-/// timestamps are not silently dropped from minutely aggregation.
-fn minute_bucket_with_fallback(timestamp_ms: i64, date_str: &str) -> Option<NaiveDateTime> {
+/// otherwise fall back to the message's local-date 00:00 bucket so messages
+/// with missing timestamps are not silently dropped from minutely aggregation.
+fn minute_bucket_with_fallback(
+    timestamp_ms: i64,
+    fallback_date: Option<NaiveDate>,
+) -> Option<NaiveDateTime> {
     if let Some(dt) = timestamp_to_minute(timestamp_ms) {
         return Some(dt);
     }
-    parse_date(date_str).and_then(|d| d.and_hms_opt(0, 0, 0))
+    fallback_date.and_then(|d| d.and_hms_opt(0, 0, 0))
 }
 
 fn build_contribution_graph(daily: &[DailyUsage]) -> GraphData {
@@ -1872,21 +1876,6 @@ mod tests {
         assert_eq!(loader.since, Some("2024-01-01".to_string()));
         assert_eq!(loader.until, Some("2024-12-31".to_string()));
         assert_eq!(loader.year, Some("2024".to_string()));
-    }
-
-    #[test]
-    fn test_parse_date() {
-        assert_eq!(
-            parse_date("2024-01-15"),
-            Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
-        );
-        assert_eq!(
-            parse_date("2024-12-31"),
-            Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap())
-        );
-        assert_eq!(parse_date("invalid"), None);
-        assert_eq!(parse_date("2024-13-01"), None);
-        assert_eq!(parse_date(""), None);
     }
 
     #[test]

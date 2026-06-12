@@ -25,7 +25,7 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
         .fold(
             || HashMap::with_capacity(estimated_days),
             |mut acc: HashMap<String, DayAccumulator>, msg| {
-                let entry = acc.entry(msg.date.clone()).or_default();
+                let entry = acc.entry(msg.date_string()).or_default();
                 entry.add_message(&msg);
                 acc
             },
@@ -73,7 +73,7 @@ pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContrib
         .fold(
             HashMap::new,
             |mut acc: HashMap<String, SessionAccumulator>, msg| {
-                let entry = acc.entry(msg.session_id.clone()).or_default();
+                let entry = acc.entry(msg.session_id.to_string()).or_default();
                 entry.add_message(&msg);
                 acc
             },
@@ -284,7 +284,7 @@ impl DayAccumulator {
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
-                client: msg.client.clone(),
+                client: msg.client.to_string(),
                 model_id: crate::normalize_model_for_grouping(&msg.model_id),
                 provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
@@ -517,7 +517,7 @@ impl SessionAccumulator {
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
-                client: msg.client.clone(),
+                client: msg.client.to_string(),
                 model_id: normalized_model.clone(),
                 provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
@@ -732,7 +732,6 @@ fn calculate_intensities(contributions: &mut [DailyContribution]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
 
     // Helper function to create mock UnifiedMessage
     fn mock_unified_message(
@@ -742,21 +741,25 @@ mod tests {
         model: &str,
         client: &str,
     ) -> UnifiedMessage {
-        // Parse date string to timestamp
-        let datetime = format!("{}T00:00:00Z", date)
-            .parse::<DateTime<Utc>>()
-            .unwrap();
-        let timestamp = datetime.timestamp_millis();
+        // Local noon keeps the derived local date equal to `date` in every
+        // timezone (dates are derived from timestamps since schema v24).
+        let timestamp = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .earliest()
+            .unwrap()
+            .timestamp_millis();
 
         UnifiedMessage {
-            client: client.to_string(),
-            model_id: model.to_string(),
-            provider_id: "test-provider".to_string(),
-            session_id: "test-session".to_string(),
+            client: client.into(),
+            model_id: model.into(),
+            provider_id: "test-provider".into(),
+            session_id: "test-session".into(),
             workspace_key: None,
             workspace_label: None,
             timestamp,
-            date: date.to_string(),
             tokens: TokenBreakdown {
                 input: tokens / 2,
                 output: tokens / 2,
@@ -803,10 +806,10 @@ mod tests {
     fn test_aggregate_by_date_normalizes_provider_display_aliases() {
         let mut first =
             mock_unified_message("2024-01-01", 1000, 0.05, "xiaomi/mimo-v2.5-pro", "opencode");
-        first.provider_id = "xiaomi".to_string();
+        first.provider_id = "xiaomi".into();
         let mut second =
             mock_unified_message("2024-01-01", 2000, 0.10, "xiaomi/mimo-v2.5-pro", "opencode");
-        second.provider_id = "xiaomi-token-plan-cn".to_string();
+        second.provider_id = "xiaomi-token-plan-cn".into();
 
         let result = aggregate_by_date(vec![first, second]);
 
@@ -820,13 +823,13 @@ mod tests {
     fn test_aggregate_by_session_normalizes_provider_display_aliases() {
         let mut first =
             mock_unified_message("2024-01-01", 1000, 0.05, "xiaomi/mimo-v2.5-pro", "opencode");
-        first.provider_id = "xiaomi".to_string();
-        first.session_id = "session-shared".to_string();
+        first.provider_id = "xiaomi".into();
+        first.session_id = "session-shared".into();
 
         let mut second =
             mock_unified_message("2024-01-01", 2000, 0.10, "xiaomi/mimo-v2.5-pro", "opencode");
-        second.provider_id = "xiaomi-token-plan-cn".to_string();
-        second.session_id = "session-shared".to_string();
+        second.provider_id = "xiaomi-token-plan-cn".into();
+        second.session_id = "session-shared".into();
 
         let result = aggregate_by_session(vec![first, second]);
 
@@ -1376,20 +1379,18 @@ mod tests {
         client: &str,
         provider: &str,
         model: &str,
-        date: &str,
         timestamp_ms: i64,
         tokens: TokenBreakdown,
         cost: f64,
     ) -> UnifiedMessage {
         UnifiedMessage {
-            client: client.to_string(),
-            model_id: model.to_string(),
-            provider_id: provider.to_string(),
-            session_id: session_id.to_string(),
+            client: client.into(),
+            model_id: model.into(),
+            provider_id: provider.into(),
+            session_id: session_id.into(),
             workspace_key: None,
             workspace_label: None,
             timestamp: timestamp_ms,
-            date: date.to_string(),
             tokens,
             cost,
             message_count: 1,
@@ -1422,7 +1423,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_001_000,
                 t.clone(),
                 0.01,
@@ -1432,7 +1432,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_002_000,
                 t.clone(),
                 0.01,
@@ -1442,7 +1441,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_003_000,
                 t.clone(),
                 0.01,
@@ -1452,7 +1450,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_004_000,
                 t.clone(),
                 0.01,
@@ -1462,7 +1459,6 @@ mod tests {
                 "amp",
                 "anthropic",
                 "claude-haiku-4-5",
-                "2026-05-10",
                 1_700_000_005_000,
                 t.clone(),
                 0.02,
@@ -1472,7 +1468,6 @@ mod tests {
                 "amp",
                 "anthropic",
                 "claude-haiku-4-5",
-                "2026-05-10",
                 1_700_000_006_000,
                 t.clone(),
                 0.02,
@@ -1482,7 +1477,6 @@ mod tests {
                 "amp",
                 "anthropic",
                 "claude-haiku-4-5",
-                "2026-05-10",
                 1_700_000_007_000,
                 t.clone(),
                 0.02,
@@ -1492,7 +1486,6 @@ mod tests {
                 "claude",
                 "anthropic",
                 "claude-sonnet-4-5",
-                "2026-05-11",
                 1_700_000_100_000,
                 t.clone(),
                 0.05,
@@ -1502,7 +1495,6 @@ mod tests {
                 "claude",
                 "anthropic",
                 "claude-sonnet-4-5",
-                "2026-05-11",
                 1_700_000_101_000,
                 t.clone(),
                 0.05,
@@ -1512,7 +1504,6 @@ mod tests {
                 "claude",
                 "anthropic",
                 "claude-sonnet-4-5",
-                "2026-05-11",
                 1_700_000_102_000,
                 t.clone(),
                 0.05,
@@ -1573,7 +1564,6 @@ mod tests {
                 "amp",
                 "anthropic",
                 "claude-haiku-4-5",
-                "2026-05-10",
                 1_700_000_001_000,
                 small,
                 0.001,
@@ -1583,7 +1573,6 @@ mod tests {
                 "codex",
                 "openai",
                 "gpt-5",
-                "2026-05-10",
                 1_700_000_002_000,
                 big,
                 0.50,
@@ -1604,8 +1593,8 @@ mod tests {
     #[test]
     fn test_session_contribution_serde_round_trip() {
         let contrib = SessionContribution {
-            session_id: "019e1e27-af49-7cd1-89b7-7bad1c3f3be2".to_string(),
-            client: "codex".to_string(),
+            session_id: "019e1e27-af49-7cd1-89b7-7bad1c3f3be2".into(),
+            client: "codex".into(),
             provider: "openai".to_string(),
             model: "gpt-5".to_string(),
             totals: DailyTotals {
@@ -1621,9 +1610,9 @@ mod tests {
                 reasoning: 40,
             },
             clients: vec![ClientContribution {
-                client: "codex".to_string(),
-                model_id: "gpt-5".to_string(),
-                provider_id: "openai".to_string(),
+                client: "codex".into(),
+                model_id: "gpt-5".into(),
+                provider_id: "openai".into(),
                 tokens: TokenBreakdown {
                     input: 25_251,
                     output: 47,

@@ -657,7 +657,7 @@ mod tests {
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.0-flash");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.0-flash");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 20);
     }
@@ -758,7 +758,7 @@ mod tests {
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].tokens.output, 34);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -780,7 +780,7 @@ mod tests {
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 20);
     }
@@ -799,7 +799,7 @@ mod tests {
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].tokens.output, 20);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -821,7 +821,7 @@ mod tests {
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].tokens.output, 20);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -842,7 +842,7 @@ mod tests {
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].tokens.output, 20);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -862,7 +862,7 @@ mod tests {
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].tokens.output, 20);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -882,9 +882,9 @@ mod tests {
         let messages = parse_gemini_file(&file_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id, "gemini-session-1");
-        assert_eq!(messages[0].model_id, "gemini-3.1-pro-preview");
-        assert_eq!(messages[0].provider_id, "google");
+        assert_eq!(messages[0].session_id.as_ref(), "gemini-session-1");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3.1-pro-preview");
+        assert_eq!(messages[0].provider_id.as_ref(), "google");
         assert_eq!(messages[0].tokens.input, 14925);
         assert_eq!(messages[0].tokens.output, 60);
         assert_eq!(messages[0].tokens.cache_read, 0);
@@ -905,7 +905,7 @@ mod tests {
         let messages = parse_gemini_file(&file_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-3.1-pro-preview");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3.1-pro-preview");
         assert_eq!(messages[0].tokens.input, 15);
         assert_eq!(messages[0].tokens.output, 2);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -941,8 +941,8 @@ not-json\n\
         let result = parse_gemini_file_with_cache_status(&file_path);
 
         assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].session_id, "session-1");
-        assert_eq!(result.messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(result.messages[0].session_id.as_ref(), "session-1");
+        assert_eq!(result.messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(result.messages[0].tokens.input, 10);
         assert_eq!(result.messages[0].tokens.output, 20);
         assert!(!result.cacheable);
@@ -963,7 +963,7 @@ not-json\n\
         let result = parse_gemini_file_with_cache_status(&file_path);
 
         assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].model_id, "gemini-2.5-pro");
+        assert_eq!(result.messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(result.messages[0].tokens.input, 10);
         assert_eq!(result.messages[0].tokens.output, 20);
         assert!(!result.cacheable);
@@ -985,8 +985,8 @@ not-json\n\
         let messages = parse_gemini_file(&file_path);
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].session_id, "session-1");
-        assert_eq!(messages[0].model_id, "gemini-3.1-pro-preview");
+        assert_eq!(messages[0].session_id.as_ref(), "session-1");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3.1-pro-preview");
         assert_eq!(messages[0].tokens.input, 15);
         assert_eq!(messages[0].tokens.output, 2);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -1020,7 +1020,7 @@ not-json\n\
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-3.1-pro-preview");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3.1-pro-preview");
         assert_eq!(messages[0].tokens.input, 19);
         assert_eq!(messages[0].tokens.output, 2);
         assert_eq!(messages[0].tokens.cache_read, 5);
@@ -1078,7 +1078,7 @@ not-json\n\
         let messages = parse_gemini_file(&file_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.0-flash");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.0-flash");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 20);
     }
@@ -1149,7 +1149,7 @@ not-json\n\
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3-flash-preview");
         assert_eq!(messages[0].tokens.input, 80);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 20);
@@ -1229,7 +1229,7 @@ not-json\n\
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3-flash-preview");
         assert_eq!(messages[0].tokens.input, 140);
         assert_eq!(messages[0].tokens.output, 40);
         assert_eq!(messages[0].tokens.cache_read, 10);
@@ -1267,7 +1267,7 @@ not-json\n\
         let messages = parse_gemini_file(&file_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-2.0-flash");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-2.0-flash");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 20);
     }
@@ -1285,8 +1285,8 @@ not-json\n\
         let messages = parse_gemini_file(&file_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id, "ses-nogem");
-        assert_eq!(messages[0].model_id, "gemini-3.1-pro-preview");
+        assert_eq!(messages[0].session_id.as_ref(), "ses-nogem");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3.1-pro-preview");
         assert_eq!(messages[0].tokens.input, 505);
         assert_eq!(messages[0].tokens.output, 30);
         assert_eq!(messages[0].tokens.cache_read, 0);
@@ -1307,7 +1307,7 @@ not-json\n\
         let messages = parse_gemini_file(&file_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3-flash-preview");
         assert_eq!(messages[0].tokens.input, 90);
         assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 10);
@@ -1348,7 +1348,7 @@ not-json\n\
         let messages = parse_gemini_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-3-flash-preview");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3-flash-preview");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 5);

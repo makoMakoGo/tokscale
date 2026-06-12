@@ -1220,7 +1220,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
     // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
     // suppress legacy JSON overlap by message identity.
-    let mut opencode_seen: HashSet<String> = HashSet::new();
+    let mut opencode_seen: HashSet<u64> = HashSet::new();
 
     for db_path in &scan_result.opencode_dbs {
         let CachedParseOutcome {
@@ -1239,8 +1239,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(messages.into_iter().filter(|message| {
             message
                 .dedup_key
-                .as_ref()
-                .is_none_or(|key| opencode_seen.insert(key.clone()))
+                .is_none_or(|key| opencode_seen.insert(key))
         }));
 
         if let Some(entry) = cache_entry.or(extra_entry) {
@@ -1265,8 +1264,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(messages.into_iter().filter(|message| {
             message
                 .dedup_key
-                .as_ref()
-                .is_none_or(|key| opencode_seen.insert(key.clone()))
+                .is_none_or(|key| opencode_seen.insert(key))
         }));
         if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
@@ -1292,24 +1290,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             )
         })
         .collect();
-    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut seen_keys: HashSet<u64> = HashSet::new();
     for outcome in claude_outcomes {
         let (messages, extra_entry) =
             resolve_messages(outcome.messages, &mut source_cache, pricing);
         all_messages.extend(
             messages
                 .into_iter()
-                .filter(|msg| match msg.dedup_key.as_deref() {
-                    None | Some("") => true,
-                    Some(key) => {
-                        if seen_keys.contains(key) {
-                            false
-                        } else {
-                            seen_keys.insert(key.to_string());
-                            true
-                        }
-                    }
-                }),
+                .filter(|msg| msg.dedup_key.is_none_or(|key| seen_keys.insert(key))),
         );
         if let Some(entry) = outcome.cache_entry.or(extra_entry) {
             source_cache.insert(entry);
@@ -1326,7 +1314,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             )
         })
         .collect();
-    let mut codex_seen: HashSet<String> = HashSet::new();
+    let mut codex_seen: HashSet<u64> = HashSet::new();
     for (path, outcome) in codex_outcomes {
         let (messages, extra_entry) =
             resolve_messages(outcome.messages, &mut source_cache, pricing);
@@ -1588,7 +1576,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     // and overwrite gjc's authoritative embedded cost, silently downgrading to
     // A2 on the dominant cached path. Message-level dedup via
     // should_keep_deduped_message collapses depth-1/depth-2 replays.
-    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let mut gjc_seen: HashSet<u64> = HashSet::new();
     let gjc_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Gjc)
         .par_iter()
@@ -1731,7 +1719,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(kilo_messages);
     }
 
-    let mut hermes_seen: HashSet<String> = HashSet::new();
+    let mut hermes_seen: HashSet<u64> = HashSet::new();
     for db_path in scan_result.hermes_db_paths() {
         let hermes_messages = parse_hermes_sqlite_with_pricing(&db_path, pricing);
         all_messages.extend(
@@ -1919,10 +1907,10 @@ pub fn compute_source_digest(
 }
 
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
-    let mut latest_by_session: HashMap<String, UnifiedMessage> = HashMap::new();
+    let mut latest_by_session: HashMap<std::sync::Arc<str>, UnifiedMessage> = HashMap::new();
 
     for message in messages.drain(..) {
-        let session_id = message.session_id.clone();
+        let session_id = std::sync::Arc::clone(&message.session_id);
         match latest_by_session.get_mut(&session_id) {
             Some(existing) => {
                 let should_replace = message.timestamp > existing.timestamp
@@ -1952,34 +1940,48 @@ fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Unified
     deduped
 }
 
+/// Date-range retain shared by the report and local-parse filters. One
+/// `date_string()` per message, only when a date filter is active.
+fn retain_messages_in_date_range(
+    filtered: &mut Vec<UnifiedMessage>,
+    year: Option<&String>,
+    since: Option<&String>,
+    until: Option<&String>,
+) {
+    if year.is_none() && since.is_none() && until.is_none() {
+        return;
+    }
+    let year_prefix = year.map(|year| format!("{}-", year));
+    filtered.retain(|m| {
+        let date = m.date_string();
+        year_prefix
+            .as_ref()
+            .is_none_or(|prefix| date.starts_with(prefix))
+            && since.is_none_or(|since| date.as_str() >= since.as_str())
+            && until.is_none_or(|until| date.as_str() <= until.as_str())
+    });
+}
+
 fn filter_unified_messages(
     messages: Vec<UnifiedMessage>,
     options: &LocalParseOptions,
 ) -> Vec<UnifiedMessage> {
     let mut filtered = messages;
-
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        filtered.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if let Some(since) = &options.since {
-        filtered.retain(|m| m.date.as_str() >= since.as_str());
-    }
-
-    if let Some(until) = &options.until {
-        filtered.retain(|m| m.date.as_str() <= until.as_str());
-    }
-
+    retain_messages_in_date_range(
+        &mut filtered,
+        options.year.as_ref(),
+        options.since.as_ref(),
+        options.until.as_ref(),
+    );
     filtered
 }
 
 fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.clone(), Some(key.clone()), label.clone()),
+        (Some(key), Some(label)) => (key.to_string(), Some(key.to_string()), label.to_string()),
         (Some(key), None) => (
-            key.clone(),
-            Some(key.clone()),
+            key.to_string(),
+            Some(key.to_string()),
             sessions::workspace_label_from_key(key)
                 .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
         ),
@@ -2018,9 +2020,9 @@ fn aggregate_model_usage_entries(
         };
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
-            client: msg.client.clone(),
+            client: msg.client.to_string(),
             merged_clients: if merge_clients {
-                Some(msg.client.clone())
+                Some(msg.client.to_string())
             } else {
                 None
             },
@@ -2035,7 +2037,7 @@ fn aggregate_model_usage_entries(
                 None
             },
             session_id: if session_grouped {
-                Some(msg.session_id.clone())
+                Some(msg.session_id.to_string())
             } else {
                 None
             },
@@ -2054,12 +2056,12 @@ fn aggregate_model_usage_entries(
         if merge_clients {
             let client_totals = client_totals_by_entry.entry(key.clone()).or_default();
             let client_count = client_totals.len();
-            let totals = client_totals.entry(msg.client.clone()).or_insert_with(|| {
-                ClientContributionOrder {
+            let totals = client_totals
+                .entry(msg.client.to_string())
+                .or_insert_with(|| ClientContributionOrder {
                     first_seen: client_count,
                     total_tokens: 0,
-                }
-            });
+                });
             totals.total_tokens = totals
                 .total_tokens
                 .saturating_add(msg.tokens.total().max(0) as u64);
@@ -2208,8 +2210,9 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
 
     for msg in filtered {
-        let month = if msg.date.len() >= 7 {
-            msg.date[..7].to_string()
+        let date = msg.date_string();
+        let month = if date.len() >= 7 {
+            date[..7].to_string()
         } else {
             continue;
         };
@@ -2309,15 +2312,15 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
             let ts_secs = msg.timestamp / 1000;
             match Local.timestamp_opt(ts_secs, 0) {
                 chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
-                _ => format!("{} 00:00", msg.date),
+                _ => format!("{} 00:00", msg.date_string()),
             }
         } else {
-            format!("{} 00:00", msg.date)
+            format!("{} 00:00", msg.date_string())
         };
 
         let entry = hour_map.entry(hour_key).or_default();
 
-        entry.clients.insert(msg.client.clone());
+        entry.clients.insert(msg.client.to_string());
         entry
             .models
             .insert(normalize_model_for_grouping(&msg.model_id));
@@ -2468,20 +2471,12 @@ fn filter_messages_for_report(
     options: &ReportOptions,
 ) -> Vec<UnifiedMessage> {
     let mut filtered = messages;
-
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        filtered.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if let Some(since) = &options.since {
-        filtered.retain(|m| m.date.as_str() >= since.as_str());
-    }
-
-    if let Some(until) = &options.until {
-        filtered.retain(|m| m.date.as_str() <= until.as_str());
-    }
-
+    retain_messages_in_date_range(
+        &mut filtered,
+        options.year.as_ref(),
+        options.since.as_ref(),
+        options.until.as_ref(),
+    );
     filtered
 }
 
@@ -2491,7 +2486,7 @@ fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
 
 fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     if is_headless && message.agent.is_none() {
-        message.agent = Some("headless".to_string());
+        message.agent = Some(sessions::intern::intern("headless"));
     }
 }
 
@@ -2506,7 +2501,7 @@ fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
     // LiteLLM update adds rows under provider `zed.dev` that already include
     // Zed's markup, this function would double-bill — revisit by threading
     // the matched-price provenance through `apply_pricing_if_available`.
-    if message.client == "zed"
+    if message.client.as_ref() == "zed"
         && message
             .provider_id
             .eq_ignore_ascii_case(sessions::zed::ZED_HOSTED_PROVIDER)
@@ -2648,43 +2643,41 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mut counts = ClientCounts::new();
 
     let opencode_count: i32 = {
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<u64> = HashSet::new();
         let mut count: i32 = 0;
 
         for db_path in &scan_result.opencode_dbs {
-            let sqlite_msgs: Vec<(String, ParsedMessage)> =
+            let sqlite_msgs: Vec<ParsedMessage> =
                 sessions::opencode::parse_opencode_sqlite(db_path)
                     .into_iter()
                     .filter_map(|msg| {
-                        let key = msg.dedup_key.clone().unwrap_or_default();
                         // Dedup across multiple channel-suffixed dbs: the
                         // same session can end up in both `opencode.db` and
                         // `opencode-<channel>.db` if the user switches
                         // channels mid-session.
-                        if !key.is_empty() && !seen.insert(key.clone()) {
-                            return None;
+                        if let Some(key) = msg.dedup_key {
+                            if !seen.insert(key) {
+                                return None;
+                            }
                         }
-                        Some((key, unified_to_parsed(&msg)))
+                        Some(unified_to_parsed(&msg))
                     })
                     .collect();
             count += sqlite_msgs.len() as i32;
-            for (_key, parsed) in sqlite_msgs {
-                messages.push(parsed);
-            }
+            messages.extend(sqlite_msgs);
         }
 
-        let json_msgs: Vec<(String, ParsedMessage)> = scan_result
+        let json_msgs: Vec<(Option<u64>, ParsedMessage)> = scan_result
             .get(ClientId::OpenCode)
             .par_iter()
             .filter_map(|path| {
                 let msg = sessions::opencode::parse_opencode_file(path)?;
-                let key = msg.dedup_key.clone().unwrap_or_default();
-                Some((key, unified_to_parsed(&msg)))
+                Some((msg.dedup_key, unified_to_parsed(&msg)))
             })
             .collect();
         let deduped: Vec<ParsedMessage> = json_msgs
             .into_iter()
-            .filter(|(key, _)| key.is_empty() || seen.insert(key.clone()))
+            .filter(|(key, _)| key.is_none_or(|key| seen.insert(key)))
             .map(|(_, msg)| msg)
             .collect();
         count += deduped.len() as i32;
@@ -2695,7 +2688,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::OpenCode, opencode_count);
 
     let claude_home = PathBuf::from(&home_dir);
-    let claude_msgs_raw: Vec<(String, ParsedMessage)> = scan_result
+    let claude_msgs_raw: Vec<(Option<u64>, ParsedMessage)> = scan_result
         .get(ClientId::Claude)
         .par_iter()
         .map_init(std::collections::HashMap::new, |parent_cache, path| {
@@ -2705,19 +2698,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 Some(&claude_home),
             )
             .into_iter()
-            .map(|msg| {
-                let dedup_key = msg.dedup_key.clone().unwrap_or_default();
-                (dedup_key, unified_to_parsed(&msg))
-            })
+            .map(|msg| (msg.dedup_key, unified_to_parsed(&msg)))
             .collect::<Vec<_>>()
         })
         .flatten()
         .collect();
 
-    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut seen_keys: HashSet<u64> = HashSet::new();
     let claude_msgs: Vec<ParsedMessage> = claude_msgs_raw
         .into_iter()
-        .filter(|(key, _)| key.is_empty() || seen_keys.insert(key.clone()))
+        .filter(|(key, _)| key.is_none_or(|key| seen_keys.insert(key)))
         .map(|(_, msg)| msg)
         .collect();
     let claude_count = claude_msgs.len() as i32;
@@ -2738,7 +2728,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 .collect::<Vec<_>>()
         })
         .collect();
-    let mut codex_seen: HashSet<String> = HashSet::new();
+    let mut codex_seen: HashSet<u64> = HashSet::new();
     let codex_msgs: Vec<ParsedMessage> = codex_msgs_raw
         .into_iter()
         .filter(|message| should_keep_deduped_message(&mut codex_seen, message))
@@ -2875,7 +2865,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .par_iter()
         .flat_map(|path| sessions::gjc::parse_gjc_file(path))
         .collect();
-    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let mut gjc_seen: HashSet<u64> = HashSet::new();
     let gjc_msgs: Vec<ParsedMessage> = gjc_msgs_raw
         .into_iter()
         .filter(|message| should_keep_deduped_message(&mut gjc_seen, message))
@@ -2987,7 +2977,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     let hermes_db_paths = scan_result.hermes_db_paths();
     if !hermes_db_paths.is_empty() {
-        let mut hermes_seen: HashSet<String> = HashSet::new();
+        let mut hermes_seen: HashSet<u64> = HashSet::new();
         let hermes_msgs: Vec<ParsedMessage> = hermes_db_paths
             .iter()
             .flat_map(|db_path| sessions::hermes::parse_hermes_sqlite(db_path))
@@ -3156,14 +3146,14 @@ pub async fn parse_local_unified_messages(
 
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     ParsedMessage {
-        client: msg.client.clone(),
-        model_id: msg.model_id.clone(),
-        provider_id: msg.provider_id.clone(),
-        session_id: msg.session_id.clone(),
-        workspace_key: msg.workspace_key.clone(),
-        workspace_label: msg.workspace_label.clone(),
+        client: msg.client.to_string(),
+        model_id: msg.model_id.to_string(),
+        provider_id: msg.provider_id.to_string(),
+        session_id: msg.session_id.to_string(),
+        workspace_key: msg.workspace_key.as_deref().map(str::to_string),
+        workspace_label: msg.workspace_label.as_deref().map(str::to_string),
         timestamp: msg.timestamp,
-        date: msg.date.clone(),
+        date: msg.date_string(),
         input: msg.tokens.input,
         output: msg.tokens.output,
         cache_read: msg.tokens.cache_read,
@@ -3171,15 +3161,12 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
         reasoning: msg.tokens.reasoning,
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
-        agent: msg.agent.clone(),
+        agent: msg.agent.as_deref().map(str::to_string),
     }
 }
 
-fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &UnifiedMessage) -> bool {
-    message
-        .dedup_key
-        .as_ref()
-        .is_none_or(|key| seen_keys.insert(key.clone()))
+fn should_keep_deduped_message(seen_keys: &mut HashSet<u64>, message: &UnifiedMessage) -> bool {
+    message.dedup_key.is_none_or(|key| seen_keys.insert(key))
 }
 
 fn summed_parsed_message_count(messages: &[ParsedMessage]) -> i32 {
@@ -3213,14 +3200,13 @@ fn filter_parsed_messages(
 
 pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
     UnifiedMessage {
-        client: msg.client.clone(),
-        model_id: msg.model_id.clone(),
-        provider_id: msg.provider_id.clone(),
-        session_id: msg.session_id.clone(),
-        workspace_key: msg.workspace_key.clone(),
-        workspace_label: msg.workspace_label.clone(),
+        client: sessions::intern::intern(&msg.client),
+        model_id: sessions::intern::intern(&msg.model_id),
+        provider_id: sessions::intern::intern(&msg.provider_id),
+        session_id: sessions::intern::intern(&msg.session_id),
+        workspace_key: msg.workspace_key.as_deref().map(sessions::intern::intern),
+        workspace_label: msg.workspace_label.as_deref().map(sessions::intern::intern),
         timestamp: msg.timestamp,
-        date: msg.date.clone(),
         tokens: TokenBreakdown {
             input: msg.input,
             output: msg.output,
@@ -3231,7 +3217,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         cost,
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
-        agent: msg.agent.clone(),
+        agent: msg.agent.as_deref().map(sessions::intern::intern),
         agent_instance: None,
         dedup_key: None,
         is_turn_start: false,
@@ -3304,7 +3290,7 @@ mod tests {
                 reasoning: 0,
             },
             cost,
-            dedup_key.map(str::to_string),
+            dedup_key.map(crate::sessions::dedup_hash_str),
         )
     }
 
@@ -4461,8 +4447,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "cursor");
-        assert_eq!(messages[0].model_id, "Composer 1.5");
+        assert_eq!(messages[0].client.as_ref(), "cursor");
+        assert_eq!(messages[0].model_id.as_ref(), "Composer 1.5");
         assert!(messages[0].cost > 0.0);
     }
 
@@ -4509,8 +4495,8 @@ model = "gpt-5.5"
             .unwrap();
 
             assert_eq!(messages.len(), 2);
-            assert_eq!(messages[0].provider_id, "openai-pro");
-            assert_eq!(messages[0].model_id, "gpt-5.5");
+            assert_eq!(messages[0].provider_id.as_ref(), "openai-pro");
+            assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
             assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 30);
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 3);
             assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 5);
@@ -4561,7 +4547,7 @@ model = "gpt-5.5"
 
     #[test]
     #[serial_test::serial]
-    fn test_source_cache_refreshes_stale_date_on_cache_hit() {
+    fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
@@ -4580,10 +4566,14 @@ model = "gpt-5.5"
             .unwrap();
 
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
-            let mut stale_message = UnifiedMessage::new(
+            // Provider deliberately wrong for the model: the cache-hit path
+            // must re-run refresh_derived_fields (dates are derived from
+            // timestamps since schema v24, so provider identity is the
+            // remaining derived field).
+            let stale_message = UnifiedMessage::new(
                 "opencode",
-                "accounts/fireworks/models/deepseek-v3-0324",
-                "fireworks",
+                "gpt-5.5",
+                "anthropic",
                 "session-1",
                 1_733_011_200_000,
                 TokenBreakdown {
@@ -4595,7 +4585,6 @@ model = "gpt-5.5"
                 },
                 0.0,
             );
-            stale_message.date = "1900-01-01".to_string();
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
@@ -4615,25 +4604,10 @@ model = "gpt-5.5"
             .unwrap();
 
             assert_eq!(messages.len(), 1);
-            assert_ne!(messages[0].date, "1900-01-01");
             assert_eq!(
-                messages[0].date,
-                UnifiedMessage::new(
-                    "opencode",
-                    "accounts/fireworks/models/deepseek-v3-0324",
-                    "fireworks",
-                    "session-1",
-                    1_733_011_200_000,
-                    TokenBreakdown {
-                        input: 10,
-                        output: 5,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
-                    0.0,
-                )
-                .date
+                messages[0].provider_id.as_ref(),
+                "openai",
+                "cache hits must refresh derived provider identity"
             );
         }
 
@@ -5011,12 +4985,14 @@ model = "gpt-5.5"
                 "expected 3 unique messages (shared + latest-only + stable-only), got {}",
                 messages.len()
             );
-            let mut ids: Vec<String> = messages
+            let mut ids: Vec<u64> = messages.iter().filter_map(|m| m.dedup_key).collect();
+            ids.sort_unstable();
+            let mut expected: Vec<u64> = ["latest-only", "shared-msg", "stable-only"]
                 .iter()
-                .filter_map(|m| m.dedup_key.clone())
+                .map(|key| crate::sessions::dedup_hash_str(key))
                 .collect();
-            ids.sort();
-            assert_eq!(ids, vec!["latest-only", "shared-msg", "stable-only"]);
+            expected.sort_unstable();
+            assert_eq!(ids, expected);
 
             let messages_warm = parse_all_messages_with_pricing(
                 source_home.path().to_str().unwrap(),
@@ -5548,7 +5524,7 @@ model = "gpt-5.5"
             )
             .unwrap();
             assert_eq!(initial_messages.len(), 1);
-            assert_eq!(initial_messages[0].model_id, "gpt-5.4");
+            assert_eq!(initial_messages[0].model_id.as_ref(), "gpt-5.4");
             assert!(message_cache::SourceMessageCache::load()
                 .get(&path)
                 .and_then(|entry| entry.codex_incremental.as_ref())
@@ -5586,7 +5562,7 @@ model = "gpt-5.5"
             assert_eq!(warm_messages.len(), 2);
             assert!(warm_messages
                 .iter()
-                .all(|message| message.model_id == "gpt-5.5"));
+                .all(|message| message.model_id.as_ref() == "gpt-5.5"));
         }
 
         match original_home {
@@ -5770,7 +5746,6 @@ model = "gpt-5.5"
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             let mut stale_message = expected[0].clone();
             stale_message.timestamp = 0;
-            stale_message.date = "1900-01-01".to_string();
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
@@ -5889,7 +5864,7 @@ model = "gpt-5.5"
             )
             .unwrap();
             assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].model_id, "gpt-5.4");
+            assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
 
             let cache = message_cache::SourceMessageCache::load();
             assert!(cache.get(&path).is_none());
@@ -5932,7 +5907,7 @@ model = "gpt-5.5"
             )
             .unwrap();
             assert_eq!(initial_messages.len(), 1);
-            assert_eq!(initial_messages[0].model_id, "unknown");
+            assert_eq!(initial_messages[0].model_id.as_ref(), "unknown");
             assert!(message_cache::SourceMessageCache::load()
                 .get(&path)
                 .is_none());
@@ -5969,7 +5944,7 @@ model = "gpt-5.5"
 
             assert_eq!(resumed_messages, fresh_messages);
             assert_eq!(resumed_messages.len(), 1);
-            assert_eq!(resumed_messages[0].model_id, "gpt-5.5");
+            assert_eq!(resumed_messages[0].model_id.as_ref(), "gpt-5.5");
 
             std::env::set_var("HOME", cache_home.path());
             assert!(message_cache::SourceMessageCache::load()
@@ -6961,13 +6936,15 @@ model = "gpt-5.5"
         assert_eq!(deduped.len(), 2);
         let stable = deduped
             .iter()
-            .find(|msg| msg.session_id == "session-stable")
+            .find(|msg| msg.session_id.as_ref() == "session-stable")
             .expect("session-stable should remain after dedupe");
         assert_eq!(stable.timestamp, 1_700_000_003_000);
         assert_eq!(stable.cost, 0.3);
         assert_eq!(
-            stable.dedup_key.as_deref(),
-            Some("trae:session-stable:1_700_000_003")
+            stable.dedup_key,
+            Some(crate::sessions::dedup_hash_str(
+                "trae:session-stable:1_700_000_003"
+            ))
         );
     }
 
@@ -6996,10 +6973,21 @@ model = "gpt-5.5"
 
         let deduped = dedupe_latest_trae_messages(messages);
 
+        // Equal timestamps tiebreak on the greater dedup hash: arbitrary but
+        // stable across runs and machines (FNV-1a). Real trae keys embed
+        // usage_time = timestamp/1000, so production ties carry equal keys.
+        let key_a = crate::sessions::dedup_hash_str("dedupe-key-a");
+        let key_z = crate::sessions::dedup_hash_str("dedupe-key-z");
+        let (winning_key, winning_cost) = if key_z > key_a {
+            (key_z, 0.4)
+        } else {
+            (key_a, 0.2)
+        };
+
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].timestamp, 1_700_000_010_000);
-        assert_eq!(deduped[0].dedup_key.as_deref(), Some("dedupe-key-z"));
-        assert_eq!(deduped[0].cost, 0.4);
+        assert_eq!(deduped[0].dedup_key, Some(winning_key));
+        assert_eq!(deduped[0].cost, winning_cost);
     }
 
     #[test]
@@ -7024,9 +7012,12 @@ model = "gpt-5.5"
         .unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "opencode");
-        assert_eq!(messages[0].model_id, "hf:deepseek-ai/DeepSeek-V3-0324");
-        assert_eq!(messages[0].provider_id, "unknown");
+        assert_eq!(messages[0].client.as_ref(), "opencode");
+        assert_eq!(
+            messages[0].model_id.as_ref(),
+            "hf:deepseek-ai/DeepSeek-V3-0324"
+        );
+        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
     }
 
     #[test]

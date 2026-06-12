@@ -266,10 +266,10 @@ model = "gpt-5.5"
         let messages = parse_kimi_file(&wire);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "kimi");
-        assert_eq!(messages[0].provider_id, "openai-pro");
-        assert_eq!(messages[0].model_id, "gpt-5.5");
-        assert_eq!(messages[0].session_id, "session_123");
+        assert_eq!(messages[0].client.as_ref(), "kimi");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai-pro");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[0].session_id.as_ref(), "session_123");
         assert_eq!(messages[0].agent.as_deref(), Some("Kimi Agent"));
         assert_eq!(
             messages[0].agent_instance.as_deref(),
@@ -386,8 +386,8 @@ model = "gpt-5.5"
         let messages = parse_kimi_file(&wire);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "unresolved");
-        assert_eq!(messages[0].model_id, "openai-pro/gpt-5.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "unresolved");
+        assert_eq!(messages[0].model_id.as_ref(), "openai-pro/gpt-5.5");
     }
 
     #[test]

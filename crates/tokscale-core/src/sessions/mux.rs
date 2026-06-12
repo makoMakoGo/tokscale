@@ -167,10 +167,10 @@ mod tests {
         // Find the claude message
         let claude = msgs
             .iter()
-            .find(|m| m.model_id == "claude-opus-4-6")
+            .find(|m| m.model_id.as_ref() == "claude-opus-4-6")
             .unwrap();
-        assert_eq!(claude.client, "mux");
-        assert_eq!(claude.provider_id, "anthropic");
+        assert_eq!(claude.client.as_ref(), "mux");
+        assert_eq!(claude.provider_id.as_ref(), "anthropic");
         assert_eq!(claude.tokens.input, 100);
         assert_eq!(claude.tokens.cache_read, 5000);
         assert_eq!(claude.tokens.cache_write, 200);
@@ -178,8 +178,11 @@ mod tests {
         assert_eq!(claude.tokens.reasoning, 0);
         assert_eq!(claude.timestamp, 1700000000000);
 
-        let gpt = msgs.iter().find(|m| m.model_id == "gpt-4o").unwrap();
-        assert_eq!(gpt.provider_id, "openai");
+        let gpt = msgs
+            .iter()
+            .find(|m| m.model_id.as_ref() == "gpt-4o")
+            .unwrap();
+        assert_eq!(gpt.provider_id.as_ref(), "openai");
         assert_eq!(gpt.tokens.input, 50);
         assert_eq!(gpt.tokens.output, 150);
     }
@@ -235,8 +238,8 @@ mod tests {
         let f = write_temp_json(json);
         let msgs = parse_mux_file(f.path());
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].model_id, "claude-opus-4-6");
-        assert_eq!(msgs[0].provider_id, "");
+        assert_eq!(msgs[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(msgs[0].provider_id.as_ref(), "");
     }
 
     #[test]
@@ -308,7 +311,7 @@ mod tests {
         let f = write_temp_json(json);
         let msgs = parse_mux_file(f.path());
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].provider_id, "provider");
-        assert_eq!(msgs[0].model_id, "sub:model-name");
+        assert_eq!(msgs[0].provider_id.as_ref(), "provider");
+        assert_eq!(msgs[0].model_id.as_ref(), "sub:model-name");
     }
 }

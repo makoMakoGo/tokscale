@@ -154,7 +154,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 Some(HERMES_AGENT_NAME.to_string()),
             );
             msg.message_count = message_count.max(0);
-            msg.dedup_key = Some(session_id);
+            msg.dedup_key = Some(crate::sessions::dedup_hash_str(&session_id));
             msg
         },
     )

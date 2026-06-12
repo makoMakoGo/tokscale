@@ -224,9 +224,9 @@ mod tests {
         let messages = parse_qwen_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "qwen");
-        assert_eq!(messages[0].model_id, "qwen3.5-plus");
-        assert_eq!(messages[0].provider_id, "qwen");
+        assert_eq!(messages[0].client.as_ref(), "qwen");
+        assert_eq!(messages[0].model_id.as_ref(), "qwen3.5-plus");
+        assert_eq!(messages[0].provider_id.as_ref(), "qwen");
         // Session ID comes from filename, not JSON content (temp file has random name)
         assert!(!messages[0].session_id.is_empty());
         assert_eq!(messages[0].tokens.input, 12414);
@@ -247,12 +247,12 @@ mod tests {
         let messages = parse_qwen_file(file.path());
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].model_id, "qwen3.5-plus");
+        assert_eq!(messages[0].model_id.as_ref(), "qwen3.5-plus");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 200);
         assert_eq!(messages[0].tokens.reasoning, 10);
         assert_eq!(messages[0].tokens.cache_read, 5);
-        assert_eq!(messages[1].model_id, "qwen3-coder-plus");
+        assert_eq!(messages[1].model_id.as_ref(), "qwen3-coder-plus");
         assert_eq!(messages[1].tokens.input, 300);
         assert_eq!(messages[1].tokens.output, 400);
         assert_eq!(messages[1].tokens.reasoning, 20);
@@ -267,11 +267,8 @@ mod tests {
         let messages = parse_qwen_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key, Some("test_project".to_string()));
-        assert_eq!(
-            messages[0].workspace_label,
-            Some("test_project".to_string())
-        );
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("test_project"));
+        assert_eq!(messages[0].workspace_label, Some("test_project".into()));
     }
 
     #[test]
@@ -360,7 +357,7 @@ not valid json at all
         let messages = parse_qwen_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "unknown");
+        assert_eq!(messages[0].model_id.as_ref(), "unknown");
         assert_eq!(messages[0].tokens.input, 100);
     }
 
@@ -373,7 +370,7 @@ not valid json at all
 
         assert_eq!(messages.len(), 1);
         // Should use the sessionId from JSON, not the filename
-        assert_eq!(messages[0].session_id, "abc123def456");
+        assert_eq!(messages[0].session_id.as_ref(), "abc123def456");
     }
 
     #[test]
@@ -386,9 +383,9 @@ not valid json at all
         assert_eq!(messages.len(), 1);
         // Should fallback to path-derived ID (not empty string)
         assert!(!messages[0].session_id.is_empty());
-        assert_ne!(messages[0].session_id, "");
+        assert_ne!(messages[0].session_id.as_ref(), "");
         // Verify it's not the JSON empty value
-        assert_ne!(messages[0].session_id, "");
+        assert_ne!(messages[0].session_id.as_ref(), "");
     }
 
     #[test]
@@ -413,7 +410,7 @@ not valid json at all
         assert_eq!(messages.len(), 1);
         // Should fallback to path-derived ID
         assert!(!messages[0].session_id.is_empty());
-        assert_ne!(messages[0].session_id, "null");
+        assert_ne!(messages[0].session_id.as_ref(), "null");
     }
 
     #[test]
@@ -498,8 +495,8 @@ not valid json at all
 
         assert_eq!(messages.len(), 2);
         // Both messages should have the same session ID from JSON
-        assert_eq!(messages[0].session_id, "shared_session");
-        assert_eq!(messages[1].session_id, "shared_session");
+        assert_eq!(messages[0].session_id.as_ref(), "shared_session");
+        assert_eq!(messages[1].session_id.as_ref(), "shared_session");
     }
 
     #[test]
@@ -513,7 +510,7 @@ not valid json at all
 
         assert_eq!(messages.len(), 3);
         // First message uses JSON sessionId
-        assert_eq!(messages[0].session_id, "valid_id");
+        assert_eq!(messages[0].session_id.as_ref(), "valid_id");
         // Second message (no sessionId) uses fallback
         assert!(
             messages[1].session_id.contains("mixed")

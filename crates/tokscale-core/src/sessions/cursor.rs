@@ -326,15 +326,15 @@ mod tests {
         let messages = parse_cursor_file(&file_path);
         assert_eq!(messages.len(), 2);
 
-        assert_eq!(messages[0].client, "cursor");
-        assert_eq!(messages[0].model_id, "gpt-4o");
-        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].client.as_ref(), "cursor");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
         assert_eq!(messages[0].tokens.input, 5);
         assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_write, 5); // 10 - 5
         assert!((messages[0].cost - 0.10).abs() < 0.001);
 
-        assert_eq!(messages[1].model_id, "gpt-4o-mini");
+        assert_eq!(messages[1].model_id.as_ref(), "gpt-4o-mini");
     }
 
     #[test]
@@ -352,9 +352,9 @@ mod tests {
         assert_eq!(messages.len(), 2);
 
         // First message: auto model
-        assert_eq!(messages[0].client, "cursor");
-        assert_eq!(messages[0].model_id, "auto");
-        assert_eq!(messages[0].provider_id, "cursor"); // unknown model -> cursor
+        assert_eq!(messages[0].client.as_ref(), "cursor");
+        assert_eq!(messages[0].model_id.as_ref(), "auto");
+        assert_eq!(messages[0].provider_id.as_ref(), "cursor"); // unknown model -> cursor
         assert_eq!(messages[0].tokens.input, 775);
         assert_eq!(messages[0].tokens.output, 21282);
         assert_eq!(messages[0].tokens.cache_read, 105891);
@@ -362,8 +362,8 @@ mod tests {
         assert!((messages[0].cost - 0.19).abs() < 0.001);
 
         // Second message: gpt-5-codex
-        assert_eq!(messages[1].model_id, "gpt-5-codex");
-        assert_eq!(messages[1].provider_id, "openai"); // gpt -> openai
+        assert_eq!(messages[1].model_id.as_ref(), "gpt-5-codex");
+        assert_eq!(messages[1].provider_id.as_ref(), "openai"); // gpt -> openai
         assert_eq!(messages[1].tokens.input, 8263);
         assert_eq!(messages[1].tokens.cache_read, 66964);
     }
@@ -384,17 +384,17 @@ mod tests {
         assert_eq!(messages.len(), 3);
 
         // First message: "Included" cost should be 0
-        assert_eq!(messages[0].client, "cursor");
-        assert_eq!(messages[0].model_id, "composer-2");
+        assert_eq!(messages[0].client.as_ref(), "cursor");
+        assert_eq!(messages[0].model_id.as_ref(), "composer-2");
         assert_eq!(messages[0].cost, 0.0);
         assert_eq!(messages[0].tokens.cache_read, 29045760);
 
         // Second message: actual cost from "On-Demand"
-        assert_eq!(messages[1].model_id, "composer-2");
+        assert_eq!(messages[1].model_id.as_ref(), "composer-2");
         assert!((messages[1].cost - 0.11).abs() < 0.001);
 
         // Third message: "-" cost should be 0 (Errored, No Charge)
-        assert_eq!(messages[2].model_id, "composer-2");
+        assert_eq!(messages[2].model_id.as_ref(), "composer-2");
         assert_eq!(messages[2].cost, 0.0);
     }
 }

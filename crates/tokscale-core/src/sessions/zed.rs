@@ -190,7 +190,7 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
         0.0,
     );
     message.message_count = message_count;
-    message.dedup_key = Some(format!("zed:{}", row.id));
+    message.dedup_key = Some(crate::sessions::dedup_hash_str(&format!("zed:{}", row.id)));
 
     if let Some(workspace_key) = workspace_key_from_folders(
         row.folder_paths.as_deref(),
@@ -472,10 +472,10 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client, "zed");
-        assert_eq!(message.provider_id, ZED_HOSTED_PROVIDER);
-        assert_eq!(message.model_id, "claude-sonnet-4-5");
-        assert_eq!(message.session_id, "thread-1");
+        assert_eq!(message.client.as_ref(), "zed");
+        assert_eq!(message.provider_id.as_ref(), ZED_HOSTED_PROVIDER);
+        assert_eq!(message.model_id.as_ref(), "claude-sonnet-4-5");
+        assert_eq!(message.session_id.as_ref(), "thread-1");
         assert_eq!(
             message.timestamp,
             parse_timestamp_str("2026-05-01T12:00:00Z").unwrap()
@@ -487,7 +487,10 @@ mod tests {
         assert_eq!(message.message_count, 2);
         assert_eq!(message.workspace_key.as_deref(), Some("/workspace/b"));
         assert_eq!(message.workspace_label.as_deref(), Some("b"));
-        assert_eq!(message.dedup_key.as_deref(), Some("zed:thread-1"));
+        assert_eq!(
+            message.dedup_key,
+            Some(crate::sessions::dedup_hash_str("zed:thread-1"))
+        );
     }
 
     #[test]

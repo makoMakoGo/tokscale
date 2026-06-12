@@ -198,7 +198,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 },
                 0.0,
             );
-            msg.dedup_key = Some(session_id);
+            msg.dedup_key = Some(crate::sessions::dedup_hash_str(&session_id));
             Some(msg)
         },
     )

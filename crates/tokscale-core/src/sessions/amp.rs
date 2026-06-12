@@ -412,8 +412,11 @@ mod tests {
 
         let messages = parse_amp_file(&path);
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].date, local_date(thread_created + 2000));
-        assert_eq!(messages[1].date, local_date(timestamp_ms(ledger_timestamp)));
+        assert_eq!(messages[0].date_string(), local_date(thread_created + 2000));
+        assert_eq!(
+            messages[1].date_string(),
+            local_date(timestamp_ms(ledger_timestamp))
+        );
         assert_eq!(messages[0].tokens.input, 50);
         assert_eq!(messages[1].tokens.input, 100);
     }
@@ -476,11 +479,11 @@ mod tests {
         let messages = parse_amp_file(&path);
         assert_eq!(messages.len(), 2);
         assert_eq!(
-            messages[0].date,
+            messages[0].date_string(),
             local_date(timestamp_ms(first_ledger_timestamp))
         );
         assert_eq!(
-            messages[1].date,
+            messages[1].date_string(),
             local_date(timestamp_ms(second_ledger_timestamp))
         );
     }
@@ -617,7 +620,7 @@ mod tests {
         let messages = parse_amp_file(&path);
         assert_eq!(messages.len(), 1);
         assert!(messages[0].timestamp >= file_mtime_ms);
-        assert_ne!(messages[0].date, "1970-01-01");
+        assert_ne!(messages[0].date_string(), "1970-01-01");
     }
 
     #[test]
@@ -647,6 +650,6 @@ mod tests {
 
         let messages = parse_amp_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "unknown");
+        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
     }
 }

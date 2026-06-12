@@ -410,7 +410,7 @@ pub fn parse_claude_file_with_cache_and_home(
     // response streams in; later entries often carry more complete token counts.
     // We merge duplicates using per-field max to always keep the highest value seen
     // for each token type, ensuring we capture the most complete record.
-    let mut processed_hashes: HashMap<String, usize> = HashMap::new();
+    let mut processed_hashes: HashMap<u64, usize> = HashMap::new();
     let mut headless_state = ClaudeHeadlessState::default();
     let mut buffer = Vec::with_capacity(4096);
     // Tracks whether the previous entry was a user message,
@@ -515,7 +515,7 @@ pub fn parse_claude_file_with_cache_and_home(
                             }
                             continue;
                         }
-                        processed_hashes.insert(dedup_key.clone(), messages.len());
+                        processed_hashes.insert(*dedup_key, messages.len());
                     }
                     let provider_confidence =
                         stored_claude_provider_confidence(&tool_message.provider_id);
@@ -565,13 +565,14 @@ pub fn parse_claude_file_with_cache_and_home(
                 // complete token counts across all duplicate entries.
                 let pending_hash = match (&message.id, &entry.request_id) {
                     (Some(msg_id), Some(req_id)) => {
-                        let hash = format!("{}:{}", msg_id, req_id);
+                        let hash =
+                            crate::sessions::dedup_hash_str(&format!("{}:{}", msg_id, req_id));
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
                             let duplicate_provider_choice = claude_provider_choice_from_parts(
                                 message
                                     .model
                                     .as_deref()
-                                    .or(Some(messages[existing_idx].model_id.as_str())),
+                                    .or(Some(messages[existing_idx].model_id.as_ref())),
                                 provider_hint.as_deref(),
                             );
                             merge_claude_duplicate(
@@ -595,13 +596,13 @@ pub fn parse_claude_file_with_cache_and_home(
                         Some(hash)
                     }
                     (Some(msg_id), None) => {
-                        let hash = format!("message:{}", msg_id);
+                        let hash = crate::sessions::dedup_hash_str(&format!("message:{}", msg_id));
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
                             let duplicate_provider_choice = claude_provider_choice_from_parts(
                                 message
                                     .model
                                     .as_deref()
-                                    .or(Some(messages[existing_idx].model_id.as_str())),
+                                    .or(Some(messages[existing_idx].model_id.as_ref())),
                                 provider_hint.as_deref(),
                             );
                             merge_claude_duplicate(
@@ -642,7 +643,7 @@ pub fn parse_claude_file_with_cache_and_home(
 
                 // Insert dedup index only after all checks pass, right before push
                 let dedup_key = pending_hash.inspect(|hash| {
-                    processed_hashes.insert(hash.clone(), messages.len());
+                    processed_hashes.insert(*hash, messages.len());
                 });
 
                 let mut unified = UnifiedMessage::new_with_dedup(
@@ -662,7 +663,9 @@ pub fn parse_claude_file_with_cache_and_home(
                     dedup_key,
                 );
                 unified.duration_ms = duration_ms;
-                unified.agent = sidechain_agent.clone();
+                unified.agent = sidechain_agent
+                    .as_deref()
+                    .map(crate::sessions::intern::intern);
                 unified.set_agent_instance(sidechain_agent_instance.clone());
                 let (message_workspace_key, message_workspace_label) = workspace_options_for_entry(
                     entry_workspace.as_ref(),
@@ -1002,14 +1005,17 @@ fn extract_claude_tool_result_message(
         },
         0.0,
         usage.dedup_key.map(|key| {
-            format!(
+            crate::sessions::dedup_hash_str(&format!(
                 "{}:tool_result:{}:{key}",
                 context.client_id, context.session_id
-            )
+            ))
         }),
     );
     message.message_count = 0;
-    message.agent = context.sidechain_agent;
+    message.agent = context
+        .sidechain_agent
+        .as_deref()
+        .map(crate::sessions::intern::intern);
     message.set_agent_instance(context.sidechain_agent_instance);
     message.set_workspace(context.workspace_key, context.workspace_label);
     Some(message)
@@ -1512,13 +1518,13 @@ fn claude_provider_choice_from_hint(
 }
 
 fn update_claude_provider_id(
-    existing: &mut String,
+    existing: &mut std::sync::Arc<str>,
     existing_confidence: &mut u8,
     candidate: ClaudeProviderChoice,
 ) {
     if candidate.confidence > *existing_confidence {
         *existing_confidence = candidate.confidence;
-        *existing = candidate.id;
+        *existing = crate::sessions::intern::intern(&candidate.id);
     }
 }
 
@@ -1733,9 +1739,9 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "cc-mirror/zai-worker");
-        assert_eq!(messages[0].provider_id, "zai");
-        assert_eq!(messages[0].model_id, "claude-3-5-sonnet");
+        assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
+        assert_eq!(messages[0].provider_id.as_ref(), "zai");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-3-5-sonnet");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 10);
@@ -1833,7 +1839,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 75);
     }
@@ -1847,7 +1853,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 75);
     }
@@ -1861,7 +1867,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 75);
     }
@@ -1912,7 +1918,10 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 250);
         assert_eq!(messages[0].timestamp, 1_733_047_203_500);
         assert_eq!(messages[0].duration_ms, Some(3500));
-        assert_eq!(messages[0].dedup_key.as_deref(), Some("message:msg_stream"));
+        assert_eq!(
+            messages[0].dedup_key,
+            Some(crate::sessions::dedup_hash_str("message:msg_stream"))
+        );
     }
 
     #[test]
@@ -2081,8 +2090,8 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-opus-4-7");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-7");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 321);
         assert_eq!(messages[0].tokens.output, 654);
         assert_eq!(messages[0].tokens.cache_read, 987);
@@ -2097,20 +2106,17 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 4);
         assert_eq!(messages[0].tokens.output, 0);
         assert_eq!(messages[0].tokens.cache_read, 0);
         assert_eq!(messages[0].tokens.cache_write, 0);
-        let expected_dedup_key = format!(
+        let expected_dedup_key = crate::sessions::dedup_hash_str(&format!(
             "claude:tool_result:{}:tool_result:toolu_input",
             messages[0].session_id
-        );
-        assert_eq!(
-            messages[0].dedup_key.as_deref(),
-            Some(expected_dedup_key.as_str())
-        );
+        ));
+        assert_eq!(messages[0].dedup_key, Some(expected_dedup_key));
         assert_eq!(messages[0].message_count, 0);
     }
 
@@ -2128,9 +2134,9 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "cc-mirror/zai-worker");
-        assert_eq!(messages[0].provider_id, "zai");
-        assert_eq!(messages[0].model_id, "sonnet");
+        assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
+        assert_eq!(messages[0].provider_id.as_ref(), "zai");
+        assert_eq!(messages[0].model_id.as_ref(), "sonnet");
         assert_eq!(messages[0].tokens.input, 7);
         assert_eq!(messages[0].message_count, 0);
     }
@@ -2144,7 +2150,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
         assert_eq!(messages[0].tokens.input, 8);
         assert_eq!(messages[0].timestamp, 1_779_876_000_100);
     }
@@ -2191,8 +2197,8 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-sonnet-4-6");
-        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
     #[test]
@@ -2203,7 +2209,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "deepseek");
+        assert_eq!(messages[0].provider_id.as_ref(), "deepseek");
     }
 
     #[test]
@@ -2222,15 +2228,17 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 8);
-        assert_eq!(messages[0].provider_id, "anthropic");
-        assert_eq!(messages[1].provider_id, "openai");
-        assert_eq!(messages[2].provider_id, "google");
-        assert_eq!(messages[3].provider_id, "minimax");
-        assert_eq!(messages[4].provider_id, "zai");
-        assert_eq!(messages[5].provider_id, "xiaomi");
-        assert_eq!(messages[6].provider_id, "moonshotai");
-        assert_eq!(messages[7].provider_id, "meituan");
-        assert!(!messages.iter().any(|msg| msg.model_id == "<synthetic>"));
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(messages[1].provider_id.as_ref(), "openai");
+        assert_eq!(messages[2].provider_id.as_ref(), "google");
+        assert_eq!(messages[3].provider_id.as_ref(), "minimax");
+        assert_eq!(messages[4].provider_id.as_ref(), "zai");
+        assert_eq!(messages[5].provider_id.as_ref(), "xiaomi");
+        assert_eq!(messages[6].provider_id.as_ref(), "moonshotai");
+        assert_eq!(messages[7].provider_id.as_ref(), "meituan");
+        assert!(!messages
+            .iter()
+            .any(|msg| msg.model_id.as_ref() == "<synthetic>"));
     }
 
     #[test]
@@ -2243,7 +2251,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "glm-5.1");
+        assert_eq!(messages[0].model_id.as_ref(), "glm-5.1");
         assert_eq!(messages[0].tokens.input, 123);
         assert_eq!(messages[0].tokens.output, 45);
     }
@@ -2262,19 +2270,19 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 7);
-        assert_eq!(messages[0].model_id, "gpt-5.3-codex");
-        assert_eq!(messages[0].provider_id, "openai");
-        assert_eq!(messages[1].provider_id, "zai");
-        assert_eq!(messages[2].provider_id, "xiaomi");
-        assert_eq!(messages[3].provider_id, "moonshotai");
-        assert_eq!(messages[4].provider_id, "meituan");
-        assert_eq!(messages[5].provider_id, "deepseek");
-        assert_eq!(messages[6].provider_id, "deepseek");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.3-codex");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(messages[1].provider_id.as_ref(), "zai");
+        assert_eq!(messages[2].provider_id.as_ref(), "xiaomi");
+        assert_eq!(messages[3].provider_id.as_ref(), "moonshotai");
+        assert_eq!(messages[4].provider_id.as_ref(), "meituan");
+        assert_eq!(messages[5].provider_id.as_ref(), "deepseek");
+        assert_eq!(messages[6].provider_id.as_ref(), "deepseek");
         assert!(
             messages
                 .iter()
                 .filter(|message| !provider_identity::is_anthropic_model(&message.model_id))
-                .all(|message| message.provider_id != "anthropic"),
+                .all(|message| message.provider_id.as_ref() != "anthropic"),
             "non-Claude models must never be attributed to Anthropic"
         );
     }
@@ -2288,8 +2296,8 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].provider_id, "deepseek");
-        assert_eq!(messages[1].provider_id, "deepseek");
+        assert_eq!(messages[0].provider_id.as_ref(), "deepseek");
+        assert_eq!(messages[1].provider_id.as_ref(), "deepseek");
     }
 
     #[test]
@@ -2301,7 +2309,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].provider_id.as_ref(), "zai");
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 15);
     }
@@ -2314,8 +2322,8 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-opus-4-6");
-        assert_eq!(messages[0].provider_id, "openrouter");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
     }
 
     #[test]
@@ -2327,7 +2335,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-3-5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-3-5-sonnet");
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 60);
         assert_eq!(messages[0].tokens.cache_read, 10);
@@ -2342,8 +2350,8 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-5.3-codex");
-        assert_eq!(messages[0].provider_id, "openai");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.3-codex");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
     }
 
     #[test]
@@ -2367,7 +2375,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-3-5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-3-5-sonnet");
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 80);
         assert_eq!(messages[0].tokens.cache_read, 20);
@@ -2383,8 +2391,8 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gemini-3-pro-preview");
-        assert_eq!(messages[0].provider_id, "google");
+        assert_eq!(messages[0].model_id.as_ref(), "gemini-3-pro-preview");
+        assert_eq!(messages[0].provider_id.as_ref(), "google");
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 80);
     }
@@ -2397,8 +2405,8 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
-        assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("myproject"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("myproject"));
     }
 
     #[test]
@@ -2415,9 +2423,9 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].workspace_key,
-            Some("/home/travis/01-workspace/tokscale".to_string())
+            Some("/home/travis/01-workspace/tokscale".into())
         );
-        assert_eq!(messages[0].workspace_label, Some("tokscale".to_string()));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("tokscale"));
     }
 
     #[test]
@@ -2445,9 +2453,9 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 70);
         assert_eq!(
             messages[0].workspace_key,
-            Some("/home/travis/01-workspace/tokscale".to_string())
+            Some("/home/travis/01-workspace/tokscale".into())
         );
-        assert_eq!(messages[0].workspace_label, Some("tokscale".to_string()));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("tokscale"));
     }
 
     #[test]
@@ -2460,9 +2468,9 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].workspace_key,
-            Some("C:/Users/Travis/Desktop".to_string())
+            Some("C:/Users/Travis/Desktop".into())
         );
-        assert_eq!(messages[0].workspace_label, Some("Desktop".to_string()));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("Desktop"));
     }
 
     #[test]
@@ -2474,8 +2482,11 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id, "ses_123456789012345678901234567");
-        assert_eq!(messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(
+            messages[0].session_id.as_ref(),
+            "ses_123456789012345678901234567"
+        );
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4");
         assert_eq!(messages[0].tokens.input, 123);
         assert_eq!(messages[0].tokens.output, 45);
         assert_eq!(messages[0].tokens.cache_read, 67);
@@ -2548,11 +2559,12 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Explore".to_string()),
+            Some("Claude Explore".into()),
             "Should resolve agent name from meta sidecar and normalize"
         );
         assert_eq!(
-            messages[0].session_id, "parent-uuid-001",
+            messages[0].session_id.as_ref(),
+            "parent-uuid-001",
             "Should use parent session ID from transcript, not filename"
         );
         assert_eq!(messages[0].tokens.input, 200);
@@ -2576,7 +2588,7 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent, Some("Claude Subagent".to_string()));
+        assert_eq!(messages[0].agent.as_deref(), Some("Claude Subagent"));
     }
 
     #[test]
@@ -2591,10 +2603,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Subagent".to_string()),
+            Some("Claude Subagent".into()),
             "Without meta sidecar, should fall back to generic label"
         );
-        assert_eq!(messages[0].session_id, "parent-uuid-002");
+        assert_eq!(messages[0].session_id.as_ref(), "parent-uuid-002");
     }
 
     #[test]
@@ -2609,11 +2621,12 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Subagent".to_string()),
+            Some("Claude Subagent".into()),
             "Legacy flat layout has no meta → Tier 3 fallback"
         );
         assert_eq!(
-            messages[0].session_id, "legacy-session-001",
+            messages[0].session_id.as_ref(),
+            "legacy-session-001",
             "Should use parent session ID from transcript body"
         );
     }
@@ -2655,14 +2668,14 @@ mod tests {
         let msgs3 = parse_claude_file(&path3);
 
         // All three should share the parent session ID
-        assert_eq!(msgs1[0].session_id, "shared-parent-uuid");
-        assert_eq!(msgs2[0].session_id, "shared-parent-uuid");
-        assert_eq!(msgs3[0].session_id, "shared-parent-uuid");
+        assert_eq!(msgs1[0].session_id.as_ref(), "shared-parent-uuid");
+        assert_eq!(msgs2[0].session_id.as_ref(), "shared-parent-uuid");
+        assert_eq!(msgs3[0].session_id.as_ref(), "shared-parent-uuid");
 
         // Agent names should differ
-        assert_eq!(msgs1[0].agent, Some("Claude Explore".to_string()));
-        assert_eq!(msgs2[0].agent, Some("Claude General Purpose".to_string()));
-        assert_eq!(msgs3[0].agent, Some("Claude Subagent".to_string()));
+        assert_eq!(msgs1[0].agent.as_deref(), Some("Claude Explore"));
+        assert_eq!(msgs2[0].agent.as_deref(), Some("Claude General Purpose"));
+        assert_eq!(msgs3[0].agent.as_deref(), Some("Claude Subagent"));
     }
 
     #[test]
@@ -2694,8 +2707,8 @@ mod tests {
         assert_eq!(total_cache_write, 150, "cache_write: 100 + 50");
 
         // Both messages should have the same agent
-        assert_eq!(messages[0].agent, Some("Claude Subagent".to_string()));
-        assert_eq!(messages[1].agent, Some("Claude Subagent".to_string()));
+        assert_eq!(messages[0].agent.as_deref(), Some("Claude Subagent"));
+        assert_eq!(messages[1].agent.as_deref(), Some("Claude Subagent"));
     }
 
     #[test]
@@ -2758,10 +2771,10 @@ mod tests {
         );
         assert_eq!(
             messages[0].agent,
-            Some("Claude Subagent".to_string()),
+            Some("Claude Subagent".into()),
             "Deduped message should retain agent"
         );
-        assert_eq!(messages[0].session_id, "parent-dedup");
+        assert_eq!(messages[0].session_id.as_ref(), "parent-dedup");
     }
 
     #[test]
@@ -2782,7 +2795,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude General Purpose".to_string()),
+            Some("Claude General Purpose".into()),
             "Should strip oh-my-claudecode: prefix and normalize"
         );
     }
@@ -2799,7 +2812,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Subagent".to_string()),
+            Some("Claude Subagent".into()),
             "Still detected as sidechain"
         );
         // session_id should be the file stem (fallback)
@@ -2810,7 +2823,7 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        assert_eq!(messages[0].session_id, expected_stem);
+        assert_eq!(messages[0].session_id.as_ref(), expected_stem);
     }
 
     // --- Tier 2: parent session tool_use inference tests ---
@@ -2846,10 +2859,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Subagent".to_string()),
+            Some("Claude Subagent".into()),
             "Tier 2 should keep unknown parent subagent types generic"
         );
-        assert_eq!(messages[0].session_id, parent_session_id);
+        assert_eq!(messages[0].session_id.as_ref(), parent_session_id);
     }
 
     #[test]
@@ -2885,7 +2898,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Explore".to_string()),
+            Some("Claude Explore".into()),
             "Tier 2 should work for flat layout too"
         );
     }
@@ -2931,7 +2944,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Plan".to_string()),
+            Some("Claude Plan".into()),
             "Tier 1 (meta sidecar) should take precedence over Tier 2 (parent lookup)"
         );
     }
@@ -2997,7 +3010,7 @@ mod tests {
         let messages = parse_claude_file(&sidechain_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent, Some("Claude Plan".to_string()));
+        assert_eq!(messages[0].agent.as_deref(), Some("Claude Plan"));
     }
 
     #[test]
@@ -3074,12 +3087,12 @@ mod tests {
 
         assert_eq!(
             msgs_a[0].agent,
-            Some("Claude Explore".to_string()),
+            Some("Claude Explore".into()),
             "First agent should be explore"
         );
         assert_eq!(
             msgs_b[0].agent,
-            Some("Claude Plan".to_string()),
+            Some("Claude Plan".into()),
             "Second agent should be plan"
         );
     }

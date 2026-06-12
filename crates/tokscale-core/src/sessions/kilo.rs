@@ -109,7 +109,10 @@ pub fn parse_kilo_sqlite_with_fallback(
             None => continue,
         };
 
-        let dedup_key = msg.id.or(Some(row_id));
+        let dedup_key = msg
+            .id
+            .or(Some(row_id))
+            .map(|key| crate::sessions::dedup_hash_str(&key));
 
         let model_id = match msg.model_id {
             Some(m) => m,
@@ -237,10 +240,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
 
         let msg = &messages[0];
-        assert_eq!(msg.client, "kilo");
-        assert_eq!(msg.session_id, "sess-1");
-        assert_eq!(msg.model_id, "claude-sonnet-4");
-        assert_eq!(msg.provider_id, "anthropic");
+        assert_eq!(msg.client.as_ref(), "kilo");
+        assert_eq!(msg.session_id.as_ref(), "sess-1");
+        assert_eq!(msg.model_id.as_ref(), "claude-sonnet-4");
+        assert_eq!(msg.provider_id.as_ref(), "anthropic");
         assert_eq!(msg.timestamp, 1_700_000_000_123);
         assert_eq!(msg.tokens.input, 1200);
         assert_eq!(msg.tokens.output, 300);
@@ -249,7 +252,10 @@ mod tests {
         assert_eq!(msg.tokens.cache_write, 25);
         assert_eq!(msg.cost, 0.42);
         assert_eq!(msg.agent.as_deref(), Some("architect"));
-        assert_eq!(msg.dedup_key.as_deref(), Some("embedded-msg-1"));
+        assert_eq!(
+            msg.dedup_key,
+            Some(crate::sessions::dedup_hash_str("embedded-msg-1"))
+        );
     }
 
     #[test]
@@ -313,9 +319,9 @@ mod tests {
         assert_eq!(messages.len(), 1);
 
         let msg = &messages[0];
-        assert_eq!(msg.session_id, "sess-valid");
-        assert_eq!(msg.model_id, "gpt-5.4");
-        assert_eq!(msg.provider_id, "openai");
+        assert_eq!(msg.session_id.as_ref(), "sess-valid");
+        assert_eq!(msg.model_id.as_ref(), "gpt-5.4");
+        assert_eq!(msg.provider_id.as_ref(), "openai");
         assert_eq!(msg.timestamp, 1_800_000_000_000);
         assert_eq!(msg.tokens.input, 0);
         assert_eq!(msg.tokens.output, 0);
@@ -324,7 +330,10 @@ mod tests {
         assert_eq!(msg.tokens.cache_write, 0);
         assert_eq!(msg.cost, 0.0);
         assert_eq!(msg.agent.as_deref(), Some("debug"));
-        assert_eq!(msg.dedup_key.as_deref(), Some("row-valid"));
+        assert_eq!(
+            msg.dedup_key,
+            Some(crate::sessions::dedup_hash_str("row-valid"))
+        );
     }
 
     #[test]

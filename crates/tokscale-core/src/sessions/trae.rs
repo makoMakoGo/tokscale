@@ -88,7 +88,10 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
         return None;
     }
 
-    let dedup_key = Some(format!("trae:{}:{}", session_id, usage_time));
+    let dedup_key = Some(crate::sessions::dedup_hash_str(&format!(
+        "trae:{}:{}",
+        session_id, usage_time
+    )));
 
     Some(UnifiedMessage::new_with_dedup(
         client,
@@ -165,9 +168,9 @@ mod tests {
         let msgs = parse_trae_file("trae", f.path());
         assert_eq!(msgs.len(), 1);
         let m = &msgs[0];
-        assert_eq!(m.client, "trae");
-        assert_eq!(m.model_id, "gpt-5.4");
-        assert_eq!(m.provider_id, "openai");
+        assert_eq!(m.client.as_ref(), "trae");
+        assert_eq!(m.model_id.as_ref(), "gpt-5.4");
+        assert_eq!(m.provider_id.as_ref(), "openai");
         assert_eq!(m.tokens.input, 1000);
         assert_eq!(m.tokens.output, 500);
         assert_eq!(m.tokens.cache_read, 200);
@@ -237,8 +240,8 @@ mod tests {
         let msgs = parse_trae_file("trae", f.path());
         assert_eq!(msgs.len(), 1);
         let m = &msgs[0];
-        assert_eq!(m.model_id, "trae-auto");
-        assert_eq!(m.provider_id, "trae");
+        assert_eq!(m.model_id.as_ref(), "trae-auto");
+        assert_eq!(m.provider_id.as_ref(), "trae");
         assert_eq!(m.cost, 0.27);
     }
 
@@ -313,6 +316,6 @@ mod tests {
         let f = write_fixture(&json.to_string());
         let msgs = parse_trae_file("trae", f.path());
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].model_id, "trae-unknown");
+        assert_eq!(msgs[0].model_id.as_ref(), "trae-unknown");
     }
 }

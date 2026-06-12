@@ -46,10 +46,10 @@ mod tests {
 
         let messages = parse_kilocode_file(&task_dir.join("ui_messages.json"));
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client, "kilocode");
-        assert_eq!(messages[0].provider_id, "openai");
-        assert_eq!(messages[0].model_id, "gpt-5");
-        assert_eq!(messages[0].session_id, "kilo-task-1");
+        assert_eq!(messages[0].client.as_ref(), "kilocode");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5");
+        assert_eq!(messages[0].session_id.as_ref(), "kilo-task-1");
         assert_eq!(messages[0].agent.as_deref(), Some("KiloAgent"));
         assert_eq!(messages[0].tokens.input, 40);
         assert_eq!(messages[0].tokens.output, 15);
@@ -109,6 +109,6 @@ mod tests {
 
         let messages = parse_kilocode_file(&task_dir.join("ui_messages.json"));
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id, "azure/openai");
+        assert_eq!(messages[0].provider_id.as_ref(), "azure/openai");
     }
 }

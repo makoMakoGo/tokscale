@@ -209,7 +209,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             timestamp,
             tokens,
             cost,
-            Some(dedup_key),
+            Some(crate::sessions::dedup_hash_str(&dedup_key)),
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
@@ -240,18 +240,18 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let m = &messages[0];
-        assert_eq!(m.client, "gjc");
-        assert_eq!(m.session_id, "gjc_ses_001");
-        assert_eq!(m.model_id, "claude-sonnet-4");
-        assert_eq!(m.provider_id, "anthropic");
+        assert_eq!(m.client.as_ref(), "gjc");
+        assert_eq!(m.session_id.as_ref(), "gjc_ses_001");
+        assert_eq!(m.model_id.as_ref(), "claude-sonnet-4");
+        assert_eq!(m.provider_id.as_ref(), "anthropic");
         assert_eq!(m.tokens.input, 100);
         assert_eq!(m.tokens.output, 50);
         assert_eq!(m.tokens.cache_read, 10);
         assert_eq!(m.tokens.cache_write, 5);
         assert_eq!(m.tokens.reasoning, 0);
         assert_eq!(m.timestamp, 1767225601000);
-        assert_eq!(m.workspace_key, Some("/work/pi".to_string()));
-        assert_eq!(m.workspace_label, Some("pi".to_string()));
+        assert_eq!(m.workspace_key.as_deref(), Some("/work/pi"));
+        assert_eq!(m.workspace_label.as_deref(), Some("pi"));
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-4o");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o");
     }
 
     #[test]
@@ -273,7 +273,7 @@ not valid json at all
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "gpt-4o-mini");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
     }
 
     #[test]
@@ -293,7 +293,7 @@ not valid json at all
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].dedup_key,
-            Some("gjc_ses_005:msg_abc".to_string())
+            Some(crate::sessions::dedup_hash_str("gjc_ses_005:msg_abc"))
         );
     }
 
@@ -304,11 +304,22 @@ not valid json at all
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        let key = messages[0].dedup_key.clone().unwrap();
-        assert!(
-            key.starts_with("gjc:gjc_ses_006:1767225601000:gpt-4o:10-5:"),
-            "key={key}"
-        );
+        // Fallback key hashes the derive_dedup_key format; the ordinal is the
+        // line index, and the message sits on line 1 after the session header.
+        let expected = crate::sessions::dedup_hash_str(&derive_dedup_key(
+            "gjc_ses_006",
+            1767225601000,
+            "gpt-4o",
+            &TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            1,
+        ));
+        assert_eq!(messages[0].dedup_key, Some(expected));
     }
 
     #[test]
@@ -363,8 +374,8 @@ not valid json at all
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 2, "expected exactly 2 valid messages");
-        assert_eq!(messages[0].model_id, "model-a");
-        assert_eq!(messages[1].model_id, "model-b");
+        assert_eq!(messages[0].model_id.as_ref(), "model-a");
+        assert_eq!(messages[1].model_id.as_ref(), "model-b");
     }
 
     /// (d) Message missing model -> skipped, no panic.
@@ -468,7 +479,7 @@ not valid json at all
         );
         assert_eq!(
             messages[0].dedup_key,
-            Some("gjc_ses_replay:replay_msg".to_string())
+            Some(crate::sessions::dedup_hash_str("gjc_ses_replay:replay_msg"))
         );
     }
 

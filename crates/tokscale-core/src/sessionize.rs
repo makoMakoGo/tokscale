@@ -141,8 +141,8 @@ pub fn sessionize(messages: &[UnifiedMessage], idle_gap_ms: i64) -> Vec<SessionI
             let wall_duration_ms = block.end_ts.saturating_sub(block.start_ts);
 
             intervals.push(SessionInterval {
-                client: client.to_string(),
-                session_id: session_id.to_string(),
+                client: client.into(),
+                session_id: session_id.into(),
                 start_ts: block.start_ts,
                 end_ts: block.end_ts,
                 wall_duration_ms,
@@ -376,14 +376,13 @@ mod tests {
 
     fn make_msg(client: &str, session_id: &str, timestamp: i64) -> UnifiedMessage {
         UnifiedMessage {
-            client: client.to_string(),
-            model_id: "test-model".to_string(),
-            provider_id: "test-provider".to_string(),
-            session_id: session_id.to_string(),
+            client: client.into(),
+            model_id: "test-model".into(),
+            provider_id: "test-provider".into(),
+            session_id: session_id.into(),
             workspace_key: None,
             workspace_label: None,
             timestamp,
-            date: "2024-01-01".to_string(),
             tokens: TokenBreakdown {
                 input: 100,
                 output: 50,
@@ -530,8 +529,8 @@ mod tests {
         // Two overlapping sessions
         let intervals = vec![
             SessionInterval {
-                client: "opencode".to_string(),
-                session_id: "ses1".to_string(),
+                client: "opencode".into(),
+                session_id: "ses1".into(),
                 start_ts: 1000,
                 end_ts: 5000,
                 wall_duration_ms: 4000,
@@ -541,8 +540,8 @@ mod tests {
                 cost: 0.0,
             },
             SessionInterval {
-                client: "claude".to_string(),
-                session_id: "ses2".to_string(),
+                client: "claude".into(),
+                session_id: "ses2".into(),
                 start_ts: 3000,
                 end_ts: 7000,
                 wall_duration_ms: 4000,
@@ -562,8 +561,8 @@ mod tests {
         // Two non-overlapping sessions
         let intervals = vec![
             SessionInterval {
-                client: "opencode".to_string(),
-                session_id: "ses1".to_string(),
+                client: "opencode".into(),
+                session_id: "ses1".into(),
                 start_ts: 1000,
                 end_ts: 3000,
                 wall_duration_ms: 2000,
@@ -573,8 +572,8 @@ mod tests {
                 cost: 0.0,
             },
             SessionInterval {
-                client: "claude".to_string(),
-                session_id: "ses2".to_string(),
+                client: "claude".into(),
+                session_id: "ses2".into(),
                 start_ts: 5000,
                 end_ts: 7000,
                 wall_duration_ms: 2000,
@@ -593,8 +592,8 @@ mod tests {
     fn test_longest_continuous_is_max_session_active_duration() {
         let intervals = vec![
             SessionInterval {
-                client: "opencode".to_string(),
-                session_id: "ses1".to_string(),
+                client: "opencode".into(),
+                session_id: "ses1".into(),
                 start_ts: 1000,
                 end_ts: 5000,
                 wall_duration_ms: 4000,
@@ -604,8 +603,8 @@ mod tests {
                 cost: 0.0,
             },
             SessionInterval {
-                client: "claude".to_string(),
-                session_id: "ses2".to_string(),
+                client: "claude".into(),
+                session_id: "ses2".into(),
                 start_ts: 3000,
                 end_ts: 8000,
                 wall_duration_ms: 5000,
@@ -624,8 +623,8 @@ mod tests {
     fn test_longest_continuous_picks_max_active() {
         let intervals = vec![
             SessionInterval {
-                client: "opencode".to_string(),
-                session_id: "ses1".to_string(),
+                client: "opencode".into(),
+                session_id: "ses1".into(),
                 start_ts: 1,
                 end_ts: 60_000,
                 wall_duration_ms: 60_000,
@@ -635,8 +634,8 @@ mod tests {
                 cost: 0.0,
             },
             SessionInterval {
-                client: "opencode".to_string(),
-                session_id: "ses2".to_string(),
+                client: "opencode".into(),
+                session_id: "ses2".into(),
                 start_ts: 60_000 + 2 * 60_000,
                 end_ts: 60_000 + 2 * 60_000 + 120_000,
                 wall_duration_ms: 120_000,
@@ -655,8 +654,8 @@ mod tests {
     fn test_longest_continuous_single_session() {
         let intervals = vec![
             SessionInterval {
-                client: "opencode".to_string(),
-                session_id: "ses1".to_string(),
+                client: "opencode".into(),
+                session_id: "ses1".into(),
                 start_ts: 1000,
                 end_ts: 61_000,
                 wall_duration_ms: 60_000,
@@ -666,8 +665,8 @@ mod tests {
                 cost: 0.0,
             },
             SessionInterval {
-                client: "opencode".to_string(),
-                session_id: "ses2".to_string(),
+                client: "opencode".into(),
+                session_id: "ses2".into(),
                 start_ts: 61_000 + 10 * 60_000,
                 end_ts: 61_000 + 10 * 60_000 + 120_000,
                 wall_duration_ms: 120_000,
@@ -685,8 +684,8 @@ mod tests {
     #[test]
     fn test_compute_daily_active_time_matches_local_day_boundaries_for_fixed_offset() {
         let interval = SessionInterval {
-            client: "trae".to_string(),
-            session_id: "session-local-boundary".to_string(),
+            client: "trae".into(),
+            session_id: "session-local-boundary".into(),
             start_ts: FixedOffset::east_opt(9 * 3600)
                 .unwrap()
                 .with_ymd_and_hms(2026, 1, 1, 23, 30, 0)

@@ -17,6 +17,7 @@ pub mod gjc;
 pub mod goose;
 pub mod grok;
 pub mod hermes;
+pub mod intern;
 pub mod kilo;
 pub mod kilocode;
 pub mod kimi;
@@ -36,24 +37,30 @@ use crate::TokenBreakdown;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
-    pub client: String,
-    pub model_id: String,
-    pub provider_id: String,
-    pub session_id: String,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
+    #[serde(deserialize_with = "intern::de_intern")]
+    pub client: std::sync::Arc<str>,
+    #[serde(deserialize_with = "intern::de_intern")]
+    pub model_id: std::sync::Arc<str>,
+    #[serde(deserialize_with = "intern::de_intern")]
+    pub provider_id: std::sync::Arc<str>,
+    #[serde(deserialize_with = "intern::de_intern")]
+    pub session_id: std::sync::Arc<str>,
+    #[serde(default, deserialize_with = "intern::de_intern_opt")]
+    pub workspace_key: Option<std::sync::Arc<str>>,
+    #[serde(default, deserialize_with = "intern::de_intern_opt")]
+    pub workspace_label: Option<std::sync::Arc<str>>,
     pub timestamp: i64,
-    pub date: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     #[serde(default)]
     pub duration_ms: Option<i64>,
     #[serde(default = "default_message_count")]
     pub message_count: i32,
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub agent_instance: Option<String>,
-    pub dedup_key: Option<String>,
+    #[serde(default, deserialize_with = "intern::de_intern_opt")]
+    pub agent: Option<std::sync::Arc<str>>,
+    #[serde(default, deserialize_with = "intern::de_intern_opt")]
+    pub agent_instance: Option<std::sync::Arc<str>>,
+    pub dedup_key: Option<u64>,
     /// True if this message is the first assistant response after a user turn.
     /// Used to count user interaction turns (as opposed to API message count).
     #[serde(default)]
@@ -62,6 +69,24 @@ pub struct UnifiedMessage {
 
 const fn default_message_count() -> i32 {
     1
+}
+
+/// Stable FNV-1a over a dedup key string. The value is persisted in the
+/// source-message cache, so the algorithm must never change across releases
+/// (it would silently break dedup between cached and freshly parsed
+/// messages). Hash inputs keep their legacy string formats.
+///
+/// Collisions are possible but negligible at this scale: for ~10^6 distinct
+/// keys the birthday bound is ~3e-8, and a collision only drops one message
+/// as a perceived duplicate from usage totals. Do not treat the hash as a
+/// unique identifier.
+pub fn dedup_hash_str(key: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 pub fn normalize_agent_name(agent: &str) -> String {
@@ -199,10 +224,10 @@ fn titlecase_agent(name: &str) -> String {
 
 impl UnifiedMessage {
     pub fn new(
-        client: impl Into<String>,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-        session_id: impl Into<String>,
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
@@ -222,10 +247,10 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_agent(
-        client: impl Into<String>,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-        session_id: impl Into<String>,
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
@@ -246,14 +271,14 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_dedup(
-        client: impl Into<String>,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-        session_id: impl Into<String>,
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
-        dedup_key: Option<String>,
+        dedup_key: Option<u64>,
     ) -> Self {
         Self::new_full(
             client,
@@ -270,35 +295,49 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     fn new_full(
-        client: impl Into<String>,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-        session_id: impl Into<String>,
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
         agent: Option<String>,
-        dedup_key: Option<String>,
+        dedup_key: Option<u64>,
     ) -> Self {
-        let date = timestamp_to_date(timestamp);
         Self {
-            client: client.into(),
-            model_id: model_id.into(),
-            provider_id: provider_id.into(),
-            session_id: session_id.into(),
+            client: intern::intern(client.as_ref()),
+            model_id: intern::intern(model_id.as_ref()),
+            provider_id: intern::intern(provider_id.as_ref()),
+            session_id: intern::intern(session_id.as_ref()),
             workspace_key: None,
             workspace_label: None,
             timestamp,
-            date,
             tokens,
             cost,
             duration_ms: None,
             message_count: default_message_count(),
-            agent,
+            agent: agent.as_deref().map(intern::intern),
             agent_instance: None,
             dedup_key,
             is_turn_start: false,
         }
+    }
+
+    /// Local calendar date derived from `timestamp`; `None` when the
+    /// timestamp is outside the representable range.
+    pub fn local_date(&self) -> Option<chrono::NaiveDate> {
+        use chrono::TimeZone;
+        match chrono::Local.timestamp_millis_opt(self.timestamp) {
+            chrono::LocalResult::Single(dt) => Some(dt.date_naive()),
+            _ => None,
+        }
+    }
+
+    /// Local `YYYY-MM-DD` string derived from `timestamp` (empty when out of
+    /// range). Allocates; prefer [`Self::local_date`] in hot paths.
+    pub fn date_string(&self) -> String {
+        timestamp_to_date(self.timestamp)
     }
 
     pub fn set_workspace(
@@ -306,21 +345,20 @@ impl UnifiedMessage {
         workspace_key: Option<String>,
         workspace_label: Option<String>,
     ) {
-        self.workspace_key = workspace_key;
-        self.workspace_label = workspace_label;
+        self.workspace_key = workspace_key.as_deref().map(intern::intern);
+        self.workspace_label = workspace_label.as_deref().map(intern::intern);
     }
 
     pub fn set_agent_instance(&mut self, agent_instance: Option<String>) {
-        self.agent_instance = agent_instance;
+        self.agent_instance = agent_instance.as_deref().map(intern::intern);
     }
 
     pub(crate) fn refresh_derived_fields(&mut self) {
-        self.date = timestamp_to_date(self.timestamp);
         if let Some(provider) = crate::provider_identity::provider_override_from_model_and_provider(
             &self.model_id,
             &self.provider_id,
         ) {
-            self.provider_id = provider.to_string();
+            self.provider_id = intern::intern(provider);
         }
     }
 
@@ -434,11 +472,11 @@ mod tests {
 
         let workspace = messages
             .iter()
-            .find(|message| message.session_id == "warp-aggregate-workspace-1")
+            .find(|message| message.session_id.as_ref() == "warp-aggregate-workspace-1")
             .unwrap();
-        assert_eq!(workspace.client, "warp");
-        assert_eq!(workspace.model_id, "aggregate-requests");
-        assert_eq!(workspace.provider_id, "warp");
+        assert_eq!(workspace.client.as_ref(), "warp");
+        assert_eq!(workspace.model_id.as_ref(), "aggregate-requests");
+        assert_eq!(workspace.provider_id.as_ref(), "warp");
         assert_eq!(workspace.workspace_label.as_deref(), Some("Personal"));
         assert_eq!(workspace.message_count, 12);
         assert_eq!(workspace.tokens, TokenBreakdown::default());
@@ -463,7 +501,7 @@ mod tests {
         let messages = crate::sessions::warp::parse_warp_file(file.path());
         assert_eq!(messages.len(), 1);
         let account = &messages[0];
-        assert_eq!(account.session_id, "warp-aggregate-account");
+        assert_eq!(account.session_id.as_ref(), "warp-aggregate-account");
         assert_eq!(account.message_count, 42);
         assert_eq!(account.tokens, TokenBreakdown::default());
         assert!((account.cost - 12.34).abs() < 1e-9);
@@ -512,10 +550,10 @@ mod tests {
             0.05,
         );
 
-        assert_eq!(msg.client, "opencode");
-        assert_eq!(msg.model_id, "claude-3-5-sonnet");
-        assert_eq!(msg.session_id, "test-session-id");
-        assert_eq!(msg.date, timestamp_to_date(1733011200000));
+        assert_eq!(msg.client.as_ref(), "opencode");
+        assert_eq!(msg.model_id.as_ref(), "claude-3-5-sonnet");
+        assert_eq!(msg.session_id.as_ref(), "test-session-id");
+        assert_eq!(msg.date_string(), timestamp_to_date(1733011200000));
         assert_eq!(msg.cost, 0.05);
         assert_eq!(msg.agent, None);
         assert_eq!(msg.workspace_key, None);
@@ -537,7 +575,7 @@ mod tests {
 
         msg.refresh_derived_fields();
 
-        assert_eq!(msg.provider_id, "deepseek");
+        assert_eq!(msg.provider_id.as_ref(), "deepseek");
 
         let mut non_alias = UnifiedMessage::new(
             "pi",
@@ -551,7 +589,7 @@ mod tests {
 
         non_alias.refresh_derived_fields();
 
-        assert_eq!(non_alias.provider_id, "pandora-deepseek");
+        assert_eq!(non_alias.provider_id.as_ref(), "pandora-deepseek");
 
         let mut non_claude = UnifiedMessage::new(
             "droid",
@@ -565,7 +603,7 @@ mod tests {
 
         non_claude.refresh_derived_fields();
 
-        assert_eq!(non_claude.provider_id, "zai");
+        assert_eq!(non_claude.provider_id.as_ref(), "zai");
     }
 
     #[test]
