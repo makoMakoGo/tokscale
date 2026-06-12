@@ -40,6 +40,11 @@ Keep this file concise and constraint-focused. Do not add hardcoded module count
 - When merging pull requests through `gh`, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy.
 - Before merging, verify the squash commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
 
+## Upstream Policy (ahead-only)
+
+- `personal/local-clients` does not merge `origin/main` (junhoyeo/tokscale) anymore; see `docs/adr/0009-ahead-only-upstream-policy.md`. Never run `git merge origin/main` here.
+- Port wanted upstream fixes by cherry-pick or hand-port, with `ported from upstream <sha>` in the commit body. Adopt new upstream clients by writing an adapter, using the upstream parser as reference only.
+
 ## Commit Message Convention
 
 ```
