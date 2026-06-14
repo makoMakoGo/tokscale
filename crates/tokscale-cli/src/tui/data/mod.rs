@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, Timelike};
+use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, Timelike, Weekday};
 use tokio::runtime::{Handle, Runtime};
 
 use tokscale_core::sessions::UnifiedMessage;
@@ -133,15 +133,26 @@ pub struct HourlyUsage {
     pub turn_count: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeriodKind {
+    Monthly,
+    Weekly,
+}
+
 #[derive(Debug, Clone)]
-pub struct MinutelyUsage {
-    pub datetime: NaiveDateTime,
+pub struct PeriodUsage {
+    pub section_year: i32,
+    pub section_label: String,
+    pub label: String,
+    pub short_label: String,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
     pub tokens: TokenBreakdown,
     pub cost: f64,
-    pub clients: BTreeSet<String>,
-    pub models: BTreeMap<String, HourlyModelInfo>,
+    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
     pub message_count: u32,
     pub turn_count: u32,
+    pub active_days: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +174,6 @@ pub struct UsageData {
     pub agents: Vec<AgentUsage>,
     pub daily: Vec<DailyUsage>,
     pub hourly: Vec<HourlyUsage>,
-    pub minutely: Vec<MinutelyUsage>,
     pub graph: Option<GraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
@@ -178,7 +188,6 @@ pub struct DataLoader {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
-    pub minutely_enabled: bool,
 }
 
 const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
@@ -293,7 +302,6 @@ impl DataLoader {
             since: None,
             until: None,
             year: None,
-            minutely_enabled: false,
         }
     }
 
@@ -308,13 +316,7 @@ impl DataLoader {
             since,
             until,
             year,
-            minutely_enabled: false,
         }
-    }
-
-    pub fn with_minutely_enabled(mut self, enabled: bool) -> Self {
-        self.minutely_enabled = enabled;
-        self
     }
 
     pub fn load(&self, enabled_clients: &[ClientId], group_by: &GroupBy) -> Result<UsageData> {
@@ -436,7 +438,6 @@ impl DataLoader {
         let mut agent_instances: HashMap<String, HashSet<String>> = HashMap::new();
         let mut daily_map: HashMap<NaiveDate, DailyUsage> = HashMap::new();
         let mut hourly_map: HashMap<NaiveDateTime, HourlyUsage> = HashMap::new();
-        let mut minutely_map: HashMap<NaiveDateTime, MinutelyUsage> = HashMap::new();
         let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
         let mut client_totals_by_model: HashMap<String, HashMap<String, ClientContributionOrder>> =
             HashMap::new();
@@ -798,96 +799,6 @@ impl DataLoader {
                     .saturating_add(msg.tokens.reasoning.max(0) as u64);
                 h_model.cost += h_cost;
             }
-
-            // Minute aggregation: same fallback semantics as hourly, but
-            // truncated to the minute. Used by the Minutely tab. Gated
-            // on `Settings::minutely_tab_enabled` so users who never open
-            // the tab do not pay the per-minute bucketing cost.
-            let minute_bucket = if self.minutely_enabled {
-                minute_bucket_with_fallback(msg.timestamp, msg.local_date())
-            } else {
-                None
-            };
-            if let Some(minute_dt) = minute_bucket {
-                let minutely_entry =
-                    minutely_map
-                        .entry(minute_dt)
-                        .or_insert_with(|| MinutelyUsage {
-                            datetime: minute_dt,
-                            tokens: TokenBreakdown::default(),
-                            cost: 0.0,
-                            clients: BTreeSet::new(),
-                            models: BTreeMap::new(),
-                            message_count: 0,
-                            turn_count: 0,
-                        });
-
-                minutely_entry.tokens.input = minutely_entry
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                minutely_entry.tokens.output = minutely_entry
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                minutely_entry.tokens.cache_read = minutely_entry
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                minutely_entry.tokens.cache_write = minutely_entry
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                minutely_entry.tokens.reasoning = minutely_entry
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                let m_cost = if msg.cost.is_finite() && msg.cost >= 0.0 {
-                    msg.cost
-                } else {
-                    0.0
-                };
-                minutely_entry.cost += m_cost;
-                minutely_entry.message_count += msg.message_count.max(0) as u32;
-                if msg.is_turn_start {
-                    minutely_entry.turn_count += 1;
-                }
-                minutely_entry.clients.insert(msg.client.to_string());
-
-                let m_model_key = hourly_model_key(group_by, &provider, &normalized_model);
-                let m_model =
-                    minutely_entry
-                        .models
-                        .entry(m_model_key)
-                        .or_insert_with(|| HourlyModelInfo {
-                            provider: provider.clone(),
-                            display_name: hourly_model_display_name(group_by, &normalized_model),
-                            color_key: model_color_key(group_by, &provider, &normalized_model),
-                            tokens: TokenBreakdown::default(),
-                            cost: 0.0,
-                        });
-                m_model.tokens.input = m_model
-                    .tokens
-                    .input
-                    .saturating_add(msg.tokens.input.max(0) as u64);
-                m_model.tokens.output = m_model
-                    .tokens
-                    .output
-                    .saturating_add(msg.tokens.output.max(0) as u64);
-                m_model.tokens.cache_read = m_model
-                    .tokens
-                    .cache_read
-                    .saturating_add(msg.tokens.cache_read.max(0) as u64);
-                m_model.tokens.cache_write = m_model
-                    .tokens
-                    .cache_write
-                    .saturating_add(msg.tokens.cache_write.max(0) as u64);
-                m_model.tokens.reasoning = m_model
-                    .tokens
-                    .reasoning
-                    .saturating_add(msg.tokens.reasoning.max(0) as u64);
-                m_model.cost += m_cost;
-            }
         }
 
         let mut models: Vec<ModelUsage> = model_map
@@ -933,9 +844,6 @@ impl DataLoader {
         let mut hourly: Vec<HourlyUsage> = hourly_map.into_values().collect();
         hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
-        let mut minutely: Vec<MinutelyUsage> = minutely_map.into_values().collect();
-        minutely.sort_by_key(|b| std::cmp::Reverse(b.datetime));
-
         let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
         let total_cost: f64 = models
             .iter()
@@ -950,7 +858,6 @@ impl DataLoader {
             agents,
             daily,
             hourly,
-            minutely,
             graph: Some(graph),
             total_tokens,
             total_cost,
@@ -997,38 +904,161 @@ fn hour_bucket_with_fallback(
     fallback_date.and_then(|d| d.and_hms_opt(0, 0, 0))
 }
 
-/// Convert Unix ms timestamp to a NaiveDateTime truncated to the minute (local tz).
-fn timestamp_to_minute(timestamp_ms: i64) -> Option<NaiveDateTime> {
-    use chrono::TimeZone;
-    if timestamp_ms <= 0 {
-        return None;
-    }
-    let ts_secs = timestamp_ms / 1000;
-    match Local.timestamp_opt(ts_secs, 0) {
-        chrono::LocalResult::Single(dt) => {
-            let naive = dt.naive_local();
-            Some(
-                naive
-                    .date()
-                    .and_hms_opt(naive.hour(), naive.minute(), 0)
-                    .unwrap_or(naive),
-            )
+/// Build monthly or weekly usage by folding the already-aggregated `daily`
+/// buckets — NOT by re-folding per-message in `DataLoader`'s main loop.
+///
+/// Why from-daily instead of per-message (the hourly/minutely approach):
+/// - Period views are COARSER than daily (a month/week spans many days), so
+///   they derive from daily losslessly. Hourly is FINER than daily and must
+///   be captured per-message in the hot loop; daily has already discarded
+///   sub-day granularity.
+/// - `daily` is a hot aggregate the graph/overview/daily tabs need on every
+///   load; period is a cold view needed only on its tab. Folding a cold view
+///   from the hot `daily` product keeps the per-message loop lean (ADR 0008)
+///   instead of opening another aggregation branch there.
+/// - At <=365 days/year this is microseconds, so it runs on demand (even
+///   per-frame) with no cache and no `enabled` toggle — the gating apparatus
+///   the old per-message Minutely tab forced is gone.
+///
+/// See ADR 0010 for the full rule and the coarse/fine boundary.
+pub fn build_period_usage(daily: &[DailyUsage], kind: PeriodKind) -> Vec<PeriodUsage> {
+    let mut period_map: BTreeMap<(i32, u32), PeriodUsage> = BTreeMap::new();
+
+    for day in daily {
+        let Some(period) = period_descriptor(day.date, kind) else {
+            continue;
+        };
+
+        let entry = period_map
+            .entry((period.section_year, period.ordinal))
+            .or_insert_with(|| PeriodUsage {
+                section_year: period.section_year,
+                section_label: period.section_year.to_string(),
+                label: period.label,
+                short_label: period.short_label,
+                start_date: period.start_date,
+                end_date: period.end_date,
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                source_breakdown: BTreeMap::new(),
+                message_count: 0,
+                turn_count: 0,
+                active_days: 0,
+            });
+
+        add_tokens(&mut entry.tokens, &day.tokens);
+        entry.cost += day.cost;
+        entry.message_count = entry.message_count.saturating_add(day.message_count);
+        entry.turn_count = entry.turn_count.saturating_add(day.turn_count);
+        if day.message_count > 0 || day.turn_count > 0 || day.tokens.total() > 0 {
+            entry.active_days = entry.active_days.saturating_add(1);
         }
-        _ => None,
+        merge_daily_sources(&mut entry.source_breakdown, &day.source_breakdown);
+    }
+
+    let mut periods: Vec<PeriodUsage> = period_map.into_values().collect();
+    periods.sort_by_key(|period| std::cmp::Reverse(period.start_date));
+    periods
+}
+
+struct PeriodDescriptor {
+    section_year: i32,
+    ordinal: u32,
+    label: String,
+    short_label: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+}
+
+fn period_descriptor(date: NaiveDate, kind: PeriodKind) -> Option<PeriodDescriptor> {
+    match kind {
+        PeriodKind::Monthly => monthly_period_descriptor(date),
+        PeriodKind::Weekly => weekly_period_descriptor(date),
     }
 }
 
-/// Derive a minute-truncated NaiveDateTime from `msg.timestamp` when present,
-/// otherwise fall back to the message's local-date 00:00 bucket so messages
-/// with missing timestamps are not silently dropped from minutely aggregation.
-fn minute_bucket_with_fallback(
-    timestamp_ms: i64,
-    fallback_date: Option<NaiveDate>,
-) -> Option<NaiveDateTime> {
-    if let Some(dt) = timestamp_to_minute(timestamp_ms) {
-        return Some(dt);
+fn monthly_period_descriptor(date: NaiveDate) -> Option<PeriodDescriptor> {
+    let start_date = NaiveDate::from_ymd_opt(date.year(), date.month(), 1)?;
+    let end_date = if date.month() == 12 {
+        NaiveDate::from_ymd_opt(date.year() + 1, 1, 1)?
+    } else {
+        NaiveDate::from_ymd_opt(date.year(), date.month() + 1, 1)?
     }
-    fallback_date.and_then(|d| d.and_hms_opt(0, 0, 0))
+    .checked_sub_days(Days::new(1))?;
+
+    Some(PeriodDescriptor {
+        section_year: date.year(),
+        ordinal: date.month(),
+        label: start_date.format("%B").to_string(),
+        short_label: start_date.format("%b").to_string(),
+        start_date,
+        end_date,
+    })
+}
+
+fn weekly_period_descriptor(date: NaiveDate) -> Option<PeriodDescriptor> {
+    let iso = date.iso_week();
+    let start_date = NaiveDate::from_isoywd_opt(iso.year(), iso.week(), Weekday::Mon)?;
+    let end_date = start_date.checked_add_days(Days::new(6))?;
+    let label = format!(
+        "W{:02} {} - {}",
+        iso.week(),
+        start_date.format("%b %d"),
+        end_date.format("%b %d")
+    );
+
+    Some(PeriodDescriptor {
+        section_year: iso.year(),
+        ordinal: iso.week(),
+        label,
+        short_label: format!("W{:02}", iso.week()),
+        start_date,
+        end_date,
+    })
+}
+
+fn add_tokens(target: &mut TokenBreakdown, source: &TokenBreakdown) {
+    target.input = target.input.saturating_add(source.input);
+    target.output = target.output.saturating_add(source.output);
+    target.cache_read = target.cache_read.saturating_add(source.cache_read);
+    target.cache_write = target.cache_write.saturating_add(source.cache_write);
+    target.reasoning = target.reasoning.saturating_add(source.reasoning);
+}
+
+fn merge_daily_sources(
+    target: &mut BTreeMap<String, DailySourceInfo>,
+    source: &BTreeMap<String, DailySourceInfo>,
+) {
+    for (source_key, source_info) in source {
+        let target_source = target
+            .entry(source_key.clone())
+            .or_insert_with(|| DailySourceInfo {
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                models: BTreeMap::new(),
+            });
+
+        add_tokens(&mut target_source.tokens, &source_info.tokens);
+        target_source.cost += source_info.cost;
+
+        for (model_key, model_info) in &source_info.models {
+            let target_model = target_source
+                .models
+                .entry(model_key.clone())
+                .or_insert_with(|| DailyModelInfo {
+                    provider: model_info.provider.clone(),
+                    display_name: model_info.display_name.clone(),
+                    color_key: model_info.color_key.clone(),
+                    tokens: TokenBreakdown::default(),
+                    cost: 0.0,
+                    messages: 0,
+                });
+
+            add_tokens(&mut target_model.tokens, &model_info.tokens);
+            target_model.cost += model_info.cost;
+            target_model.messages = target_model.messages.saturating_add(model_info.messages);
+        }
+    }
 }
 
 fn build_contribution_graph(daily: &[DailyUsage]) -> GraphData {
@@ -2720,117 +2750,100 @@ after"#,
         assert_eq!(longest, 2);
     }
 
-    fn make_msg(timestamp_ms: i64, input: i64, output: i64, cost: f64) -> UnifiedMessage {
-        UnifiedMessage::new(
-            "claude",
-            "claude-sonnet-4-5-20250929",
-            "anthropic",
-            format!("session-{timestamp_ms}"),
-            timestamp_ms,
-            tokscale_core::TokenBreakdown {
-                input,
-                output,
-                cache_read: 0,
-                cache_write: 0,
-                reasoning: 0,
+    fn period_day(date: &str, input_tokens: u64, cost: f64) -> DailyUsage {
+        let tokens = TokenBreakdown {
+            input: input_tokens,
+            ..TokenBreakdown::default()
+        };
+        let mut models = BTreeMap::new();
+        models.insert(
+            "claude-sonnet-4".to_string(),
+            DailyModelInfo {
+                provider: "anthropic".to_string(),
+                display_name: "claude-sonnet-4".to_string(),
+                color_key: "claude-sonnet-4".to_string(),
+                tokens: tokens.clone(),
+                cost,
+                messages: 1,
             },
+        );
+
+        let mut source_breakdown = BTreeMap::new();
+        source_breakdown.insert(
+            "claude".to_string(),
+            DailySourceInfo {
+                tokens: tokens.clone(),
+                cost,
+                models,
+            },
+        );
+
+        DailyUsage {
+            date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            tokens,
             cost,
-        )
+            source_breakdown,
+            message_count: 1,
+            turn_count: 1,
+        }
     }
 
     #[test]
-    fn test_minutely_aggregation_skipped_when_flag_disabled() {
-        let loader = DataLoader::new(None);
-        assert!(!loader.minutely_enabled);
-        let usage = loader
-            .aggregate_messages(
-                vec![make_msg(1_735_689_600_000, 10, 5, 1.0)],
-                &GroupBy::Model,
-            )
-            .unwrap();
-        assert!(
-            usage.minutely.is_empty(),
-            "minutely aggregation should be skipped when flag is off"
+    fn test_build_monthly_period_usage_groups_by_calendar_year() {
+        let periods = build_period_usage(
+            &[
+                period_day("2026-06-02", 10, 1.0),
+                period_day("2026-06-14", 20, 2.0),
+                period_day("2026-05-01", 5, 0.5),
+            ],
+            PeriodKind::Monthly,
         );
-        assert_eq!(usage.hourly.len(), 1, "hourly should still aggregate");
-    }
 
-    #[test]
-    fn test_minutely_aggregation_runs_when_flag_enabled() {
-        let loader = DataLoader::new(None).with_minutely_enabled(true);
-        assert!(loader.minutely_enabled);
-        let usage = loader
-            .aggregate_messages(
-                vec![make_msg(1_735_689_600_000, 10, 5, 1.0)],
-                &GroupBy::Model,
-            )
-            .unwrap();
-        assert_eq!(usage.minutely.len(), 1);
-        let bucket = &usage.minutely[0];
-        assert_eq!(bucket.tokens.input, 10);
-        assert_eq!(bucket.tokens.output, 5);
-        assert_eq!(bucket.cost, 1.0);
-        assert_eq!(bucket.message_count, 1);
-    }
-
-    #[test]
-    fn test_minutely_aggregation_groups_same_minute_messages() {
-        let loader = DataLoader::new(None).with_minutely_enabled(true);
-        let base_ms = 1_735_689_600_000_i64;
-        let usage = loader
-            .aggregate_messages(
-                vec![
-                    make_msg(base_ms, 10, 5, 1.0),
-                    make_msg(base_ms + 30_000, 20, 10, 2.0),
-                ],
-                &GroupBy::Model,
-            )
-            .unwrap();
+        assert_eq!(periods.len(), 2);
+        assert_eq!(periods[0].section_label, "2026");
+        assert_eq!(periods[0].label, "June");
+        assert_eq!(periods[0].short_label, "Jun");
+        assert_eq!(periods[0].start_date.to_string(), "2026-06-01");
+        assert_eq!(periods[0].end_date.to_string(), "2026-06-30");
+        assert_eq!(periods[0].active_days, 2);
+        assert_eq!(periods[0].tokens.input, 30);
+        assert_eq!(periods[0].cost, 3.0);
         assert_eq!(
-            usage.minutely.len(),
-            1,
-            "two messages within the same minute should share a bucket"
-        );
-        let bucket = &usage.minutely[0];
-        assert_eq!(bucket.tokens.input, 30);
-        assert_eq!(bucket.tokens.output, 15);
-        assert_eq!(bucket.cost, 3.0);
-        assert_eq!(bucket.message_count, 2);
-    }
-
-    #[test]
-    fn test_minutely_aggregation_splits_adjacent_minutes() {
-        let loader = DataLoader::new(None).with_minutely_enabled(true);
-        let base_ms = 1_735_689_600_000_i64;
-        let usage = loader
-            .aggregate_messages(
-                vec![
-                    make_msg(base_ms, 10, 5, 1.0),
-                    make_msg(base_ms + 60_000, 20, 10, 2.0),
-                ],
-                &GroupBy::Model,
-            )
-            .unwrap();
-        assert_eq!(
-            usage.minutely.len(),
-            2,
-            "messages one minute apart should land in distinct buckets"
+            periods[0].source_breakdown["claude"].models["claude-sonnet-4"].messages,
+            2
         );
     }
 
     #[test]
-    fn test_minutely_aggregation_clamps_negative_tokens_and_cost() {
-        let loader = DataLoader::new(None).with_minutely_enabled(true);
-        let usage = loader
-            .aggregate_messages(
-                vec![make_msg(1_735_689_600_000, -50, -50, -10.0)],
-                &GroupBy::Model,
-            )
-            .unwrap();
-        assert_eq!(usage.minutely.len(), 1);
-        let bucket = &usage.minutely[0];
-        assert_eq!(bucket.tokens.input, 0);
-        assert_eq!(bucket.tokens.output, 0);
-        assert_eq!(bucket.cost, 0.0);
+    fn test_build_period_usage_counts_zero_token_message_days_as_active() {
+        let periods = build_period_usage(&[period_day("2026-06-02", 0, 0.0)], PeriodKind::Monthly);
+
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].active_days, 1);
+        assert_eq!(periods[0].message_count, 1);
+        assert_eq!(periods[0].tokens.total(), 0);
+    }
+
+    #[test]
+    fn test_build_weekly_period_usage_uses_iso_week_year_for_cross_year_week() {
+        let periods = build_period_usage(
+            &[
+                period_day("2026-01-04", 20, 2.0),
+                period_day("2025-12-29", 10, 1.0),
+                period_day("2025-12-28", 5, 0.5),
+            ],
+            PeriodKind::Weekly,
+        );
+
+        assert_eq!(periods.len(), 2);
+        assert_eq!(periods[0].section_label, "2026");
+        assert_eq!(periods[0].label, "W01 Dec 29 - Jan 04");
+        assert_eq!(periods[0].short_label, "W01");
+        assert_eq!(periods[0].start_date.to_string(), "2025-12-29");
+        assert_eq!(periods[0].end_date.to_string(), "2026-01-04");
+        assert_eq!(periods[0].active_days, 2);
+        assert_eq!(periods[0].tokens.input, 30);
+        assert_eq!(periods[1].section_label, "2025");
+        assert_eq!(periods[1].label, "W52 Dec 22 - Dec 28");
     }
 }

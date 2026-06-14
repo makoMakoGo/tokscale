@@ -146,7 +146,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
 ## Features
 
 - **Interactive TUI Mode** - Beautiful terminal UI powered by Ratatui (default mode)
-  - 6 interactive views: Overview, Models, Daily, Hourly, Stats, Agents (plus optional Usage and Minutely views, opt-in via `usageTabEnabled` / `minutelyTabEnabled`)
+  - 8 interactive views: Overview, Models, Monthly, Weekly, Daily, Hourly, Stats, Agents (plus optional Usage, opt-in via `usageTabEnabled`)
   - Keyboard & mouse navigation
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
@@ -254,11 +254,11 @@ tokscale models --json > report.json   # Save to file
 
 The interactive TUI mode provides:
 
-- **6 core views**: Overview (chart + top models), Models, Daily, Hourly, Stats (contribution graph), Agents. Optional Usage (subscription quotas) and Minutely views are hidden by default and can be enabled with `usageTabEnabled` / `minutelyTabEnabled` in `settings.json` — see [Configuration](#configuration)
+- **8 core views**: Overview (chart + top models), Models, Monthly, Weekly, Daily, Hourly, Stats (contribution graph), Agents. Optional Usage (subscription quotas) is hidden by default and can be enabled with `usageTabEnabled` in `settings.json` — see [Configuration](#configuration)
 - **Keyboard Navigation**:
   - `←/→/Tab/BackTab`: Switch views
   - `↑/↓` or `Home/End`: Navigate lists
-  - `Enter`: Open daily detail (Daily tab) / select graph cell (Stats tab)
+  - `Enter`: Open period/day detail (Monthly, Weekly, Daily tabs) / select graph cell (Stats tab)
   - `Esc` or `Backspace`: Close dialog or exit detail view
   - `c/d/t`: Sort by cost/date/tokens
   - `j`: Jump to today
@@ -722,26 +722,11 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `defaultClients` | string[] | `[]` | Client filter applied when no `--client/-c` flag is passed. Accepts the same ids as `--client` (e.g. `["opencode", "claude", "zed"]`). Unknown ids are silently dropped. CLI flags always override this list completely — no merging. |
 | `light.writeCache` | boolean | `false` | When true, `tokscale --light` overwrites the TUI cache atomically after rendering. CLI flags `--write-cache` / `--no-write-cache` override per-invocation. |
 | `usageTabEnabled` | boolean | `false` | Show the subscription quota Usage tab in the TUI. Default-off because local token usage is the primary TUI workflow and subscription lookups are optional. |
-| `minutelyTabEnabled` | boolean | `false` | Show the per-minute Minutely tab in the TUI and aggregate per-minute usage during data loading. Default-off because minute-granularity is a niche/diagnostic view for most users and the per-minute bucketing has a non-trivial cost on large datasets. |
 | `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
 
 Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories, imported Gemini/OpenClaw histories, Hermes profile databases, or a Windows Zed data directory mounted from WSL. Hermes entries may point at a profile directory containing `state.db` or directly at a `state.db` file. Zed entries may point at a `threads` directory containing `threads.db` or directly at `threads.db`. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
 
 Use `defaultClients` to pin a personal default — for example, set it to `["opencode", "claude"]` if those are the only clients you use, and `tokscale` (with no flags) will scope every report to them automatically. Pass `--client` on the command line to override for a single run.
-
-#### Enabling the Minutely tab
-
-The Minutely tab shows a per-minute breakdown of token usage and is most useful for diagnosing burst patterns, debugging a single session, or watching activity in near-real-time alongside `autoRefreshEnabled`. It is hidden by default because the per-minute aggregation runs over every parsed message during data loading, which adds RAM and CPU cost that most users do not need.
-
-To enable it, set `minutelyTabEnabled` to `true` in `~/.config/tokscale/settings.json`:
-
-```json
-{
-  "minutelyTabEnabled": true
-}
-```
-
-After restart, the Minutely tab appears between Hourly and Stats in the tab strip, and Tab / BackTab / Left / Right navigation cycles through it. Set the flag back to `false` to hide the tab and skip the aggregation again.
 
 #### Cache directory layout
 

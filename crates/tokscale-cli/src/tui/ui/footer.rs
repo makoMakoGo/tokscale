@@ -4,6 +4,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use super::spinner::{get_phase_message, get_scanner_spans};
 use super::widgets::{format_cost, format_tokens};
 use crate::tui::app::{App, ClickAction, SortField, Tab};
+use crate::tui::data::{build_period_usage, PeriodKind};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -155,9 +156,22 @@ fn current_count_label(app: &App) -> String {
         Tab::Daily if app.is_daily_detail_active() => {
             format!(" ({} models)", app.get_sorted_daily_detail_rows().len())
         }
+        Tab::Monthly if app.is_period_detail_active_for_kind(PeriodKind::Monthly) => {
+            format!(" ({} models)", app.get_sorted_period_detail_rows().len())
+        }
+        Tab::Weekly if app.is_period_detail_active_for_kind(PeriodKind::Weekly) => {
+            format!(" ({} models)", app.get_sorted_period_detail_rows().len())
+        }
+        Tab::Monthly => format!(
+            " ({} months)",
+            build_period_usage(&app.data.daily, PeriodKind::Monthly).len()
+        ),
+        Tab::Weekly => format!(
+            " ({} weeks)",
+            build_period_usage(&app.data.daily, PeriodKind::Weekly).len()
+        ),
         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
-        Tab::Minutely => format!(" ({} minutes)", app.data.minutely.len()),
         Tab::Stats | Tab::Usage => String::new(),
     }
 }
@@ -193,6 +207,14 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled("j", Style::default().fg(Color::Yellow)));
             }
         }
+        if matches!(app.current_tab, Tab::Monthly | Tab::Weekly) {
+            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            if app.is_period_detail_active() {
+                spans.push(Span::styled("esc", Style::default().fg(Color::Yellow)));
+            } else {
+                spans.push(Span::styled("↵", Style::default().fg(Color::Yellow)));
+            }
+        }
         if app.current_tab == Tab::Hourly {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
             spans.push(Span::styled("v", Style::default().fg(Color::Yellow)));
@@ -221,6 +243,20 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(" ", Style::default()));
                 spans.push(Span::styled(
                     "[j:today]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+        }
+        if matches!(app.current_tab, Tab::Monthly | Tab::Weekly) {
+            if app.is_period_detail_active() {
+                spans.push(Span::styled(
+                    "[esc:back]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "[enter:details]",
                     Style::default().fg(Color::Yellow),
                 ));
             }
@@ -367,16 +403,13 @@ mod tests {
             current_count_label(&make_app_on(Tab::Agents)),
             " (0 agents)"
         );
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Monthly)),
+            " (0 months)"
+        );
+        assert_eq!(current_count_label(&make_app_on(Tab::Weekly)), " (0 weeks)");
         assert_eq!(current_count_label(&make_app_on(Tab::Daily)), " (0 days)");
         assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
         assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
-    }
-
-    #[test]
-    fn test_current_count_label_minutely_when_flag_enabled() {
-        let mut app = make_app_on(Tab::Models);
-        app.settings.minutely_tab_enabled = true;
-        app.current_tab = Tab::Minutely;
-        assert_eq!(current_count_label(&app), " (0 minutes)");
     }
 }

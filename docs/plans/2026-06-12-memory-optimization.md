@@ -416,7 +416,7 @@ thread::spawn(move || {
             }
         }
     }
-    let loader = background_data_loader(since, until, year, minutely_enabled);
+    let loader = background_data_loader(since, until, year);
     let result = loader.load(&clients, &group_by);
     if let Ok(ref data) = result {
         if let Err(err) = save_cached_data(data, &enabled_clients, &group_by, &report_scope) {

@@ -8,19 +8,26 @@ const TAB_PADDING_LEFT: &str = " ";
 const TAB_PADDING_RIGHT: &str = " ";
 const TAB_DIVIDER: &str = " │ ";
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    let is_very_narrow = app.is_very_narrow();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabLabelMode {
+    Full,
+    Short,
+}
 
+pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_tabs: Vec<Tab> = Tab::all()
         .iter()
         .copied()
         .filter(|t| app.is_tab_visible(*t))
         .collect();
+    let block = header_block(app);
+    let tabs_area = block.inner(area);
+    let label_mode = tab_label_mode(app, &visible_tabs, tabs_area);
 
     let titles: Vec<Line> = visible_tabs
         .iter()
         .map(|t| {
-            let name = tab_label(*t, is_very_narrow);
+            let name = tab_label(*t, label_mode);
             let style = if *t == app.current_tab {
                 Style::default()
                     .fg(app.theme.accent)
@@ -36,9 +43,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .position(|t| *t == app.current_tab)
         .unwrap_or(0);
-
-    let block = header_block(app);
-    let tabs_area = block.inner(area);
 
     let tabs = Tabs::new(titles)
         .block(block)
@@ -86,11 +90,34 @@ fn tab_divider(app: &App) -> Span<'static> {
     Span::styled(TAB_DIVIDER, Style::default().fg(app.theme.border))
 }
 
-fn tab_label(tab: Tab, is_very_narrow: bool) -> &'static str {
-    if is_very_narrow {
-        tab.short_name()
+fn tab_label(tab: Tab, mode: TabLabelMode) -> &'static str {
+    match mode {
+        TabLabelMode::Full => tab.as_str(),
+        TabLabelMode::Short => tab.short_name(),
+    }
+}
+
+fn tab_row_width(tabs: &[Tab], mode: TabLabelMode) -> u16 {
+    if tabs.is_empty() {
+        return 0;
+    }
+
+    let padding_width = TAB_PADDING_LEFT.width() + TAB_PADDING_RIGHT.width();
+    let labels_width: usize = tabs
+        .iter()
+        .map(|tab| tab_label(*tab, mode).width() + padding_width)
+        .sum();
+    let dividers_width = TAB_DIVIDER.width() * tabs.len().saturating_sub(1);
+    labels_width
+        .saturating_add(dividers_width)
+        .min(u16::MAX as usize) as u16
+}
+
+fn tab_label_mode(app: &App, tabs: &[Tab], tabs_area: Rect) -> TabLabelMode {
+    if app.is_very_narrow() || tab_row_width(tabs, TabLabelMode::Full) > tabs_area.width {
+        TabLabelMode::Short
     } else {
-        tab.as_str()
+        TabLabelMode::Full
     }
 }
 
@@ -99,12 +126,12 @@ fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
         return Vec::new();
     };
 
-    let is_very_narrow = app.is_very_narrow();
     let visible_tabs: Vec<Tab> = Tab::all()
         .iter()
         .copied()
         .filter(|t| app.is_tab_visible(*t))
         .collect();
+    let label_mode = tab_label_mode(app, &visible_tabs, tabs_area);
     let mut areas = Vec::with_capacity(visible_tabs.len());
     let mut x = tab_row.x;
     let right = tab_row.right();
@@ -126,7 +153,7 @@ fn tab_click_areas(app: &App, tabs_area: Rect) -> Vec<(Rect, Tab)> {
             break;
         }
 
-        let name = tab_label(*tab, is_very_narrow);
+        let name = tab_label(*tab, label_mode);
         let width = (name.width() as u16).min(remaining_width);
         if width == 0 {
             break;
@@ -192,7 +219,6 @@ mod tests {
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
         app.settings.usage_tab_enabled = false;
-        app.settings.minutely_tab_enabled = false;
         app.handle_resize(width, 24);
         app
     }
@@ -200,12 +226,6 @@ mod tests {
     fn make_app_with_usage(width: u16) -> App {
         let mut app = make_app(width);
         app.settings.usage_tab_enabled = true;
-        app
-    }
-
-    fn make_app_with_minutely(width: u16) -> App {
-        let mut app = make_app(width);
-        app.settings.minutely_tab_enabled = true;
         app
     }
 
@@ -223,10 +243,12 @@ mod tests {
         vec![
             (Rect::new(21, 5, 10, 1), Tab::Overview),
             (Rect::new(34, 5, 8, 1), Tab::Models),
-            (Rect::new(45, 5, 7, 1), Tab::Daily),
-            (Rect::new(55, 5, 8, 1), Tab::Hourly),
-            (Rect::new(66, 5, 7, 1), Tab::Stats),
-            (Rect::new(76, 5, 8, 1), Tab::Agents),
+            (Rect::new(45, 5, 9, 1), Tab::Monthly),
+            (Rect::new(57, 5, 8, 1), Tab::Weekly),
+            (Rect::new(68, 5, 7, 1), Tab::Daily),
+            (Rect::new(78, 5, 8, 1), Tab::Hourly),
+            (Rect::new(89, 5, 7, 1), Tab::Stats),
+            (Rect::new(99, 5, 8, 1), Tab::Agents),
         ]
     }
 
@@ -235,22 +257,12 @@ mod tests {
             (Rect::new(21, 5, 10, 1), Tab::Overview),
             (Rect::new(34, 5, 7, 1), Tab::Usage),
             (Rect::new(44, 5, 8, 1), Tab::Models),
-            (Rect::new(55, 5, 7, 1), Tab::Daily),
-            (Rect::new(65, 5, 8, 1), Tab::Hourly),
-            (Rect::new(76, 5, 7, 1), Tab::Stats),
-            (Rect::new(86, 5, 8, 1), Tab::Agents),
-        ]
-    }
-
-    fn expected_normal_tab_areas_with_minutely() -> Vec<(Rect, Tab)> {
-        vec![
-            (Rect::new(21, 5, 10, 1), Tab::Overview),
-            (Rect::new(34, 5, 8, 1), Tab::Models),
-            (Rect::new(45, 5, 7, 1), Tab::Daily),
-            (Rect::new(55, 5, 8, 1), Tab::Hourly),
-            (Rect::new(66, 5, 10, 1), Tab::Minutely),
-            (Rect::new(79, 5, 7, 1), Tab::Stats),
-            (Rect::new(89, 5, 8, 1), Tab::Agents),
+            (Rect::new(55, 5, 9, 1), Tab::Monthly),
+            (Rect::new(67, 5, 8, 1), Tab::Weekly),
+            (Rect::new(78, 5, 7, 1), Tab::Daily),
+            (Rect::new(88, 5, 8, 1), Tab::Hourly),
+            (Rect::new(99, 5, 7, 1), Tab::Stats),
+            (Rect::new(109, 5, 8, 1), Tab::Agents),
         ]
     }
 
@@ -258,10 +270,12 @@ mod tests {
         vec![
             (Rect::new(8, 3, 5, 1), Tab::Overview),
             (Rect::new(16, 3, 5, 1), Tab::Models),
-            (Rect::new(24, 3, 5, 1), Tab::Daily),
-            (Rect::new(32, 3, 4, 1), Tab::Hourly),
-            (Rect::new(39, 3, 5, 1), Tab::Stats),
-            (Rect::new(47, 3, 5, 1), Tab::Agents),
+            (Rect::new(24, 3, 5, 1), Tab::Monthly),
+            (Rect::new(32, 3, 4, 1), Tab::Weekly),
+            (Rect::new(39, 3, 5, 1), Tab::Daily),
+            (Rect::new(47, 3, 4, 1), Tab::Hourly),
+            (Rect::new(54, 3, 5, 1), Tab::Stats),
+            (Rect::new(62, 3, 5, 1), Tab::Agents),
         ]
     }
 
@@ -357,18 +371,8 @@ mod tests {
         let app = make_app(120);
 
         assert_eq!(
-            tab_click_areas(&app, Rect::new(21, 5, 78, 1)),
+            tab_click_areas(&app, Rect::new(21, 5, 90, 1)),
             expected_normal_tab_areas()
-        );
-    }
-
-    #[test]
-    fn tab_click_areas_include_minutely_when_enabled() {
-        let app = make_app_with_minutely(120);
-
-        assert_eq!(
-            tab_click_areas(&app, Rect::new(21, 5, 103, 1)),
-            expected_normal_tab_areas_with_minutely()
         );
     }
 
@@ -377,7 +381,7 @@ mod tests {
         let app = make_app_with_usage(120);
 
         assert_eq!(
-            tab_click_areas(&app, Rect::new(21, 5, 78, 1)),
+            tab_click_areas(&app, Rect::new(21, 5, 100, 1)),
             expected_normal_tab_areas_with_usage()
         );
     }
@@ -395,31 +399,19 @@ mod tests {
     #[test]
     fn rendered_normal_tabs_match_click_area_geometry_for_offset_area() {
         let mut app = make_app(120);
-        let area = Rect::new(20, 4, 80, 3);
+        let area = Rect::new(20, 4, 92, 3);
 
         let lines = render_header_symbols(&mut app, area, 120, 8);
 
         assert_eq!(symbols_at(&lines, 5, 21, 10), " Overview ");
         assert_eq!(symbols_at(&lines, 5, 34, 8), " Models ");
-        assert_eq!(symbols_at(&lines, 5, 45, 7), " Daily ");
-        assert_eq!(symbols_at(&lines, 5, 55, 8), " Hourly ");
-        assert_eq!(symbols_at(&lines, 5, 66, 7), " Stats ");
-        assert_eq!(symbols_at(&lines, 5, 76, 8), " Agents ");
+        assert_eq!(symbols_at(&lines, 5, 45, 9), " Monthly ");
+        assert_eq!(symbols_at(&lines, 5, 57, 8), " Weekly ");
+        assert_eq!(symbols_at(&lines, 5, 68, 7), " Daily ");
+        assert_eq!(symbols_at(&lines, 5, 78, 8), " Hourly ");
+        assert_eq!(symbols_at(&lines, 5, 89, 7), " Stats ");
+        assert_eq!(symbols_at(&lines, 5, 99, 8), " Agents ");
         assert_eq!(registered_tab_areas(&app), expected_normal_tab_areas());
-    }
-
-    #[test]
-    fn rendered_minutely_tab_matches_click_area_geometry_when_enabled() {
-        let mut app = make_app_with_minutely(120);
-        let area = Rect::new(20, 4, 105, 3);
-
-        let lines = render_header_symbols(&mut app, area, 130, 8);
-
-        assert_eq!(symbols_at(&lines, 5, 66, 10), " Minutely ");
-        assert_eq!(
-            registered_tab_areas(&app),
-            expected_normal_tab_areas_with_minutely()
-        );
     }
 
     #[test]
@@ -431,34 +423,40 @@ mod tests {
 
         assert_eq!(symbols_at(&lines, 3, 8, 5), " Ovw ");
         assert_eq!(symbols_at(&lines, 3, 16, 5), " Mod ");
-        assert_eq!(symbols_at(&lines, 3, 24, 5), " Day ");
-        assert_eq!(symbols_at(&lines, 3, 32, 4), " Hr ");
-        assert_eq!(symbols_at(&lines, 3, 39, 5), " Sta ");
-        assert_eq!(symbols_at(&lines, 3, 47, 5), " Agt ");
+        assert_eq!(symbols_at(&lines, 3, 24, 5), " Mth ");
+        assert_eq!(symbols_at(&lines, 3, 32, 4), " Wk ");
+        assert_eq!(symbols_at(&lines, 3, 39, 5), " Day ");
+        assert_eq!(symbols_at(&lines, 3, 47, 4), " Hr ");
+        assert_eq!(symbols_at(&lines, 3, 54, 5), " Sta ");
+        assert_eq!(symbols_at(&lines, 3, 62, 5), " Agt ");
         assert_eq!(registered_tab_areas(&app), expected_very_narrow_tab_areas());
     }
 
     #[test]
     fn clicks_on_tab_dividers_do_not_switch_tabs() {
         let mut app = make_app(120);
-        let area = Rect::new(20, 4, 80, 3);
+        let area = Rect::new(20, 4, 92, 3);
 
         let lines = render_header_symbols(&mut app, area, 120, 8);
 
         assert_eq!(symbols_at(&lines, 5, 31, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 5, 42, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 5, 52, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 5, 63, 3), TAB_DIVIDER);
-        assert_eq!(symbols_at(&lines, 5, 73, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 54, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 65, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 75, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 86, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 5, 96, 3), TAB_DIVIDER);
 
         assert_clicks_do_not_switch_tabs(
             &mut app,
             &[
                 Rect::new(31, 5, 3, 1),
                 Rect::new(42, 5, 3, 1),
-                Rect::new(52, 5, 3, 1),
-                Rect::new(63, 5, 3, 1),
-                Rect::new(73, 5, 3, 1),
+                Rect::new(54, 5, 3, 1),
+                Rect::new(65, 5, 3, 1),
+                Rect::new(75, 5, 3, 1),
+                Rect::new(86, 5, 3, 1),
+                Rect::new(96, 5, 3, 1),
             ],
         );
     }
@@ -475,6 +473,8 @@ mod tests {
         assert_eq!(symbols_at(&lines, 3, 29, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 3, 36, 3), TAB_DIVIDER);
         assert_eq!(symbols_at(&lines, 3, 44, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 51, 3), TAB_DIVIDER);
+        assert_eq!(symbols_at(&lines, 3, 59, 3), TAB_DIVIDER);
 
         assert_clicks_do_not_switch_tabs(
             &mut app,
@@ -484,6 +484,8 @@ mod tests {
                 Rect::new(29, 3, 3, 1),
                 Rect::new(36, 3, 3, 1),
                 Rect::new(44, 3, 3, 1),
+                Rect::new(51, 3, 3, 1),
+                Rect::new(59, 3, 3, 1),
             ],
         );
     }
@@ -491,7 +493,7 @@ mod tests {
     #[test]
     fn clicks_on_rendered_tab_labels_and_padding_select_matching_tabs() {
         let mut app = make_app(120);
-        let area = Rect::new(20, 4, 80, 3);
+        let area = Rect::new(20, 4, 92, 3);
 
         render_header_symbols(&mut app, area, 120, 8);
 

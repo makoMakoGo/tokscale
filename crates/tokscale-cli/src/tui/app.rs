@@ -12,8 +12,8 @@ use tokscale_core::ClientId;
 use ratatui::style::Color;
 
 use super::data::{
-    AgentUsage, DailyUsage, DataLoader, HourlyUsage, MinutelyUsage, ModelUsage, TokenBreakdown,
-    UsageData,
+    build_period_usage, AgentUsage, DailyUsage, DataLoader, HourlyUsage, ModelUsage, PeriodKind,
+    PeriodUsage, TokenBreakdown, UsageData,
 };
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
@@ -37,9 +37,10 @@ pub enum Tab {
     Overview,
     Usage,
     Models,
+    Monthly,
+    Weekly,
     Daily,
     Hourly,
-    Minutely,
     Stats,
     Agents,
 }
@@ -50,9 +51,10 @@ impl Tab {
             Tab::Overview,
             Tab::Usage,
             Tab::Models,
+            Tab::Monthly,
+            Tab::Weekly,
             Tab::Daily,
             Tab::Hourly,
-            Tab::Minutely,
             Tab::Stats,
             Tab::Agents,
         ]
@@ -63,9 +65,10 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Usage => "Usage",
             Tab::Models => "Models",
+            Tab::Monthly => "Monthly",
+            Tab::Weekly => "Weekly",
             Tab::Daily => "Daily",
             Tab::Hourly => "Hourly",
-            Tab::Minutely => "Minutely",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
         }
@@ -76,9 +79,10 @@ impl Tab {
             Tab::Overview => "Ovw",
             Tab::Usage => "Use",
             Tab::Models => "Mod",
+            Tab::Monthly => "Mth",
+            Tab::Weekly => "Wk",
             Tab::Daily => "Day",
             Tab::Hourly => "Hr",
-            Tab::Minutely => "Min",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
         }
@@ -88,10 +92,11 @@ impl Tab {
         match self {
             Tab::Overview => Tab::Usage,
             Tab::Usage => Tab::Models,
-            Tab::Models => Tab::Daily,
+            Tab::Models => Tab::Monthly,
+            Tab::Monthly => Tab::Weekly,
+            Tab::Weekly => Tab::Daily,
             Tab::Daily => Tab::Hourly,
-            Tab::Hourly => Tab::Minutely,
-            Tab::Minutely => Tab::Stats,
+            Tab::Hourly => Tab::Stats,
             Tab::Stats => Tab::Agents,
             Tab::Agents => Tab::Overview,
         }
@@ -102,10 +107,11 @@ impl Tab {
             Tab::Overview => Tab::Agents,
             Tab::Usage => Tab::Overview,
             Tab::Models => Tab::Usage,
-            Tab::Daily => Tab::Models,
+            Tab::Monthly => Tab::Models,
+            Tab::Weekly => Tab::Monthly,
+            Tab::Daily => Tab::Weekly,
             Tab::Hourly => Tab::Daily,
-            Tab::Minutely => Tab::Hourly,
-            Tab::Stats => Tab::Minutely,
+            Tab::Stats => Tab::Hourly,
             Tab::Agents => Tab::Stats,
         }
     }
@@ -154,19 +160,29 @@ pub struct DailyDetailRow<'a> {
     pub messages: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeriodDetailSelection {
+    pub kind: PeriodKind,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeriodDetailRow {
+    pub source: String,
+    pub provider: String,
+    pub model: String,
+    pub color_key: String,
+    pub tokens: TokenBreakdown,
+    pub cost: f64,
+    pub messages: u64,
+}
+
 #[derive(Debug, Clone)]
 pub enum ClickAction {
     Tab(Tab),
     Sort(SortField),
     GraphCell { week: usize, day: usize },
-}
-
-struct MinutelySortCache {
-    sort_field: SortField,
-    sort_direction: SortDirection,
-    data_version: u64,
-    data_len: usize,
-    indices: Vec<usize>,
 }
 
 pub struct App {
@@ -193,6 +209,11 @@ pub struct App {
     daily_list_scroll_offset: usize,
     daily_list_sort_before_detail: Option<(SortField, SortDirection)>,
     daily_detail_sort_state: Option<(SortField, SortDirection)>,
+    pub selected_period_detail: Option<PeriodDetailSelection>,
+    period_list_selected_index: usize,
+    period_list_scroll_offset: usize,
+    period_list_sort_before_detail: Option<(SortField, SortDirection)>,
+    period_detail_sort_state: Option<(SortField, SortDirection)>,
 
     pub selected_graph_cell: Option<(usize, usize)>,
     pub stats_breakdown_total_lines: usize,
@@ -237,9 +258,6 @@ pub struct App {
 
     pub usage_fetch_attempted: bool,
     usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
-
-    data_version: u64,
-    minutely_sort_cache: RefCell<Option<MinutelySortCache>>,
 }
 
 impl App {
@@ -289,8 +307,7 @@ impl App {
             config.since,
             config.until,
             config.year,
-        )
-        .with_minutely_enabled(settings.minutely_tab_enabled);
+        );
 
         let data = cached_data.unwrap_or_default();
         let has_data = !data.models.is_empty();
@@ -325,6 +342,11 @@ impl App {
             daily_list_scroll_offset: 0,
             daily_list_sort_before_detail: None,
             daily_detail_sort_state: None,
+            selected_period_detail: None,
+            period_list_selected_index: 0,
+            period_list_scroll_offset: 0,
+            period_list_sort_before_detail: None,
+            period_detail_sort_state: None,
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -363,8 +385,6 @@ impl App {
             },
             usage_fetch_attempted: false,
             usage_rx: None,
-            data_version: 0,
-            minutely_sort_cache: RefCell::new(None),
         };
         app.build_model_shade_map();
         Ok(app)
@@ -413,10 +433,8 @@ impl App {
 
     pub fn update_data(&mut self, data: UsageData) {
         self.data = data;
-        self.data_version = self.data_version.saturating_add(1);
         self.last_refresh = Instant::now();
         self.build_model_shade_map();
-        self.minutely_sort_cache.borrow_mut().take();
 
         // Exit Daily-detail mode if the refresh dropped the day we were
         // viewing; otherwise `get_sorted_daily_detail_rows()` would return
@@ -427,6 +445,20 @@ impl App {
                 self.selected_daily_detail_date = None;
                 self.selected_index = self.daily_list_selected_index;
                 self.scroll_offset = self.daily_list_scroll_offset;
+            }
+        }
+        if let Some(selection) = self.selected_period_detail {
+            let period_still_exists = build_period_usage(&self.data.daily, selection.kind)
+                .iter()
+                .any(|period| {
+                    period.start_date == selection.start_date
+                        && period.end_date == selection.end_date
+                });
+            if !period_still_exists {
+                self.leave_period_detail_sort_context();
+                self.selected_period_detail = None;
+                self.selected_index = self.period_list_selected_index;
+                self.scroll_offset = self.period_list_scroll_offset;
             }
         }
 
@@ -639,6 +671,12 @@ impl App {
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
             }
+            KeyCode::Enter if self.current_tab == Tab::Monthly => {
+                self.open_selected_period_detail(PeriodKind::Monthly);
+            }
+            KeyCode::Enter if self.current_tab == Tab::Weekly => {
+                self.open_selected_period_detail(PeriodKind::Weekly);
+            }
             KeyCode::Enter if self.current_tab == Tab::Stats => {
                 self.handle_graph_selection();
             }
@@ -646,6 +684,11 @@ impl App {
                 if self.current_tab == Tab::Daily && self.is_daily_detail_active() =>
             {
                 self.close_daily_detail();
+            }
+            KeyCode::Esc | KeyCode::Backspace
+                if self.current_period_kind().is_some() && self.is_period_detail_active() =>
+            {
+                self.close_period_detail();
             }
             KeyCode::Esc if self.selected_graph_cell.is_some() => {
                 self.selected_graph_cell = None;
@@ -773,6 +816,10 @@ impl App {
         self.daily_list_selected_index = 0;
         self.daily_list_scroll_offset = 0;
         self.daily_list_sort_before_detail = None;
+        self.selected_period_detail = None;
+        self.period_list_selected_index = 0;
+        self.period_list_scroll_offset = 0;
+        self.period_list_sort_before_detail = None;
         self.selected_graph_cell = None;
         self.stats_breakdown_total_lines = 0;
     }
@@ -783,12 +830,17 @@ impl App {
         }
 
         let was_daily_detail = self.current_tab == Tab::Daily && self.is_daily_detail_active();
+        let was_period_detail = self.is_period_detail_active();
         self.persist_current_sort();
 
         self.current_tab = target;
         if target != Tab::Daily || was_daily_detail {
             self.selected_daily_detail_date = None;
             self.daily_list_sort_before_detail = None;
+        }
+        if was_period_detail {
+            self.selected_period_detail = None;
+            self.period_list_sort_before_detail = None;
         }
 
         let (field, dir) = self
@@ -803,7 +855,7 @@ impl App {
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
         match tab {
             Tab::Models => (SortField::Tokens, SortDirection::Descending),
-            Tab::Daily | Tab::Hourly | Tab::Minutely => {
+            Tab::Monthly | Tab::Weekly | Tab::Daily | Tab::Hourly => {
                 (SortField::Date, SortDirection::Descending)
             }
             Tab::Overview | Tab::Usage | Tab::Stats | Tab::Agents => {
@@ -816,11 +868,29 @@ impl App {
         (SortField::Tokens, SortDirection::Descending)
     }
 
+    fn default_sort_for_period_detail() -> (SortField, SortDirection) {
+        (SortField::Tokens, SortDirection::Descending)
+    }
+
     pub(crate) fn tab_visible(settings: &Settings, tab: Tab) -> bool {
         match tab {
             Tab::Usage => settings.usage_tab_enabled,
-            Tab::Minutely => settings.minutely_tab_enabled,
             _ => true,
+        }
+    }
+
+    fn period_tab(kind: PeriodKind) -> Tab {
+        match kind {
+            PeriodKind::Monthly => Tab::Monthly,
+            PeriodKind::Weekly => Tab::Weekly,
+        }
+    }
+
+    fn current_period_kind(&self) -> Option<PeriodKind> {
+        match self.current_tab {
+            Tab::Monthly => Some(PeriodKind::Monthly),
+            Tab::Weekly => Some(PeriodKind::Weekly),
+            _ => None,
         }
     }
 
@@ -854,6 +924,15 @@ impl App {
             self.tab_sort_state.insert(Tab::Daily, daily_sort);
             return;
         }
+        if let Some(selection) = self.selected_period_detail {
+            self.period_detail_sort_state = Some(current_sort);
+            let tab = Self::period_tab(selection.kind);
+            let period_sort = self
+                .period_list_sort_before_detail
+                .unwrap_or_else(|| Self::default_sort_for_tab(tab));
+            self.tab_sort_state.insert(tab, period_sort);
+            return;
+        }
 
         self.tab_sort_state.insert(self.current_tab, current_sort);
     }
@@ -877,6 +956,31 @@ impl App {
         self.sort_field = daily_sort.0;
         self.sort_direction = daily_sort.1;
         self.tab_sort_state.insert(Tab::Daily, daily_sort);
+    }
+
+    fn enter_period_detail_sort_context(&mut self) {
+        self.period_list_sort_before_detail = Some((self.sort_field, self.sort_direction));
+        let (field, direction) = self
+            .period_detail_sort_state
+            .unwrap_or_else(Self::default_sort_for_period_detail);
+        self.sort_field = field;
+        self.sort_direction = direction;
+    }
+
+    fn leave_period_detail_sort_context(&mut self) {
+        self.period_detail_sort_state = Some((self.sort_field, self.sort_direction));
+        let tab = self
+            .selected_period_detail
+            .map(|selection| Self::period_tab(selection.kind))
+            .unwrap_or(self.current_tab);
+        let period_sort = self
+            .period_list_sort_before_detail
+            .take()
+            .or_else(|| self.tab_sort_state.get(&tab).copied())
+            .unwrap_or_else(|| Self::default_sort_for_tab(tab));
+        self.sort_field = period_sort.0;
+        self.sort_direction = period_sort.1;
+        self.tab_sort_state.insert(tab, period_sort);
     }
 
     fn move_selection_up(&mut self) {
@@ -993,9 +1097,16 @@ impl App {
             Tab::Daily if self.is_daily_detail_active() => {
                 self.get_sorted_daily_detail_rows().len()
             }
+            Tab::Monthly if self.is_period_detail_active_for_kind(PeriodKind::Monthly) => {
+                self.get_sorted_period_detail_rows().len()
+            }
+            Tab::Weekly if self.is_period_detail_active_for_kind(PeriodKind::Weekly) => {
+                self.get_sorted_period_detail_rows().len()
+            }
+            Tab::Monthly => build_period_usage(&self.data.daily, PeriodKind::Monthly).len(),
+            Tab::Weekly => build_period_usage(&self.data.daily, PeriodKind::Weekly).len(),
             Tab::Daily => self.data.daily.len(),
             Tab::Hourly => self.data.hourly.len(),
-            Tab::Minutely => self.data.minutely.len(),
             Tab::Stats => {
                 if self.selected_graph_cell.is_some() {
                     self.stats_breakdown_total_lines
@@ -1022,7 +1133,9 @@ impl App {
             self.sort_direction = SortDirection::Descending;
         }
         self.persist_current_sort();
-        if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
+        if (self.current_tab == Tab::Daily && self.is_daily_detail_active())
+            || self.is_period_detail_active()
+        {
             self.selected_index = 0;
             self.scroll_offset = 0;
         } else {
@@ -1164,6 +1277,71 @@ impl App {
         self.clamp_selection();
     }
 
+    fn open_selected_period_detail(&mut self, kind: PeriodKind) {
+        if self.is_period_detail_active() {
+            return;
+        }
+
+        let selected_period = {
+            let periods = self.get_sorted_periods(kind);
+            periods.get(self.selected_index).map(|period| {
+                (
+                    PeriodDetailSelection {
+                        kind,
+                        start_date: period.start_date,
+                        end_date: period.end_date,
+                    },
+                    format!("{} {}", period.section_label, period.label),
+                )
+            })
+        };
+
+        if let Some((selection, label)) = selected_period {
+            self.period_list_selected_index = self.selected_index;
+            self.period_list_scroll_offset = self.scroll_offset;
+            self.selected_period_detail = Some(selection);
+            self.enter_period_detail_sort_context();
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.set_status(&format!("Viewing period details for {}", label));
+            self.clamp_selection();
+        }
+    }
+
+    fn close_period_detail(&mut self) {
+        let Some(selection) = self.selected_period_detail else {
+            return;
+        };
+
+        self.leave_period_detail_sort_context();
+        self.selected_period_detail = None;
+
+        let restored_index = self
+            .get_sorted_periods(selection.kind)
+            .iter()
+            .position(|period| {
+                period.start_date == selection.start_date && period.end_date == selection.end_date
+            })
+            .unwrap_or(self.period_list_selected_index);
+
+        self.selected_index = restored_index;
+
+        let max_visible = self.max_visible_items.max(1);
+        let viewport_still_holds = restored_index >= self.period_list_scroll_offset
+            && restored_index < self.period_list_scroll_offset + max_visible;
+        self.scroll_offset = if viewport_still_holds {
+            self.period_list_scroll_offset
+        } else {
+            restored_index.saturating_sub(max_visible / 2)
+        };
+
+        self.set_status(match selection.kind {
+            PeriodKind::Monthly => "Returned to monthly usage",
+            PeriodKind::Weekly => "Returned to weekly usage",
+        });
+        self.clamp_selection();
+    }
+
     fn toggle_auto_refresh(&mut self) {
         self.auto_refresh = !self.auto_refresh;
         self.settings.auto_refresh_enabled = self.auto_refresh;
@@ -1238,10 +1416,46 @@ impl App {
                         row.cost
                     )
                 }),
+            Tab::Monthly | Tab::Weekly if self.is_period_detail_active() => self
+                .get_sorted_period_detail_rows()
+                .get(self.selected_index)
+                .map(|row| {
+                    format!(
+                        "{} / {}: {} tokens, ${:.4}",
+                        row.source,
+                        row.model,
+                        row.tokens.total(),
+                        row.cost
+                    )
+                }),
             Tab::Daily => self
                 .get_sorted_daily()
                 .get(self.selected_index)
                 .map(|d| format!("{}: {} tokens, ${:.4}", d.date, d.tokens.total(), d.cost)),
+            Tab::Monthly => self
+                .get_sorted_periods(PeriodKind::Monthly)
+                .get(self.selected_index)
+                .map(|p| {
+                    format!(
+                        "{} {}: {} tokens, ${:.4}",
+                        p.section_label,
+                        p.label,
+                        p.tokens.total(),
+                        p.cost
+                    )
+                }),
+            Tab::Weekly => self
+                .get_sorted_periods(PeriodKind::Weekly)
+                .get(self.selected_index)
+                .map(|p| {
+                    format!(
+                        "{} {}: {} tokens, ${:.4}",
+                        p.section_label,
+                        p.label,
+                        p.tokens.total(),
+                        p.cost
+                    )
+                }),
             Tab::Hourly => self.get_sorted_hourly().get(self.selected_index).map(|h| {
                 format!(
                     "{}: {} tokens, ${:.4}",
@@ -1250,17 +1464,6 @@ impl App {
                     h.cost
                 )
             }),
-            Tab::Minutely => self
-                .get_sorted_minutely()
-                .get(self.selected_index)
-                .map(|m| {
-                    format!(
-                        "{}: {} tokens, ${:.4}",
-                        m.datetime.format("%Y-%m-%d %H:%M"),
-                        m.tokens.total(),
-                        m.cost
-                    )
-                }),
             Tab::Stats | Tab::Usage => None,
         };
 
@@ -1412,6 +1615,25 @@ impl App {
         self.selected_daily_detail_date
     }
 
+    pub fn is_period_detail_active(&self) -> bool {
+        self.selected_period_detail.is_some()
+    }
+
+    pub fn is_period_detail_active_for_kind(&self, kind: PeriodKind) -> bool {
+        self.selected_period_detail
+            .is_some_and(|selection| selection.kind == kind)
+    }
+
+    pub fn period_detail_label(&self) -> Option<String> {
+        let selection = self.selected_period_detail?;
+        build_period_usage(&self.data.daily, selection.kind)
+            .into_iter()
+            .find(|period| {
+                period.start_date == selection.start_date && period.end_date == selection.end_date
+            })
+            .map(|period| format!("{} {}", period.section_label, period.label))
+    }
+
     pub fn get_sorted_daily_detail_rows(&self) -> Vec<DailyDetailRow<'_>> {
         let Some(date) = self.selected_daily_detail_date else {
             return Vec::new();
@@ -1444,6 +1666,77 @@ impl App {
                 .cmp(b.source)
                 .then_with(|| a.model.cmp(b.model))
                 .then_with(|| a.provider.cmp(b.provider))
+        };
+
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => {
+                rows.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Cost, SortDirection::Ascending) => {
+                rows.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
+            }
+            (SortField::Tokens, SortDirection::Descending) => rows.sort_by(|a, b| {
+                b.tokens
+                    .total()
+                    .cmp(&a.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => rows.sort_by(|a, b| {
+                a.tokens
+                    .total()
+                    .cmp(&b.tokens.total())
+                    .then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Date, _) => rows.sort_by(tie_breaker),
+        }
+
+        rows
+    }
+
+    pub fn get_sorted_period_detail_rows(&self) -> Vec<PeriodDetailRow> {
+        let Some(selection) = self.selected_period_detail else {
+            return Vec::new();
+        };
+        let Some(period) = build_period_usage(&self.data.daily, selection.kind)
+            .into_iter()
+            .find(|period| {
+                period.start_date == selection.start_date && period.end_date == selection.end_date
+            })
+        else {
+            return Vec::new();
+        };
+
+        let mut rows: Vec<PeriodDetailRow> = period
+            .source_breakdown
+            .iter()
+            .flat_map(|(source, source_info)| {
+                source_info
+                    .models
+                    .iter()
+                    .map(move |(model_key, model_info)| {
+                        let model = if model_info.display_name.is_empty() {
+                            model_key.clone()
+                        } else {
+                            model_info.display_name.clone()
+                        };
+                        PeriodDetailRow {
+                            source: source.clone(),
+                            provider: model_info.provider.clone(),
+                            model,
+                            color_key: model_info.color_key.clone(),
+                            tokens: model_info.tokens.clone(),
+                            cost: model_info.cost,
+                            messages: model_info.messages,
+                        }
+                    })
+            })
+            .collect();
+
+        let tie_breaker = |a: &PeriodDetailRow, b: &PeriodDetailRow| {
+            a.source
+                .cmp(&b.source)
+                .then_with(|| a.model.cmp(&b.model))
+                .then_with(|| a.provider.cmp(&b.provider))
         };
 
         match (self.sort_field, self.sort_direction) {
@@ -1506,83 +1799,44 @@ impl App {
         hourly
     }
 
-    pub fn get_sorted_minutely(&self) -> Vec<&MinutelyUsage> {
-        let sort_field = self.sort_field;
-        let sort_direction = self.sort_direction;
-        let data_version = self.data_version;
-        let data_len = self.data.minutely.len();
+    pub fn get_sorted_periods(&self, kind: PeriodKind) -> Vec<PeriodUsage> {
+        let mut periods = build_period_usage(&self.data.daily, kind);
 
-        let cached_indices = {
-            let cache = self.minutely_sort_cache.borrow();
-            cache
-                .as_ref()
-                .filter(|cache| {
-                    cache.sort_field == sort_field
-                        && cache.sort_direction == sort_direction
-                        && cache.data_version == data_version
-                        && cache.data_len == data_len
-                })
-                .map(|cache| cache.indices.clone())
-        };
-
-        let indices = if let Some(indices) = cached_indices {
-            indices
-        } else {
-            let mut indices: Vec<usize> = (0..data_len).collect();
-
-            match (sort_field, sort_direction) {
-                (SortField::Cost, SortDirection::Descending) => indices.sort_by(|a, b| {
-                    let a = &self.data.minutely[*a];
-                    let b = &self.data.minutely[*b];
-                    b.cost
-                        .total_cmp(&a.cost)
-                        .then_with(|| a.datetime.cmp(&b.datetime))
-                }),
-                (SortField::Cost, SortDirection::Ascending) => indices.sort_by(|a, b| {
-                    let a = &self.data.minutely[*a];
-                    let b = &self.data.minutely[*b];
-                    a.cost
-                        .total_cmp(&b.cost)
-                        .then_with(|| a.datetime.cmp(&b.datetime))
-                }),
-                (SortField::Tokens, SortDirection::Descending) => indices.sort_by(|a, b| {
-                    let a = &self.data.minutely[*a];
-                    let b = &self.data.minutely[*b];
-                    b.tokens
-                        .total()
-                        .cmp(&a.tokens.total())
-                        .then_with(|| a.datetime.cmp(&b.datetime))
-                }),
-                (SortField::Tokens, SortDirection::Ascending) => indices.sort_by(|a, b| {
-                    let a = &self.data.minutely[*a];
-                    let b = &self.data.minutely[*b];
-                    a.tokens
-                        .total()
-                        .cmp(&b.tokens.total())
-                        .then_with(|| a.datetime.cmp(&b.datetime))
-                }),
-                (SortField::Date, SortDirection::Descending) => indices
-                    .sort_by_key(|index| std::cmp::Reverse(self.data.minutely[*index].datetime)),
-                (SortField::Date, SortDirection::Ascending) => {
-                    indices.sort_by_key(|index| self.data.minutely[*index].datetime)
-                }
+        // Metric sorts keep Year sections newest-first; ordering is metric-based within each year.
+        match (self.sort_field, self.sort_direction) {
+            (SortField::Cost, SortDirection::Descending) => periods.sort_by(|a, b| {
+                b.section_year
+                    .cmp(&a.section_year)
+                    .then_with(|| b.cost.total_cmp(&a.cost))
+                    .then_with(|| b.start_date.cmp(&a.start_date))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => periods.sort_by(|a, b| {
+                b.section_year
+                    .cmp(&a.section_year)
+                    .then_with(|| a.cost.total_cmp(&b.cost))
+                    .then_with(|| b.start_date.cmp(&a.start_date))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => periods.sort_by(|a, b| {
+                b.section_year
+                    .cmp(&a.section_year)
+                    .then_with(|| b.tokens.total().cmp(&a.tokens.total()))
+                    .then_with(|| b.start_date.cmp(&a.start_date))
+            }),
+            (SortField::Tokens, SortDirection::Ascending) => periods.sort_by(|a, b| {
+                b.section_year
+                    .cmp(&a.section_year)
+                    .then_with(|| a.tokens.total().cmp(&b.tokens.total()))
+                    .then_with(|| b.start_date.cmp(&a.start_date))
+            }),
+            (SortField::Date, SortDirection::Descending) => {
+                periods.sort_by_key(|period| std::cmp::Reverse(period.start_date))
             }
+            (SortField::Date, SortDirection::Ascending) => {
+                periods.sort_by_key(|period| period.start_date)
+            }
+        }
 
-            *self.minutely_sort_cache.borrow_mut() = Some(MinutelySortCache {
-                sort_field,
-                sort_direction,
-                data_version,
-                data_len,
-                indices: indices.clone(),
-            });
-
-            indices
-        };
-
-        indices
-            .into_iter()
-            .map(|index| &self.data.minutely[index])
-            .collect()
+        periods
     }
 
     pub fn is_narrow(&self) -> bool {
@@ -1599,31 +1853,33 @@ mod tests {
     use super::super::ui::widgets::get_provider_shade;
     use super::*;
     use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
-    use chrono::{NaiveDate, NaiveDateTime};
-    use std::collections::{BTreeMap, BTreeSet};
+    use chrono::NaiveDate;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 8);
+        assert_eq!(tabs.len(), 9);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Usage);
         assert_eq!(tabs[2], Tab::Models);
-        assert_eq!(tabs[3], Tab::Daily);
-        assert_eq!(tabs[4], Tab::Hourly);
-        assert_eq!(tabs[5], Tab::Minutely);
-        assert_eq!(tabs[6], Tab::Stats);
-        assert_eq!(tabs[7], Tab::Agents);
+        assert_eq!(tabs[3], Tab::Monthly);
+        assert_eq!(tabs[4], Tab::Weekly);
+        assert_eq!(tabs[5], Tab::Daily);
+        assert_eq!(tabs[6], Tab::Hourly);
+        assert_eq!(tabs[7], Tab::Stats);
+        assert_eq!(tabs[8], Tab::Agents);
     }
 
     #[test]
     fn test_tab_next() {
         assert_eq!(Tab::Overview.next(), Tab::Usage);
         assert_eq!(Tab::Usage.next(), Tab::Models);
-        assert_eq!(Tab::Models.next(), Tab::Daily);
+        assert_eq!(Tab::Models.next(), Tab::Monthly);
+        assert_eq!(Tab::Monthly.next(), Tab::Weekly);
+        assert_eq!(Tab::Weekly.next(), Tab::Daily);
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
-        assert_eq!(Tab::Hourly.next(), Tab::Minutely);
-        assert_eq!(Tab::Minutely.next(), Tab::Stats);
+        assert_eq!(Tab::Hourly.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
         assert_eq!(Tab::Agents.next(), Tab::Overview);
     }
@@ -1633,10 +1889,11 @@ mod tests {
         assert_eq!(Tab::Overview.prev(), Tab::Agents);
         assert_eq!(Tab::Usage.prev(), Tab::Overview);
         assert_eq!(Tab::Models.prev(), Tab::Usage);
-        assert_eq!(Tab::Daily.prev(), Tab::Models);
+        assert_eq!(Tab::Monthly.prev(), Tab::Models);
+        assert_eq!(Tab::Weekly.prev(), Tab::Monthly);
+        assert_eq!(Tab::Daily.prev(), Tab::Weekly);
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
-        assert_eq!(Tab::Minutely.prev(), Tab::Hourly);
-        assert_eq!(Tab::Stats.prev(), Tab::Minutely);
+        assert_eq!(Tab::Stats.prev(), Tab::Hourly);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
     }
 
@@ -1645,9 +1902,10 @@ mod tests {
         assert_eq!(Tab::Overview.as_str(), "Overview");
         assert_eq!(Tab::Models.as_str(), "Models");
         assert_eq!(Tab::Agents.as_str(), "Agents");
+        assert_eq!(Tab::Monthly.as_str(), "Monthly");
+        assert_eq!(Tab::Weekly.as_str(), "Weekly");
         assert_eq!(Tab::Daily.as_str(), "Daily");
         assert_eq!(Tab::Hourly.as_str(), "Hourly");
-        assert_eq!(Tab::Minutely.as_str(), "Minutely");
         assert_eq!(Tab::Stats.as_str(), "Stats");
     }
 
@@ -1656,9 +1914,10 @@ mod tests {
         assert_eq!(Tab::Overview.short_name(), "Ovw");
         assert_eq!(Tab::Models.short_name(), "Mod");
         assert_eq!(Tab::Agents.short_name(), "Agt");
+        assert_eq!(Tab::Monthly.short_name(), "Mth");
+        assert_eq!(Tab::Weekly.short_name(), "Wk");
         assert_eq!(Tab::Daily.short_name(), "Day");
         assert_eq!(Tab::Hourly.short_name(), "Hr");
-        assert_eq!(Tab::Minutely.short_name(), "Min");
         assert_eq!(Tab::Stats.short_name(), "Sta");
     }
 
@@ -2002,122 +2261,6 @@ mod tests {
         }
     }
 
-    fn minutely_usage(datetime: &str, input_tokens: u64, cost: f64) -> MinutelyUsage {
-        MinutelyUsage {
-            datetime: NaiveDateTime::parse_from_str(datetime, "%Y-%m-%d %H:%M:%S").unwrap(),
-            tokens: TokenBreakdown {
-                input: input_tokens,
-                output: 0,
-                cache_read: 0,
-                cache_write: 0,
-                reasoning: 0,
-            },
-            cost,
-            clients: BTreeSet::new(),
-            models: BTreeMap::new(),
-            message_count: 1,
-            turn_count: 1,
-        }
-    }
-
-    #[test]
-    fn test_get_sorted_minutely_reuses_cached_order_for_same_sort() {
-        let mut app = make_app();
-        app.data.minutely = vec![
-            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
-            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
-        ];
-
-        let first = app
-            .get_sorted_minutely()
-            .iter()
-            .map(|entry| entry.datetime)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            first,
-            vec![
-                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
-                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
-            ]
-        );
-
-        app.data.minutely.swap(0, 1);
-
-        let second = app
-            .get_sorted_minutely()
-            .iter()
-            .map(|entry| entry.datetime)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            second,
-            vec![
-                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
-                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
-            ],
-            "unchanged data should reuse the cached sorted index order"
-        );
-    }
-
-    #[test]
-    fn test_get_sorted_minutely_invalidates_cache_when_sort_changes() {
-        let mut app = make_app();
-        app.data.minutely = vec![
-            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
-            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
-        ];
-        let _ = app.get_sorted_minutely();
-
-        app.data.minutely.swap(0, 1);
-        app.set_sort(SortField::Date);
-
-        let sorted = app
-            .get_sorted_minutely()
-            .iter()
-            .map(|entry| entry.datetime)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            sorted,
-            vec![
-                NaiveDateTime::parse_from_str("2026-05-20 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap(),
-                NaiveDateTime::parse_from_str("2026-05-20 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
-            ],
-            "changing sort key should rebuild the minutely sorted cache"
-        );
-    }
-
-    #[test]
-    fn test_get_sorted_minutely_invalidates_cache_when_data_updates() {
-        let mut app = make_app();
-        app.data.minutely = vec![
-            minutely_usage("2026-05-20 10:00:00", 10, 1.0),
-            minutely_usage("2026-05-20 10:01:00", 20, 9.0),
-        ];
-        let _ = app.get_sorted_minutely();
-
-        let refreshed = UsageData {
-            minutely: vec![
-                minutely_usage("2026-05-20 10:02:00", 30, 2.0),
-                minutely_usage("2026-05-20 10:03:00", 40, 12.0),
-            ],
-            ..Default::default()
-        };
-        app.update_data(refreshed);
-
-        let sorted = app
-            .get_sorted_minutely()
-            .iter()
-            .map(|entry| entry.datetime)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            sorted,
-            vec![
-                NaiveDateTime::parse_from_str("2026-05-20 10:03:00", "%Y-%m-%d %H:%M:%S").unwrap(),
-                NaiveDateTime::parse_from_str("2026-05-20 10:02:00", "%Y-%m-%d %H:%M:%S").unwrap(),
-            ],
-            "update_data should clear stale minutely sorted cache entries"
-        );
-    }
-
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -2155,6 +2298,12 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Monthly);
+
+        app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Weekly);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Daily);
 
         app.handle_key_event(key(KeyCode::Tab));
@@ -2188,6 +2337,12 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Daily);
 
         app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Weekly);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Monthly);
+
+        app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Models);
 
         app.handle_key_event(key(KeyCode::BackTab));
@@ -2202,6 +2357,8 @@ mod tests {
         for expected in [
             Tab::Usage,
             Tab::Models,
+            Tab::Monthly,
+            Tab::Weekly,
             Tab::Daily,
             Tab::Hourly,
             Tab::Stats,
@@ -2211,47 +2368,6 @@ mod tests {
             app.handle_key_event(key(KeyCode::Tab));
             assert_eq!(app.current_tab, expected);
         }
-    }
-
-    #[test]
-    fn test_handle_key_tab_switch_with_minutely_enabled_includes_minutely() {
-        let mut app = make_app();
-        app.settings.minutely_tab_enabled = true;
-        assert_eq!(app.current_tab, Tab::Overview);
-
-        for expected in [
-            Tab::Models,
-            Tab::Daily,
-            Tab::Hourly,
-            Tab::Minutely,
-            Tab::Stats,
-            Tab::Agents,
-            Tab::Overview,
-        ] {
-            app.handle_key_event(key(KeyCode::Tab));
-            assert_eq!(app.current_tab, expected);
-        }
-    }
-
-    #[test]
-    fn test_initial_minutely_tab_clamps_to_overview_when_flag_off() {
-        let config = TuiConfig {
-            theme: "blue".to_string(),
-            refresh: 0,
-            sessions_path: None,
-            clients: None,
-            since: None,
-            until: None,
-            year: None,
-            initial_tab: Some(Tab::Minutely),
-        };
-        let app = App::new_with_cached_data_and_settings(
-            config,
-            Some(UsageData::default()),
-            Settings::default(),
-        )
-        .unwrap();
-        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]
@@ -2580,6 +2696,135 @@ mod tests {
 
         assert!(app.is_daily_detail_active());
         assert_eq!(app.daily_detail_date(), Some(target_date));
+    }
+
+    #[test]
+    fn test_enter_on_monthly_opens_selected_period_detail_rows() {
+        let mut app = make_app();
+        app.current_tab = Tab::Monthly;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-17", 7.0, vec![("target-a", "openai", 5.0)]),
+            daily_usage(
+                "2026-05-18",
+                5.0,
+                vec![("target-a", "openai", 3.0), ("target-b", "anthropic", 2.0)],
+            ),
+            daily_usage("2026-06-01", 1.0, vec![("june-model", "google", 1.0)]),
+        ];
+
+        app.selected_index = 1;
+        let selected_period =
+            app.get_sorted_periods(PeriodKind::Monthly)[app.selected_index].start_date;
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert!(app.is_period_detail_active_for_kind(PeriodKind::Monthly));
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+        assert_eq!(app.get_current_list_len(), 2);
+        assert_eq!(app.get_sorted_period_detail_rows()[0].model, "target-a");
+        assert_eq!(
+            app.selected_period_detail.unwrap().start_date,
+            selected_period
+        );
+    }
+
+    #[test]
+    fn test_period_detail_model_name_falls_back_to_model_key() {
+        let mut app = make_app();
+        app.current_tab = Tab::Monthly;
+        app.data.daily = vec![daily_usage(
+            "2026-05-17",
+            7.0,
+            vec![("fallback-model", "openai", 7.0)],
+        )];
+        app.data.daily[0]
+            .source_breakdown
+            .get_mut("claude")
+            .unwrap()
+            .models
+            .get_mut("fallback-model")
+            .unwrap()
+            .display_name
+            .clear();
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.get_sorted_period_detail_rows()[0].model,
+            "fallback-model"
+        );
+    }
+
+    #[test]
+    fn test_esc_from_weekly_detail_restores_week_selection() {
+        let mut app = make_app();
+        app.current_tab = Tab::Weekly;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-06-01", 1.0, vec![("week-23-a", "openai", 1.0)]),
+            daily_usage("2026-06-03", 2.0, vec![("week-23-b", "anthropic", 2.0)]),
+            daily_usage("2026-06-10", 3.0, vec![("week-24", "google", 3.0)]),
+            daily_usage("2026-06-17", 4.0, vec![("week-25", "google", 4.0)]),
+        ];
+
+        app.max_visible_items = 2;
+        app.selected_index = 2;
+        app.scroll_offset = 1;
+        let selected_period =
+            app.get_sorted_periods(PeriodKind::Weekly)[app.selected_index].start_date;
+
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Down));
+        assert!(app.is_period_detail_active_for_kind(PeriodKind::Weekly));
+        assert_eq!(app.selected_index, 1);
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(!app.is_period_detail_active());
+        assert_eq!(app.current_tab, Tab::Weekly);
+        assert_eq!(app.sort_field, SortField::Date);
+        assert_eq!(app.sort_direction, SortDirection::Descending);
+        assert_eq!(app.selected_index, 2);
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(
+            app.get_sorted_periods(PeriodKind::Weekly)[app.selected_index].start_date,
+            selected_period
+        );
+    }
+
+    #[test]
+    fn test_update_data_exits_period_detail_when_period_disappears() {
+        let mut app = make_app();
+        app.current_tab = Tab::Weekly;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-06-01", 1.0, vec![("target", "openai", 1.0)]),
+            daily_usage("2026-06-10", 3.0, vec![("other", "google", 3.0)]),
+        ];
+
+        app.selected_index = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_period_detail_active_for_kind(PeriodKind::Weekly));
+
+        let refreshed = UsageData {
+            daily: vec![daily_usage(
+                "2026-06-10",
+                3.0,
+                vec![("other", "google", 3.0)],
+            )],
+            ..Default::default()
+        };
+        app.update_data(refreshed);
+
+        assert!(
+            !app.is_period_detail_active(),
+            "update_data should drop period detail mode when the selected period is gone"
+        );
+        assert!(app.get_sorted_period_detail_rows().is_empty());
     }
 
     // ── handle_key_event: sort ──────────────────────────────────────
