@@ -141,7 +141,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
 ## 기능
 
 - **인터랙티브 TUI 모드** - Ratatui 기반의 터미널 UI (기본 모드)
-  - 6개 인터랙티브 뷰: 개요, 모델, 일별, 시간별, 통계, 에이전트 (선택적 Minutely 뷰는 `minutelyTabEnabled`로 활성화)
+  - 8개 인터랙티브 뷰: 개요, 모델, 월별, 주별, 일별, 시간별, 통계, 에이전트
   - 키보드 및 마우스 지원
   - 9가지 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
@@ -535,21 +535,6 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 | `nativeTimeoutMs` | number | `300000` | 네이티브 서브프로세스 처리 최대 시간 (5000-3600000ms) |
 | `defaultClients` | string[] | `[]` | `--client/-c` 플래그를 전달하지 않을 때 적용되는 기본 클라이언트 필터. `--client`와 동일한 ID를 받습니다 (예: `["opencode", "claude", "zed"]`). 알 수 없는 ID는 자동으로 무시됩니다. CLI 플래그가 있으면 이 목록은 완전히 무시됩니다 — 병합되지 않습니다. |
 | `light.writeCache` | boolean | `false` | `true`이면 `tokscale --light`가 렌더링 직후 TUI 캐시를 원자적으로 덮어씁니다. CLI 플래그 `--write-cache` / `--no-write-cache`가 실행별로 우선합니다. |
-| `minutelyTabEnabled` | boolean | `false` | TUI에 분 단위 Minutely 탭을 표시하고 데이터 로딩 중에 분 단위 집계를 수행합니다. 대부분의 사용자에게 분 단위 세분화는 틈새/진단 뷰이며, 대규모 데이터셋에서는 분 단위 버케팅에 무시할 수 없는 비용이 들기 때문에 기본적으로 비활성화되어 있습니다. |
-
-#### Minutely 탭 활성화
-
-Minutely 탭은 토큰 사용량을 분 단위로 표시하며, 버스트 패턴 진단, 단일 세션 디버깅, `autoRefreshEnabled`와 함께 거의 실시간 모니터링에 가장 유용합니다. 분 단위 집계는 데이터 로딩 중 모든 파싱된 메시지를 처리하므로 대부분의 사용자에게는 불필요한 RAM과 CPU 비용이 발생합니다. 그래서 기본적으로 숨겨져 있습니다.
-
-활성화하려면 `~/.config/tokscale/settings.json`에서 `minutelyTabEnabled`를 `true`로 설정하세요:
-
-```json
-{
-  "minutelyTabEnabled": true
-}
-```
-
-재시작 후 탭 스트립의 Hourly와 Stats 사이에 Minutely 탭이 나타나며, Tab / BackTab / Left / Right 내비게이션이 이를 순환합니다. 플래그를 다시 `false`로 설정하면 탭이 숨겨지고 집계도 다시 건너뜁니다.
 
 #### 캐시 디렉터리 레이아웃
 

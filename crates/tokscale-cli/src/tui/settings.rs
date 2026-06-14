@@ -82,13 +82,6 @@ pub struct Settings {
     /// the user explicitly wants subscription usage lookups.
     #[serde(default)]
     pub usage_tab_enabled: bool,
-    /// Opt-in toggle for the per-minute breakdown tab. Default is `false`
-    /// to keep the tab strip focused on the daily/hourly views most users
-    /// want and to skip the minute-bucket aggregation cost in DataLoader
-    /// for users who never need it. Set to `true` to surface the Minutely
-    /// tab and enable its aggregation in subsequent loads.
-    #[serde(default)]
-    pub minutely_tab_enabled: bool,
     #[cfg(test)]
     #[serde(skip)]
     pub save_path_override: Option<PathBuf>,
@@ -137,7 +130,6 @@ impl Default for Settings {
             default_clients: Vec::new(),
             light: LightSettings::default(),
             usage_tab_enabled: false,
-            minutely_tab_enabled: false,
             #[cfg(test)]
             save_path_override: None,
         }
@@ -703,14 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_minutely_tab_enabled_defaults_to_false() {
-        let json = r#"{ "colorPalette": "blue" }"#;
-        let parsed: Settings = serde_json::from_str(json).unwrap();
-        assert!(!parsed.minutely_tab_enabled);
-        assert!(!Settings::default().minutely_tab_enabled);
-    }
-
-    #[test]
     fn settings_usage_tab_enabled_defaults_to_false() {
         let json = r#"{ "colorPalette": "blue" }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
@@ -730,22 +714,5 @@ mod tests {
         let serialized = serde_json::to_string(&parsed).unwrap();
         let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(round_trip["usageTabEnabled"], serde_json::Value::Bool(true));
-    }
-
-    #[test]
-    fn settings_minutely_tab_enabled_round_trips_when_set() {
-        let json = r#"{
-            "colorPalette": "blue",
-            "minutelyTabEnabled": true
-        }"#;
-        let parsed: Settings = serde_json::from_str(json).unwrap();
-        assert!(parsed.minutely_tab_enabled);
-
-        let serialized = serde_json::to_string(&parsed).unwrap();
-        let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(
-            round_trip["minutelyTabEnabled"],
-            serde_json::Value::Bool(true)
-        );
     }
 }

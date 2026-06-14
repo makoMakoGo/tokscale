@@ -34,7 +34,7 @@ New `crates/tokscale-core/src/aggregate/` owning every rule that turns
 messages into report/view models. Absorbs and then deletes:
 
 - TUI `aggregate_messages` (crates/tokscale-cli/src/tui/data/mod.rs, ~415-950):
-  model/agent/daily/hourly/minutely maps, `model_session_ids`,
+  model/agent/daily/hourly maps, `model_session_ids`,
   `client_totals_by_model`, the 9 repeated saturating-add blocks.
 - core `aggregator.rs`: `aggregate_by_date`, `aggregate_by_session`,
   summary/years/intensity helpers.
@@ -50,7 +50,6 @@ pub struct AggregationEngine { /* accumulators, config */ }
 pub struct AggregationConfig {
     pub group_by: GroupBy,
     pub date_range: DateRange,        // since/until/year resolved once
-    pub minutely: bool,
     // which views are wanted, so unneeded maps cost nothing
 }
 impl AggregationEngine {

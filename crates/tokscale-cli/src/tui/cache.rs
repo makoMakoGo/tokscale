@@ -532,11 +532,6 @@ impl TryFrom<CachedUsageData> for UsageData {
             agents: normalize_cached_agents(u.agents),
             daily: daily?,
             hourly: hourly?,
-            // Minutely data is recomputed on each load (high cardinality,
-            // not worth round-tripping through the on-disk cache); the
-            // first background or foreground refresh after cache hit will
-            // populate it when the tab is enabled.
-            minutely: Vec::new(),
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,
@@ -624,7 +619,6 @@ pub fn load_cache(
     enabled_clients: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
-    minutely_enabled: bool,
 ) -> CacheResult {
     let Some(cache_path) = cache_file() else {
         return CacheResult::Miss;
@@ -685,10 +679,6 @@ pub fn load_cache(
             return CacheResult::Miss;
         }
     };
-
-    if minutely_enabled && data.minutely.is_empty() {
-        return CacheResult::Stale(data);
-    }
 
     let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_millis() as u64,
@@ -936,12 +926,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -994,8 +979,7 @@ mod tests {
             load_cache(
                 &clients,
                 &GroupBy::WorkspaceModel,
-                &CacheReportScope::default(),
-                false
+                &CacheReportScope::default()
             ),
             CacheResult::Miss
         ));
@@ -1030,17 +1014,12 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
         assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &filtered_scope, false),
+            load_cache(&clients, &GroupBy::Model, &filtered_scope),
             CacheResult::Fresh(_)
         ));
 
@@ -1069,7 +1048,7 @@ mod tests {
         cached.timestamp = u64::MAX;
         fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
-        let result = load_cache(&clients, &GroupBy::Model, &scope, false);
+        let result = load_cache(&clients, &GroupBy::Model, &scope);
         assert!(
             matches!(result, CacheResult::Stale(_)),
             "expected Stale for future cache timestamp, got {}",
@@ -1130,12 +1109,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -1203,12 +1177,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -1329,12 +1298,7 @@ mod tests {
         fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
         let clients = make_filters(&[ClientId::Claude, ClientId::Cursor]);
-        match load_cache(
-            &clients,
-            &GroupBy::Model,
-            &CacheReportScope::default(),
-            false,
-        ) {
+        match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
             CacheResult::Fresh(data) => {
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
                 let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
@@ -1344,45 +1308,6 @@ mod tests {
             }
             other => panic!(
                 "expected fresh current-schema cache, got {:?}",
-                other_variant_name(&other)
-            ),
-        }
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_is_stale_when_minutely_enabled() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let clients = make_filters(&[ClientId::Claude]);
-        save_cached_data(
-            &UsageData::default(),
-            &clients,
-            &GroupBy::Model,
-            &CacheReportScope::default(),
-        )
-        .unwrap();
-
-        match load_cache(
-            &clients,
-            &GroupBy::Model,
-            &CacheReportScope::default(),
-            true,
-        ) {
-            CacheResult::Stale(data) => {
-                assert!(data.minutely.is_empty());
-            }
-            other => panic!(
-                "expected stale cache when minutely is enabled, got {:?}",
                 other_variant_name(&other)
             ),
         }
@@ -1454,12 +1379,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -1527,12 +1447,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -1581,12 +1496,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -1642,12 +1552,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::Model,
-                &CacheReportScope::default(),
-                false
-            ),
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 
@@ -1783,7 +1688,7 @@ mod tests {
         // launch). The bug would have returned `Miss` here because the
         // historical writer used `GroupBy::default()` (= ClientModel)
         // while the reader used `GroupBy::Model`.
-        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope, false);
+        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope);
         assert!(
             matches!(result, CacheResult::Fresh(_)),
             "expected Fresh after writing with TUI_DEFAULT_GROUP_BY, got {}",
@@ -1828,7 +1733,7 @@ mod tests {
         // will start failing — at which point the divergent-write site
         // in `run_warm_tui_cache` is no longer dangerous and the test
         // should be updated accordingly.
-        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope, false);
+        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope);
         assert!(
             matches!(result, CacheResult::Miss),
             "expected Miss when reader uses TUI_DEFAULT_GROUP_BY and writer used GroupBy::default(), got {}",
