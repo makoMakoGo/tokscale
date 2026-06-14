@@ -950,7 +950,7 @@ pub fn build_period_usage(daily: &[DailyUsage], kind: PeriodKind) -> Vec<PeriodU
         entry.cost += day.cost;
         entry.message_count = entry.message_count.saturating_add(day.message_count);
         entry.turn_count = entry.turn_count.saturating_add(day.turn_count);
-        if day.tokens.total() > 0 {
+        if day.message_count > 0 || day.turn_count > 0 || day.tokens.total() > 0 {
             entry.active_days = entry.active_days.saturating_add(1);
         }
         merge_daily_sources(&mut entry.source_breakdown, &day.source_breakdown);
@@ -2812,6 +2812,16 @@ after"#,
             periods[0].source_breakdown["claude"].models["claude-sonnet-4"].messages,
             2
         );
+    }
+
+    #[test]
+    fn test_build_period_usage_counts_zero_token_message_days_as_active() {
+        let periods = build_period_usage(&[period_day("2026-06-02", 0, 0.0)], PeriodKind::Monthly);
+
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].active_days, 1);
+        assert_eq!(periods[0].message_count, 1);
+        assert_eq!(periods[0].tokens.total(), 0);
     }
 
     #[test]
