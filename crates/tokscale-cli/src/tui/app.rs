@@ -1712,15 +1712,22 @@ impl App {
             .flat_map(|(source, source_info)| {
                 source_info
                     .models
-                    .values()
-                    .map(move |model_info| PeriodDetailRow {
-                        source: source.clone(),
-                        provider: model_info.provider.clone(),
-                        model: model_info.display_name.clone(),
-                        color_key: model_info.color_key.clone(),
-                        tokens: model_info.tokens.clone(),
-                        cost: model_info.cost,
-                        messages: model_info.messages,
+                    .iter()
+                    .map(move |(model_key, model_info)| {
+                        let model = if model_info.display_name.is_empty() {
+                            model_key.clone()
+                        } else {
+                            model_info.display_name.clone()
+                        };
+                        PeriodDetailRow {
+                            source: source.clone(),
+                            provider: model_info.provider.clone(),
+                            model,
+                            color_key: model_info.color_key.clone(),
+                            tokens: model_info.tokens.clone(),
+                            cost: model_info.cost,
+                            messages: model_info.messages,
+                        }
                     })
             })
             .collect();
@@ -1795,6 +1802,7 @@ impl App {
     pub fn get_sorted_periods(&self, kind: PeriodKind) -> Vec<PeriodUsage> {
         let mut periods = build_period_usage(&self.data.daily, kind);
 
+        // Metric sorts keep Year sections newest-first; ordering is metric-based within each year.
         match (self.sort_field, self.sort_direction) {
             (SortField::Cost, SortDirection::Descending) => periods.sort_by(|a, b| {
                 b.section_year
@@ -2719,6 +2727,33 @@ mod tests {
         assert_eq!(
             app.selected_period_detail.unwrap().start_date,
             selected_period
+        );
+    }
+
+    #[test]
+    fn test_period_detail_model_name_falls_back_to_model_key() {
+        let mut app = make_app();
+        app.current_tab = Tab::Monthly;
+        app.data.daily = vec![daily_usage(
+            "2026-05-17",
+            7.0,
+            vec![("fallback-model", "openai", 7.0)],
+        )];
+        app.data.daily[0]
+            .source_breakdown
+            .get_mut("claude")
+            .unwrap()
+            .models
+            .get_mut("fallback-model")
+            .unwrap()
+            .display_name
+            .clear();
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.get_sorted_period_detail_rows()[0].model,
+            "fallback-model"
         );
     }
 

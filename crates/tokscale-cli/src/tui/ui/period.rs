@@ -482,6 +482,14 @@ fn period_label(period: &PeriodUsage, is_very_narrow: bool) -> &str {
     }
 }
 
+fn clamped_detail_start(scroll_offset: usize, row_len: usize, visible_rows: usize) -> usize {
+    scroll_offset.min(row_len.saturating_sub(visible_rows.max(1)))
+}
+
+fn clamped_period_start(scroll_offset: usize, period_len: usize) -> usize {
+    scroll_offset.min(period_len.saturating_sub(1))
+}
+
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = app
         .period_detail_label()
@@ -585,12 +593,8 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     .height(1);
 
     let detail_len = rows_data.len();
-    let start = scroll_offset.min(detail_len);
+    let start = clamped_detail_start(scroll_offset, detail_len, visible_height);
     let end = (start + visible_height).min(detail_len);
-
-    if start >= detail_len {
-        return;
-    }
 
     let rows: Vec<Row> = rows_data[start..end]
         .iter()
@@ -794,11 +798,7 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
     .height(1);
 
     let period_len = periods.len();
-    let start = scroll_offset.min(period_len);
-
-    if start >= period_len {
-        return;
-    }
+    let start = clamped_period_start(scroll_offset, period_len);
 
     let separator_style = Style::default()
         .fg(theme_accent)
@@ -988,5 +988,16 @@ mod tests {
         assert!(layout.columns.contains(&PeriodColumn::Turn));
         assert!(layout.columns.contains(&PeriodColumn::Total));
         assert!(layout.columns.contains(&PeriodColumn::Cost));
+    }
+
+    #[test]
+    fn detail_start_clamps_stale_scroll_to_visible_tail() {
+        assert_eq!(clamped_detail_start(100, 8, 3), 5);
+        assert_eq!(clamped_detail_start(100, 8, 0), 7);
+    }
+
+    #[test]
+    fn period_start_clamps_stale_scroll_to_last_period() {
+        assert_eq!(clamped_period_start(100, 8), 7);
     }
 }
