@@ -1993,6 +1993,13 @@ fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     }
 }
 
+fn workspace_model_bucket_key(workspace_group_key: &str, model: &str) -> String {
+    format!(
+        "{}:{workspace_group_key}:{model}",
+        workspace_group_key.len()
+    )
+}
+
 fn aggregate_model_usage_entries(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
@@ -2011,7 +2018,10 @@ fn aggregate_model_usage_entries(
             GroupBy::ClientProviderModel => {
                 (format!("{}:{}:{}", msg.client, provider, normalized), false)
             }
-            GroupBy::WorkspaceModel => (format!("{}:{}", workspace_group_key, normalized), true),
+            GroupBy::WorkspaceModel => (
+                workspace_model_bucket_key(&workspace_group_key, &normalized),
+                true,
+            ),
             GroupBy::Session => (format!("{}:{}", msg.session_id, normalized), false),
             GroupBy::ClientSession => (
                 format!("{}:{}:{}", msg.client, msg.session_id, normalized),
@@ -4253,6 +4263,45 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             entry.workspace_key.is_none()
                 && entry.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
+                && (entry.cost - 2.0).abs() < f64::EPSILON
+        }));
+    }
+
+    #[test]
+    fn test_workspace_model_grouping_avoids_separator_key_collisions() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "c",
+                    "anthropic",
+                    "session-1",
+                    1.0,
+                    Some("a:b"),
+                    Some("workspace-ab"),
+                ),
+                make_workspace_message(
+                    "claude",
+                    "b:c",
+                    "anthropic",
+                    "session-2",
+                    2.0,
+                    Some("a"),
+                    Some("workspace-a"),
+                ),
+            ],
+            &GroupBy::WorkspaceModel,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.workspace_key.as_deref() == Some("a:b")
+                && entry.model == "c"
+                && (entry.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.workspace_key.as_deref() == Some("a")
+                && entry.model == "b:c"
                 && (entry.cost - 2.0).abs() < f64::EPSILON
         }));
     }

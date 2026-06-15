@@ -224,6 +224,7 @@ fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Ve
                         } else {
                             model_info.display_name.clone()
                         },
+                        // Merged detail buckets share a model-derived color key.
                         color_key: model_info.color_key.clone(),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,

@@ -222,6 +222,13 @@ fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
     format!("{workspace_label} / {model}")
 }
 
+fn workspace_model_bucket_key(workspace_group_key: &str, model: &str) -> String {
+    format!(
+        "{}:{workspace_group_key}:{model}",
+        workspace_group_key.len()
+    )
+}
+
 fn grouped_model_display_label(
     group_by: &GroupBy,
     workspace_label: Option<&str>,
@@ -251,7 +258,7 @@ fn grouped_model_bucket_key(
         GroupBy::Model => (model.to_string(), true),
         GroupBy::ClientModel => (format!("{client}:{model}"), false),
         GroupBy::ClientProviderModel => (format!("{client}:{provider_id}:{model}"), false),
-        GroupBy::WorkspaceModel => (format!("{workspace_group_key}:{model}"), true),
+        GroupBy::WorkspaceModel => (workspace_model_bucket_key(workspace_group_key, model), true),
         GroupBy::Session => (format!("{session_id}:{model}"), false),
         GroupBy::ClientSession => (format!("{client}:{session_id}:{model}"), false),
     }
@@ -2302,6 +2309,51 @@ mod tests {
                 "demo / claude-sonnet-4.5".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_avoids_separator_key_collisions() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "c",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("a:b"),
+                        Some("workspace-ab"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "b:c",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("a"),
+                        Some("workspace-a"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("a:b")
+                && model.model == "c"
+                && (model.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("a")
+                && model.model == "b:c"
+                && (model.cost - 2.0).abs() < f64::EPSILON
+        }));
+
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
     }
 
     #[test]
