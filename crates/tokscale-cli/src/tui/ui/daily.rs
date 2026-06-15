@@ -754,17 +754,17 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let model_content_width = rows_data
         .iter()
-        .map(|row| display_width(row.model))
+        .map(|row| display_width(&row.model))
         .max()
         .unwrap_or(MODEL_MIN_WIDTH);
     let provider_content_width = rows_data
         .iter()
-        .map(|row| display_width(&get_provider_display_name(row.provider)))
+        .map(|row| display_width(&get_provider_display_name(&row.provider)))
         .max()
         .unwrap_or(DETAIL_PROVIDER_WIDTH);
     let source_content_width = rows_data
         .iter()
-        .map(|row| display_width(&get_client_display_name(row.source)))
+        .map(|row| display_width(&get_client_display_name(&row.source)))
         .max()
         .unwrap_or(DETAIL_SOURCE_WIDTH);
     let table_layout = daily_detail_table_layout(
@@ -810,12 +810,12 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             let idx = i + start;
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
-            let model_color = app.model_color_for(row.provider, row.color_key);
+            let model_color = app.model_color_for(&row.provider, &row.color_key);
 
             let cell_for_column = |column: DailyDetailColumn| -> Cell {
                 match column {
                     DailyDetailColumn::Model => Cell::from(truncate_model_display_name_to(
-                        row.model,
+                        &row.model,
                         table_layout.model_width,
                     ))
                     .style(
@@ -824,9 +824,9 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     DailyDetailColumn::Provider => {
-                        Cell::from(get_provider_display_name(row.provider))
+                        Cell::from(get_provider_display_name(&row.provider))
                     }
-                    DailyDetailColumn::Source => Cell::from(get_client_display_name(row.source))
+                    DailyDetailColumn::Source => Cell::from(get_client_display_name(&row.source))
                         .style(Style::default().fg(theme_muted)),
                     DailyDetailColumn::Messages => Cell::from(row.messages.to_string()),
                     DailyDetailColumn::Input => {

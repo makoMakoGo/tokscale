@@ -222,51 +222,74 @@ fn workspace_model_display_label(workspace_label: &str, model: &str) -> String {
     format!("{workspace_label} / {model}")
 }
 
-fn grouped_model_display_label(
-    group_by: &GroupBy,
-    workspace_label: Option<&str>,
-    model: &str,
-) -> String {
-    match group_by {
-        GroupBy::WorkspaceModel => workspace_label
-            .map(|label| workspace_model_display_label(label, model))
-            .unwrap_or_else(|| model.to_string()),
-        GroupBy::Model
-        | GroupBy::ClientModel
-        | GroupBy::ClientProviderModel
-        | GroupBy::Session
-        | GroupBy::ClientSession => model.to_string(),
-    }
-}
-
-fn workspace_model_daily_key(workspace_group_key: &str, model: &str) -> String {
+fn workspace_model_bucket_key(workspace_group_key: &str, model: &str) -> String {
     format!(
         "{}:{workspace_group_key}:{model}",
         workspace_group_key.len()
     )
 }
 
-fn daily_source_model_key(
+fn grouped_model_display_label(
     group_by: &GroupBy,
-    workspace_group_key: &str,
-    provider_id: &str,
+    workspace_label: Option<&str>,
+    session_id: Option<&str>,
     model: &str,
 ) -> String {
     match group_by {
-        GroupBy::WorkspaceModel => workspace_model_daily_key(workspace_group_key, model),
-        GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
-            model.to_string()
-        }
+        GroupBy::WorkspaceModel => workspace_label
+            .map(|label| workspace_model_display_label(label, model))
+            .unwrap_or_else(|| model.to_string()),
+        GroupBy::Session | GroupBy::ClientSession => session_id
+            .map(|session_id| format!("{session_id} / {model}"))
+            .unwrap_or_else(|| model.to_string()),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::ClientProviderModel => model.to_string(),
     }
+}
+
+fn grouped_model_bucket_key(
+    group_by: &GroupBy,
+    client: &str,
+    provider_id: &str,
+    workspace_group_key: &str,
+    session_id: &str,
+    model: &str,
+) -> (String, bool) {
+    match group_by {
+        GroupBy::Model => (model.to_string(), true),
+        GroupBy::ClientModel => (format!("{client}:{model}"), false),
+        GroupBy::ClientProviderModel => (format!("{client}:{provider_id}:{model}"), false),
+        GroupBy::WorkspaceModel => (workspace_model_bucket_key(workspace_group_key, model), true),
+        GroupBy::Session => (format!("{session_id}:{model}"), false),
+        GroupBy::ClientSession => (format!("{client}:{session_id}:{model}"), false),
+    }
+}
+
+fn daily_source_model_key(
+    group_by: &GroupBy,
+    client: &str,
+    workspace_group_key: &str,
+    provider_id: &str,
+    session_id: &str,
+    model: &str,
+) -> String {
+    let (key, _) = grouped_model_bucket_key(
+        group_by,
+        client,
+        provider_id,
+        workspace_group_key,
+        session_id,
+        model,
+    );
+    key
 }
 
 fn daily_source_model_display_name(
     group_by: &GroupBy,
     workspace_label: &str,
+    session_id: &str,
     model: &str,
 ) -> String {
-    grouped_model_display_label(group_by, Some(workspace_label), model)
+    grouped_model_display_label(group_by, Some(workspace_label), Some(session_id), model)
 }
 
 fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
@@ -292,7 +315,7 @@ fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> Strin
 }
 
 fn hourly_model_display_name(group_by: &GroupBy, model: &str) -> String {
-    grouped_model_display_label(group_by, None, model)
+    grouped_model_display_label(group_by, None, None, model)
 }
 
 impl DataLoader {
@@ -446,23 +469,14 @@ impl DataLoader {
             let normalized_model = normalize_model_for_grouping(&msg.model_id);
             let provider = normalize_provider_for_grouping(&msg.provider_id);
             let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
-            let (key, merge_clients) = match group_by {
-                GroupBy::Model => (normalized_model.clone(), true),
-                GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized_model), false),
-                GroupBy::ClientProviderModel => (
-                    format!("{}:{}:{}", msg.client, provider, normalized_model),
-                    false,
-                ),
-                GroupBy::WorkspaceModel => (
-                    format!("{}:{}", workspace_group_key, normalized_model),
-                    true,
-                ),
-                GroupBy::Session => (format!("{}:{}", msg.session_id, normalized_model), false),
-                GroupBy::ClientSession => (
-                    format!("{}:{}:{}", msg.client, msg.session_id, normalized_model),
-                    false,
-                ),
-            };
+            let (key, merge_clients) = grouped_model_bucket_key(
+                group_by,
+                &msg.client,
+                &provider,
+                &workspace_group_key,
+                &msg.session_id,
+                &normalized_model,
+            );
 
             let model_entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
                 model: normalized_model.clone(),
@@ -672,8 +686,10 @@ impl DataLoader {
 
                 let daily_model_key = daily_source_model_key(
                     group_by,
+                    &msg.client,
                     &workspace_group_key,
                     &provider,
+                    &msg.session_id,
                     &normalized_model,
                 );
 
@@ -685,6 +701,7 @@ impl DataLoader {
                         display_name: daily_source_model_display_name(
                             group_by,
                             &workspace_label,
+                            &msg.session_id,
                             &normalized_model,
                         ),
                         color_key: model_color_key(group_by, &provider, &normalized_model),
@@ -1503,7 +1520,7 @@ mod tests {
 
         let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
         assert_eq!(daily_models.len(), 1);
-        let daily_model = daily_models.get("xiaomi:mimo-v2.5-pro").unwrap();
+        let daily_model = daily_models.get("opencode:xiaomi:mimo-v2.5-pro").unwrap();
         assert_eq!(daily_model.provider, "xiaomi");
         assert_eq!(daily_model.display_name, "mimo-v2.5-pro");
     }
@@ -1532,7 +1549,7 @@ mod tests {
 
         let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
         assert_eq!(daily_models.len(), 1);
-        let daily_model = daily_models.get("openai:gpt-5.5").unwrap();
+        let daily_model = daily_models.get("opencode:openai:gpt-5.5").unwrap();
         assert_eq!(daily_model.provider, "openai");
         assert_eq!(daily_model.display_name, "gpt-5.5");
     }
@@ -1570,11 +1587,56 @@ mod tests {
 
         let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
         assert_eq!(daily_models.len(), 2);
-        assert!(daily_models.contains_key("openai:gpt-5.5"));
-        assert!(daily_models.contains_key("azure:gpt-5.5"));
+        assert!(daily_models.contains_key("opencode:openai:gpt-5.5"));
+        assert!(daily_models.contains_key("opencode:azure:gpt-5.5"));
         assert!(daily_models
             .values()
             .all(|model| model.display_name == "gpt-5.5"));
+    }
+
+    #[test]
+    fn test_session_grouping_splits_daily_models_by_session() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "opencode",
+                        "openai/gpt-5.5",
+                        "openai",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "opencode",
+                        "openai/gpt-5.5",
+                        "openai",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::Session,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+
+        let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
+        assert_eq!(daily_models.len(), 2);
+        assert!(daily_models.contains_key("session-1:gpt-5.5"));
+        assert!(daily_models.contains_key("session-2:gpt-5.5"));
+        assert_eq!(
+            daily_models["session-1:gpt-5.5"].display_name,
+            "session-1 / gpt-5.5"
+        );
+        assert_eq!(
+            daily_models["session-2:gpt-5.5"].display_name,
+            "session-2 / gpt-5.5"
+        );
     }
 
     #[test]
@@ -2250,6 +2312,51 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_messages_workspace_grouping_avoids_separator_key_collisions() {
+        let loader = DataLoader::new(None);
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "c",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("a:b"),
+                        Some("workspace-ab"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "b:c",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("a"),
+                        Some("workspace-a"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("a:b")
+                && model.model == "c"
+                && (model.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("a")
+                && model.model == "b:c"
+                && (model.cost - 2.0).abs() < f64::EPSILON
+        }));
+
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
+    }
+
+    #[test]
     fn test_aggregate_messages_client_provider_model_splits_providers_in_daily_breakdown() {
         let loader = DataLoader::new(None);
         let usage = loader
@@ -2294,8 +2401,8 @@ mod tests {
         let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
         assert_eq!(claude.models.len(), 2);
 
-        let anthropic_key = "anthropic:claude-sonnet-4.5";
-        let copilot_key = "github-copilot:claude-sonnet-4.5";
+        let anthropic_key = "claude:anthropic:claude-sonnet-4.5";
+        let copilot_key = "claude:github-copilot:claude-sonnet-4.5";
         let anthropic_model = claude.models.get(anthropic_key).unwrap();
         assert_eq!(anthropic_model.display_name, "claude-sonnet-4.5");
         assert_eq!(anthropic_model.provider, "anthropic");
