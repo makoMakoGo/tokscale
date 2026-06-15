@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -7,13 +7,13 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use tokscale_core::ClientId;
+use tokscale_core::{ordered_clients_by_token_contribution, ClientContributionOrder, ClientId};
 
 use ratatui::style::Color;
 
 use super::data::{
-    build_period_usage, AgentUsage, DailyUsage, DataLoader, HourlyUsage, ModelUsage, PeriodKind,
-    PeriodUsage, TokenBreakdown, UsageData,
+    build_period_usage, AgentUsage, DailySourceInfo, DailyUsage, DataLoader, HourlyUsage,
+    ModelUsage, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
 };
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
@@ -149,26 +149,8 @@ pub struct ClickArea {
     pub action: ClickAction,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct DailyDetailRow<'a> {
-    pub source: &'a str,
-    pub provider: &'a str,
-    pub model: &'a str,
-    pub color_key: &'a str,
-    pub tokens: &'a TokenBreakdown,
-    pub cost: f64,
-    pub messages: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PeriodDetailSelection {
-    pub kind: PeriodKind,
-    pub start_date: NaiveDate,
-    pub end_date: NaiveDate,
-}
-
 #[derive(Debug, Clone)]
-pub struct PeriodDetailRow {
+pub struct DetailRow {
     pub source: String,
     pub provider: String,
     pub model: String,
@@ -178,11 +160,137 @@ pub struct PeriodDetailRow {
     pub messages: u64,
 }
 
+pub type DailyDetailRow = DetailRow;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeriodDetailSelection {
+    pub kind: PeriodKind,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+}
+
+pub type PeriodDetailRow = DetailRow;
+
 #[derive(Debug, Clone)]
 pub enum ClickAction {
     Tab(Tab),
     Sort(SortField),
     GraphCell { week: usize, day: usize },
+}
+
+struct DetailRowAccumulator {
+    source_totals: HashMap<String, ClientContributionOrder>,
+    provider: String,
+    model: String,
+    color_key: String,
+    tokens: TokenBreakdown,
+    cost: f64,
+    messages: u64,
+}
+
+fn add_detail_tokens(target: &mut TokenBreakdown, source: &TokenBreakdown) {
+    target.input = target.input.saturating_add(source.input);
+    target.output = target.output.saturating_add(source.output);
+    target.cache_read = target.cache_read.saturating_add(source.cache_read);
+    target.cache_write = target.cache_write.saturating_add(source.cache_write);
+    target.reasoning = target.reasoning.saturating_add(source.reasoning);
+}
+
+fn merge_provider_label(target: &mut String, provider: &str) {
+    if provider.is_empty() || target.split(", ").any(|existing| existing == provider) {
+        return;
+    }
+    if target.is_empty() {
+        target.push_str(provider);
+    } else {
+        target.push_str(", ");
+        target.push_str(provider);
+    }
+}
+
+fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Vec<DetailRow> {
+    let mut rows_by_key: BTreeMap<String, DetailRowAccumulator> = BTreeMap::new();
+
+    for (source, source_info) in source_breakdown {
+        for (model_key, model_info) in &source_info.models {
+            let row =
+                rows_by_key
+                    .entry(model_key.clone())
+                    .or_insert_with(|| DetailRowAccumulator {
+                        source_totals: HashMap::new(),
+                        provider: String::new(),
+                        model: if model_info.display_name.is_empty() {
+                            model_key.clone()
+                        } else {
+                            model_info.display_name.clone()
+                        },
+                        color_key: model_info.color_key.clone(),
+                        tokens: TokenBreakdown::default(),
+                        cost: 0.0,
+                        messages: 0,
+                    });
+
+            let source_count = row.source_totals.len();
+            let source_total = row.source_totals.entry(source.clone()).or_insert_with(|| {
+                ClientContributionOrder {
+                    first_seen: source_count,
+                    total_tokens: 0,
+                }
+            });
+            source_total.total_tokens = source_total
+                .total_tokens
+                .saturating_add(model_info.tokens.total());
+
+            merge_provider_label(&mut row.provider, &model_info.provider);
+            add_detail_tokens(&mut row.tokens, &model_info.tokens);
+            row.cost += model_info.cost;
+            row.messages = row.messages.saturating_add(model_info.messages);
+        }
+    }
+
+    rows_by_key
+        .into_values()
+        .map(|row| DetailRow {
+            source: ordered_clients_by_token_contribution(&row.source_totals),
+            provider: row.provider,
+            model: row.model,
+            color_key: row.color_key,
+            tokens: row.tokens,
+            cost: row.cost,
+            messages: row.messages,
+        })
+        .collect()
+}
+
+fn sort_detail_rows(rows: &mut [DetailRow], field: SortField, direction: SortDirection) {
+    let tie_breaker = |a: &DetailRow, b: &DetailRow| {
+        a.source
+            .cmp(&b.source)
+            .then_with(|| a.model.cmp(&b.model))
+            .then_with(|| a.provider.cmp(&b.provider))
+    };
+
+    match (field, direction) {
+        (SortField::Cost, SortDirection::Descending) => {
+            rows.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
+        }
+        (SortField::Cost, SortDirection::Ascending) => {
+            rows.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
+        }
+        (SortField::Tokens, SortDirection::Descending) => rows.sort_by(|a, b| {
+            b.tokens
+                .total()
+                .cmp(&a.tokens.total())
+                .then_with(|| tie_breaker(a, b))
+        }),
+        (SortField::Tokens, SortDirection::Ascending) => rows.sort_by(|a, b| {
+            a.tokens
+                .total()
+                .cmp(&b.tokens.total())
+                .then_with(|| tie_breaker(a, b))
+        }),
+        (SortField::Date, _) => rows.sort_by(tie_breaker),
+    }
 }
 
 pub struct App {
@@ -1634,7 +1742,7 @@ impl App {
             .map(|period| format!("{} {}", period.section_label, period.label))
     }
 
-    pub fn get_sorted_daily_detail_rows(&self) -> Vec<DailyDetailRow<'_>> {
+    pub fn get_sorted_daily_detail_rows(&self) -> Vec<DailyDetailRow> {
         let Some(date) = self.selected_daily_detail_date else {
             return Vec::new();
         };
@@ -1642,54 +1750,8 @@ impl App {
             return Vec::new();
         };
 
-        let mut rows: Vec<DailyDetailRow<'_>> = day
-            .source_breakdown
-            .iter()
-            .flat_map(|(source, source_info)| {
-                source_info
-                    .models
-                    .values()
-                    .map(move |model_info| DailyDetailRow {
-                        source,
-                        provider: &model_info.provider,
-                        model: &model_info.display_name,
-                        color_key: &model_info.color_key,
-                        tokens: &model_info.tokens,
-                        cost: model_info.cost,
-                        messages: model_info.messages,
-                    })
-            })
-            .collect();
-
-        let tie_breaker = |a: &DailyDetailRow<'_>, b: &DailyDetailRow<'_>| {
-            a.source
-                .cmp(b.source)
-                .then_with(|| a.model.cmp(b.model))
-                .then_with(|| a.provider.cmp(b.provider))
-        };
-
-        match (self.sort_field, self.sort_direction) {
-            (SortField::Cost, SortDirection::Descending) => {
-                rows.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
-            }
-            (SortField::Cost, SortDirection::Ascending) => {
-                rows.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
-            }
-            (SortField::Tokens, SortDirection::Descending) => rows.sort_by(|a, b| {
-                b.tokens
-                    .total()
-                    .cmp(&a.tokens.total())
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Tokens, SortDirection::Ascending) => rows.sort_by(|a, b| {
-                a.tokens
-                    .total()
-                    .cmp(&b.tokens.total())
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Date, _) => rows.sort_by(tie_breaker),
-        }
-
+        let mut rows = build_detail_rows(&day.source_breakdown);
+        sort_detail_rows(&mut rows, self.sort_field, self.sort_direction);
         rows
     }
 
@@ -1706,61 +1768,8 @@ impl App {
             return Vec::new();
         };
 
-        let mut rows: Vec<PeriodDetailRow> = period
-            .source_breakdown
-            .iter()
-            .flat_map(|(source, source_info)| {
-                source_info
-                    .models
-                    .iter()
-                    .map(move |(model_key, model_info)| {
-                        let model = if model_info.display_name.is_empty() {
-                            model_key.clone()
-                        } else {
-                            model_info.display_name.clone()
-                        };
-                        PeriodDetailRow {
-                            source: source.clone(),
-                            provider: model_info.provider.clone(),
-                            model,
-                            color_key: model_info.color_key.clone(),
-                            tokens: model_info.tokens.clone(),
-                            cost: model_info.cost,
-                            messages: model_info.messages,
-                        }
-                    })
-            })
-            .collect();
-
-        let tie_breaker = |a: &PeriodDetailRow, b: &PeriodDetailRow| {
-            a.source
-                .cmp(&b.source)
-                .then_with(|| a.model.cmp(&b.model))
-                .then_with(|| a.provider.cmp(&b.provider))
-        };
-
-        match (self.sort_field, self.sort_direction) {
-            (SortField::Cost, SortDirection::Descending) => {
-                rows.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
-            }
-            (SortField::Cost, SortDirection::Ascending) => {
-                rows.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
-            }
-            (SortField::Tokens, SortDirection::Descending) => rows.sort_by(|a, b| {
-                b.tokens
-                    .total()
-                    .cmp(&a.tokens.total())
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Tokens, SortDirection::Ascending) => rows.sort_by(|a, b| {
-                a.tokens
-                    .total()
-                    .cmp(&b.tokens.total())
-                    .then_with(|| tie_breaker(a, b))
-            }),
-            (SortField::Date, _) => rows.sort_by(tie_breaker),
-        }
-
+        let mut rows = build_detail_rows(&period.source_breakdown);
+        sort_detail_rows(&mut rows, self.sort_field, self.sort_direction);
         rows
     }
 
@@ -2211,45 +2220,63 @@ mod tests {
     }
 
     fn daily_usage(date: &str, cost: f64, models: Vec<(&str, &str, f64)>) -> DailyUsage {
-        let mut model_breakdown = BTreeMap::new();
+        daily_usage_by_source(date, cost, vec![("claude", models)])
+    }
+
+    fn daily_usage_by_source(
+        date: &str,
+        cost: f64,
+        sources: Vec<(&str, Vec<(&str, &str, f64)>)>,
+    ) -> DailyUsage {
+        let mut source_breakdown = BTreeMap::new();
         let mut total_tokens = TokenBreakdown::default();
         let mut total_cost = 0.0;
 
-        for (model, provider, model_cost) in models {
-            let tokens = TokenBreakdown {
-                input: (model_cost * 100.0) as u64,
-                output: 10,
-                cache_read: 5,
-                cache_write: 0,
-                reasoning: 0,
-            };
-            total_tokens.input = total_tokens.input.saturating_add(tokens.input);
-            total_tokens.output = total_tokens.output.saturating_add(tokens.output);
-            total_tokens.cache_read = total_tokens.cache_read.saturating_add(tokens.cache_read);
-            total_cost += model_cost;
+        for (source, models) in sources {
+            let mut model_breakdown = BTreeMap::new();
+            let mut source_tokens = TokenBreakdown::default();
+            let mut source_cost = 0.0;
 
-            model_breakdown.insert(
-                model.to_string(),
-                DailyModelInfo {
-                    provider: provider.to_string(),
-                    display_name: model.to_string(),
-                    color_key: model.to_string(),
-                    tokens,
-                    cost: model_cost,
-                    messages: 1,
+            for (model, provider, model_cost) in models {
+                let tokens = TokenBreakdown {
+                    input: (model_cost * 100.0) as u64,
+                    output: 10,
+                    cache_read: 5,
+                    cache_write: 0,
+                    reasoning: 0,
+                };
+                source_tokens.input = source_tokens.input.saturating_add(tokens.input);
+                source_tokens.output = source_tokens.output.saturating_add(tokens.output);
+                source_tokens.cache_read =
+                    source_tokens.cache_read.saturating_add(tokens.cache_read);
+                total_tokens.input = total_tokens.input.saturating_add(tokens.input);
+                total_tokens.output = total_tokens.output.saturating_add(tokens.output);
+                total_tokens.cache_read = total_tokens.cache_read.saturating_add(tokens.cache_read);
+                source_cost += model_cost;
+                total_cost += model_cost;
+
+                model_breakdown.insert(
+                    model.to_string(),
+                    DailyModelInfo {
+                        provider: provider.to_string(),
+                        display_name: model.to_string(),
+                        color_key: model.to_string(),
+                        tokens,
+                        cost: model_cost,
+                        messages: 1,
+                    },
+                );
+            }
+
+            source_breakdown.insert(
+                source.to_string(),
+                DailySourceInfo {
+                    tokens: source_tokens,
+                    cost: source_cost,
+                    models: model_breakdown,
                 },
             );
         }
-
-        let mut source_breakdown = BTreeMap::new();
-        source_breakdown.insert(
-            "claude".to_string(),
-            DailySourceInfo {
-                tokens: total_tokens.clone(),
-                cost: total_cost,
-                models: model_breakdown,
-            },
-        );
 
         DailyUsage {
             date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
@@ -2699,6 +2726,53 @@ mod tests {
     }
 
     #[test]
+    fn test_daily_detail_updates_rows_after_group_by_reload() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
+        app.data.daily = vec![daily_usage_by_source(
+            "2026-05-17",
+            0.0,
+            vec![
+                ("claude", vec![("claude:gpt-5", "openai", 5.0)]),
+                ("codex", vec![("codex:gpt-5", "openai", 2.0)]),
+            ],
+        )];
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+        assert_eq!(app.get_sorted_daily_detail_rows().len(), 2);
+
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::Model;
+        app.update_data(UsageData {
+            daily: vec![daily_usage_by_source(
+                "2026-05-17",
+                0.0,
+                vec![
+                    ("claude", vec![("gpt-5", "openai", 5.0)]),
+                    ("codex", vec![("gpt-5", "openai", 2.0)]),
+                ],
+            )],
+            ..Default::default()
+        });
+
+        let rows = app.get_sorted_daily_detail_rows();
+        assert!(app.is_daily_detail_active());
+        assert_eq!(
+            app.daily_detail_date(),
+            Some(NaiveDate::from_ymd_opt(2026, 5, 17).unwrap())
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "claude, codex");
+        assert_eq!(rows[0].model, "gpt-5");
+        assert_eq!(rows[0].tokens.total(), 730);
+        assert_eq!(rows[0].messages, 2);
+        assert!((rows[0].cost - 7.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn test_enter_on_monthly_opens_selected_period_detail_rows() {
         let mut app = make_app();
         app.current_tab = Tab::Monthly;
@@ -2825,6 +2899,38 @@ mod tests {
             "update_data should drop period detail mode when the selected period is gone"
         );
         assert!(app.get_sorted_period_detail_rows().is_empty());
+    }
+
+    #[test]
+    fn test_period_detail_uses_grouped_detail_rows() {
+        let mut app = make_app();
+        app.current_tab = Tab::Monthly;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::Model;
+        app.data.daily = vec![
+            daily_usage_by_source(
+                "2026-05-17",
+                0.0,
+                vec![
+                    ("claude", vec![("gpt-5", "openai", 5.0)]),
+                    ("codex", vec![("gpt-5", "openai", 2.0)]),
+                ],
+            ),
+            daily_usage("2026-06-01", 1.0, vec![("june-model", "google", 1.0)]),
+        ];
+
+        app.selected_index = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+
+        let rows = app.get_sorted_period_detail_rows();
+        assert!(app.is_period_detail_active_for_kind(PeriodKind::Monthly));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "claude, codex");
+        assert_eq!(rows[0].model, "gpt-5");
+        assert_eq!(rows[0].tokens.total(), 730);
+        assert_eq!(rows[0].messages, 2);
+        assert!((rows[0].cost - 7.0).abs() < f64::EPSILON);
     }
 
     // ── handle_key_event: sort ──────────────────────────────────────
