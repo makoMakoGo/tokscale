@@ -1,5 +1,6 @@
 #![deny(clippy::all)]
 
+mod adapters;
 mod aggregator;
 mod cc_mirror;
 mod client_catalog;
@@ -1214,12 +1215,18 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         parse_full_log_source(path, pricing, is_headless)
     }
 
-    let scan_result = scanner::scan_all_clients_with_scanner_settings(
-        home_dir,
-        clients,
-        use_env_roots,
-        scanner_settings,
-    );
+    let selected_adapters = adapters::selected_adapters(clients);
+    let legacy_clients = adapters::legacy_clients(clients);
+    let scan_result = if legacy_clients.is_empty() {
+        scanner::ScanResult::default()
+    } else {
+        scanner::scan_all_clients_with_scanner_settings(
+            home_dir,
+            &legacy_clients,
+            use_env_roots,
+            scanner_settings,
+        )
+    };
     let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
     let mut source_cache = message_cache::SourceMessageCache::load();
     source_cache.prune_missing_files();
@@ -1510,72 +1517,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let pi_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Pi)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::pi::parse_pi_file(path)
-            })
-        })
-        .collect();
-    for outcome in pi_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let omp_paths = scan_result.get(ClientId::Omp);
-    let mut omp_outcomes: Vec<CachedParseOutcome> = Vec::new();
-    let mut omp_miss_paths: Vec<PathBuf> = Vec::new();
-    for path in omp_paths {
-        let Some(fingerprint) = message_cache::SourceFingerprint::from_path(path) else {
-            omp_miss_paths.push(path.clone());
-            continue;
-        };
-
-        let is_hit = source_cache
-            .get(path)
-            .is_some_and(|cached| cached.fingerprint == fingerprint && !cached.messages.is_empty());
-        if is_hit {
-            omp_outcomes.push(CachedParseOutcome {
-                messages: ParsedSource::CacheHit(path.clone()),
-                cache_entry: None,
-                invalidate_cache: false,
-            });
-            continue;
-        }
-
-        omp_miss_paths.push(path.clone());
-    }
-
-    let omp_parent_task_agent_index =
-        sessions::pi::build_omp_parent_task_agent_index(&omp_miss_paths);
-    let omp_miss_outcomes: Vec<CachedParseOutcome> = omp_miss_paths
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::pi::parse_omp_file_with_parent_task_agent_index(
-                    path,
-                    &omp_parent_task_agent_index,
-                )
-            })
-        })
-        .collect();
-    omp_outcomes.extend(omp_miss_outcomes);
-
-    for outcome in omp_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
     // gjc (gajae-code) JSONL sessions. Binding note N1: this cached cluster
     // MUST obtain messages via the non-repricing parser and apply the A1
     // Hermes guard explicitly (reprice only when the embedded usage.cost.total
@@ -1748,18 +1689,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         all_messages.extend(goose_messages);
     }
 
-    for db_path in scan_result.zed_db_paths() {
-        let outcome = load_or_parse_sqlite_source(&db_path, &source_cache, pricing, |path| {
-            sessions::zed::parse_zed_sqlite(path)
-        });
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
     let kiro_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Kiro)
         .par_iter()
@@ -1826,6 +1755,19 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let deduped_trae_messages = dedupe_latest_trae_messages(trae_messages);
     all_messages.extend(deduped_trae_messages);
 
+    let scan_ctx = adapters::AdapterScanContext {
+        home_dir,
+        use_env_roots,
+        scanner_settings,
+    };
+    adapters::run_local_source_adapters(
+        &selected_adapters,
+        &scan_ctx,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+    );
+
     if !include_all {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
         all_messages.retain(|msg| {
@@ -1851,12 +1793,18 @@ pub fn compute_source_digest(
 ) -> u64 {
     use std::hash::{Hash, Hasher};
 
-    let scan_result = scanner::scan_all_clients_with_scanner_settings(
-        home_dir,
-        clients,
-        use_env_roots,
-        scanner_settings,
-    );
+    let selected_adapters = adapters::selected_adapters(clients);
+    let legacy_clients = adapters::legacy_clients(clients);
+    let scan_result = if legacy_clients.is_empty() {
+        scanner::ScanResult::default()
+    } else {
+        scanner::scan_all_clients_with_scanner_settings(
+            home_dir,
+            &legacy_clients,
+            use_env_roots,
+            scanner_settings,
+        )
+    };
 
     let mut paths: Vec<PathBuf> = Vec::new();
     for files in &scan_result.files {
@@ -1866,7 +1814,6 @@ pub fn compute_source_digest(
     paths.extend(scan_result.kilo_db.iter().cloned());
     paths.extend(scan_result.hermes_db_paths());
     paths.extend(scan_result.goose_db.iter().cloned());
-    paths.extend(scan_result.zed_db_paths());
     paths.extend(scan_result.kiro_db.iter().cloned());
     paths.extend(
         scan_result
@@ -1874,6 +1821,16 @@ pub fn compute_source_digest(
             .iter()
             .map(|source| source.db_path.clone()),
     );
+    let scan_ctx = adapters::AdapterScanContext {
+        home_dir,
+        use_env_roots,
+        scanner_settings,
+    };
+    for adapter in selected_adapters {
+        for unit in adapter.discover(&scan_ctx) {
+            paths.extend(unit.digest_paths());
+        }
+    }
 
     // SQLite writes may only touch the WAL sidecar between checkpoints.
     let wal_paths: Vec<PathBuf> = paths
@@ -2421,12 +2378,18 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     });
     let include_all = clients.is_empty();
 
-    let scan_result = scanner::scan_all_clients_with_scanner_settings(
-        &home_dir,
-        &clients,
-        options.use_env_roots,
-        &options.scanner_settings,
-    );
+    let selected_adapters = adapters::selected_adapters(&clients);
+    let legacy_clients = adapters::legacy_clients(&clients);
+    let scan_result = if legacy_clients.is_empty() {
+        scanner::ScanResult::default()
+    } else {
+        scanner::scan_all_clients_with_scanner_settings(
+            &home_dir,
+            &legacy_clients,
+            options.use_env_roots,
+            &options.scanner_settings,
+        )
+    };
     let headless_roots =
         scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
 
@@ -2616,38 +2579,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::OpenClaw, openclaw_count);
     messages.extend(openclaw_msgs);
 
-    let pi_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Pi)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::pi::parse_pi_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let pi_count = pi_msgs.len() as i32;
-    counts.set(ClientId::Pi, pi_count);
-    messages.extend(pi_msgs);
-
-    let omp_paths = scan_result.get(ClientId::Omp);
-    let omp_parent_task_agent_index = sessions::pi::build_omp_parent_task_agent_index(omp_paths);
-    let omp_msgs: Vec<ParsedMessage> = omp_paths
-        .par_iter()
-        .flat_map(|path| {
-            sessions::pi::parse_omp_file_with_parent_task_agent_index(
-                path,
-                &omp_parent_task_agent_index,
-            )
-            .into_iter()
-            .map(|msg| unified_to_parsed(&msg))
-            .collect::<Vec<_>>()
-        })
-        .collect();
-    let omp_count = omp_msgs.len() as i32;
-    counts.set(ClientId::Omp, omp_count);
-    messages.extend(omp_msgs);
-
     // gjc (gajae-code) JSONL sessions. This non-cached path produces
     // ParsedMessage (no cost field) and has no pricing service in scope, so
     // the A1 cost guard is a no-op here — cost correctness is enforced on the
@@ -2793,18 +2724,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         messages.extend(goose_msgs);
     }
 
-    let zed_db_paths = scan_result.zed_db_paths();
-    if !zed_db_paths.is_empty() {
-        let zed_msgs: Vec<ParsedMessage> = zed_db_paths
-            .iter()
-            .flat_map(|db_path| sessions::zed::parse_zed_sqlite(db_path))
-            .map(|msg| unified_to_parsed(&msg))
-            .collect();
-        let count = summed_parsed_message_count(&zed_msgs);
-        counts.set(ClientId::Zed, count);
-        messages.extend(zed_msgs);
-    }
-
     let kiro_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Kiro)
         .par_iter()
@@ -2904,6 +2823,33 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let grok_count = summed_parsed_message_count(&grok_msgs);
     counts.set(ClientId::Grok, grok_count);
     messages.extend(grok_msgs);
+
+    let mut adapter_messages = Vec::new();
+    let mut adapter_source_cache = message_cache::SourceMessageCache::default();
+    let scan_ctx = adapters::AdapterScanContext {
+        home_dir: &home_dir,
+        use_env_roots: options.use_env_roots,
+        scanner_settings: &options.scanner_settings,
+    };
+    adapters::run_local_source_adapters(
+        &selected_adapters,
+        &scan_ctx,
+        &mut adapter_source_cache,
+        None,
+        &mut adapter_messages,
+    );
+    let adapter_parsed: Vec<ParsedMessage> =
+        adapter_messages.iter().map(unified_to_parsed).collect();
+    for adapter in selected_adapters {
+        let client = adapter.client();
+        let count = adapter_parsed
+            .iter()
+            .filter(|message| ClientId::from_str(&message.client) == Some(client))
+            .map(|message| message.message_count.max(0))
+            .sum::<i32>();
+        counts.set(client, count);
+    }
+    messages.extend(adapter_parsed);
 
     if !include_all {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
@@ -3030,6 +2976,7 @@ mod tests {
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
+    use std::path::Path;
     use std::str::FromStr;
     use std::sync::Arc;
 
@@ -3248,6 +3195,34 @@ mod tests {
                 output_tokens,
                 actual_cost_usd
             ],
+        )
+        .unwrap();
+    }
+
+    fn write_pi_fixture(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            r#"{"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}"#,
+        )
+        .unwrap();
+    }
+
+    fn write_omp_parent_child_fixture(session_root: &Path) {
+        let parent_path = session_root.with_extension("jsonl");
+        let child_path = session_root.join("0-ReviewFindings.jsonl");
+        std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            parent_path,
+            r#"{"type":"session","version":3,"id":"root-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"root_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_001","name":"task","arguments":{"agent":"reviewer","tasks":[{"id":"ReviewFindings","description":"Review findings","assignment":"Check the diff"}]}}],"model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            child_path,
+            r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"child_001","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
         )
         .unwrap();
     }
@@ -4485,6 +4460,31 @@ model = "gpt-5.5"
         assert_ne!(
             digest_added, digest_other_clients,
             "client set is part of the digest"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_compute_source_digest_tracks_adapter_zed_wal() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let threads_dir = source_home.path().join(".local/share/zed/threads");
+        std::fs::create_dir_all(&threads_dir).unwrap();
+        let threads_db = threads_dir.join("threads.db");
+        std::fs::write(&threads_db, b"sqlite-placeholder").unwrap();
+        let wal_path = threads_dir.join("threads.db-wal");
+        std::fs::write(&wal_path, b"wal-1").unwrap();
+
+        let home = source_home.path().to_str().unwrap();
+        let clients = ["zed".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
+        std::fs::write(&wal_path, b"wal-contents-changed").unwrap();
+        let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
+
+        assert_ne!(
+            digest_one, digest_two,
+            "adapter-discovered Zed WAL changes must affect the source digest"
         );
     }
 
@@ -7196,6 +7196,131 @@ model = "gpt-5.5"
 
         assert_eq!(parsed.counts.get(ClientId::Zed), 0);
         assert!(parsed.messages.is_empty());
+    }
+
+    #[test]
+    fn test_driver_uses_zed_adapter_when_only_zed_requested() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let zed_threads_dir = temp_dir.path().join(".local/share/zed/threads");
+        std::fs::create_dir_all(&zed_threads_dir).unwrap();
+        let zed_db = zed_threads_dir.join("threads.db");
+        let zed_conn = create_zed_sqlite_db(&zed_db);
+        insert_zed_thread(&zed_conn, "zed-only-thread", "claude-sonnet-4-5");
+        drop(zed_conn);
+
+        let opencode_dir = temp_dir
+            .path()
+            .join(".local/share/opencode/storage/message/project-1");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        std::fs::write(
+            opencode_dir.join("msg_001.json"),
+            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["zed".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Zed), 1);
+        assert_eq!(
+            parsed.counts.get(ClientId::OpenCode),
+            0,
+            "only adapter clients must not turn an empty legacy partition into an all-client scan"
+        );
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "zed");
+        assert_eq!(parsed.messages[0].session_id, "zed-only-thread");
+    }
+
+    #[test]
+    fn test_driver_uses_pi_and_omp_adapters_when_requested() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let pi_path = temp_dir
+            .path()
+            .join(".pi/agent/sessions/project/pi-session.jsonl");
+        write_pi_fixture(&pi_path);
+
+        let omp_session_root = temp_dir
+            .path()
+            .join(".omp/agent/sessions/project/root-session");
+        write_omp_parent_child_fixture(&omp_session_root);
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["pi".to_string(), "omp".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Pi), 1);
+        assert_eq!(parsed.counts.get(ClientId::Omp), 2);
+        assert!(parsed
+            .messages
+            .iter()
+            .any(|message| message.client == "pi" && message.session_id == "pi_ses_001"));
+        assert!(parsed.messages.iter().any(|message| {
+            message.client == "omp"
+                && message.session_id == "child-session"
+                && message.agent.as_deref() == Some("OMP Reviewer")
+        }));
+    }
+
+    #[test]
+    fn test_driver_all_clients_includes_adapter_and_legacy_without_duplicate() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let zed_threads_dir = temp_dir.path().join(".local/share/zed/threads");
+        std::fs::create_dir_all(&zed_threads_dir).unwrap();
+        let zed_db = zed_threads_dir.join("threads.db");
+        let zed_conn = create_zed_sqlite_db(&zed_db);
+        insert_zed_thread(&zed_conn, "zed-all-thread", "claude-sonnet-4-5");
+        drop(zed_conn);
+
+        let opencode_dir = temp_dir
+            .path()
+            .join(".local/share/opencode/storage/message/project-1");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        std::fs::write(
+            opencode_dir.join("msg_001.json"),
+            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(Vec::new()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Zed), 1);
+        assert_eq!(parsed.counts.get(ClientId::OpenCode), 1);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .filter(|message| message.client == "zed")
+                .count(),
+            1
+        );
     }
 
     #[test]
