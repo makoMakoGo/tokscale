@@ -1345,124 +1345,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let copilot_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Copilot)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::copilot::parse_copilot_file(path)
-            })
-        })
-        .collect();
-    for outcome in copilot_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let gemini_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
-        .get(ClientId::Gemini)
-        .par_iter()
-        .map(|path| {
-            let outcome = load_or_parse_source_with_fingerprint_and_policy(
-                path,
-                &source_cache,
-                pricing,
-                message_cache::SourceFingerprint::from_path,
-                |path| {
-                    let parsed = sessions::gemini::parse_gemini_file_with_cache_status(path);
-                    (parsed.messages, parsed.cacheable)
-                },
-            );
-            (path.clone(), outcome)
-        })
-        .collect();
-    for (path, outcome) in gemini_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        } else if outcome.invalidate_cache {
-            source_cache.remove(&path);
-        }
-    }
-
-    let cursor_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Cursor)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::cursor::parse_cursor_file(path)
-            })
-        })
-        .collect();
-    for outcome in cursor_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let grok_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Grok)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::grok::parse_grok_updates_file(path)
-            })
-        })
-        .collect();
-    for outcome in grok_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let warp_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Warp)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::warp::parse_warp_file(path)
-            })
-        })
-        .collect();
-    for outcome in warp_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let amp_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Amp)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::amp::parse_amp_file(path)
-            })
-        })
-        .collect();
-    for outcome in amp_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
     let codebuff_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Codebuff)
         .par_iter()
@@ -1473,24 +1355,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in codebuff_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let droid_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Droid)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::droid::parse_droid_file(path)
-            })
-        })
-        .collect();
-    for outcome in droid_outcomes {
         let (messages, extra_entry) =
             resolve_messages(outcome.messages, &mut source_cache, pricing);
         all_messages.extend(messages);
@@ -1547,43 +1411,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             .filter(|message| should_keep_deduped_message(&mut gjc_seen, message)),
     );
 
-    let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Kimi)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kimi::parse_kimi_file(path)
-            })
-        })
-        .collect();
-    for outcome in kimi_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    // Parse Qwen files
-    let qwen_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Qwen)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::qwen::parse_qwen_file(path)
-            })
-        })
-        .collect();
-    for outcome in qwen_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
     let roocode_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::RooCode)
         .par_iter()
@@ -1630,24 +1457,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         })
         .collect();
     for outcome in cline_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let mux_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Mux)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::mux::parse_mux_file(path)
-            })
-        })
-        .collect();
-    for outcome in mux_outcomes {
         let (messages, extra_entry) =
             resolve_messages(outcome.messages, &mut source_cache, pricing);
         all_messages.extend(messages);
@@ -2495,48 +2304,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
 
-    let copilot_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Copilot)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::copilot::parse_copilot_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let copilot_count = copilot_msgs.len() as i32;
-    counts.set(ClientId::Copilot, copilot_count);
-    messages.extend(copilot_msgs);
-
-    let gemini_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Gemini)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::gemini::parse_gemini_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let gemini_count = gemini_msgs.len() as i32;
-    counts.set(ClientId::Gemini, gemini_count);
-    messages.extend(gemini_msgs);
-
-    let amp_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Amp)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::amp::parse_amp_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let amp_count = amp_msgs.len() as i32;
-    counts.set(ClientId::Amp, amp_count);
-    messages.extend(amp_msgs);
-
     let codebuff_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Codebuff)
         .par_iter()
@@ -2550,20 +2317,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let codebuff_count = codebuff_msgs.len() as i32;
     counts.set(ClientId::Codebuff, codebuff_count);
     messages.extend(codebuff_msgs);
-
-    let droid_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Droid)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::droid::parse_droid_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let droid_count = droid_msgs.len() as i32;
-    counts.set(ClientId::Droid, droid_count);
-    messages.extend(droid_msgs);
 
     let openclaw_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::OpenClaw)
@@ -2599,36 +2352,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let gjc_count = gjc_msgs.len() as i32;
     counts.set(ClientId::Gjc, gjc_count);
     messages.extend(gjc_msgs);
-
-    // Parse Kimi usage records in parallel
-    let kimi_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Kimi)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::kimi::parse_kimi_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let kimi_count = kimi_msgs.len() as i32;
-    counts.set(ClientId::Kimi, kimi_count);
-    messages.extend(kimi_msgs);
-
-    // Parse Qwen JSONL files in parallel
-    let qwen_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Qwen)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::qwen::parse_qwen_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let qwen_count = qwen_msgs.len() as i32;
-    counts.set(ClientId::Qwen, qwen_count);
-    messages.extend(qwen_msgs);
 
     let roocode_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::RooCode)
@@ -2671,20 +2394,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let cline_count = summed_parsed_message_count(&cline_msgs);
     counts.set(ClientId::Cline, cline_count);
     messages.extend(cline_msgs);
-
-    let mux_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Mux)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::mux::parse_mux_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let mux_count = summed_parsed_message_count(&mux_msgs);
-    counts.set(ClientId::Mux, mux_count);
-    messages.extend(mux_msgs);
 
     // Kilo CLI: SQLite database
     let _kilo_count: i32 = if let Some(db_path) = &scan_result.kilo_db {
@@ -2795,34 +2504,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let trae_count = trae_msgs.len() as i32;
     counts.set(ClientId::Trae, trae_count);
     messages.extend(trae_msgs);
-
-    let warp_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Warp)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::warp::parse_warp_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let warp_count = summed_parsed_message_count(&warp_msgs);
-    counts.set(ClientId::Warp, warp_count);
-    messages.extend(warp_msgs);
-
-    let grok_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Grok)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::grok::parse_grok_updates_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let grok_count = summed_parsed_message_count(&grok_msgs);
-    counts.set(ClientId::Grok, grok_count);
-    messages.extend(grok_msgs);
 
     let mut adapter_messages = Vec::new();
     // parse_local_clients historically parsed directly without the persisted
@@ -4497,6 +4178,29 @@ model = "gpt-5.5"
         assert_ne!(
             digest_one, digest_two,
             "adapter-discovered Zed WAL changes must affect the source digest"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_compute_source_digest_tracks_adapter_plain_file() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let amp_dir = source_home.path().join(".local/share/amp/threads");
+        std::fs::create_dir_all(&amp_dir).unwrap();
+        let amp_file = amp_dir.join("T-digest.json");
+        std::fs::write(&amp_file, r#"{"id":"amp-digest"}"#).unwrap();
+
+        let home = source_home.path().to_str().unwrap();
+        let clients = ["amp".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
+        std::fs::write(&amp_file, r#"{"id":"amp-digest","changed":true}"#).unwrap();
+        let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
+
+        assert_ne!(
+            digest_one, digest_two,
+            "adapter-discovered plain file changes must affect the source digest"
         );
     }
 
@@ -7254,6 +6958,64 @@ model = "gpt-5.5"
     }
 
     #[test]
+    fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let amp_dir = temp_dir.path().join(".local/share/amp/threads");
+        std::fs::create_dir_all(&amp_dir).unwrap();
+        std::fs::write(
+            amp_dir.join("T-simple.json"),
+            r#"{
+                "id": "amp-thread",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "messageId": 1,
+                        "usage": {
+                            "timestamp": "2026-05-21T04:00:00Z",
+                            "model": "claude-opus-4-7",
+                            "inputTokens": 10,
+                            "outputTokens": 2
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let opencode_dir = temp_dir
+            .path()
+            .join(".local/share/opencode/storage/message/project-1");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        std::fs::write(
+            opencode_dir.join("msg_001.json"),
+            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["amp".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Amp), 1);
+        assert_eq!(
+            parsed.counts.get(ClientId::OpenCode),
+            0,
+            "only C3.1 adapter clients must not turn an empty legacy partition into an all-client scan"
+        );
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "amp");
+        assert_eq!(parsed.messages[0].model_id, "claude-opus-4-7");
+    }
+
+    #[test]
     fn test_driver_uses_pi_and_omp_adapters_when_requested() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -7571,5 +7333,38 @@ model = "gpt-5.5"
         assert_eq!(parsed.messages[0].provider_id, "anthropic");
         assert_eq!(parsed.messages[0].input, 10);
         assert_eq!(parsed.messages[0].output, 2);
+    }
+
+    #[test]
+    fn test_parse_local_clients_default_keeps_cursor_out_of_local_count() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+        std::fs::write(
+            cursor_cache_dir.join("usage.csv"),
+            r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","0""#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Cursor), 0);
+        assert!(
+            parsed
+                .messages
+                .iter()
+                .all(|message| message.client != "cursor"),
+            "Cursor cache rows must not enter the default parse_local_clients result"
+        );
     }
 }

@@ -195,11 +195,7 @@ mod tests {
         insert_thread(&conn, "zed-thread-1", "claude-sonnet-4-5");
         drop(conn);
 
-        let units = vec![SourceUnit {
-            client: ClientId::Zed,
-            path: db_path.clone(),
-            fingerprint_policy: FingerprintPolicy::SqliteWithWal,
-        }];
+        let units = vec![SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())];
         let mut cache = message_cache::SourceMessageCache::default();
         let parsed = ZED_ADAPTER.parse(
             units,

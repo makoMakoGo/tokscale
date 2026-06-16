@@ -115,15 +115,15 @@ until C3.
 
 ## C3 — Migrate remaining clients
 
-Mechanical series, 2-4 PRs, per-PR parity:
+Mechanical series, preferably 5 PRs, per-PR parity:
 
-1. Simple file clients (copilot, cursor, grok, warp, amp, codebuff, droid,
-   openclaw, kimi, qwen, roocode, kilocode, cline, mux, kiro-files,
-   antigravity, trae, gjc).
-2. SQLite family (opencode dbs+json layering, kilo, hermes, goose,
-   kiro-db, crush).
-3. Claude (sidecar fingerprints, tool_result merge, cc-mirror variants).
-4. Codex last (incremental append state machine, headless roots).
+1. Simple cached file clients plus Gemini cacheability policy.
+2. Custom discovery / custom pricing file clients (OpenClaw, Roo/KiloCode,
+   Cline, Codebuff, Antigravity, Trae, GJC).
+3. SQLite and mixed clients (opencode dbs+json layering, kilo, hermes, goose,
+   kiro file+db, crush).
+4. Claude (sidecar fingerprints, tool_result merge, cc-mirror variants).
+5. Codex last (incremental append state machine, headless roots).
 
 Ends with the driver reduced to adapter iteration and the 24-block
 function deleted.

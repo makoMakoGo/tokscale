@@ -159,11 +159,7 @@ mod tests {
         write_file(&parent_path, OMP_PARENT_CONTENT);
         write_file(&child_path, OMP_CHILD_CONTENT);
 
-        let units = vec![SourceUnit {
-            client: ClientId::Omp,
-            path: child_path.clone(),
-            fingerprint_policy: FingerprintPolicy::PlainFile,
-        }];
+        let units = vec![SourceUnit::plain_file(ClientId::Omp, child_path.clone())];
         let mut cache = message_cache::SourceMessageCache::default();
         let actual = fold_with_omp_adapter(units, &mut cache);
 

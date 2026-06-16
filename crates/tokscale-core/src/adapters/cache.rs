@@ -93,7 +93,7 @@ pub(crate) fn fold_units(
     sink: &mut dyn MessageSink,
 ) {
     for unit in parsed {
-        debug_assert!(unit.unit.client.parse_local());
+        debug_assert!(unit.unit.client.local_def().is_some());
         let path = unit.unit.path.clone();
         let messages = resolve_messages(unit.messages, ctx);
         sink.extend_messages(messages);
