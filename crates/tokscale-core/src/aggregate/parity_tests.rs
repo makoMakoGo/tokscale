@@ -353,3 +353,149 @@ fn parity_session_contributions() {
     // SessionContribution derives PartialEq.
     assert_eq!(old, new, "SessionContribution parity failed");
 }
+
+// ===========================================================================
+// Contract tests (C1.4) — pin the sort/tie-break comparators that the existing
+// suite leaves uncovered. These assert the EXACT ordering, independent of the
+// diff harness above, so a regression is caught even when the two paths happen
+// to agree. Focused legs that depend on the C1.5 BLOCKERs are #[ignore]'d and
+// enabled when C1.5 makes them deterministic.
+// ===========================================================================
+
+#[test]
+fn contract_merged_clients_first_seen_tie_break() {
+    // ordered_clients_by_token_contribution: total_tokens DESC -> first_seen
+    // ASC -> client ASC. Existing tests cover only the total_tokens leg with
+    // distinct totals. Pin the first_seen tie-break here.
+    use crate::{ordered_clients_by_token_contribution, ClientContributionOrder};
+    use std::collections::HashMap;
+    let mut m = HashMap::new();
+    // Equal tokens (50): first_seen decides -> b(0) before a(1).
+    m.insert(
+        "a".to_string(),
+        ClientContributionOrder { first_seen: 1, total_tokens: 50 },
+    );
+    m.insert(
+        "b".to_string(),
+        ClientContributionOrder { first_seen: 0, total_tokens: 50 },
+    );
+    assert_eq!(ordered_clients_by_token_contribution(&m), "b, a");
+}
+
+#[test]
+fn contract_merged_clients_name_tie_break() {
+    // Equal tokens AND equal first_seen -> client name ASC.
+    use crate::{ordered_clients_by_token_contribution, ClientContributionOrder};
+    use std::collections::HashMap;
+    let mut m = HashMap::new();
+    m.insert(
+        "zeta".to_string(),
+        ClientContributionOrder { first_seen: 0, total_tokens: 7 },
+    );
+    m.insert(
+        "alpha".to_string(),
+        ClientContributionOrder { first_seen: 0, total_tokens: 7 },
+    );
+    assert_eq!(ordered_clients_by_token_contribution(&m), "alpha, zeta");
+}
+
+#[test]
+fn contract_model_entry_cost_desc_nan_last() {
+    // lib.rs:2122 — entries sort cost DESC, NaN sorts last.
+    use crate::GroupBy;
+    fn mk(model: &str, cost: f64) -> UnifiedMessage {
+        UnifiedMessage::new(
+            "c",
+            model,
+            "p",
+            "s",
+            ts("2024-06-10"),
+            TokenBreakdown { input: 1, output: 1, cache_read: 0, cache_write: 0, reasoning: 0 },
+            cost,
+        )
+    }
+    // Distinct costs, descending: 9.0, 5.0, 1.0, then NaN last.
+    let msgs = vec![mk("m1", 1.0), mk("m2", 9.0), mk("m3", f64::NAN), mk("m4", 5.0)];
+    let entries = crate::aggregate_model_usage_entries_pub(msgs, &GroupBy::Model);
+    let models: Vec<&str> = entries.iter().map(|e| e.model.as_str()).collect();
+    assert_eq!(models, vec!["m2", "m4", "m1", "m3"]);
+}
+
+#[test]
+#[ignore = "equal-cost tie-break is nondeterministic today (C1.5 BLOCKER 1); enable after C1.5"]
+fn contract_model_entry_equal_cost_tie_break() {
+    // lib.rs:2122 has NO secondary key on equal cost. C1.5 will add
+    // model -> provider -> ... so two equal-cost entries order by model ASC.
+    use crate::GroupBy;
+    fn mk(model: &str, cost: f64) -> UnifiedMessage {
+        UnifiedMessage::new(
+            "c", model, "p", "s", ts("2024-06-10"),
+            TokenBreakdown { input: 1, output: 1, cache_read: 0, cache_write: 0, reasoning: 0 },
+            cost,
+        )
+    }
+    let msgs = vec![mk("zzz", 5.0), mk("aaa", 5.0)];
+    let entries = crate::aggregate_model_usage_entries_pub(msgs, &GroupBy::Model);
+    let models: Vec<&str> = entries.iter().map(|e| e.model.as_str()).collect();
+    assert_eq!(models, vec!["aaa", "zzz"]);
+}
+
+#[test]
+#[serial]
+fn contract_hourly_full_key_asc() {
+    // lib.rs:2375 — hourly entries sort by the full "YYYY-MM-DD HH:00" key ASC.
+    pin_tz();
+    let msgs = vec![
+        UnifiedMessage::new("c", "m", "p", "s", ts("2024-06-10"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+        UnifiedMessage::new("c", "m", "p", "s", ts("2024-05-01"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+    ];
+    let report = crate::hourly_report_from_messages_pub(msgs);
+    assert_eq!(report.entries.len(), 2);
+    // May precedes June.
+    assert!(report.entries[0].hour < report.entries[1].hour);
+}
+
+#[test]
+#[serial]
+fn contract_hourly_timestamp_zero_fallback_bucket() {
+    // lib.rs:2321 — a timestamp<=0 message lands in "{date} 00:00".
+    pin_tz();
+    let mut zero = UnifiedMessage::new(
+        "c", "m", "p", "s", ts("1970-01-01"),
+        TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 },
+        1.0,
+    );
+    zero.timestamp = 0;
+    let report = crate::hourly_report_from_messages_pub(vec![zero]);
+    assert_eq!(report.entries.len(), 1);
+    assert!(report.entries[0].hour.ends_with("00:00"));
+}
+
+#[test]
+#[serial]
+fn contract_monthly_month_asc() {
+    // lib.rs:2257 — monthly entries sort by month ASC.
+    pin_tz();
+    let msgs = vec![
+        UnifiedMessage::new("c", "m", "p", "s", ts("2024-06-15"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+        UnifiedMessage::new("c", "m", "p", "s", ts("2024-05-15"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+    ];
+    let report = crate::monthly_report_from_messages_pub(msgs);
+    assert_eq!(report.entries.len(), 2);
+    assert_eq!(report.entries[0].month, "2024-05");
+    assert_eq!(report.entries[1].month, "2024-06");
+}
+
+#[test]
+#[ignore = "monthly models order is nondeterministic today (C1.5 BLOCKER 2); enable after C1.5"]
+#[serial]
+fn contract_monthly_models_sorted() {
+    // MonthlyUsage.models is an unsorted HashSet->Vec today; C1.5 will sort it.
+    pin_tz();
+    let msgs = vec![
+        UnifiedMessage::new("c", "zzz-model", "p", "s", ts("2024-06-15"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+        UnifiedMessage::new("c", "aaa-model", "p", "s", ts("2024-06-16"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+    ];
+    let report = crate::monthly_report_from_messages_pub(msgs);
+    assert_eq!(report.entries[0].models, vec!["aaa-model", "zzz-model"]);
+}
