@@ -1,9 +1,14 @@
 pub(crate) mod cache;
+mod codebuff;
 pub(crate) mod discover;
 pub(crate) mod file;
+mod gjc;
+mod openclaw;
 
 mod omp;
 mod pi;
+mod trae;
+mod vscode_tasks;
 mod zed;
 
 use std::collections::HashSet;
@@ -118,7 +123,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 13] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 21] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -132,6 +137,14 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 13] = [
     &file::KIMI_ADAPTER,
     &file::QWEN_ADAPTER,
     &file::MUX_ADAPTER,
+    &codebuff::CODEBUFF_ADAPTER,
+    &openclaw::OPENCLAW_ADAPTER,
+    &gjc::GJC_ADAPTER,
+    &vscode_tasks::ROOCODE_ADAPTER,
+    &vscode_tasks::KILOCODE_ADAPTER,
+    &vscode_tasks::CLINE_ADAPTER,
+    &file::ANTIGRAVITY_ADAPTER,
+    &trae::TRAE_ADAPTER,
 ];
 
 pub(crate) fn local_source_adapters() -> &'static [&'static dyn LocalSourceAdapter] {

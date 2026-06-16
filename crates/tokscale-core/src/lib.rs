@@ -1345,126 +1345,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let codebuff_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Codebuff)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::codebuff::parse_codebuff_file(path)
-            })
-        })
-        .collect();
-    for outcome in codebuff_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let openclaw_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::OpenClaw)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::openclaw::parse_openclaw_transcript(path)
-            })
-        })
-        .collect();
-    for outcome in openclaw_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    // gjc (gajae-code) JSONL sessions. Binding note N1: this cached cluster
-    // MUST obtain messages via the non-repricing parser and apply the A1
-    // Hermes guard explicitly (reprice only when the embedded usage.cost.total
-    // was absent, i.e. cost <= 0.0). Routing through load_or_parse_source /
-    // apply_pricing_to_messages / cached_messages would reprice unconditionally
-    // and overwrite gjc's authoritative embedded cost, silently downgrading to
-    // A2 on the dominant cached path. Message-level dedup via
-    // should_keep_deduped_message collapses depth-1/depth-2 replays.
-    let mut gjc_seen: HashSet<u64> = HashSet::new();
-    let gjc_messages: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::Gjc)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::gjc::parse_gjc_file(path)
-                .into_iter()
-                .map(|mut msg| {
-                    if msg.cost <= 0.0 {
-                        apply_pricing_if_available(&mut msg, pricing);
-                    }
-                    msg
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    all_messages.extend(
-        gjc_messages
-            .into_iter()
-            .filter(|message| should_keep_deduped_message(&mut gjc_seen, message)),
-    );
-
-    let roocode_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::RooCode)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::roocode::parse_roocode_file(path)
-            })
-        })
-        .collect();
-    for outcome in roocode_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let kilocode_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::KiloCode)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kilocode::parse_kilocode_file(path)
-            })
-        })
-        .collect();
-    for outcome in kilocode_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let cline_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Cline)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::cline::parse_cline_file(path)
-            })
-        })
-        .collect();
-    for outcome in cline_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
     // Kilo CLI: SQLite database
     if let Some(db_path) = &scan_result.kilo_db {
         let kilo_messages: Vec<UnifiedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
@@ -1539,30 +1419,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 .collect();
         all_messages.extend(crush_messages);
     }
-
-    let antigravity_messages: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::Antigravity)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::antigravity::parse_antigravity_file(path)
-                .into_iter()
-                .map(|mut msg| {
-                    apply_pricing_if_available(&mut msg, pricing);
-                    msg
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    all_messages.extend(antigravity_messages);
-
-    // Trae API dump uses exact dollar_float totals, so pricing lookup is not needed.
-    let trae_messages: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::Trae)
-        .par_iter()
-        .flat_map(|path| sessions::trae::parse_trae_file("trae", path))
-        .collect();
-    let deduped_trae_messages = dedupe_latest_trae_messages(trae_messages);
-    all_messages.extend(deduped_trae_messages);
 
     let scan_ctx = adapters::AdapterScanContext {
         home_dir,
@@ -2304,97 +2160,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
 
-    let codebuff_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Codebuff)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::codebuff::parse_codebuff_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let codebuff_count = codebuff_msgs.len() as i32;
-    counts.set(ClientId::Codebuff, codebuff_count);
-    messages.extend(codebuff_msgs);
-
-    let openclaw_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::OpenClaw)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::openclaw::parse_openclaw_transcript(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let openclaw_count = openclaw_msgs.len() as i32;
-    counts.set(ClientId::OpenClaw, openclaw_count);
-    messages.extend(openclaw_msgs);
-
-    // gjc (gajae-code) JSONL sessions. This non-cached path produces
-    // ParsedMessage (no cost field) and has no pricing service in scope, so
-    // the A1 cost guard is a no-op here — cost correctness is enforced on the
-    // cached pricing path (see the gjc_outcomes block). What matters here is
-    // message-level dedup (codebuff-style key via should_keep_deduped_message)
-    // to collapse depth-1/depth-2 replays, mirroring the codex cluster.
-    let gjc_msgs_raw: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::Gjc)
-        .par_iter()
-        .flat_map(|path| sessions::gjc::parse_gjc_file(path))
-        .collect();
-    let mut gjc_seen: HashSet<u64> = HashSet::new();
-    let gjc_msgs: Vec<ParsedMessage> = gjc_msgs_raw
-        .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut gjc_seen, message))
-        .map(|message| unified_to_parsed(&message))
-        .collect();
-    let gjc_count = gjc_msgs.len() as i32;
-    counts.set(ClientId::Gjc, gjc_count);
-    messages.extend(gjc_msgs);
-
-    let roocode_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::RooCode)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::roocode::parse_roocode_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let roocode_count = roocode_msgs.len() as i32;
-    counts.set(ClientId::RooCode, roocode_count);
-    messages.extend(roocode_msgs);
-
-    let kilocode_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::KiloCode)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::kilocode::parse_kilocode_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let kilocode_count = summed_parsed_message_count(&kilocode_msgs);
-    counts.set(ClientId::KiloCode, kilocode_count);
-    messages.extend(kilocode_msgs);
-
-    let cline_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Cline)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::cline::parse_cline_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let cline_count = summed_parsed_message_count(&cline_msgs);
-    counts.set(ClientId::Cline, cline_count);
-    messages.extend(cline_msgs);
-
     // Kilo CLI: SQLite database
     let _kilo_count: i32 = if let Some(db_path) = &scan_result.kilo_db {
         let kilo_msgs: Vec<ParsedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
@@ -2473,37 +2238,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let crush_count = summed_parsed_message_count(&crush_msgs);
     counts.set(ClientId::Crush, crush_count);
     messages.extend(crush_msgs);
-
-    let antigravity_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Antigravity)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::antigravity::parse_antigravity_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let antigravity_count = antigravity_msgs.len() as i32;
-    counts.set(ClientId::Antigravity, antigravity_count);
-    messages.extend(antigravity_msgs);
-
-    let trae_msgs: Vec<ParsedMessage> = {
-        let unique_trae_messages = dedupe_latest_trae_messages(
-            scan_result
-                .get(ClientId::Trae)
-                .par_iter()
-                .flat_map(|path| sessions::trae::parse_trae_file("trae", path))
-                .collect(),
-        );
-        unique_trae_messages
-            .into_iter()
-            .map(|msg| unified_to_parsed(&msg))
-            .collect()
-    };
-    let trae_count = trae_msgs.len() as i32;
-    counts.set(ClientId::Trae, trae_count);
-    messages.extend(trae_msgs);
 
     let mut adapter_messages = Vec::new();
     // parse_local_clients historically parsed directly without the persisted
@@ -4201,6 +3935,35 @@ model = "gpt-5.5"
         assert_ne!(
             digest_one, digest_two,
             "adapter-discovered plain file changes must affect the source digest"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_compute_source_digest_tracks_adapter_no_cache_file() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let trae_dir = source_home
+            .path()
+            .join(".config/tokscale/trae-cache/sessions");
+        std::fs::create_dir_all(&trae_dir).unwrap();
+        let trae_file = trae_dir.join("usage.json");
+        std::fs::write(&trae_file, r#"[{"session_id":"trae-digest"}]"#).unwrap();
+
+        let home = source_home.path().to_str().unwrap();
+        let clients = ["trae".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
+        std::fs::write(
+            &trae_file,
+            r#"[{"session_id":"trae-digest","changed":true}]"#,
+        )
+        .unwrap();
+        let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
+
+        assert_ne!(
+            digest_one, digest_two,
+            "adapter-discovered no-cache file changes must affect the source digest"
         );
     }
 
@@ -7013,6 +6776,61 @@ model = "gpt-5.5"
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].client, "amp");
         assert_eq!(parsed.messages[0].model_id, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let codebuff_dir = temp_dir
+            .path()
+            .join(".config/manicode/projects/proj/chats/2025-12-20T12-00-00.000Z");
+        std::fs::create_dir_all(&codebuff_dir).unwrap();
+        std::fs::write(
+            codebuff_dir.join("chat-messages.json"),
+            r#"[
+                { "variant": "user", "content": "hi" },
+                { "variant": "ai",
+                  "timestamp": "2025-12-20T12:00:05.000Z",
+                  "metadata": {
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": { "inputTokens": 10, "outputTokens": 5 }
+                  }
+                }
+            ]"#,
+        )
+        .unwrap();
+
+        let opencode_dir = temp_dir
+            .path()
+            .join(".local/share/opencode/storage/message/project-1");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        std::fs::write(
+            opencode_dir.join("msg_001.json"),
+            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["codebuff".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Codebuff), 1);
+        assert_eq!(
+            parsed.counts.get(ClientId::OpenCode),
+            0,
+            "only C3.2 adapter clients must not turn an empty legacy partition into an all-client scan"
+        );
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].client, "codebuff");
+        assert_eq!(parsed.messages[0].model_id, "claude-sonnet-4-20250514");
     }
 
     #[test]
