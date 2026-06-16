@@ -691,6 +691,13 @@ impl TuiAcc {
         let mut models: Vec<UsageModelEntry> = model_map
             .into_iter()
             .map(|(key, mut model)| {
+                let provider = {
+                    let mut providers: Vec<&str> = model.provider.split(", ").collect();
+                    providers.sort_unstable();
+                    providers.dedup();
+                    providers.join(", ")
+                };
+                model.provider = provider;
                 if let Some(client_totals) = client_totals_by_model.get(&key) {
                     model.client = ordered_clients_by_token_contribution(client_totals);
                 }

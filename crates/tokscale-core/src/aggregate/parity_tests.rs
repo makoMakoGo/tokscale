@@ -34,24 +34,15 @@ impl Drop for TzGuard {
     }
 }
 
-/// A timestamp at local noon for `YYYY-MM-DD`, stable across timezones within
-/// a day shift of ±12h. Mirrors the existing `aggregator.rs` mock idiom.
+/// A timestamp at UTC noon for `YYYY-MM-DD`; tests pin `TZ=UTC` before any
+/// local date/hour bucketing reads it.
 fn ts(date: &str) -> i64 {
-    // date = "YYYY-MM-DD"; encode noon-of-day in ms. Parsing kept minimal so the
-    // test stays dependency-free; local-noon keeps day-bucketing stable.
-    let (y, m, d) = (
-        date[..4].parse::<i64>().unwrap_or(2024),
-        date[5..7].parse::<i64>().unwrap_or(1),
-        date[8..10].parse::<i64>().unwrap_or(1),
-    );
-    // Days since 1970-01-01 (Gregorian), *86400 + 12h, in ms. Good enough for
-    // date-string bucketing (`date_string()` derives local date from timestamp).
-    let days = (y - 1970) * 365 + (y - 1969) / 4 - (y - 1901) / 100
-        + (y - 1601) / 400
-        + [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][m.clamp(1, 12) as usize]
-        + d
-        - 1;
-    days * 86_400_000 + 12 * 3_600_000
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .expect("valid test date")
+        .and_hms_opt(12, 0, 0)
+        .expect("valid noon timestamp")
+        .and_utc()
+        .timestamp_millis()
 }
 
 fn msg(
@@ -446,7 +437,10 @@ fn contract_tui_workspace_provider_daily_and_streaks() {
         1.0,
     );
 
-    let data = engine_usage_data(&[first, second, third], GroupBy::WorkspaceModel);
+    let data = engine_usage_data(
+        &[first.clone(), second.clone(), third.clone()],
+        GroupBy::WorkspaceModel,
+    );
 
     assert_eq!(data.current_streak, 3);
     assert_eq!(data.longest_streak, 3);
@@ -463,6 +457,20 @@ fn contract_tui_workspace_provider_daily_and_streaks() {
     assert_eq!(workspace_model.workspace_label.as_deref(), Some("repo-a"));
     assert_eq!(workspace_model.provider, "anthropic, anthropic-bedrock");
     assert_eq!(workspace_model.session_count, 1);
+
+    let reversed = engine_usage_data(
+        &[second.clone(), first.clone(), third],
+        GroupBy::WorkspaceModel,
+    );
+    let reversed_workspace_model = reversed
+        .models
+        .iter()
+        .find(|entry| entry.model == "claude-sonnet-4")
+        .expect("reversed workspace model entry");
+    assert_eq!(
+        reversed_workspace_model.provider,
+        "anthropic, anthropic-bedrock"
+    );
 
     let today_usage = data
         .daily
