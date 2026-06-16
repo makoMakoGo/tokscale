@@ -433,7 +433,14 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
     }
     hour_totals
         .into_iter()
-        .max_by_key(|(_, (tokens, _))| *tokens)
+        .max_by(
+            |(hour_a, (tokens_a, cost_a)), (hour_b, (tokens_b, cost_b))| {
+                tokens_a
+                    .cmp(tokens_b)
+                    .then_with(|| cost_a.total_cmp(cost_b))
+                    .then_with(|| hour_b.cmp(hour_a))
+            },
+        )
         .map(|(hour, (tokens, cost))| (hour, tokens, cost))
 }
 
@@ -757,4 +764,40 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
         acc.push(msg);
     }
     acc.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use chrono::NaiveDate;
+
+    use super::*;
+
+    fn hourly(hour: u32, input_tokens: u64, cost: f64) -> HourlyUsage {
+        HourlyUsage {
+            datetime: NaiveDate::from_ymd_opt(2024, 6, 10)
+                .unwrap()
+                .and_hms_opt(hour, 0, 0)
+                .unwrap(),
+            tokens: UsageTokenBreakdown {
+                input: input_tokens,
+                ..UsageTokenBreakdown::default()
+            },
+            cost,
+            clients: BTreeSet::new(),
+            models: BTreeMap::new(),
+            message_count: 0,
+            turn_count: 0,
+        }
+    }
+
+    #[test]
+    fn find_peak_hour_breaks_token_ties_deterministically() {
+        let high_cost = vec![hourly(8, 100, 2.0), hourly(12, 100, 3.0)];
+        assert_eq!(find_peak_hour(&high_cost), Some((12, 100, 3.0)));
+
+        let earliest_hour = vec![hourly(10, 100, 2.0), hourly(8, 100, 2.0)];
+        assert_eq!(find_peak_hour(&earliest_hour), Some((8, 100, 2.0)));
+    }
 }

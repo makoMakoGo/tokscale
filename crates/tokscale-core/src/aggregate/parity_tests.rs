@@ -5,6 +5,8 @@
 
 #![cfg(test)]
 
+use std::ffi::OsString;
+
 use crate::aggregate::{AggregationConfig, AggregationEngine, DateRange, ViewSet};
 use crate::sessions::UnifiedMessage;
 use crate::usage_views::UsageData;
@@ -12,8 +14,24 @@ use crate::{aggregator, sessionize, GroupBy, ModelReport, TokenBreakdown};
 use serial_test::serial;
 
 /// Pin `TZ=UTC` for date/hour bucketing that reads `chrono::Local`.
-fn pin_tz() {
+fn pin_tz() -> TzGuard {
+    let old = std::env::var_os("TZ");
     std::env::set_var("TZ", "UTC");
+    TzGuard { old }
+}
+
+struct TzGuard {
+    old: Option<OsString>,
+}
+
+impl Drop for TzGuard {
+    fn drop(&mut self) {
+        if let Some(value) = &self.old {
+            std::env::set_var("TZ", value);
+        } else {
+            std::env::remove_var("TZ");
+        }
+    }
 }
 
 /// A timestamp at local noon for `YYYY-MM-DD`, stable across timezones within
@@ -165,7 +183,7 @@ fn engine_usage_data(msgs: &[UnifiedMessage], group_by: GroupBy) -> UsageData {
 #[test]
 #[serial]
 fn parity_graph_result() {
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = corpus();
 
     // Primitive composition — exactly the graph assembly the engine must
@@ -214,7 +232,7 @@ fn parity_graph_result() {
 #[test]
 #[serial]
 fn entrypoint_model_report_matches_engine_all_group_by() {
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = corpus();
     for gb in [
         GroupBy::Model,
@@ -247,7 +265,7 @@ fn entrypoint_model_report_matches_engine_all_group_by() {
 #[test]
 #[serial]
 fn entrypoint_monthly_report_matches_engine() {
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = corpus();
 
     let expected = crate::monthly_report_from_messages_pub(msgs.clone());
@@ -274,7 +292,7 @@ fn entrypoint_monthly_report_matches_engine() {
 #[test]
 #[serial]
 fn entrypoint_hourly_report_matches_engine() {
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = corpus();
 
     let expected = crate::hourly_report_from_messages_pub(msgs.clone());
@@ -299,7 +317,7 @@ fn entrypoint_hourly_report_matches_engine() {
 #[test]
 #[serial]
 fn parity_time_metrics() {
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = corpus();
 
     let intervals = sessionize::sessionize(&msgs, sessionize::DEFAULT_IDLE_GAP_MS);
@@ -353,7 +371,7 @@ fn parity_session_contributions() {
 #[test]
 #[serial]
 fn contract_tui_view_materializes_usage_data() {
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = corpus();
     let mut engine = AggregationEngine::new(AggregationConfig {
         group_by: GroupBy::Model,
@@ -390,7 +408,7 @@ fn contract_tui_view_materializes_usage_data() {
 #[test]
 #[serial]
 fn contract_tui_workspace_provider_daily_and_streaks() {
-    pin_tz();
+    let _tz = pin_tz();
     let today = chrono::Local::now().date_naive();
     let yesterday = today - chrono::Duration::days(1);
     let two_days_ago = today - chrono::Duration::days(2);
@@ -471,7 +489,7 @@ fn contract_tui_workspace_provider_daily_and_streaks() {
 #[test]
 #[serial]
 fn contract_tui_hourly_timestamp_zero_fallback_bucket() {
-    pin_tz();
+    let _tz = pin_tz();
     let mut zero = msg(
         "claude",
         "claude-sonnet-4",
@@ -621,7 +639,7 @@ fn contract_model_entry_equal_cost_tie_break() {
 #[serial]
 fn contract_hourly_full_key_asc() {
     // lib.rs:2375 — hourly entries sort by the full "YYYY-MM-DD HH:00" key ASC.
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = vec![
         UnifiedMessage::new(
             "c",
@@ -664,7 +682,7 @@ fn contract_hourly_full_key_asc() {
 #[serial]
 fn contract_hourly_timestamp_zero_fallback_bucket() {
     // lib.rs:2321 — a timestamp<=0 message lands in "{date} 00:00".
-    pin_tz();
+    let _tz = pin_tz();
     let mut zero = UnifiedMessage::new(
         "c",
         "m",
@@ -690,7 +708,7 @@ fn contract_hourly_timestamp_zero_fallback_bucket() {
 #[serial]
 fn contract_monthly_month_asc() {
     // lib.rs:2257 — monthly entries sort by month ASC.
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = vec![
         UnifiedMessage::new(
             "c",
@@ -733,7 +751,7 @@ fn contract_monthly_month_asc() {
 #[serial]
 fn contract_monthly_models_sorted() {
     // MonthlyUsage.models is an unsorted HashSet->Vec today; C1.5 will sort it.
-    pin_tz();
+    let _tz = pin_tz();
     let msgs = vec![
         UnifiedMessage::new(
             "c",
