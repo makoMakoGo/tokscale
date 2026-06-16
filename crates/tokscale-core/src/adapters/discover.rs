@@ -74,11 +74,7 @@ pub(crate) fn source_units_from_paths(
     for path in paths {
         let key = canonical_key(&path);
         if seen.insert(key) {
-            units.push(match fingerprint_policy {
-                FingerprintPolicy::PlainFile => SourceUnit::plain_file(client, path),
-                FingerprintPolicy::SqliteWithWal => SourceUnit::sqlite_with_wal(client, path),
-                FingerprintPolicy::None => SourceUnit::no_cache(client, path),
-            });
+            units.push(source_unit_for_policy(client, path, &fingerprint_policy));
         }
     }
 
@@ -97,11 +93,7 @@ pub(crate) fn source_units_from_paths_preserving_order(
     for path in paths {
         let key = canonical_key(&path);
         if seen.insert(key) {
-            units.push(match fingerprint_policy {
-                FingerprintPolicy::PlainFile => SourceUnit::plain_file(client, path),
-                FingerprintPolicy::SqliteWithWal => SourceUnit::sqlite_with_wal(client, path),
-                FingerprintPolicy::None => SourceUnit::no_cache(client, path),
-            });
+            units.push(source_unit_for_policy(client, path, &fingerprint_policy));
         }
     }
 
@@ -116,4 +108,19 @@ pub(crate) fn push_existing_file(path: PathBuf, paths: &mut Vec<PathBuf>) {
 
 fn canonical_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn source_unit_for_policy(
+    client: ClientId,
+    path: PathBuf,
+    fingerprint_policy: &FingerprintPolicy,
+) -> SourceUnit {
+    match fingerprint_policy {
+        FingerprintPolicy::PlainFile => SourceUnit::plain_file(client, path),
+        FingerprintPolicy::SqliteWithWal => SourceUnit::sqlite_with_wal(client, path),
+        FingerprintPolicy::ClaudeCodeWithHome { home_dir } => {
+            SourceUnit::claude_code(client, path, home_dir.clone())
+        }
+        FingerprintPolicy::None => SourceUnit::no_cache(client, path),
+    }
 }

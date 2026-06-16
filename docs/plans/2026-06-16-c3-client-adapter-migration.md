@@ -376,6 +376,13 @@ sessions::claudecode::parse_claude_file_with_cache_and_home(...)
 
 Fold dedupes across units by `dedup_key`, matching the current driver.
 
+Implementation note for the C3.4 PR: Claude is adapter-backed. Claude source
+units use `FingerprintPolicy::ClaudeCodeWithHome`, so cache invalidation and
+`compute_source_digest` include sibling `.meta.json` files and cc-mirror
+`variant.json` metadata. The adapter owns default project discovery,
+`.claude/transcripts`, cc-mirror project roots, configured extras, cache
+resolution, and cross-unit `dedup_key` filtering.
+
 ## C3.5 - Codex Adapter Last
 
 Codex is last because it owns the incremental append state machine and headless

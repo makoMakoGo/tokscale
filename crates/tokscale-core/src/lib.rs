@@ -802,9 +802,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    /// Where a source's messages come from. Cache hits defer the move out of
-    /// the store to the serial fold (`resolve_messages`), so hit messages are
-    /// never cloned (ADR 0008).
     #[derive(Debug)]
     struct CodexAppendSource {
         path: PathBuf,
@@ -818,8 +815,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
     #[derive(Debug)]
     enum ParsedSource {
-        /// Fingerprint matched; messages still live in the cache store.
-        CacheHit(PathBuf),
         /// Codex fingerprint match; finalization parameters captured for the
         /// serial fold.
         CodexCacheHit {
@@ -854,11 +849,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     ) {
         match source {
             ParsedSource::Fresh(messages) => (messages, None),
-            ParsedSource::CacheHit(path) => {
-                let mut messages = source_cache.take_messages(&path).unwrap_or_default();
-                apply_pricing_to_messages(&mut messages, pricing);
-                (messages, None)
-            }
             ParsedSource::CodexCacheHit {
                 path,
                 is_headless,
@@ -1019,78 +1009,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         ))
     }
 
-    fn load_or_parse_source_with_fingerprint_and_policy<F, FingerprintFn>(
-        path: &Path,
-        source_cache: &message_cache::SourceMessageCache,
-        pricing: Option<&pricing::PricingService>,
-        fingerprint_from_path: FingerprintFn,
-        parse: F,
-    ) -> CachedParseOutcome
-    where
-        F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
-        FingerprintFn: Fn(&Path) -> Option<message_cache::SourceFingerprint>,
-    {
-        let Some(fingerprint) = fingerprint_from_path(path) else {
-            let (mut messages, _) = parse(path);
-            apply_pricing_to_messages(&mut messages, pricing);
-            return CachedParseOutcome {
-                messages: ParsedSource::Fresh(messages),
-                cache_entry: None,
-                invalidate_cache: false,
-            };
-        };
-
-        if let Some(cached) = source_cache.get(path) {
-            if cached.fingerprint == fingerprint && !cached.messages.is_empty() {
-                return CachedParseOutcome {
-                    messages: ParsedSource::CacheHit(path.to_path_buf()),
-                    cache_entry: None,
-                    invalidate_cache: false,
-                };
-            }
-        }
-
-        let (mut messages, cacheable) = parse(path);
-        let cache_entry = if messages.is_empty() || !cacheable {
-            None
-        } else {
-            Some(message_cache::CachedSourceEntry::new(
-                path,
-                fingerprint,
-                messages.clone(),
-                Vec::new(),
-                None,
-            ))
-        };
-        apply_pricing_to_messages(&mut messages, pricing);
-
-        CachedParseOutcome {
-            messages: ParsedSource::Fresh(messages),
-            cache_entry,
-            invalidate_cache: !cacheable,
-        }
-    }
-
-    fn load_or_parse_source_with_fingerprint<F, FingerprintFn>(
-        path: &Path,
-        source_cache: &message_cache::SourceMessageCache,
-        pricing: Option<&pricing::PricingService>,
-        fingerprint_from_path: FingerprintFn,
-        parse: F,
-    ) -> CachedParseOutcome
-    where
-        F: Fn(&Path) -> Vec<UnifiedMessage>,
-        FingerprintFn: Fn(&Path) -> Option<message_cache::SourceFingerprint>,
-    {
-        load_or_parse_source_with_fingerprint_and_policy(
-            path,
-            source_cache,
-            pricing,
-            fingerprint_from_path,
-            |path| (parse(path), true),
-        )
-    }
-
     fn load_or_parse_codex_source(
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
@@ -1196,39 +1114,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     source_cache.prune_missing_files();
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
-
-    let claude_home = PathBuf::from(home_dir);
-    let claude_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Claude)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source_with_fingerprint(
-                path,
-                &source_cache,
-                pricing,
-                |path| {
-                    message_cache::SourceFingerprint::from_claude_code_path_with_home(
-                        path,
-                        Some(&claude_home),
-                    )
-                },
-                |path| sessions::claudecode::parse_claude_file_with_home(path, Some(&claude_home)),
-            )
-        })
-        .collect();
-    let mut seen_keys: HashSet<u64> = HashSet::new();
-    for outcome in claude_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(
-            messages
-                .into_iter()
-                .filter(|msg| msg.dedup_key.is_none_or(|key| seen_keys.insert(key))),
-        );
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
 
     let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Codex)
@@ -1870,33 +1755,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     let mut messages: Vec<ParsedMessage> = Vec::new();
     let mut counts = ClientCounts::new();
-
-    let claude_home = PathBuf::from(&home_dir);
-    let claude_msgs_raw: Vec<(Option<u64>, ParsedMessage)> = scan_result
-        .get(ClientId::Claude)
-        .par_iter()
-        .map_init(std::collections::HashMap::new, |parent_cache, path| {
-            sessions::claudecode::parse_claude_file_with_cache_and_home(
-                path,
-                parent_cache,
-                Some(&claude_home),
-            )
-            .into_iter()
-            .map(|msg| (msg.dedup_key, unified_to_parsed(&msg)))
-            .collect::<Vec<_>>()
-        })
-        .flatten()
-        .collect();
-
-    let mut seen_keys: HashSet<u64> = HashSet::new();
-    let claude_msgs: Vec<ParsedMessage> = claude_msgs_raw
-        .into_iter()
-        .filter(|(key, _)| key.is_none_or(|key| seen_keys.insert(key)))
-        .map(|(_, msg)| msg)
-        .collect();
-    let claude_count = claude_msgs.len() as i32;
-    counts.set(ClientId::Claude, claude_count);
-    messages.extend(claude_msgs);
 
     let codex_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Codex)
