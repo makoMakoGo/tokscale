@@ -134,11 +134,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("pi.jsonl");
         write_file(&path, PI_CONTENT);
-        let units = vec![SourceUnit {
-            client: ClientId::Pi,
-            path: path.clone(),
-            fingerprint_policy: FingerprintPolicy::PlainFile,
-        }];
+        let units = vec![SourceUnit::plain_file(ClientId::Pi, path.clone())];
         let mut cache = message_cache::SourceMessageCache::default();
 
         let actual = fold_with_adapter(&PI_ADAPTER, units, &mut cache);
@@ -153,11 +149,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("pi.jsonl");
         write_file(&path, PI_CONTENT);
-        let units = vec![SourceUnit {
-            client: ClientId::Pi,
-            path: path.clone(),
-            fingerprint_policy: FingerprintPolicy::PlainFile,
-        }];
+        let units = vec![SourceUnit::plain_file(ClientId::Pi, path.clone())];
         let mut cache = message_cache::SourceMessageCache::default();
 
         let first = fold_with_adapter(&PI_ADAPTER, units.clone(), &mut cache);
@@ -189,11 +181,7 @@ mod tests {
     #[test]
     fn source_unit_plain_file_digest_is_just_path() {
         let path = PathBuf::from("/tmp/pi.jsonl");
-        let unit = SourceUnit {
-            client: ClientId::Pi,
-            path: path.clone(),
-            fingerprint_policy: FingerprintPolicy::PlainFile,
-        };
+        let unit = SourceUnit::plain_file(ClientId::Pi, path.clone());
 
         assert_eq!(unit.digest_paths(), vec![path]);
     }

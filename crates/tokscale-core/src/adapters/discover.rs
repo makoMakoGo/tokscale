@@ -74,10 +74,10 @@ pub(crate) fn source_units_from_paths(
     for path in paths {
         let key = canonical_key(&path);
         if seen.insert(key) {
-            units.push(SourceUnit {
-                client,
-                path,
-                fingerprint_policy,
+            units.push(match fingerprint_policy {
+                FingerprintPolicy::PlainFile => SourceUnit::plain_file(client, path),
+                FingerprintPolicy::SqliteWithWal => SourceUnit::sqlite_with_wal(client, path),
+                FingerprintPolicy::None => SourceUnit::no_cache(client, path),
             });
         }
     }

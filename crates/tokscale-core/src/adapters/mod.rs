@@ -1,5 +1,6 @@
 pub(crate) mod cache;
 pub(crate) mod discover;
+pub(crate) mod file;
 
 mod omp;
 mod pi;
@@ -61,6 +62,30 @@ pub(crate) struct SourceUnit {
 }
 
 impl SourceUnit {
+    pub(crate) fn plain_file(client: ClientId, path: PathBuf) -> Self {
+        Self {
+            client,
+            path,
+            fingerprint_policy: FingerprintPolicy::PlainFile,
+        }
+    }
+
+    pub(crate) fn sqlite_with_wal(client: ClientId, path: PathBuf) -> Self {
+        Self {
+            client,
+            path,
+            fingerprint_policy: FingerprintPolicy::SqliteWithWal,
+        }
+    }
+
+    pub(crate) fn no_cache(client: ClientId, path: PathBuf) -> Self {
+        Self {
+            client,
+            path,
+            fingerprint_policy: FingerprintPolicy::None,
+        }
+    }
+
     pub(crate) fn digest_paths(&self) -> Vec<PathBuf> {
         match self.fingerprint_policy {
             FingerprintPolicy::SqliteWithWal => {
@@ -93,23 +118,36 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static C2_ADAPTERS: [&dyn LocalSourceAdapter; 3] =
-    [&zed::ZED_ADAPTER, &pi::PI_ADAPTER, &omp::OMP_ADAPTER];
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 13] = [
+    &zed::ZED_ADAPTER,
+    &pi::PI_ADAPTER,
+    &omp::OMP_ADAPTER,
+    &file::COPILOT_ADAPTER,
+    &file::CURSOR_ADAPTER,
+    &file::GEMINI_ADAPTER,
+    &file::GROK_ADAPTER,
+    &file::WARP_ADAPTER,
+    &file::AMP_ADAPTER,
+    &file::DROID_ADAPTER,
+    &file::KIMI_ADAPTER,
+    &file::QWEN_ADAPTER,
+    &file::MUX_ADAPTER,
+];
 
-pub(crate) fn c2_adapters() -> &'static [&'static dyn LocalSourceAdapter] {
-    &C2_ADAPTERS
+pub(crate) fn local_source_adapters() -> &'static [&'static dyn LocalSourceAdapter] {
+    &LOCAL_SOURCE_ADAPTERS
 }
 
 #[allow(dead_code)]
 pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalSourceAdapter> {
-    c2_adapters()
+    local_source_adapters()
         .iter()
         .copied()
         .find(|adapter| adapter.client() == client)
 }
 
 pub(crate) fn adapter_clients() -> HashSet<ClientId> {
-    c2_adapters()
+    local_source_adapters()
         .iter()
         .map(|adapter| adapter.client())
         .collect()
@@ -118,7 +156,7 @@ pub(crate) fn adapter_clients() -> HashSet<ClientId> {
 pub(crate) fn selected_adapters(clients: &[String]) -> Vec<&'static dyn LocalSourceAdapter> {
     let include_all = clients.is_empty();
     let requested = requested_client_ids(clients);
-    c2_adapters()
+    local_source_adapters()
         .iter()
         .copied()
         .filter(|adapter| include_all || requested.contains(&adapter.client()))
