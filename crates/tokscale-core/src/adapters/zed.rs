@@ -30,20 +30,24 @@ impl LocalSourceAdapter for ZedAdapter {
         );
 
         #[cfg(target_os = "macos")]
-        adapter_discover::push_existing_file(
-            PathBuf::from(format!(
-                "{}/Library/Application Support/Zed/threads/threads.db",
-                ctx.home_dir
-            )),
-            &mut paths,
-        );
-
-        #[cfg(target_os = "windows")]
-        if let Some(local_app_data) = dirs::data_local_dir() {
+        if paths.is_empty() {
             adapter_discover::push_existing_file(
-                local_app_data.join("Zed/threads/threads.db"),
+                PathBuf::from(format!(
+                    "{}/Library/Application Support/Zed/threads/threads.db",
+                    ctx.home_dir
+                )),
                 &mut paths,
             );
+        }
+
+        #[cfg(target_os = "windows")]
+        if paths.is_empty() {
+            if let Some(local_app_data) = dirs::data_local_dir() {
+                adapter_discover::push_existing_file(
+                    local_app_data.join("Zed/threads/threads.db"),
+                    &mut paths,
+                );
+            }
         }
 
         paths.extend(adapter_discover::scan_roots(

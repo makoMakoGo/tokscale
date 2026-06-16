@@ -2825,6 +2825,9 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(grok_msgs);
 
     let mut adapter_messages = Vec::new();
+    // parse_local_clients historically parsed directly without the persisted
+    // source-message cache; keep that non-cached count path while reusing the
+    // adapter fold contract.
     let mut adapter_source_cache = message_cache::SourceMessageCache::default();
     let scan_ctx = adapters::AdapterScanContext {
         home_dir: &home_dir,
