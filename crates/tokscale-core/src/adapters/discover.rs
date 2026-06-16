@@ -86,6 +86,28 @@ pub(crate) fn source_units_from_paths(
     units
 }
 
+pub(crate) fn source_units_from_paths_preserving_order(
+    client: ClientId,
+    paths: Vec<PathBuf>,
+    fingerprint_policy: FingerprintPolicy,
+) -> Vec<SourceUnit> {
+    let mut seen = HashSet::new();
+    let mut units = Vec::new();
+
+    for path in paths {
+        let key = canonical_key(&path);
+        if seen.insert(key) {
+            units.push(match fingerprint_policy {
+                FingerprintPolicy::PlainFile => SourceUnit::plain_file(client, path),
+                FingerprintPolicy::SqliteWithWal => SourceUnit::sqlite_with_wal(client, path),
+                FingerprintPolicy::None => SourceUnit::no_cache(client, path),
+            });
+        }
+    }
+
+    units
+}
+
 pub(crate) fn push_existing_file(path: PathBuf, paths: &mut Vec<PathBuf>) {
     if path.is_file() {
         paths.push(path);

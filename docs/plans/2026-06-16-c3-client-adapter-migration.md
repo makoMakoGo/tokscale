@@ -337,6 +337,13 @@ JSON:
 - use `SqliteWithWal` for SQLite and `PlainFile` for JSON
 - keep current pricing behavior
 
+Implementation note for the C3.3 PR: Kilo, Hermes, Goose, Kiro, Crush, and
+OpenCode are adapter-backed. Kilo, Hermes, Goose, Kiro SQLite, and Crush keep
+their current non-persistent parse behavior, but their SQLite source units use
+`SqliteWithWal` so `compute_source_digest` still observes WAL changes. OpenCode
+keeps cache semantics for SQLite and legacy JSON units, and its fold runs DB
+units before JSON units so legacy JSON overlap is suppressed by the DB source.
+
 ## C3.4 - Claude Adapter
 
 Claude is separate because it has sidecar fingerprints, cc-mirror variant files,

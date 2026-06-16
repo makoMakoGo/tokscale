@@ -106,7 +106,10 @@ pub(crate) fn fold_units(
     }
 }
 
-fn resolve_messages(source: UnitMessageSource, ctx: &mut FoldContext<'_>) -> Vec<UnifiedMessage> {
+pub(crate) fn resolve_messages(
+    source: UnitMessageSource,
+    ctx: &mut FoldContext<'_>,
+) -> Vec<UnifiedMessage> {
     match source {
         UnitMessageSource::Fresh(messages) => messages,
         UnitMessageSource::CacheHit(path) => {

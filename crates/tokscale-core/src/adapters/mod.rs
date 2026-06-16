@@ -1,9 +1,15 @@
 pub(crate) mod cache;
 mod codebuff;
+mod crush;
 pub(crate) mod discover;
 pub(crate) mod file;
 mod gjc;
+mod goose;
+mod hermes;
+mod kilo;
+mod kiro;
 mod openclaw;
+mod opencode;
 
 mod omp;
 mod pi;
@@ -64,6 +70,7 @@ pub(crate) struct SourceUnit {
     pub client: ClientId,
     pub path: PathBuf,
     pub fingerprint_policy: FingerprintPolicy,
+    pub meta: SourceUnitMeta,
 }
 
 impl SourceUnit {
@@ -72,6 +79,7 @@ impl SourceUnit {
             client,
             path,
             fingerprint_policy: FingerprintPolicy::PlainFile,
+            meta: SourceUnitMeta::None,
         }
     }
 
@@ -80,6 +88,7 @@ impl SourceUnit {
             client,
             path,
             fingerprint_policy: FingerprintPolicy::SqliteWithWal,
+            meta: SourceUnitMeta::None,
         }
     }
 
@@ -88,7 +97,13 @@ impl SourceUnit {
             client,
             path,
             fingerprint_policy: FingerprintPolicy::None,
+            meta: SourceUnitMeta::None,
         }
+    }
+
+    pub(crate) fn with_meta(mut self, meta: SourceUnitMeta) -> Self {
+        self.meta = meta;
+        self
     }
 
     pub(crate) fn digest_paths(&self) -> Vec<PathBuf> {
@@ -99,6 +114,20 @@ impl SourceUnit {
             FingerprintPolicy::PlainFile | FingerprintPolicy::None => vec![self.path.clone()],
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) enum SourceUnitMeta {
+    #[default]
+    None,
+    Crush {
+        workspace_key: Option<String>,
+        workspace_label: Option<String>,
+    },
+    OpenCodeSqlite,
+    OpenCodeJson,
+    KiroFile,
+    KiroSqlite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,10 +152,11 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 21] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 27] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
+    &opencode::OPENCODE_ADAPTER,
     &file::COPILOT_ADAPTER,
     &file::CURSOR_ADAPTER,
     &file::GEMINI_ADAPTER,
@@ -145,6 +175,11 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 21] = [
     &vscode_tasks::CLINE_ADAPTER,
     &file::ANTIGRAVITY_ADAPTER,
     &trae::TRAE_ADAPTER,
+    &kilo::KILO_ADAPTER,
+    &hermes::HERMES_ADAPTER,
+    &goose::GOOSE_ADAPTER,
+    &kiro::KIRO_ADAPTER,
+    &crush::CRUSH_ADAPTER,
 ];
 
 pub(crate) fn local_source_adapters() -> &'static [&'static dyn LocalSourceAdapter] {
