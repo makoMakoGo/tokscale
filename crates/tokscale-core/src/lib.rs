@@ -17,6 +17,9 @@ pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
 
+pub mod aggregate;
+
+pub use aggregate::{AggregatedViews, AggregationConfig, DateRange, ViewSet};
 pub use aggregator::*;
 pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
 pub use parser::*;
