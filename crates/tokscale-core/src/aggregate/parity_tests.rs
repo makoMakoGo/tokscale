@@ -1,7 +1,7 @@
-//! Cross-path parity harness: the OLD aggregator paths vs the NEW
-//! `AggregationEngine`, over identical inputs, must produce byte-identical
-//! serialized reports (with non-deterministic fields neutralized). Green here
-//! is the gate for every deletion in C1.6-C1.9.
+//! Aggregation engine contract tests. The graph/session legs still compare the
+//! engine against the existing primitive composition; reports whose old folds
+//! have been deleted now exercise the message-list entrypoints and the engine
+//! interface to keep ordering and serialization contracts pinned.
 
 #![cfg(test)]
 
@@ -121,9 +121,9 @@ fn corpus() -> Vec<UnifiedMessage> {
     msgs
 }
 
-// ---- OLD-path runners (mirror the live aggregators minus parse/pricing) ----
+// ---- Message-list runners (production shape without parse/pricing) ----
 
-fn old_model_report(msgs: &[UnifiedMessage], gb: &GroupBy) -> ModelReport {
+fn model_report_from_entrypoint(msgs: &[UnifiedMessage], gb: &GroupBy) -> ModelReport {
     let entries = crate::aggregate_model_usage_entries_pub(msgs.to_vec(), gb);
     let total_input: i64 = entries.iter().map(|e| e.input).sum();
     let total_output: i64 = entries.iter().map(|e| e.output).sum();
@@ -155,8 +155,9 @@ fn parity_graph_result() {
     pin_tz();
     let msgs = corpus();
 
-    // OLD path — exactly what generate_graph_with_loaded_pricing runs.
-    let mut old = {
+    // Primitive composition — exactly the graph assembly the engine must
+    // preserve while hiding it behind `push`/`finish`.
+    let mut expected = {
         let intervals = sessionize::sessionize(&msgs, sessionize::DEFAULT_IDLE_GAP_MS);
         let tm = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
         let dat = sessionize::compute_daily_active_time(&intervals);
@@ -171,8 +172,8 @@ fn parity_graph_result() {
         r
     };
 
-    // NEW path.
-    let mut new = {
+    // Engine view.
+    let mut actual = {
         let mut e = AggregationEngine::new(AggregationConfig {
             group_by: GroupBy::ClientModel,
             date_range: DateRange::none(),
@@ -185,14 +186,14 @@ fn parity_graph_result() {
     };
 
     // Neutralize non-deterministic meta.
-    old.meta.generated_at.clear();
-    new.meta.generated_at.clear();
-    old.meta.processing_time_ms = 0;
-    new.meta.processing_time_ms = 0;
+    expected.meta.generated_at.clear();
+    actual.meta.generated_at.clear();
+    expected.meta.processing_time_ms = 0;
+    actual.meta.processing_time_ms = 0;
 
     assert_eq!(
-        serde_json::to_string(&old).unwrap(),
-        serde_json::to_string(&new).unwrap(),
+        serde_json::to_string(&expected).unwrap(),
+        serde_json::to_string(&actual).unwrap(),
         "GraphResult byte parity failed",
     );
 }
@@ -210,7 +211,7 @@ fn parity_model_report_all_group_by() {
         GroupBy::Session,
         GroupBy::ClientSession,
     ] {
-        let mut old = old_model_report(&msgs, &gb);
+        let mut expected = model_report_from_entrypoint(&msgs, &gb);
         let mut e = AggregationEngine::new(AggregationConfig {
             group_by: gb.clone(),
             date_range: DateRange::none(),
@@ -219,12 +220,12 @@ fn parity_model_report_all_group_by() {
         for m in &msgs {
             e.push(m);
         }
-        let mut new = e.finish().model_report.expect("model view requested");
-        neutralize_processing_time(&mut old);
-        neutralize_processing_time(&mut new);
+        let mut actual = e.finish().model_report.expect("model view requested");
+        neutralize_processing_time(&mut expected);
+        neutralize_processing_time(&mut actual);
         assert_eq!(
-            serde_json::to_string(&old).unwrap(),
-            serde_json::to_string(&new).unwrap(),
+            serde_json::to_string(&expected).unwrap(),
+            serde_json::to_string(&actual).unwrap(),
             "ModelReport parity failed for {gb:?}",
         );
     }
@@ -236,11 +237,9 @@ fn parity_monthly_report() {
     pin_tz();
     let msgs = corpus();
 
-    // OLD path.
-    let old = crate::monthly_report_from_messages_pub(msgs.clone());
+    let expected = crate::monthly_report_from_messages_pub(msgs.clone());
 
-    // NEW path.
-    let new = {
+    let actual = {
         let mut e = AggregationEngine::new(AggregationConfig {
             group_by: GroupBy::ClientModel,
             date_range: DateRange::none(),
@@ -253,8 +252,8 @@ fn parity_monthly_report() {
     };
 
     assert_eq!(
-        serde_json::to_string(&old).unwrap(),
-        serde_json::to_string(&new).unwrap(),
+        serde_json::to_string(&expected).unwrap(),
+        serde_json::to_string(&actual).unwrap(),
         "MonthlyReport byte parity failed",
     );
 }
@@ -265,8 +264,8 @@ fn parity_hourly_report() {
     pin_tz();
     let msgs = corpus();
 
-    let old = crate::hourly_report_from_messages_pub(msgs.clone());
-    let new = {
+    let expected = crate::hourly_report_from_messages_pub(msgs.clone());
+    let actual = {
         let mut e = AggregationEngine::new(AggregationConfig {
             group_by: GroupBy::ClientModel,
             date_range: DateRange::none(),
@@ -278,8 +277,8 @@ fn parity_hourly_report() {
         e.finish().hourly_report.expect("hourly view requested")
     };
     assert_eq!(
-        serde_json::to_string(&old).unwrap(),
-        serde_json::to_string(&new).unwrap(),
+        serde_json::to_string(&expected).unwrap(),
+        serde_json::to_string(&actual).unwrap(),
         "HourlyReport byte parity failed",
     );
 }
@@ -336,6 +335,43 @@ fn parity_session_contributions() {
     };
     // SessionContribution derives PartialEq.
     assert_eq!(old, new, "SessionContribution parity failed");
+}
+
+#[test]
+#[serial]
+fn contract_tui_view_materializes_usage_data() {
+    pin_tz();
+    let msgs = corpus();
+    let mut engine = AggregationEngine::new(AggregationConfig {
+        group_by: GroupBy::Model,
+        date_range: DateRange::none(),
+        views: ViewSet::TUI,
+    });
+    for msg in &msgs {
+        engine.push(msg);
+    }
+
+    let data = engine.finish().tui_usage.expect("tui view requested");
+    assert!(!data.models.is_empty(), "TUI models should be materialized");
+    assert!(
+        !data.daily.is_empty(),
+        "TUI daily usage should be materialized"
+    );
+    assert!(
+        !data.hourly.is_empty(),
+        "TUI hourly usage should be materialized"
+    );
+    assert!(data.graph.is_some(), "TUI graph should be materialized");
+    assert_eq!(
+        data.total_tokens,
+        data.models
+            .iter()
+            .map(|model| model.tokens.total())
+            .sum::<u64>(),
+        "TUI total tokens should derive from finished model entries",
+    );
+    assert!(!data.loading);
+    assert!(data.error.is_none());
 }
 
 // ===========================================================================

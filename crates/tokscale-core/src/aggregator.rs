@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Aggregate messages into daily contributions
-pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
+pub(crate) fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
     if messages.is_empty() {
         return Vec::new();
     }
@@ -63,7 +63,7 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
 /// single session and exposes the same client/model breakdown shape as
 /// [`aggregate_by_date`].  Sessions are sorted by `last_seen` descending so the
 /// most recently active sessions appear first.
-pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
+pub(crate) fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
     if messages.is_empty() {
         return Vec::new();
     }
@@ -187,7 +187,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
 }
 
 /// Generate complete graph result
-pub fn generate_graph_result(
+pub(crate) fn generate_graph_result(
     contributions: Vec<DailyContribution>,
     processing_time_ms: u32,
 ) -> GraphResult {

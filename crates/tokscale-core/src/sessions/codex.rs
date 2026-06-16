@@ -526,7 +526,7 @@ fn parse_codex_reader<R: BufRead>(
                         "codex",
                         model.clone().unwrap_or_else(|| "unknown".to_string()),
                         provider,
-                        session_id.to_string(),
+                        session_id,
                         timestamp,
                         tokens,
                         0.0,
@@ -602,13 +602,15 @@ fn parse_codex_reader<R: BufRead>(
 
         let headless_message = parse_codex_headless_line(
             trimmed,
-            session_id,
+            CodexHeadlessContext {
+                session_id,
+                fallback_timestamp,
+                session_provider: state.session_provider.as_deref(),
+                session_agent: &state.session_agent,
+                session_agent_instance: &state.session_agent_instance,
+                session_is_headless: state.session_is_headless,
+            },
             &mut state.current_model,
-            fallback_timestamp,
-            state.session_provider.as_deref(),
-            &state.session_agent,
-            &state.session_agent_instance,
-            state.session_is_headless,
         );
         if !pending_model_messages.is_empty() {
             if let Some(model) = state.current_model.clone() {
@@ -981,15 +983,19 @@ struct CodexHeadlessUsage {
     timestamp_ms: Option<i64>,
 }
 
+struct CodexHeadlessContext<'a> {
+    session_id: &'a str,
+    fallback_timestamp: i64,
+    session_provider: Option<&'a str>,
+    session_agent: &'a Option<String>,
+    session_agent_instance: &'a Option<String>,
+    session_is_headless: bool,
+}
+
 fn parse_codex_headless_line(
     line: &str,
-    session_id: &str,
+    context: CodexHeadlessContext<'_>,
     current_model: &mut Option<String>,
-    fallback_timestamp: i64,
-    session_provider: Option<&str>,
-    session_agent: &Option<String>,
-    session_agent_instance: &Option<String>,
-    session_is_headless: bool,
 ) -> Option<(UnifiedMessage, bool)> {
     let mut bytes = line.as_bytes().to_vec();
     let value: Value = simd_json::from_slice(&mut bytes).ok()?;
@@ -1003,18 +1009,18 @@ fn parse_codex_headless_line(
         .model
         .or_else(|| current_model.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let timestamp = usage.timestamp_ms.unwrap_or(fallback_timestamp);
+    let timestamp = usage.timestamp_ms.unwrap_or(context.fallback_timestamp);
 
     if usage.input == 0 && usage.output == 0 && usage.cached == 0 {
         return None;
     }
 
-    let provider = session_provider.unwrap_or("openai");
+    let provider = context.session_provider.unwrap_or("openai");
     let mut message = UnifiedMessage::new_with_agent(
         "codex",
         model,
         provider,
-        session_id.to_string(),
+        context.session_id,
         timestamp,
         TokenBreakdown {
             input: usage.input.max(0),
@@ -1024,13 +1030,13 @@ fn parse_codex_headless_line(
             reasoning: 0,
         },
         0.0,
-        if session_is_headless {
+        if context.session_is_headless {
             Some("Codex Headless".to_string())
         } else {
-            session_agent.clone()
+            context.session_agent.clone()
         },
     );
-    message.set_agent_instance(session_agent_instance.clone());
+    message.set_agent_instance(context.session_agent_instance.clone());
 
     Some((message, usage.timestamp_ms.is_none()))
 }

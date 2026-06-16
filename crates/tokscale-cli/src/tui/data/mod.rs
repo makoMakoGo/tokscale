@@ -200,25 +200,29 @@ impl DataLoader {
         messages: Vec<UnifiedMessage>,
         group_by: &GroupBy,
     ) -> Result<UsageData> {
-        // Delegate to the core aggregation engine (#37: single site). The
-        // 36 data-module tests exercise this entry point unchanged.
-        Ok(tokscale_core::aggregate::tui::aggregate_usage_data(
-            messages, group_by,
-        ))
+        let mut engine =
+            tokscale_core::aggregate::AggregationEngine::new(tokscale_core::AggregationConfig {
+                group_by: group_by.clone(),
+                date_range: tokscale_core::DateRange::none(),
+                views: tokscale_core::ViewSet::TUI,
+            });
+        for msg in &messages {
+            engine.push(msg);
+        }
+        Ok(engine.finish().tui_usage.expect("tui view requested"))
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap};
     use std::env;
     use std::fs;
     use tempfile::TempDir;
     use tokio::runtime::{Handle, Runtime};
     use tokscale_core::parse_local_unified_messages_with_pricing;
     use tokscale_core::pricing::{ModelPricing, PricingService};
-    use tokscale_core::sessions::{self};
     use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
 
     fn test_pricing_service() -> PricingService {

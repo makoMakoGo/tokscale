@@ -19,27 +19,27 @@ const DAY_LABELS: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatsLayoutMode {
-    GraphStats,
-    GraphStatsBreakdown,
-    GraphBreakdown,
+    StatsOnly,
+    StatsWithBreakdown,
+    BreakdownOnly,
 }
 
 fn stats_layout_mode(area_height: u16, has_selected_cell: bool) -> StatsLayoutMode {
     if !has_selected_cell {
-        return StatsLayoutMode::GraphStats;
+        return StatsLayoutMode::StatsOnly;
     }
 
     if area_height >= GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H {
-        StatsLayoutMode::GraphStatsBreakdown
+        StatsLayoutMode::StatsWithBreakdown
     } else {
-        StatsLayoutMode::GraphBreakdown
+        StatsLayoutMode::BreakdownOnly
     }
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let has_selected_cell = app.selected_graph_cell.is_some();
     match stats_layout_mode(area.height, has_selected_cell) {
-        StatsLayoutMode::GraphStatsBreakdown => {
+        StatsLayoutMode::StatsWithBreakdown => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             render_stats_panel(frame, app, chunks[1]);
             render_breakdown_panel(frame, app, chunks[2]);
         }
-        StatsLayoutMode::GraphBreakdown => {
+        StatsLayoutMode::BreakdownOnly => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -65,7 +65,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             render_graph(frame, app, chunks[0]);
             render_breakdown_panel(frame, app, chunks[1]);
         }
-        StatsLayoutMode::GraphStats => {
+        StatsLayoutMode::StatsOnly => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -210,37 +210,6 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stats_layout_without_selection_keeps_graph_fixed() {
-        assert_eq!(stats_layout_mode(24, false), StatsLayoutMode::GraphStats);
-        assert_eq!(stats_layout_mode(60, false), StatsLayoutMode::GraphStats);
-    }
-
-    #[test]
-    fn stats_layout_with_selection_keeps_all_panels_when_roomy() {
-        assert_eq!(
-            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H, true),
-            StatsLayoutMode::GraphStatsBreakdown
-        );
-        assert_eq!(
-            stats_layout_mode(60, true),
-            StatsLayoutMode::GraphStatsBreakdown
-        );
-    }
-
-    #[test]
-    fn stats_layout_with_selection_drops_stats_when_constrained() {
-        assert_eq!(
-            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H - 1, true),
-            StatsLayoutMode::GraphBreakdown
-        );
     }
 }
 
@@ -710,6 +679,37 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                 vertical: 1,
             }),
             &mut scrollbar_state,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_layout_without_selection_keeps_graph_fixed() {
+        assert_eq!(stats_layout_mode(24, false), StatsLayoutMode::StatsOnly);
+        assert_eq!(stats_layout_mode(60, false), StatsLayoutMode::StatsOnly);
+    }
+
+    #[test]
+    fn stats_layout_with_selection_keeps_all_panels_when_roomy() {
+        assert_eq!(
+            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H, true),
+            StatsLayoutMode::StatsWithBreakdown
+        );
+        assert_eq!(
+            stats_layout_mode(60, true),
+            StatsLayoutMode::StatsWithBreakdown
+        );
+    }
+
+    #[test]
+    fn stats_layout_with_selection_drops_stats_when_constrained() {
+        assert_eq!(
+            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H - 1, true),
+            StatsLayoutMode::BreakdownOnly
         );
     }
 }

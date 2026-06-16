@@ -6,17 +6,18 @@ use std::collections::HashMap;
 
 use crate::{
     aggregate::accumulators::{
-        finish_hour_map, finish_month_map, graph_result_from_messages, hour_key,
-        sessions_from_messages, HourAcc, ModelEntries, MonthAcc,
+        finish_buffered_views, finish_hour_map, finish_month_map, hour_key, HourAcc, ModelEntries,
+        MonthAcc,
     },
-    sessionize::{self},
+    aggregate::tui::TuiAcc,
     AggregatedViews, AggregationConfig, ViewSet,
 };
-use crate::{HourlyReport, ModelReport, MonthlyReport, TimeMetricsReport, UnifiedMessage};
+use crate::{HourlyReport, ModelReport, MonthlyReport, UnifiedMessage};
 
 pub struct AggregationEngine {
     config: AggregationConfig,
     model_entries: Option<ModelEntries>,
+    tui: Option<TuiAcc>,
     month_map: Option<HashMap<String, MonthAcc>>,
     hour_map: Option<HashMap<String, HourAcc>>,
     graph_buffer: Option<Vec<UnifiedMessage>>,
@@ -32,6 +33,9 @@ impl AggregationEngine {
             model_entries: views
                 .contains(ViewSet::MODEL)
                 .then(|| ModelEntries::new(config.group_by.clone())),
+            tui: views
+                .contains(ViewSet::TUI)
+                .then(|| TuiAcc::new(config.group_by.clone())),
             month_map: views.contains(ViewSet::MONTHLY).then(HashMap::new),
             hour_map: views.contains(ViewSet::HOURLY).then(HashMap::new),
             graph_buffer: graph_needed.then(Vec::new),
@@ -48,6 +52,9 @@ impl AggregationEngine {
         }
         if let Some(entries) = &mut self.model_entries {
             entries.push(msg);
+        }
+        if let Some(tui) = &mut self.tui {
+            tui.push(msg);
         }
         if let Some(month_map) = &mut self.month_map {
             if let Some(month) = MonthAcc::try_key(msg) {
@@ -67,6 +74,7 @@ impl AggregationEngine {
         let Self {
             config,
             model_entries,
+            tui,
             month_map,
             hour_map,
             graph_buffer,
@@ -76,6 +84,7 @@ impl AggregationEngine {
             let list = entries.finish();
             wrap_model_report(list)
         });
+        let tui_usage = tui.map(TuiAcc::finish);
 
         let monthly_report = month_map.map(|map| {
             let entries = finish_month_map(map);
@@ -97,42 +106,24 @@ impl AggregationEngine {
             }
         });
 
-        // Graph, sessions, and time-metrics all replay the buffered messages
-        // through the existing two-pass functions. `processing_time_ms` is the
-        // caller's responsibility (set after `finish`); 0 here.
+        // Graph, sessions, and time-metrics share the same buffered projection.
+        // `processing_time_ms` is the caller's responsibility (set after
+        // `finish`); 0 here.
         let (graph, session_contributions, time_metrics, daily_contributions) = match graph_buffer {
             Some(messages) => {
-                let intervals = sessionize::sessionize(&messages, sessionize::DEFAULT_IDLE_GAP_MS);
-                let metrics =
-                    sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
-                let graph = config
-                    .views
-                    .contains(ViewSet::GRAPH)
-                    .then(|| graph_result_from_messages(&messages, 0));
-                let sessions = config
-                    .views
-                    .contains(ViewSet::SESSIONS)
-                    .then(|| sessions_from_messages(&messages));
-                let time_metrics =
-                    config
-                        .views
-                        .contains(ViewSet::TIME_METRICS)
-                        .then_some(TimeMetricsReport {
-                            metrics,
-                            processing_time_ms: 0,
-                        });
-                let daily = config.views.contains(ViewSet::GRAPH).then(|| {
-                    graph
-                        .as_ref()
-                        .map(|g| g.contributions.clone())
-                        .unwrap_or_default()
-                });
-                (graph, sessions, time_metrics, daily)
+                let views = finish_buffered_views(&messages, config.views);
+                (
+                    views.graph,
+                    views.session_contributions,
+                    views.time_metrics,
+                    views.daily_contributions,
+                )
             }
             None => (None, None, None, None),
         };
 
         AggregatedViews {
+            tui_usage,
             model_report,
             monthly_report,
             hourly_report,

@@ -9,8 +9,9 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     aggregator, normalize_model_for_grouping, normalize_provider_for_grouping,
     ordered_clients_by_token_contribution, positive_token_total, workspace_bucket,
-    workspace_model_bucket_key, ClientContributionOrder, GraphResult, GroupBy, HourlyUsage,
-    ModelPerformance, ModelUsage, MonthlyUsage, UnifiedMessage,
+    workspace_model_bucket_key, ClientContributionOrder, DailyContribution, GraphResult, GroupBy,
+    HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
+    TimeMetricsReport, UnifiedMessage, ViewSet,
 };
 
 fn hourly_label(hour_key: &str) -> String {
@@ -322,33 +323,63 @@ pub(super) fn finish_hour_map(hour_map: HashMap<String, HourAcc>) -> Vec<HourlyU
     entries.into_iter().map(|(_, entry)| entry).collect()
 }
 
-/// Assemble a `GraphResult` from a buffered message vec — the exact sequence
-/// `generate_graph_with_loaded_pricing` runs (sessionize → time metrics →
-/// daily active time → `aggregate_by_date` → `generate_graph_result`, then the
-/// `active_time_ms` back-fill). Replays the existing functions unmodified.
-pub(super) fn graph_result_from_messages(
-    messages: &[UnifiedMessage],
-    processing_time_ms: u32,
-) -> GraphResult {
-    let intervals = crate::sessionize::sessionize(messages, crate::sessionize::DEFAULT_IDLE_GAP_MS);
-    let time_metrics =
-        crate::sessionize::compute_time_metrics(&intervals, crate::sessionize::DEFAULT_IDLE_GAP_MS);
-    let daily_active_time = crate::sessionize::compute_daily_active_time(&intervals);
-    let contributions = aggregator::aggregate_by_date(messages.to_vec());
-
-    let mut result = aggregator::generate_graph_result(contributions, processing_time_ms);
-    result.time_metrics = Some(time_metrics);
-    for contribution in &mut result.contributions {
-        if let Some(&ms) = daily_active_time.get(&contribution.date) {
-            contribution.active_time_ms = Some(ms);
-        }
-    }
-    result
+pub(super) struct BufferedViews {
+    pub(super) graph: Option<GraphResult>,
+    pub(super) session_contributions: Option<Vec<SessionContribution>>,
+    pub(super) time_metrics: Option<TimeMetricsReport>,
+    pub(super) daily_contributions: Option<Vec<DailyContribution>>,
 }
 
-/// `SessionContribution` list via the existing `aggregate_by_session`.
-pub(super) fn sessions_from_messages(
-    messages: &[UnifiedMessage],
-) -> Vec<crate::SessionContribution> {
-    aggregator::aggregate_by_session(messages.to_vec())
+/// Materialize the buffered two-pass views. Sessionize-derived metrics are
+/// computed once and reused by graph + time-metrics outputs when both are
+/// requested.
+pub(super) fn finish_buffered_views(messages: &[UnifiedMessage], views: ViewSet) -> BufferedViews {
+    let needs_session_metrics =
+        views.contains(ViewSet::GRAPH) || views.contains(ViewSet::TIME_METRICS);
+    let (time_metrics_value, daily_active_time) = if needs_session_metrics {
+        let intervals =
+            crate::sessionize::sessionize(messages, crate::sessionize::DEFAULT_IDLE_GAP_MS);
+        let metrics = crate::sessionize::compute_time_metrics(
+            &intervals,
+            crate::sessionize::DEFAULT_IDLE_GAP_MS,
+        );
+        let daily_active_time = views
+            .contains(ViewSet::GRAPH)
+            .then(|| crate::sessionize::compute_daily_active_time(&intervals));
+        (Some(metrics), daily_active_time)
+    } else {
+        (None, None)
+    };
+
+    let graph = views.contains(ViewSet::GRAPH).then(|| {
+        let contributions = aggregator::aggregate_by_date(messages.to_vec());
+        let mut result = aggregator::generate_graph_result(contributions, 0);
+        result.time_metrics = time_metrics_value.clone();
+        if let Some(daily_active_time) = &daily_active_time {
+            for contribution in &mut result.contributions {
+                if let Some(&ms) = daily_active_time.get(&contribution.date) {
+                    contribution.active_time_ms = Some(ms);
+                }
+            }
+        }
+        result
+    });
+
+    let daily_contributions = graph.as_ref().map(|graph| graph.contributions.clone());
+    let session_contributions = views
+        .contains(ViewSet::SESSIONS)
+        .then(|| aggregator::aggregate_by_session(messages.to_vec()));
+    let time_metrics = views
+        .contains(ViewSet::TIME_METRICS)
+        .then(|| TimeMetricsReport {
+            metrics: time_metrics_value.expect("time metrics requested"),
+            processing_time_ms: 0,
+        });
+
+    BufferedViews {
+        graph,
+        session_contributions,
+        time_metrics,
+        daily_contributions,
+    }
 }

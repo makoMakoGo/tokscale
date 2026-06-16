@@ -994,7 +994,7 @@ fn extract_claude_tool_result_message(
         context.client_id,
         model,
         provider_choice.id,
-        context.session_id.to_string(),
+        context.session_id,
         timestamp,
         TokenBreakdown {
             input: usage.input_tokens,
@@ -1351,7 +1351,7 @@ fn extract_claude_headless_message(
         client_id,
         model,
         provider_id,
-        session_id.to_string(),
+        session_id,
         timestamp,
         TokenBreakdown {
             input: extract_i64(usage.get("input_tokens")).unwrap_or(0).max(0),
@@ -1600,7 +1600,7 @@ fn finalize_headless_state(
         client_id,
         model,
         provider_id,
-        session_id.to_string(),
+        session_id,
         timestamp,
         TokenBreakdown {
             input: state.input.max(0),

@@ -21,7 +21,7 @@ pub mod aggregate;
 pub mod usage_views;
 
 pub use aggregate::{AggregatedViews, AggregationConfig, DateRange, ViewSet};
-pub use aggregator::*;
+pub use aggregator::{calculate_summary, calculate_years};
 pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
 pub use parser::*;
 pub use provider_identity::normalize_provider_for_grouping;
@@ -805,6 +805,17 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     /// the store to the serial fold (`resolve_messages`), so hit messages are
     /// never cloned (ADR 0008).
     #[derive(Debug)]
+    struct CodexAppendSource {
+        path: PathBuf,
+        is_headless: bool,
+        fallback_timestamp: i64,
+        tail_messages: Vec<UnifiedMessage>,
+        tail_fallback_indices: Vec<usize>,
+        fingerprint: message_cache::SourceFingerprint,
+        codex_incremental: message_cache::CodexIncrementalCache,
+    }
+
+    #[derive(Debug)]
     enum ParsedSource {
         /// Fingerprint matched; messages still live in the cache store.
         CacheHit(PathBuf),
@@ -818,15 +829,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         /// Codex append: cached prefix stays in the store; only the tail was
         /// parsed. Viability (fingerprint + incremental state) was already
         /// established on the parallel path.
-        CodexAppend {
-            path: PathBuf,
-            is_headless: bool,
-            fallback_timestamp: i64,
-            tail_messages: Vec<UnifiedMessage>,
-            tail_fallback_indices: Vec<usize>,
-            fingerprint: message_cache::SourceFingerprint,
-            codex_incremental: message_cache::CodexIncrementalCache,
-        },
+        CodexAppend(Box<CodexAppendSource>),
         /// Freshly parsed (pricing already applied).
         Fresh(Vec<UnifiedMessage>),
     }
@@ -874,15 +877,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                     None,
                 )
             }
-            ParsedSource::CodexAppend {
-                path,
-                is_headless,
-                fallback_timestamp,
-                tail_messages,
-                tail_fallback_indices,
-                fingerprint,
-                codex_incremental,
-            } => {
+            ParsedSource::CodexAppend(append) => {
+                let CodexAppendSource {
+                    path,
+                    is_headless,
+                    fallback_timestamp,
+                    tail_messages,
+                    tail_fallback_indices,
+                    fingerprint,
+                    codex_incremental,
+                } = *append;
                 let (mut raw_messages, mut fallback_timestamp_indices) = source_cache
                     .take_messages_with_fallback(&path)
                     .unwrap_or_default();
@@ -1187,7 +1191,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                             (entry_fingerprint, codex_incremental_cache)
                         {
                             return CachedParseOutcome {
-                                messages: ParsedSource::CodexAppend {
+                                messages: ParsedSource::CodexAppend(Box::new(CodexAppendSource {
                                     path: path.to_path_buf(),
                                     is_headless,
                                     fallback_timestamp,
@@ -1195,7 +1199,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                                     tail_fallback_indices: parsed.fallback_timestamp_indices,
                                     fingerprint: entry_fingerprint,
                                     codex_incremental: codex_incremental_cache,
-                                },
+                                })),
                                 cache_entry: None,
                                 invalidate_cache: false,
                             };
@@ -2005,17 +2009,14 @@ pub(crate) fn workspace_model_bucket_key(workspace_group_key: &str, model: &str)
 }
 
 /// Test-only entry point: delegates to the aggregation engine. Kept as the
-/// stable name the 17 model-grouping unit tests call (now driving the engine,
-/// which the C1.3 parity harness proved byte-identical to the old fold).
+/// stable name the model-grouping unit tests call.
 #[cfg(test)]
 fn aggregate_model_usage_entries(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
 ) -> Vec<ModelUsage> {
     // Delegate to the aggregation engine (the single source of truth for the
-    // model fold). The unit tests below exercise this entry point; they now
-    // drive the engine, which the C1.3 parity harness proves byte-identical to
-    // the old inline implementation. The old fold body is gone (#33: one copy).
+    // model fold). The old inline implementation is gone (#33: one copy).
     let mut engine =
         crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
             group_by: group_by.clone(),
@@ -2187,9 +2188,8 @@ async fn generate_graph_with_loaded_pricing(
     for msg in &all_messages {
         engine.push(msg);
     }
-    let processing_time_ms = start.elapsed().as_millis() as u32;
     let mut result = engine.finish().graph.expect("graph view requested");
-    result.meta.processing_time_ms = processing_time_ms;
+    result.meta.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(result)
 }
 
@@ -2247,9 +2247,8 @@ pub async fn generate_local_graph_report(options: ReportOptions) -> Result<Graph
 }
 
 // Test-only thin wrappers exposing the live aggregation logic with a message
-// list as input, so the aggregate::parity_tests harness can drive the OLD path
-// identically to AggregationEngine's NEW path. They are NOT part of the public
-// API and are removed together with their private callees in C1.6/C1.8.
+// list as input, so aggregate::parity_tests can exercise the same entrypoint
+// shape as production without parse/pricing setup. They are not public API.
 #[cfg(test)]
 pub(crate) fn aggregate_model_usage_entries_pub(
     messages: Vec<UnifiedMessage>,

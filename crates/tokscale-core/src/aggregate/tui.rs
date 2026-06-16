@@ -1,7 +1,7 @@
 //! The TUI usage aggregation: one fold over `UnifiedMessage`s producing
 //! [`crate::usage_views::UsageData`] (models/agents/daily/hourly/graph/streaks).
-//! Ported verbatim from the CLI's `aggregate_messages`; the CLI now delegates
-//! here so there is a single aggregation site (#37).
+//! `AggregationEngine` owns this accumulator when `ViewSet::TUI` is requested;
+//! CLI code drives that engine instead of carrying its own fold (#37).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -503,25 +503,41 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
         .map(|(hour, (tokens, cost))| (hour, tokens, cost))
 }
 
-/// The single TUI aggregation fold: messages -> `UsageData`.
-///
-/// One pass builds the model/agent/daily/hourly maps; a finalize pass sorts
-/// each and assembles the graph + streaks from the finished `daily` buckets.
-pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -> UsageData {
-    let mut model_map: HashMap<String, UsageModelEntry> = HashMap::new();
-    let mut agent_map: HashMap<String, AgentEntry> = HashMap::new();
-    let mut agent_clients: HashMap<String, BTreeSet<String>> = HashMap::new();
-    let mut agent_instances: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut daily_map: HashMap<NaiveDate, DailyUsage> = HashMap::new();
-    let mut hourly_map: HashMap<NaiveDateTime, HourlyUsage> = HashMap::new();
-    let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut client_totals_by_model: HashMap<String, HashMap<String, ClientContributionOrder>> =
-        HashMap::new();
+/// TUI usage accumulator owned by `AggregationEngine` when `ViewSet::TUI` is
+/// requested. `push` is the per-message fold; `finish` sorts and derives the
+/// graph + streaks from the finished daily buckets.
+pub(super) struct TuiAcc {
+    group_by: GroupBy,
+    model_map: HashMap<String, UsageModelEntry>,
+    agent_map: HashMap<String, AgentEntry>,
+    agent_clients: HashMap<String, BTreeSet<String>>,
+    agent_instances: HashMap<String, HashSet<String>>,
+    daily_map: HashMap<NaiveDate, DailyUsage>,
+    hourly_map: HashMap<NaiveDateTime, HourlyUsage>,
+    model_session_ids: HashMap<String, HashSet<String>>,
+    client_totals_by_model: HashMap<String, HashMap<String, ClientContributionOrder>>,
+}
 
-    for msg in messages {
+impl TuiAcc {
+    pub(super) fn new(group_by: GroupBy) -> Self {
+        Self {
+            group_by,
+            model_map: HashMap::new(),
+            agent_map: HashMap::new(),
+            agent_clients: HashMap::new(),
+            agent_instances: HashMap::new(),
+            daily_map: HashMap::new(),
+            hourly_map: HashMap::new(),
+            model_session_ids: HashMap::new(),
+            client_totals_by_model: HashMap::new(),
+        }
+    }
+
+    pub(super) fn push(&mut self, msg: &UnifiedMessage) {
+        let group_by = &self.group_by;
         let normalized_model = normalize_model_for_grouping(&msg.model_id);
         let provider = normalize_provider_for_grouping(&msg.provider_id);
-        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
+        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
         let (key, merge_clients) = grouped_model_bucket_key(
             group_by,
             &msg.client,
@@ -533,7 +549,8 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
 
         let msg_cost = sane_cost(msg.cost);
 
-        let model_entry = model_map
+        let model_entry = self
+            .model_map
             .entry(key.clone())
             .or_insert_with(|| UsageModelEntry {
                 model: normalized_model.clone(),
@@ -556,7 +573,7 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
             });
 
         if merge_clients {
-            let client_totals = client_totals_by_model.entry(key.clone()).or_default();
+            let client_totals = self.client_totals_by_model.entry(key.clone()).or_default();
             let client_count = client_totals.len();
             let totals = client_totals
                 .entry(msg.client.to_string())
@@ -582,7 +599,7 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
             .record_message(positive_unified_token_total(&msg.tokens), msg.duration_ms);
 
         let session_key = format!("{}:{}", msg.client, msg.session_id);
-        let model_sessions = model_session_ids.entry(key).or_default();
+        let model_sessions = self.model_session_ids.entry(key).or_default();
         if model_sessions.insert(session_key) {
             model_entry.session_count += 1;
         }
@@ -593,7 +610,8 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
             } else {
                 sessions::normalize_agent_name(agent)
             };
-            let agent_entry = agent_map
+            let agent_entry = self
+                .agent_map
                 .entry(normalized_agent.clone())
                 .or_insert_with(|| AgentEntry {
                     agent: normalized_agent.clone(),
@@ -608,7 +626,7 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
             agent_entry.message_count = agent_entry
                 .message_count
                 .saturating_add(msg.message_count.max(0) as u32);
-            agent_clients
+            self.agent_clients
                 .entry(normalized_agent.clone())
                 .or_default()
                 .insert(msg.client.to_string());
@@ -617,14 +635,14 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
                 .as_deref()
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{}:{}", msg.client, msg.session_id));
-            agent_instances
+            self.agent_instances
                 .entry(normalized_agent)
                 .or_default()
                 .insert(instance_key);
         }
 
         if let Some(date) = msg.local_date() {
-            let daily_entry = daily_map.entry(date).or_insert_with(|| DailyUsage {
+            let daily_entry = self.daily_map.entry(date).or_insert_with(|| DailyUsage {
                 date,
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
@@ -682,15 +700,18 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
         }
 
         if let Some(bucket) = hour_bucket_with_fallback(msg.timestamp, msg.local_date()) {
-            let hourly_entry = hourly_map.entry(bucket).or_insert_with(|| HourlyUsage {
-                datetime: bucket,
-                tokens: UsageTokenBreakdown::default(),
-                cost: 0.0,
-                clients: BTreeSet::new(),
-                models: BTreeMap::new(),
-                message_count: 0,
-                turn_count: 0,
-            });
+            let hourly_entry = self
+                .hourly_map
+                .entry(bucket)
+                .or_insert_with(|| HourlyUsage {
+                    datetime: bucket,
+                    tokens: UsageTokenBreakdown::default(),
+                    cost: 0.0,
+                    clients: BTreeSet::new(),
+                    models: BTreeMap::new(),
+                    message_count: 0,
+                    turn_count: 0,
+                });
             add_unified_tokens(&mut hourly_entry.tokens, &msg.tokens);
             hourly_entry.cost += msg_cost;
             hourly_entry.clients.insert(msg.client.to_string());
@@ -714,68 +735,92 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
         }
     }
 
-    let mut models: Vec<UsageModelEntry> = model_map
-        .into_iter()
-        .map(|(key, mut model)| {
-            if let Some(client_totals) = client_totals_by_model.get(&key) {
-                model.client = ordered_clients_by_token_contribution(client_totals);
+    pub(super) fn finish(self) -> UsageData {
+        let Self {
+            model_map,
+            mut agent_map,
+            agent_clients,
+            agent_instances,
+            daily_map,
+            hourly_map,
+            client_totals_by_model,
+            ..
+        } = self;
+
+        let mut models: Vec<UsageModelEntry> = model_map
+            .into_iter()
+            .map(|(key, mut model)| {
+                if let Some(client_totals) = client_totals_by_model.get(&key) {
+                    model.client = ordered_clients_by_token_contribution(client_totals);
+                }
+                model.performance.finalize(model.tokens.total() as i64);
+                model
+            })
+            .collect();
+        models.sort_by(|a, b| {
+            b.cost
+                .total_cmp(&a.cost)
+                .then_with(|| a.model.cmp(&b.model))
+                .then_with(|| a.provider.cmp(&b.provider))
+        });
+
+        for (agent, clients) in agent_clients {
+            if let Some(agent_entry) = agent_map.get_mut(&agent) {
+                agent_entry.clients = clients.into_iter().collect::<Vec<_>>().join(", ");
             }
-            model.performance.finalize(model.tokens.total() as i64);
-            model
-        })
-        .collect();
-    models.sort_by(|a, b| {
-        b.cost
-            .total_cmp(&a.cost)
-            .then_with(|| a.model.cmp(&b.model))
-            .then_with(|| a.provider.cmp(&b.provider))
-    });
+        }
+        for (agent, instances) in agent_instances {
+            if let Some(agent_entry) = agent_map.get_mut(&agent) {
+                agent_entry.instance_count = instances.len() as u32;
+            }
+        }
 
-    for (agent, clients) in agent_clients {
-        if let Some(agent_entry) = agent_map.get_mut(&agent) {
-            agent_entry.clients = clients.into_iter().collect::<Vec<_>>().join(", ");
+        let mut agents: Vec<AgentEntry> = agent_map.into_values().collect();
+        agents.sort_by(|a, b| {
+            b.cost
+                .total_cmp(&a.cost)
+                .then_with(|| b.tokens.total().cmp(&a.tokens.total()))
+                .then_with(|| a.agent.cmp(&b.agent))
+        });
+
+        let mut daily: Vec<DailyUsage> = daily_map.into_values().collect();
+        daily.sort_by_key(|b| std::cmp::Reverse(b.date));
+
+        let mut hourly: Vec<HourlyUsage> = hourly_map.into_values().collect();
+        hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
+
+        let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
+        let total_cost: f64 = models
+            .iter()
+            .map(|m| if m.cost.is_finite() { m.cost } else { 0.0 })
+            .sum();
+
+        let graph = build_contribution_graph(&daily);
+        let (current_streak, longest_streak) = calculate_streaks(&daily);
+
+        UsageData {
+            models,
+            agents,
+            daily,
+            hourly,
+            graph: Some(graph),
+            total_tokens,
+            total_cost,
+            loading: false,
+            error: None,
+            current_streak,
+            longest_streak,
         }
     }
-    for (agent, instances) in agent_instances {
-        if let Some(agent_entry) = agent_map.get_mut(&agent) {
-            agent_entry.instance_count = instances.len() as u32;
-        }
+}
+
+/// Compatibility helper for callers/tests that still pass a finished message
+/// vector. The fold itself is owned by `TuiAcc` and driven through the same
+/// `push`/`finish` shape as `AggregationEngine`.
+pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -> UsageData {
+    let mut acc = TuiAcc::new(group_by.clone());
+    for msg in &messages {
+        acc.push(msg);
     }
-
-    let mut agents: Vec<AgentEntry> = agent_map.into_values().collect();
-    agents.sort_by(|a, b| {
-        b.cost
-            .total_cmp(&a.cost)
-            .then_with(|| b.tokens.total().cmp(&a.tokens.total()))
-            .then_with(|| a.agent.cmp(&b.agent))
-    });
-
-    let mut daily: Vec<DailyUsage> = daily_map.into_values().collect();
-    daily.sort_by_key(|b| std::cmp::Reverse(b.date));
-
-    let mut hourly: Vec<HourlyUsage> = hourly_map.into_values().collect();
-    hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
-
-    let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
-    let total_cost: f64 = models
-        .iter()
-        .map(|m| if m.cost.is_finite() { m.cost } else { 0.0 })
-        .sum();
-
-    let graph = build_contribution_graph(&daily);
-    let (current_streak, longest_streak) = calculate_streaks(&daily);
-
-    UsageData {
-        models,
-        agents,
-        daily,
-        hourly,
-        graph: Some(graph),
-        total_tokens,
-        total_cost,
-        loading: false,
-        error: None,
-        current_streak,
-        longest_streak,
-    }
+    acc.finish()
 }

@@ -1866,6 +1866,8 @@ mod tests {
     use chrono::NaiveDate;
     use std::collections::BTreeMap;
 
+    type SourceModelCosts<'a> = Vec<(&'a str, Vec<(&'a str, &'a str, f64)>)>;
+
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
@@ -2224,11 +2226,7 @@ mod tests {
         daily_usage_by_source(date, cost, vec![("claude", models)])
     }
 
-    fn daily_usage_by_source(
-        date: &str,
-        cost: f64,
-        sources: Vec<(&str, Vec<(&str, &str, f64)>)>,
-    ) -> DailyUsage {
+    fn daily_usage_by_source(date: &str, cost: f64, sources: SourceModelCosts<'_>) -> DailyUsage {
         let mut source_breakdown = BTreeMap::new();
         let mut total_tokens = TokenBreakdown::default();
         let mut total_cost = 0.0;
