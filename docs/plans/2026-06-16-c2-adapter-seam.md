@@ -1,7 +1,7 @@
 # C2 — Local Source Adapter Seam (#36)
 
-Status: implementation plan for the C2 tracer-client migration after C1 / PR
-#59. C2 is producer-side only: it introduces a local source adapter seam and
+Status: implementation plan for the C2 tracer-client migration after C1 / PR #59.
+C2 is producer-side only: it introduces a local source adapter seam and
 migrates Zed, Pi, and OMP. Remaining clients stay on the legacy scanner/driver
 path for C3.
 

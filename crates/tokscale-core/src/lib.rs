@@ -2977,9 +2977,9 @@ mod tests {
         ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
         UNKNOWN_WORKSPACE_LABEL,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::sync::Arc;
 
@@ -3228,6 +3228,15 @@ mod tests {
 {"type":"message","id":"child_001","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
         )
         .unwrap();
+    }
+
+    fn scanner_settings_for_zed_threads_dir(threads_dir: PathBuf) -> scanner::ScannerSettings {
+        let mut extra_scan_paths = BTreeMap::new();
+        extra_scan_paths.insert("zed".to_string(), vec![threads_dir]);
+        scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -4470,7 +4479,7 @@ model = "gpt-5.5"
     #[serial_test::serial]
     fn test_compute_source_digest_tracks_adapter_zed_wal() {
         let source_home = tempfile::TempDir::new().unwrap();
-        let threads_dir = source_home.path().join(".local/share/zed/threads");
+        let threads_dir = source_home.path().join("zed-fixture/threads");
         std::fs::create_dir_all(&threads_dir).unwrap();
         let threads_db = threads_dir.join("threads.db");
         std::fs::write(&threads_db, b"sqlite-placeholder").unwrap();
@@ -4479,7 +4488,7 @@ model = "gpt-5.5"
 
         let home = source_home.path().to_str().unwrap();
         let clients = ["zed".to_string()];
-        let settings = scanner::ScannerSettings::default();
+        let settings = scanner_settings_for_zed_threads_dir(threads_dir);
 
         let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
         std::fs::write(&wal_path, b"wal-contents-changed").unwrap();
@@ -7205,7 +7214,7 @@ model = "gpt-5.5"
     fn test_driver_uses_zed_adapter_when_only_zed_requested() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
-        let zed_threads_dir = temp_dir.path().join(".local/share/zed/threads");
+        let zed_threads_dir = temp_dir.path().join("zed-fixture/threads");
         std::fs::create_dir_all(&zed_threads_dir).unwrap();
         let zed_db = zed_threads_dir.join("threads.db");
         let zed_conn = create_zed_sqlite_db(&zed_db);
@@ -7229,7 +7238,7 @@ model = "gpt-5.5"
             since: None,
             until: None,
             year: None,
-            scanner_settings: scanner::ScannerSettings::default(),
+            scanner_settings: scanner_settings_for_zed_threads_dir(zed_threads_dir),
         })
         .unwrap();
 
@@ -7286,7 +7295,7 @@ model = "gpt-5.5"
     fn test_driver_all_clients_includes_adapter_and_legacy_without_duplicate() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
-        let zed_threads_dir = temp_dir.path().join(".local/share/zed/threads");
+        let zed_threads_dir = temp_dir.path().join("zed-fixture/threads");
         std::fs::create_dir_all(&zed_threads_dir).unwrap();
         let zed_db = zed_threads_dir.join("threads.db");
         let zed_conn = create_zed_sqlite_db(&zed_db);
@@ -7310,7 +7319,7 @@ model = "gpt-5.5"
             since: None,
             until: None,
             year: None,
-            scanner_settings: scanner::ScannerSettings::default(),
+            scanner_settings: scanner_settings_for_zed_threads_dir(zed_threads_dir),
         })
         .unwrap();
 
