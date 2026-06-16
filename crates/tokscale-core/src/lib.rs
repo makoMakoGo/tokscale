@@ -2069,17 +2069,6 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     Ok(report)
 }
 
-#[derive(Default)]
-struct MonthAggregator {
-    models: HashSet<String>,
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    cache_write: i64,
-    message_count: i32,
-    cost: f64,
-}
-
 pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
     let start = Instant::now();
 
@@ -2101,79 +2090,20 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
-
-    for msg in filtered {
-        let date = msg.date_string();
-        let month = if date.len() >= 7 {
-            date[..7].to_string()
-        } else {
-            continue;
-        };
-
-        let entry = month_map.entry(month).or_default();
-
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.message_count += msg.message_count.max(0);
-        entry.cost += msg.cost;
+    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+        group_by: options.group_by.clone(),
+        date_range: crate::aggregate::DateRange::from_options(&options),
+        views: crate::aggregate::ViewSet::MONTHLY,
+    });
+    for msg in &all_messages {
+        engine.push(msg);
     }
-
-    let mut entries: Vec<MonthlyUsage> = month_map
-        .into_iter()
-        .map(|(month, agg)| MonthlyUsage {
-            month,
-            models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
-                v.sort();
-                v
-            },
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            cost: agg.cost,
-        })
-        .collect();
-
-    entries.sort_by(|a, b| a.month.cmp(&b.month));
-
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-
-    Ok(MonthlyReport {
-        entries,
-        total_cost,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
-}
-
-#[derive(Default)]
-struct HourAggregator {
-    clients: HashSet<String>,
-    models: HashSet<String>,
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    cache_write: i64,
-    reasoning: i64,
-    message_count: i32,
-    turn_count: i32,
-    cost: f64,
-}
-
-fn hourly_report_label(hour_key: &str) -> Result<String, String> {
-    hour_key
-        .get(5..)
-        .map(str::to_string)
-        .ok_or_else(|| format!("Invalid hourly report key: {hour_key}"))
+    let mut report = engine
+        .finish()
+        .monthly_report
+        .expect("monthly view requested");
+    report.processing_time_ms = start.elapsed().as_millis() as u32;
+    Ok(report)
 }
 
 /// Generate hourly usage report with hour labels formatted as "MM-DD HH:00".
@@ -2181,8 +2111,6 @@ fn hourly_report_label(hour_key: &str) -> Result<String, String> {
 /// Derives the hour slot from `UnifiedMessage.timestamp` (Unix ms).
 /// Falls back to date + "00:00" when timestamp is zero or missing.
 pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, String> {
-    use chrono::{Local, TimeZone};
-
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
@@ -2203,75 +2131,20 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
-
-    for msg in filtered {
-        let hour_key = if msg.timestamp > 0 {
-            let ts_secs = msg.timestamp / 1000;
-            match Local.timestamp_opt(ts_secs, 0) {
-                chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
-                _ => format!("{} 00:00", msg.date_string()),
-            }
-        } else {
-            format!("{} 00:00", msg.date_string())
-        };
-
-        let entry = hour_map.entry(hour_key).or_default();
-
-        entry.clients.insert(msg.client.to_string());
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
-        entry.message_count += msg.message_count.max(0);
-        if msg.is_turn_start {
-            entry.turn_count += 1;
-        }
-        entry.cost += msg.cost;
+    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+        group_by: options.group_by.clone(),
+        date_range: crate::aggregate::DateRange::from_options(&options),
+        views: crate::aggregate::ViewSet::HOURLY,
+    });
+    for msg in &all_messages {
+        engine.push(msg);
     }
-
-    let mut entries: Vec<(String, HourlyUsage)> = Vec::with_capacity(hour_map.len());
-    for (hour, agg) in hour_map {
-        let entry = HourlyUsage {
-            hour: hourly_report_label(&hour)?,
-            clients: {
-                let mut v: Vec<String> = agg.clients.into_iter().collect();
-                v.sort();
-                v
-            },
-            models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
-                v.sort();
-                v
-            },
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            turn_count: agg.turn_count,
-            reasoning: agg.reasoning,
-            cost: agg.cost,
-        };
-        entries.push((hour, entry));
-    }
-
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let entries: Vec<HourlyUsage> = entries.into_iter().map(|(_, entry)| entry).collect();
-
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-
-    Ok(HourlyReport {
-        entries,
-        total_cost,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
+    let mut report = engine
+        .finish()
+        .hourly_report
+        .expect("hourly view requested");
+    report.processing_time_ms = start.elapsed().as_millis() as u32;
+    Ok(report)
 }
 
 async fn generate_graph_with_loaded_pricing(
@@ -2394,114 +2267,35 @@ pub(crate) fn aggregate_model_usage_entries_pub(
 
 #[cfg(test)]
 pub(crate) fn monthly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> MonthlyReport {
-    let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
-    for msg in messages {
-        let date = msg.date_string();
-        let month = if date.len() >= 7 {
-            date[..7].to_string()
-        } else {
-            continue;
-        };
-        let entry = month_map.entry(month).or_default();
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.message_count += msg.message_count.max(0);
-        entry.cost += msg.cost;
+    // Delegate to the engine (single source of truth). The parity harness uses
+    // this message-list entry point to confirm the engine is deterministic and
+    // matches what the async production path produces.
+    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+        group_by: crate::GroupBy::ClientModel,
+        date_range: crate::aggregate::DateRange::none(),
+        views: crate::aggregate::ViewSet::MONTHLY,
+    });
+    for msg in &messages {
+        engine.push(msg);
     }
-    let mut entries: Vec<MonthlyUsage> = month_map
-        .into_iter()
-        .map(|(month, agg)| MonthlyUsage {
-            month,
-            models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
-                v.sort();
-                v
-            },
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            cost: agg.cost,
-        })
-        .collect();
-    entries.sort_by(|a, b| a.month.cmp(&b.month));
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-    MonthlyReport {
-        entries,
-        total_cost,
-        processing_time_ms: 0,
-    }
+    let mut report = engine.finish().monthly_report.expect("monthly view requested");
+    report.processing_time_ms = 0;
+    report
 }
 
 #[cfg(test)]
 pub(crate) fn hourly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> HourlyReport {
-    use chrono::{Local, TimeZone};
-    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
-    for msg in messages {
-        let hour_key = if msg.timestamp > 0 {
-            let ts_secs = msg.timestamp / 1000;
-            match Local.timestamp_opt(ts_secs, 0) {
-                chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
-                _ => format!("{} 00:00", msg.date_string()),
-            }
-        } else {
-            format!("{} 00:00", msg.date_string())
-        };
-        let entry = hour_map.entry(hour_key).or_default();
-        entry.clients.insert(msg.client.to_string());
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
-        entry.message_count += msg.message_count.max(0);
-        if msg.is_turn_start {
-            entry.turn_count += 1;
-        }
-        entry.cost += msg.cost;
+    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+        group_by: crate::GroupBy::ClientModel,
+        date_range: crate::aggregate::DateRange::none(),
+        views: crate::aggregate::ViewSet::HOURLY,
+    });
+    for msg in &messages {
+        engine.push(msg);
     }
-    let mut entries: Vec<(String, HourlyUsage)> = Vec::with_capacity(hour_map.len());
-    for (hour, agg) in hour_map {
-        let entry = HourlyUsage {
-            hour: hourly_report_label(&hour).unwrap_or_default(),
-            clients: {
-                let mut v: Vec<String> = agg.clients.into_iter().collect();
-                v.sort();
-                v
-            },
-            models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
-                v.sort();
-                v
-            },
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            turn_count: agg.turn_count,
-            reasoning: agg.reasoning,
-            cost: agg.cost,
-        };
-        entries.push((hour, entry));
-    }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let entries: Vec<HourlyUsage> = entries.into_iter().map(|(_, entry)| entry).collect();
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-    HourlyReport {
-        entries,
-        total_cost,
-        processing_time_ms: 0,
-    }
+    let mut report = engine.finish().hourly_report.expect("hourly view requested");
+    report.processing_time_ms = 0;
+    report
 }
 
 fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
