@@ -6,8 +6,9 @@ use tokio::runtime::{Handle, Runtime};
 #[cfg(test)]
 use chrono::NaiveDate;
 
+#[cfg(test)]
 use tokscale_core::sessions::UnifiedMessage;
-use tokscale_core::{parse_local_unified_messages, ClientId, GroupBy, LocalParseOptions};
+use tokscale_core::{load_usage_data, ClientId, GroupBy, LocalParseOptions};
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
 // aggregation engine can produce them directly (#37). Re-export them under the
@@ -108,23 +109,22 @@ impl DataLoader {
             scanner_settings: data_loader_scanner_settings(),
         };
 
-        let messages = if Handle::try_current().is_ok() {
+        let usage_data = if Handle::try_current().is_ok() {
             std::thread::scope(|s| {
                 s.spawn(|| {
                     let rt = Runtime::new().map_err(|e| e.to_string())?;
-                    rt.block_on(parse_local_unified_messages(opts))
+                    rt.block_on(load_usage_data(opts, group_by.clone()))
                 })
                 .join()
                 .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
             })
         } else {
-            Runtime::new()?.block_on(parse_local_unified_messages(opts))
+            Runtime::new()?.block_on(load_usage_data(opts, group_by.clone()))
         }
         .map_err(anyhow::Error::msg)?;
 
-        let result = self.aggregate_messages(messages, group_by);
         trim_allocator();
-        result
+        Ok(usage_data)
     }
 
     /// Digest of the sources `load` would scan, used by the auto-refresh
@@ -172,29 +172,14 @@ impl DataLoader {
             scanner_settings: data_loader_scanner_settings(),
         };
 
-        let messages = if Handle::try_current().is_ok() {
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    let rt = Runtime::new().map_err(|e| e.to_string())?;
-                    rt.block_on(tokscale_core::parse_local_unified_messages_with_pricing(
-                        opts,
-                        Some(pricing),
-                    ))
-                })
-                .join()
-                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
-            })
-        } else {
-            Runtime::new()?.block_on(tokscale_core::parse_local_unified_messages_with_pricing(
-                opts,
-                Some(pricing),
-            ))
-        }
-        .map_err(anyhow::Error::msg)?;
+        let usage_data =
+            tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), Some(pricing))
+                .map_err(anyhow::Error::msg)?;
 
-        self.aggregate_messages(messages, group_by)
+        Ok(usage_data)
     }
 
+    #[cfg(test)]
     fn aggregate_messages(
         &self,
         messages: Vec<UnifiedMessage>,
@@ -220,8 +205,6 @@ mod tests {
     use std::env;
     use std::fs;
     use tempfile::TempDir;
-    use tokio::runtime::{Handle, Runtime};
-    use tokscale_core::parse_local_unified_messages_with_pricing;
     use tokscale_core::pricing::{ModelPricing, PricingService};
     use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
 
@@ -283,21 +266,8 @@ mod tests {
             scanner_settings: data_loader_scanner_settings(),
         };
 
-        let messages = if Handle::try_current().is_ok() {
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    let rt = Runtime::new().map_err(|e| e.to_string())?;
-                    rt.block_on(parse_local_unified_messages_with_pricing(opts, pricing))
-                })
-                .join()
-                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
-            })
-        } else {
-            Runtime::new()?.block_on(parse_local_unified_messages_with_pricing(opts, pricing))
-        }
-        .map_err(anyhow::Error::msg)?;
-
-        loader.aggregate_messages(messages, group_by)
+        tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), pricing)
+            .map_err(anyhow::Error::msg)
     }
 
     fn expected_message_cost(

@@ -801,35 +801,106 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<Vec<UnifiedMessage>, String> {
+    let mut all_messages: Vec<UnifiedMessage> = Vec::new();
+    fold_local_sources_with_pricing(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+        &mut all_messages,
+    )?;
+    Ok(all_messages)
+}
+
+fn fold_local_sources_with_pricing(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+    sink: &mut dyn adapters::MessageSink,
+) -> Result<(), String> {
     let selected_adapters = adapters::selected_adapters(clients);
     let mut source_cache = message_cache::SourceMessageCache::load();
     source_cache.prune_missing_files();
-    let mut all_messages: Vec<UnifiedMessage> = Vec::new();
-    let include_all = clients.is_empty();
 
     let scan_ctx = adapters::AdapterScanContext {
         home_dir,
         use_env_roots,
         scanner_settings,
     };
-    adapters::run_local_source_adapters(
-        &selected_adapters,
-        &scan_ctx,
-        &mut source_cache,
-        pricing,
-        &mut all_messages,
-    );
-
-    if !include_all {
+    if clients.is_empty() {
+        adapters::run_local_source_adapters(
+            &selected_adapters,
+            &scan_ctx,
+            &mut source_cache,
+            pricing,
+            sink,
+        );
+    } else {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
-        all_messages.retain(|msg| {
-            retain_for_requested_clients(&msg.client, &msg.model_id, &msg.provider_id, &requested)
-        });
+        let mut filtered_sink = RequestedClientFilterSink {
+            requested: &requested,
+            inner: sink,
+        };
+        adapters::run_local_source_adapters(
+            &selected_adapters,
+            &scan_ctx,
+            &mut source_cache,
+            pricing,
+            &mut filtered_sink,
+        );
     }
 
     source_cache.save_if_dirty();
 
-    Ok(all_messages)
+    Ok(())
+}
+
+struct RequestedClientFilterSink<'a> {
+    requested: &'a HashSet<&'a str>,
+    inner: &'a mut dyn adapters::MessageSink,
+}
+
+impl adapters::MessageSink for RequestedClientFilterSink<'_> {
+    fn push_message(&mut self, message: UnifiedMessage) {
+        if retain_for_requested_clients(
+            &message.client,
+            &message.model_id,
+            &message.provider_id,
+            self.requested,
+        ) {
+            self.inner.push_message(message);
+        }
+    }
+}
+
+struct AggregationSink<'a>(&'a mut crate::aggregate::AggregationEngine);
+
+impl adapters::MessageSink for AggregationSink<'_> {
+    fn push_message(&mut self, message: UnifiedMessage) {
+        self.0.push(&message);
+    }
+}
+
+fn stream_local_sources_into_engine(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+    engine: &mut crate::aggregate::AggregationEngine,
+) -> Result<(), String> {
+    let mut sink = AggregationSink(engine);
+    fold_local_sources_with_pricing(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+        &mut sink,
+    )
 }
 
 /// Digest over every scannable source's (path, size, mtime) plus the
@@ -1013,23 +1084,20 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     });
 
     let pricing = load_pricing_for_local_parse().await;
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-    )?;
-
     let mut engine =
         crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
             group_by: options.group_by.clone(),
             date_range: crate::aggregate::DateRange::from_options(&options),
             views: crate::aggregate::ViewSet::MODEL,
         });
-    for msg in &all_messages {
-        engine.push(msg);
-    }
+    stream_local_sources_into_engine(
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+        &options.scanner_settings,
+        &mut engine,
+    )?;
     let mut report = engine.finish().model_report.expect("model view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
@@ -1048,23 +1116,20 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     });
 
     let pricing = load_pricing_for_local_parse().await;
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-    )?;
-
     let mut engine =
         crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
             group_by: options.group_by.clone(),
             date_range: crate::aggregate::DateRange::from_options(&options),
             views: crate::aggregate::ViewSet::MONTHLY,
         });
-    for msg in &all_messages {
-        engine.push(msg);
-    }
+    stream_local_sources_into_engine(
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+        &options.scanner_settings,
+        &mut engine,
+    )?;
     let mut report = engine
         .finish()
         .monthly_report
@@ -1090,23 +1155,20 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     });
 
     let pricing = load_pricing_for_local_parse().await;
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-    )?;
-
     let mut engine =
         crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
             group_by: options.group_by.clone(),
             date_range: crate::aggregate::DateRange::from_options(&options),
             views: crate::aggregate::ViewSet::HOURLY,
         });
-    for msg in &all_messages {
-        engine.push(msg);
-    }
+    stream_local_sources_into_engine(
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+        &options.scanner_settings,
+        &mut engine,
+    )?;
     let mut report = engine
         .finish()
         .hourly_report
@@ -1130,23 +1192,20 @@ async fn generate_graph_with_loaded_pricing(
             .collect()
     });
 
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        pricing,
-        options.use_env_roots,
-        &options.scanner_settings,
-    )?;
-
     let mut engine =
         crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
             group_by: options.group_by.clone(),
             date_range: crate::aggregate::DateRange::from_options(&options),
             views: crate::aggregate::ViewSet::GRAPH | crate::aggregate::ViewSet::TIME_METRICS,
         });
-    for msg in &all_messages {
-        engine.push(msg);
-    }
+    stream_local_sources_into_engine(
+        &home_dir,
+        &clients,
+        pricing,
+        options.use_env_roots,
+        &options.scanner_settings,
+        &mut engine,
+    )?;
     let mut result = engine.finish().graph.expect("graph view requested");
     result.meta.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(result)
@@ -1170,23 +1229,20 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
             .collect()
     });
 
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        None,
-        options.use_env_roots,
-        &options.scanner_settings,
-    )?;
-
     let mut engine =
         crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
             group_by: options.group_by.clone(),
             date_range: crate::aggregate::DateRange::from_options(&options),
             views: crate::aggregate::ViewSet::TIME_METRICS,
         });
-    for msg in &all_messages {
-        engine.push(msg);
-    }
+    stream_local_sources_into_engine(
+        &home_dir,
+        &clients,
+        None,
+        options.use_env_roots,
+        &options.scanner_settings,
+        &mut engine,
+    )?;
     let mut report = engine
         .finish()
         .time_metrics
@@ -1452,6 +1508,42 @@ pub async fn parse_local_unified_messages(
     parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing.as_deref())
 }
 
+#[doc(hidden)]
+pub fn load_usage_data_with_pricing(
+    options: LocalParseOptions,
+    group_by: GroupBy,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<usage_views::UsageData, String> {
+    let (home_dir, clients) = resolve_local_parse_request(&options)?;
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by,
+            date_range: crate::aggregate::DateRange {
+                since: options.since.clone(),
+                until: options.until.clone(),
+                year: options.year.clone(),
+            },
+            views: crate::aggregate::ViewSet::TUI,
+        });
+    stream_local_sources_into_engine(
+        &home_dir,
+        &clients,
+        pricing,
+        options.use_env_roots,
+        &options.scanner_settings,
+        &mut engine,
+    )?;
+    Ok(engine.finish().tui_usage.expect("tui view requested"))
+}
+
+pub async fn load_usage_data(
+    options: LocalParseOptions,
+    group_by: GroupBy,
+) -> Result<usage_views::UsageData, String> {
+    let pricing = load_pricing_for_local_parse().await;
+    load_usage_data_with_pricing(options, group_by, pricing.as_deref())
+}
+
 fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
     ParsedMessage {
         client: msg.client.to_string(),
@@ -1529,11 +1621,13 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        generate_graph_with_loaded_pricing, message_cache, normalize_model_for_grouping,
-        parse_all_messages_with_pricing, parse_local_clients, parsed_to_unified, pricing,
-        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
-        ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
-        UNKNOWN_WORKSPACE_LABEL,
+        generate_graph_with_loaded_pricing, load_usage_data_with_pricing, message_cache,
+        normalize_model_for_grouping, parse_all_messages_with_pricing,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
+        pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
+        stream_local_sources_into_engine, unified_to_parsed, AggregatedViews, AggregationConfig,
+        ClientId, DateRange, GraphResult, GroupBy, LocalParseOptions, ReportOptions,
+        TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::io::Write;
@@ -1623,6 +1717,257 @@ mod tests {
             },
             0.0,
         )
+    }
+
+    fn write_streaming_fold_fixture(home: &Path) {
+        let opencode_dir = home.join(".local/share/opencode/storage/message/project-streaming");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        std::fs::write(
+            opencode_dir.join("msg_001.json"),
+            r#"{"id":"msg-1","sessionID":"opencode-session","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":1,"cache":{"read":2,"write":3}},"time":{"created":1733011200000}}"#,
+        )
+        .unwrap();
+
+        let codex_dir = home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("codex-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2024-12-01T01:00:00Z","type":"session_meta","payload":{"id":"codex-session","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2024-12-01T01:00:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"timestamp":"2024-12-01T01:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6,"reasoning_output_tokens":2},"last_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6,"reasoning_output_tokens":2}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+    }
+
+    fn streaming_report_options(home: &Path, clients: Vec<&str>) -> ReportOptions {
+        ReportOptions {
+            home_dir: Some(home.to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(clients.into_iter().map(str::to_string).collect()),
+            since: None,
+            until: None,
+            year: None,
+            group_by: GroupBy::ClientModel,
+            scanner_settings: scanner::ScannerSettings::default(),
+        }
+    }
+
+    fn streaming_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
+        let home_dir = options.home_dir.as_deref().unwrap();
+        let clients = options.clients.clone().unwrap();
+        let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: DateRange::from_options(options),
+            views,
+        });
+        stream_local_sources_into_engine(
+            home_dir,
+            &clients,
+            None,
+            options.use_env_roots,
+            &options.scanner_settings,
+            &mut engine,
+        )
+        .unwrap();
+        engine.finish()
+    }
+
+    fn vec_compat_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
+        let home_dir = options.home_dir.as_deref().unwrap();
+        let clients = options.clients.clone().unwrap();
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            home_dir,
+            &clients,
+            None,
+            options.use_env_roots,
+            &options.scanner_settings,
+        )
+        .unwrap();
+        let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: DateRange::from_options(options),
+            views,
+        });
+        for message in &messages {
+            engine.push(message);
+        }
+        engine.finish()
+    }
+
+    fn json_value<T: serde::Serialize>(value: &T) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+
+    fn normalized_graph_value(mut graph: GraphResult) -> serde_json::Value {
+        graph.meta.generated_at.clear();
+        graph.meta.processing_time_ms = 0;
+        json_value(&graph)
+    }
+
+    fn normalized_time_metrics_value(mut report: TimeMetricsReport) -> serde_json::Value {
+        report.processing_time_ms = 0;
+        json_value(&report)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_model_monthly_hourly_reports_match_vec_compat() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+
+        let streaming = streaming_views(
+            &options,
+            ViewSet::MODEL | ViewSet::MONTHLY | ViewSet::HOURLY,
+        );
+        let compat = vec_compat_views(
+            &options,
+            ViewSet::MODEL | ViewSet::MONTHLY | ViewSet::HOURLY,
+        );
+
+        assert_eq!(
+            json_value(&streaming.model_report.unwrap()),
+            json_value(&compat.model_report.unwrap())
+        );
+        assert_eq!(
+            json_value(&streaming.monthly_report.unwrap()),
+            json_value(&compat.monthly_report.unwrap())
+        );
+        assert_eq!(
+            json_value(&streaming.hourly_report.unwrap()),
+            json_value(&compat.hourly_report.unwrap())
+        );
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_graph_and_time_metrics_match_vec_compat() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+
+        let streaming = streaming_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
+        let compat = vec_compat_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
+
+        assert_eq!(
+            normalized_graph_value(streaming.graph.unwrap()),
+            normalized_graph_value(compat.graph.unwrap())
+        );
+        assert_eq!(
+            normalized_time_metrics_value(streaming.time_metrics.unwrap()),
+            normalized_time_metrics_value(compat.time_metrics.unwrap())
+        );
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_tui_usage_matches_vec_compat() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let options = LocalParseOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        };
+        let report_options =
+            streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+
+        let streaming = load_usage_data_with_pricing(options, GroupBy::ClientModel, None).unwrap();
+        let compat = vec_compat_views(&report_options, ViewSet::TUI)
+            .tui_usage
+            .unwrap();
+
+        assert_eq!(format!("{streaming:?}"), format!("{compat:?}"));
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_requested_client_filter_matches_vec_compat() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let options = streaming_report_options(source_home.path(), vec!["codex"]);
+
+        let streaming = streaming_views(&options, ViewSet::MODEL);
+        let compat = vec_compat_views(&options, ViewSet::MODEL);
+        let streaming_report = streaming.model_report.unwrap();
+
+        assert_eq!(
+            json_value(&streaming_report),
+            json_value(&compat.model_report.unwrap())
+        );
+        assert_eq!(streaming_report.entries.len(), 1);
+        assert_eq!(streaming_report.entries[0].client, "codex");
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_warm_cache_matches_cold_streaming_report() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+
+        let cold = streaming_views(&options, ViewSet::MODEL)
+            .model_report
+            .unwrap();
+        let warm = streaming_views(&options, ViewSet::MODEL)
+            .model_report
+            .unwrap();
+
+        assert_eq!(json_value(&cold), json_value(&warm));
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
