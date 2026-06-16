@@ -2007,139 +2007,23 @@ fn aggregate_model_usage_entries(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
 ) -> Vec<ModelUsage> {
-    let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
-    let mut client_totals_by_entry: HashMap<String, HashMap<String, ClientContributionOrder>> =
-        HashMap::new();
-
-    for msg in messages {
-        let normalized = normalize_model_for_grouping(&msg.model_id);
-        let provider = normalize_provider_for_grouping(&msg.provider_id);
-        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
-        let (key, merge_clients) = match group_by {
-            GroupBy::Model => (normalized.clone(), true),
-            GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized), false),
-            GroupBy::ClientProviderModel => {
-                (format!("{}:{}:{}", msg.client, provider, normalized), false)
-            }
-            GroupBy::WorkspaceModel => (
-                workspace_model_bucket_key(&workspace_group_key, &normalized),
-                true,
-            ),
-            GroupBy::Session => (format!("{}:{}", msg.session_id, normalized), false),
-            GroupBy::ClientSession => (
-                format!("{}:{}:{}", msg.client, msg.session_id, normalized),
-                false,
-            ),
-        };
-        let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
-        let entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
-            client: msg.client.to_string(),
-            merged_clients: if merge_clients {
-                Some(msg.client.to_string())
-            } else {
-                None
-            },
-            workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
-                workspace_key.clone()
-            } else {
-                None
-            },
-            workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
-                Some(workspace_label.clone())
-            } else {
-                None
-            },
-            session_id: if session_grouped {
-                Some(msg.session_id.to_string())
-            } else {
-                None
-            },
-            model: normalized.clone(),
-            provider: provider.clone(),
-            input: 0,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-            message_count: 0,
-            cost: 0.0,
-            performance: ModelPerformance::default(),
-        });
-
-        if merge_clients {
-            let client_totals = client_totals_by_entry.entry(key.clone()).or_default();
-            let client_count = client_totals.len();
-            let totals = client_totals
-                .entry(msg.client.to_string())
-                .or_insert_with(|| ClientContributionOrder {
-                    first_seen: client_count,
-                    total_tokens: 0,
-                });
-            totals.total_tokens = totals
-                .total_tokens
-                .saturating_add(msg.tokens.total().max(0) as u64);
-        }
-
-        if *group_by != GroupBy::ClientProviderModel
-            && !entry.provider.split(", ").any(|p| p == provider)
-        {
-            entry.provider = format!("{}, {}", entry.provider, provider);
-        }
-
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
-        entry.message_count += msg.message_count.max(0);
-        entry.cost += msg.cost;
-        entry
-            .performance
-            .record_message(positive_token_total(&msg.tokens), msg.duration_ms);
-    }
-
-    let mut entries: Vec<ModelUsage> = model_map
-        .into_iter()
-        .map(|(key, mut entry)| {
-            if let Some(client_totals) = client_totals_by_entry.get(&key) {
-                let ordered_clients = ordered_clients_by_token_contribution(client_totals);
-                entry.client = ordered_clients.clone();
-                if let Some(merged_clients) = &mut entry.merged_clients {
-                    *merged_clients = ordered_clients;
-                }
-            }
-
-            let total_tokens = entry.input.max(0)
-                + entry.output.max(0)
-                + entry.cache_read.max(0)
-                + entry.cache_write.max(0)
-                + entry.reasoning.max(0);
-            entry.performance.finalize(total_tokens);
-            let mut providers: Vec<&str> = entry.provider.split(", ").collect();
-            providers.sort_unstable();
-            providers.dedup();
-            entry.provider = providers.join(", ");
-            entry
-        })
-        .collect();
-    entries.sort_by(|a, b| {
-        let cost = match (a.cost.is_nan(), b.cost.is_nan()) {
-            (true, true) => std::cmp::Ordering::Equal,
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
-            (false, false) => b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal),
-        };
-        // Deterministic secondary keys so equal-cost entries don't depend on
-        // HashMap drain order (the C1.5 BLOCKER). Mirrors the TUI model sort.
-        cost.then_with(|| a.model.cmp(&b.model))
-            .then_with(|| a.provider.cmp(&b.provider))
-            .then_with(|| a.client.cmp(&b.client))
-            .then_with(|| a.workspace_label.cmp(&b.workspace_label))
-            .then_with(|| a.workspace_key.cmp(&b.workspace_key))
-            .then_with(|| a.session_id.cmp(&b.session_id))
+    // Delegate to the aggregation engine (the single source of truth for the
+    // model fold). The unit tests below exercise this entry point; they now
+    // drive the engine, which the C1.3 parity harness proves byte-identical to
+    // the old inline implementation. The old fold body is gone (#33: one copy).
+    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+        group_by: group_by.clone(),
+        date_range: crate::aggregate::DateRange::none(),
+        views: crate::aggregate::ViewSet::MODEL,
     });
-
-    entries
+    for msg in &messages {
+        engine.push(msg);
+    }
+    engine
+        .finish()
+        .model_report
+        .expect("model view requested")
+        .entries
 }
 
 pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
@@ -2171,26 +2055,17 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-    let entries = aggregate_model_usage_entries(filtered, &options.group_by);
-
-    let total_input: i64 = entries.iter().map(|e| e.input).sum();
-    let total_output: i64 = entries.iter().map(|e| e.output).sum();
-    let total_cache_read: i64 = entries.iter().map(|e| e.cache_read).sum();
-    let total_cache_write: i64 = entries.iter().map(|e| e.cache_write).sum();
-    let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-
-    Ok(ModelReport {
-        entries,
-        total_input,
-        total_output,
-        total_cache_read,
-        total_cache_write,
-        total_messages,
-        total_cost,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
+    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+        group_by: options.group_by.clone(),
+        date_range: crate::aggregate::DateRange::from_options(&options),
+        views: crate::aggregate::ViewSet::MODEL,
+    });
+    for msg in &all_messages {
+        engine.push(msg);
+    }
+    let mut report = engine.finish().model_report.expect("model view requested");
+    report.processing_time_ms = start.elapsed().as_millis() as u32;
+    Ok(report)
 }
 
 #[derive(Default)]
