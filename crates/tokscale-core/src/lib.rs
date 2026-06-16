@@ -18,6 +18,7 @@ pub mod sessionize;
 pub mod sessions;
 
 pub mod aggregate;
+pub mod usage_views;
 
 pub use aggregate::{AggregatedViews, AggregationConfig, DateRange, ViewSet};
 pub use aggregator::*;

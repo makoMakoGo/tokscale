@@ -12,6 +12,16 @@ use tokscale_core::{
     ClientContributionOrder, ClientId, GroupBy, LocalParseOptions, ModelPerformance,
 };
 
+// The TUI view types live in core (`tokscale_core::usage_views`) so the
+// aggregation engine can produce them directly (#37). Re-export them under the
+// historical names this crate already uses, so downstream modules keep their
+// existing imports.
+pub use tokscale_core::usage_views::{
+    AgentEntry as AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage,
+    HourlyModelInfo, HourlyUsage, PeriodKind, PeriodUsage, UsageData, UsageGraphData as GraphData,
+    UsageModelEntry as ModelUsage, UsageTokenBreakdown as TokenBreakdown,
+};
+
 /// Returns the scanner settings that `DataLoader` should use when building
 /// `LocalParseOptions`. Under `#[cfg(test)]` this intentionally ignores
 /// `~/.config/tokscale/settings.json` so data-loader unit tests stay
@@ -37,151 +47,6 @@ fn trim_allocator() {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct TokenBreakdown {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
-    pub reasoning: u64,
-}
-
-impl TokenBreakdown {
-    pub fn total(&self) -> u64 {
-        self.input
-            .saturating_add(self.output)
-            .saturating_add(self.cache_read)
-            .saturating_add(self.cache_write)
-            .saturating_add(self.reasoning)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ModelUsage {
-    pub model: String,
-    pub provider: String,
-    pub client: String,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub performance: ModelPerformance,
-    pub session_count: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentUsage {
-    pub agent: String,
-    pub clients: String,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub message_count: u32,
-    pub instance_count: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct DailyModelInfo {
-    /// API provider identifier (e.g. "anthropic", "openai").
-    ///
-    /// **Caveat**: For `GroupBy::Model`, `GroupBy::ClientModel`, and
-    /// `GroupBy::WorkspaceModel`, multiple providers may be merged into a
-    /// single daily model entry.  In that case this field retains whichever
-    /// provider was seen first and is **not** authoritative.  Only treat it
-    /// as exact when `group_by == GroupBy::ClientProviderModel`.
-    pub provider: String,
-    pub display_name: String,
-    pub color_key: String,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub messages: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct DailySourceInfo {
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub models: BTreeMap<String, DailyModelInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DailyUsage {
-    pub date: NaiveDate,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
-    pub message_count: u32,
-    pub turn_count: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct HourlyModelInfo {
-    pub provider: String,
-    pub display_name: String,
-    pub color_key: String,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct HourlyUsage {
-    pub datetime: NaiveDateTime,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub clients: BTreeSet<String>,
-    pub models: BTreeMap<String, HourlyModelInfo>,
-    pub message_count: u32,
-    pub turn_count: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeriodKind {
-    Monthly,
-    Weekly,
-}
-
-#[derive(Debug, Clone)]
-pub struct PeriodUsage {
-    pub section_year: i32,
-    pub section_label: String,
-    pub label: String,
-    pub short_label: String,
-    pub start_date: NaiveDate,
-    pub end_date: NaiveDate,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
-    pub message_count: u32,
-    pub turn_count: u32,
-    pub active_days: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct ContributionDay {
-    pub date: NaiveDate,
-    pub tokens: u64,
-    pub cost: f64,
-    pub intensity: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct GraphData {
-    pub weeks: Vec<Vec<Option<ContributionDay>>>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct UsageData {
-    pub models: Vec<ModelUsage>,
-    pub agents: Vec<AgentUsage>,
-    pub daily: Vec<DailyUsage>,
-    pub hourly: Vec<HourlyUsage>,
-    pub graph: Option<GraphData>,
-    pub total_tokens: u64,
-    pub total_cost: f64,
-    pub loading: bool,
-    pub error: Option<String>,
-    pub current_streak: u32,
-    pub longest_streak: u32,
-}
 
 pub struct DataLoader {
     _sessions_path: Option<PathBuf>,
