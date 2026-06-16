@@ -19,7 +19,7 @@
 | Phase | Issue | Delivers | Gate |
 |---|---|---|---|
 | C1 aggregation engine | #37 | one fold target for everything | TUI/CLI output parity on fixtures + real corpus |
-| C2 adapter seam + tracers | #36 | the producer interface, proven on Zed + Pi/OMP | totals parity, driver no longer branches on tracer internals |
+| C2 adapter seam + tracers | #36 | the producer interface, proven on Zed, Pi, and OMP | totals parity, driver no longer branches on tracer internals |
 | C3 migrate remaining clients | #36 | driver becomes `for adapter { run }` | per-PR totals parity; legacy blocks deleted |
 | C4 sharded cache | #54 | no global cache load/save | warm totals parity; concurrent-process safety |
 | C5 streaming fold | #54 | `all_messages` dies | peak RSS ≈ target; totals parity |
@@ -81,24 +81,37 @@ Parity gate (the phase's core discipline):
 ```rust
 pub(crate) trait LocalSourceAdapter: Sync {
     fn client(&self) -> ClientId;
+
     /// Source units (files/dbs) with their fingerprint policy baked in.
-    fn discover(&self, ctx: &ScanContext) -> Vec<SourceUnit>;
-    /// Parse one unit into messages plus cacheability; pure, parallel-safe.
-    fn parse_unit(&self, unit: &SourceUnit) -> ParsedUnit;
+    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit>;
+
+    /// Parse a client batch into messages plus cacheability; pure,
+    /// parallel-safe, and able to build client-scoped indexes first.
+    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit>;
+
     /// Client-scoped post-pass: dedup across units, finalization
     /// (codex fallback timestamps, headless agent), pricing point.
-    fn fold(&self, units: Vec<ResolvedUnit>, sink: &mut dyn MessageSink);
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    );
 }
 ```
 
 `SourceUnit` carries the fingerprint strategy (plain / sqlite+wal /
 claude-sidecar) so the cache layer stays policy-free. The A1 mechanics
 (`ParsedSource`, `resolve_messages`, take-not-clone) become the shared
-plumbing under `fold`.
+plumbing under `fold`. `parse` is intentionally batch-scoped so OMP-like
+adapters can split cache hits/misses and build client-scoped indexes before
+parsing misses.
 
-Tracer bullets per #36: **Zed** (sqlite, simple) and **Pi/OMP** (glob +
-parent-task agent index — exercises a genuinely odd policy). Driver
-delegates these two; all other clients keep their legacy blocks until C3.
+Tracer bullets per #36: **Zed**, **Pi**, and **OMP**. Pi and OMP share the
+`sessions::pi` parser family but remain separate adapter modules because they
+are separate client identities and OMP owns parent-task agent index policy.
+Driver delegates these clients; all other clients keep their legacy blocks
+until C3.
 
 ## C3 — Migrate remaining clients
 
