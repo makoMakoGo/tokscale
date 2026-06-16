@@ -13,37 +13,15 @@ use crate::usage_views::{
     UsageTokenBreakdown,
 };
 use crate::{
+    aggregate::keys::{
+        daily_source_model_key, grouped_model_bucket_key, hourly_model_key, workspace_bucket,
+    },
     normalize_model_for_grouping, normalize_provider_for_grouping,
     ordered_clients_by_token_contribution, sessions, ClientContributionOrder, GroupBy,
     ModelPerformance, UnifiedMessage,
 };
 
-pub const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
-const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
-
-fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
-    match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.to_string(), Some(key.to_string()), label.to_string()),
-        (Some(key), None) => (
-            key.to_string(),
-            Some(key.to_string()),
-            crate::sessions::workspace_label_from_key(key)
-                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
-        ),
-        _ => (
-            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
-            None,
-            UNKNOWN_WORKSPACE_LABEL.to_string(),
-        ),
-    }
-}
-
-fn workspace_model_bucket_key(workspace_group_key: &str, model: &str) -> String {
-    format!(
-        "{}:{workspace_group_key}:{model}",
-        workspace_group_key.len()
-    )
-}
+pub use crate::aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
 
 fn positive_unified_token_total(tokens: &crate::TokenBreakdown) -> i64 {
     tokens.input.max(0)
@@ -70,43 +48,6 @@ fn grouped_model_display_label(
     }
 }
 
-fn grouped_model_bucket_key(
-    group_by: &GroupBy,
-    client: &str,
-    provider_id: &str,
-    workspace_group_key: &str,
-    session_id: &str,
-    model: &str,
-) -> (String, bool) {
-    match group_by {
-        GroupBy::Model => (model.to_string(), true),
-        GroupBy::ClientModel => (format!("{client}:{model}"), false),
-        GroupBy::ClientProviderModel => (format!("{client}:{provider_id}:{model}"), false),
-        GroupBy::WorkspaceModel => (workspace_model_bucket_key(workspace_group_key, model), true),
-        GroupBy::Session => (format!("{session_id}:{model}"), false),
-        GroupBy::ClientSession => (format!("{client}:{session_id}:{model}"), false),
-    }
-}
-
-fn daily_source_model_key(
-    group_by: &GroupBy,
-    client: &str,
-    workspace_group_key: &str,
-    provider_id: &str,
-    session_id: &str,
-    model: &str,
-) -> String {
-    grouped_model_bucket_key(
-        group_by,
-        client,
-        provider_id,
-        workspace_group_key,
-        session_id,
-        model,
-    )
-    .0
-}
-
 fn daily_source_model_display_name(
     group_by: &GroupBy,
     workspace_label: &str,
@@ -119,13 +60,6 @@ fn daily_source_model_display_name(
 fn model_color_key(_group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
     // All GroupBy variants currently reduce to the bare model name.
     model.to_string()
-}
-
-fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
-    match group_by {
-        GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        _ => model.to_string(),
-    }
 }
 
 fn hourly_model_display_name(group_by: &GroupBy, model: &str) -> String {

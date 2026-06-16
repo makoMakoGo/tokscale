@@ -7,6 +7,7 @@
 
 use crate::aggregate::{AggregationConfig, AggregationEngine, DateRange, ViewSet};
 use crate::sessions::UnifiedMessage;
+use crate::usage_views::UsageData;
 use crate::{aggregator, sessionize, GroupBy, ModelReport, TokenBreakdown};
 use serial_test::serial;
 
@@ -147,7 +148,19 @@ fn neutralize_processing_time(report: &mut ModelReport) {
     report.processing_time_ms = 0;
 }
 
-// ---- Parity tests ----
+fn engine_usage_data(msgs: &[UnifiedMessage], group_by: GroupBy) -> UsageData {
+    let mut engine = AggregationEngine::new(AggregationConfig {
+        group_by,
+        date_range: DateRange::none(),
+        views: ViewSet::TUI,
+    });
+    for msg in msgs {
+        engine.push(msg);
+    }
+    engine.finish().tui_usage.expect("tui view requested")
+}
+
+// ---- Primitive parity and entrypoint consistency tests ----
 
 #[test]
 #[serial]
@@ -200,7 +213,7 @@ fn parity_graph_result() {
 
 #[test]
 #[serial]
-fn parity_model_report_all_group_by() {
+fn entrypoint_model_report_matches_engine_all_group_by() {
     pin_tz();
     let msgs = corpus();
     for gb in [
@@ -226,14 +239,14 @@ fn parity_model_report_all_group_by() {
         assert_eq!(
             serde_json::to_string(&expected).unwrap(),
             serde_json::to_string(&actual).unwrap(),
-            "ModelReport parity failed for {gb:?}",
+            "ModelReport entrypoint consistency failed for {gb:?}",
         );
     }
 }
 
 #[test]
 #[serial]
-fn parity_monthly_report() {
+fn entrypoint_monthly_report_matches_engine() {
     pin_tz();
     let msgs = corpus();
 
@@ -254,13 +267,13 @@ fn parity_monthly_report() {
     assert_eq!(
         serde_json::to_string(&expected).unwrap(),
         serde_json::to_string(&actual).unwrap(),
-        "MonthlyReport byte parity failed",
+        "MonthlyReport entrypoint consistency failed",
     );
 }
 
 #[test]
 #[serial]
-fn parity_hourly_report() {
+fn entrypoint_hourly_report_matches_engine() {
     pin_tz();
     let msgs = corpus();
 
@@ -279,7 +292,7 @@ fn parity_hourly_report() {
     assert_eq!(
         serde_json::to_string(&expected).unwrap(),
         serde_json::to_string(&actual).unwrap(),
-        "HourlyReport byte parity failed",
+        "HourlyReport entrypoint consistency failed",
     );
 }
 
@@ -372,6 +385,118 @@ fn contract_tui_view_materializes_usage_data() {
     );
     assert!(!data.loading);
     assert!(data.error.is_none());
+}
+
+#[test]
+#[serial]
+fn contract_tui_workspace_provider_daily_and_streaks() {
+    pin_tz();
+    let today = chrono::Local::now().date_naive();
+    let yesterday = today - chrono::Duration::days(1);
+    let two_days_ago = today - chrono::Duration::days(2);
+    let today_s = today.format("%Y-%m-%d").to_string();
+    let yesterday_s = yesterday.format("%Y-%m-%d").to_string();
+    let two_days_ago_s = two_days_ago.format("%Y-%m-%d").to_string();
+
+    let mut first = msg(
+        "claude",
+        "claude-sonnet-4",
+        "anthropic",
+        "workspace-session",
+        &today_s,
+        2.0,
+    );
+    first.set_workspace(Some("/Users/alice/repo-a".to_string()), None);
+    first.is_turn_start = true;
+
+    let mut second = msg(
+        "claude",
+        "claude-sonnet-4",
+        "anthropic-bedrock",
+        "workspace-session",
+        &yesterday_s,
+        3.0,
+    );
+    second.set_workspace(Some("/Users/alice/repo-a".to_string()), None);
+
+    let third = msg(
+        "codex",
+        "gpt-5",
+        "openai",
+        "codex-session",
+        &two_days_ago_s,
+        1.0,
+    );
+
+    let data = engine_usage_data(&[first, second, third], GroupBy::WorkspaceModel);
+
+    assert_eq!(data.current_streak, 3);
+    assert_eq!(data.longest_streak, 3);
+
+    let workspace_model = data
+        .models
+        .iter()
+        .find(|entry| entry.model == "claude-sonnet-4")
+        .expect("workspace model entry");
+    assert_eq!(
+        workspace_model.workspace_key.as_deref(),
+        Some("/Users/alice/repo-a")
+    );
+    assert_eq!(workspace_model.workspace_label.as_deref(), Some("repo-a"));
+    assert_eq!(workspace_model.provider, "anthropic, anthropic-bedrock");
+    assert_eq!(workspace_model.session_count, 1);
+
+    let today_usage = data
+        .daily
+        .iter()
+        .find(|day| day.date == today)
+        .expect("today usage");
+    assert_eq!(today_usage.message_count, 1);
+    assert_eq!(today_usage.turn_count, 1);
+
+    let claude_source = today_usage
+        .source_breakdown
+        .get("claude")
+        .expect("claude daily source");
+    assert_eq!(claude_source.cost, 2.0);
+    let daily_model = claude_source
+        .models
+        .values()
+        .find(|model| model.display_name == "repo-a / claude-sonnet-4")
+        .expect("workspace daily model display");
+    assert_eq!(daily_model.provider, "anthropic");
+    assert_eq!(daily_model.messages, 1);
+}
+
+#[test]
+#[serial]
+fn contract_tui_hourly_timestamp_zero_fallback_bucket() {
+    pin_tz();
+    let mut zero = msg(
+        "claude",
+        "claude-sonnet-4",
+        "anthropic",
+        "zero-session",
+        "1970-01-01",
+        1.0,
+    );
+    zero.timestamp = 0;
+
+    let data = engine_usage_data(&[zero], GroupBy::Model);
+
+    assert_eq!(data.hourly.len(), 1);
+    assert_eq!(
+        data.hourly[0].datetime,
+        chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+    );
+    assert_eq!(
+        data.hourly[0].clients.iter().collect::<Vec<_>>(),
+        vec!["claude"]
+    );
+    assert_eq!(data.hourly[0].message_count, 1);
 }
 
 // ===========================================================================

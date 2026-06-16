@@ -5,6 +5,7 @@
 mod accumulators;
 mod config;
 mod engine;
+pub(crate) mod keys;
 pub mod tui;
 mod views;
 

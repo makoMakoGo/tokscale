@@ -735,8 +735,8 @@ pub struct ModelReport {
     pub processing_time_ms: u32,
 }
 
-const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
-const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
+#[cfg(test)]
+pub(crate) use aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonthlyReport {
@@ -1982,30 +1982,6 @@ fn filter_unified_messages(
         options.until.as_ref(),
     );
     filtered
-}
-
-pub(crate) fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
-    match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.to_string(), Some(key.to_string()), label.to_string()),
-        (Some(key), None) => (
-            key.to_string(),
-            Some(key.to_string()),
-            sessions::workspace_label_from_key(key)
-                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
-        ),
-        _ => (
-            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
-            None,
-            UNKNOWN_WORKSPACE_LABEL.to_string(),
-        ),
-    }
-}
-
-pub(crate) fn workspace_model_bucket_key(workspace_group_key: &str, model: &str) -> String {
-    format!(
-        "{}:{workspace_group_key}:{model}",
-        workspace_group_key.len()
-    )
 }
 
 /// Test-only entry point: delegates to the aggregation engine. Kept as the

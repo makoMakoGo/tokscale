@@ -7,11 +7,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
+    aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
     aggregator, normalize_model_for_grouping, normalize_provider_for_grouping,
-    ordered_clients_by_token_contribution, positive_token_total, workspace_bucket,
-    workspace_model_bucket_key, ClientContributionOrder, DailyContribution, GraphResult, GroupBy,
-    HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
-    TimeMetricsReport, UnifiedMessage, ViewSet,
+    ordered_clients_by_token_contribution, positive_token_total, ClientContributionOrder,
+    DailyContribution, GraphResult, GroupBy, HourlyUsage, ModelPerformance, ModelUsage,
+    MonthlyUsage, SessionContribution, TimeMetricsReport, UnifiedMessage, ViewSet,
 };
 
 fn hourly_label(hour_key: &str) -> String {
@@ -42,22 +42,14 @@ impl ModelEntries {
         let normalized = normalize_model_for_grouping(&msg.model_id);
         let provider = normalize_provider_for_grouping(&msg.provider_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
-        let (key, merge_clients) = match group_by {
-            GroupBy::Model => (normalized.clone(), true),
-            GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized), false),
-            GroupBy::ClientProviderModel => {
-                (format!("{}:{}:{}", msg.client, provider, normalized), false)
-            }
-            GroupBy::WorkspaceModel => (
-                workspace_model_bucket_key(&workspace_group_key, &normalized),
-                true,
-            ),
-            GroupBy::Session => (format!("{}:{}", msg.session_id, normalized), false),
-            GroupBy::ClientSession => (
-                format!("{}:{}:{}", msg.client, msg.session_id, normalized),
-                false,
-            ),
-        };
+        let (key, merge_clients) = grouped_model_bucket_key(
+            group_by,
+            &msg.client,
+            &provider,
+            &workspace_group_key,
+            &msg.session_id,
+            &normalized,
+        );
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = self
             .model_map
