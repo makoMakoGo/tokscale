@@ -10,3 +10,6 @@ mod views;
 pub use config::{AggregationConfig, DateRange, ViewSet};
 pub use engine::AggregationEngine;
 pub use views::AggregatedViews;
+
+#[cfg(test)]
+mod parity_tests;

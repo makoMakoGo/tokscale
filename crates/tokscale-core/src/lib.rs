@@ -2493,6 +2493,126 @@ fn filter_messages_for_report(
     filtered
 }
 
+// Test-only thin wrappers exposing the live aggregation logic with a message
+// list as input, so the aggregate::parity_tests harness can drive the OLD path
+// identically to AggregationEngine's NEW path. They are NOT part of the public
+// API and are removed together with their private callees in C1.6/C1.8.
+#[cfg(test)]
+pub(crate) fn aggregate_model_usage_entries_pub(
+    messages: Vec<UnifiedMessage>,
+    group_by: &GroupBy,
+) -> Vec<ModelUsage> {
+    aggregate_model_usage_entries(messages, group_by)
+}
+
+#[cfg(test)]
+pub(crate) fn monthly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> MonthlyReport {
+    let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
+    for msg in messages {
+        let date = msg.date_string();
+        let month = if date.len() >= 7 {
+            date[..7].to_string()
+        } else {
+            continue;
+        };
+        let entry = month_map.entry(month).or_default();
+        entry
+            .models
+            .insert(normalize_model_for_grouping(&msg.model_id));
+        entry.input += msg.tokens.input;
+        entry.output += msg.tokens.output;
+        entry.cache_read += msg.tokens.cache_read;
+        entry.cache_write += msg.tokens.cache_write;
+        entry.message_count += msg.message_count.max(0);
+        entry.cost += msg.cost;
+    }
+    let mut entries: Vec<MonthlyUsage> = month_map
+        .into_iter()
+        .map(|(month, agg)| MonthlyUsage {
+            month,
+            models: agg.models.into_iter().collect(),
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            message_count: agg.message_count,
+            cost: agg.cost,
+        })
+        .collect();
+    entries.sort_by(|a, b| a.month.cmp(&b.month));
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    MonthlyReport {
+        entries,
+        total_cost,
+        processing_time_ms: 0,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn hourly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> HourlyReport {
+    use chrono::{Local, TimeZone};
+    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
+    for msg in messages {
+        let hour_key = if msg.timestamp > 0 {
+            let ts_secs = msg.timestamp / 1000;
+            match Local.timestamp_opt(ts_secs, 0) {
+                chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
+                _ => format!("{} 00:00", msg.date_string()),
+            }
+        } else {
+            format!("{} 00:00", msg.date_string())
+        };
+        let entry = hour_map.entry(hour_key).or_default();
+        entry.clients.insert(msg.client.to_string());
+        entry
+            .models
+            .insert(normalize_model_for_grouping(&msg.model_id));
+        entry.input += msg.tokens.input;
+        entry.output += msg.tokens.output;
+        entry.cache_read += msg.tokens.cache_read;
+        entry.cache_write += msg.tokens.cache_write;
+        entry.reasoning += msg.tokens.reasoning;
+        entry.message_count += msg.message_count.max(0);
+        if msg.is_turn_start {
+            entry.turn_count += 1;
+        }
+        entry.cost += msg.cost;
+    }
+    let mut entries: Vec<(String, HourlyUsage)> = Vec::with_capacity(hour_map.len());
+    for (hour, agg) in hour_map {
+        let entry = HourlyUsage {
+            hour: hourly_report_label(&hour).unwrap_or_default(),
+            clients: {
+                let mut v: Vec<String> = agg.clients.into_iter().collect();
+                v.sort();
+                v
+            },
+            models: {
+                let mut v: Vec<String> = agg.models.into_iter().collect();
+                v.sort();
+                v
+            },
+            input: agg.input,
+            output: agg.output,
+            cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
+            message_count: agg.message_count,
+            turn_count: agg.turn_count,
+            reasoning: agg.reasoning,
+            cost: agg.cost,
+        };
+        entries.push((hour, entry));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let entries: Vec<HourlyUsage> = entries.into_iter().map(|(_, entry)| entry).collect();
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    HourlyReport {
+        entries,
+        total_cost,
+        processing_time_ms: 0,
+    }
+}
+
 fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
     headless_roots.iter().any(|root| path.starts_with(root))
 }
