@@ -6,7 +6,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit,
+    ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::{scanner, sessions, UnifiedMessage};
@@ -19,6 +19,92 @@ pub(crate) struct ParsedFileWithCachePolicy {
 pub(crate) struct CachedFileAdapter {
     client: ClientId,
     parse: fn(&Path) -> Vec<UnifiedMessage>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PricingPolicy {
+    ApplyAlways,
+    ApplyIfCostNonPositive,
+    Never,
+}
+
+impl PricingPolicy {
+    pub(crate) fn apply(
+        self,
+        message: &mut UnifiedMessage,
+        pricing: Option<&crate::pricing::PricingService>,
+    ) {
+        match self {
+            PricingPolicy::ApplyAlways => crate::apply_pricing_if_available(message, pricing),
+            PricingPolicy::ApplyIfCostNonPositive if message.cost <= 0.0 => {
+                crate::apply_pricing_if_available(message, pricing);
+            }
+            PricingPolicy::ApplyIfCostNonPositive | PricingPolicy::Never => {}
+        }
+    }
+}
+
+pub(crate) struct NonCachedFileAdapter {
+    client: ClientId,
+    parse: fn(&Path) -> Vec<UnifiedMessage>,
+    pricing_policy: PricingPolicy,
+}
+
+impl NonCachedFileAdapter {
+    pub(crate) const fn new(
+        client: ClientId,
+        parse: fn(&Path) -> Vec<UnifiedMessage>,
+        pricing_policy: PricingPolicy,
+    ) -> Self {
+        Self {
+            client,
+            parse,
+            pricing_policy,
+        }
+    }
+}
+
+impl LocalSourceAdapter for NonCachedFileAdapter {
+    fn client(&self) -> ClientId {
+        self.client
+    }
+
+    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+        adapter_discover::discover_default_scanned_units(self.client, ctx, FingerprintPolicy::None)
+    }
+
+    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+        let parse = self.parse;
+        let pricing_policy = self.pricing_policy;
+        units
+            .into_par_iter()
+            .map(|unit| {
+                let mut messages = parse(&unit.path);
+                for message in &mut messages {
+                    pricing_policy.apply(message, ctx.pricing);
+                }
+                ParsedUnit {
+                    unit,
+                    messages: UnitMessageSource::Fresh(messages),
+                    cache_entry: None,
+                    invalidate_cache: false,
+                }
+            })
+            .collect()
+    }
+
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        _ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) {
+        for unit in parsed {
+            if let UnitMessageSource::Fresh(messages) = unit.messages {
+                sink.extend_messages(messages);
+            }
+        }
+    }
 }
 
 impl CachedFileAdapter {
@@ -174,6 +260,11 @@ pub(crate) static QWEN_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new(ClientId::Qwen, sessions::qwen::parse_qwen_file);
 pub(crate) static MUX_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new(ClientId::Mux, sessions::mux::parse_mux_file);
+pub(crate) static ANTIGRAVITY_ADAPTER: NonCachedFileAdapter = NonCachedFileAdapter::new(
+    ClientId::Antigravity,
+    sessions::antigravity::parse_antigravity_file,
+    PricingPolicy::ApplyAlways,
+);
 
 #[cfg(test)]
 mod tests {
@@ -299,5 +390,41 @@ mod tests {
         assert!(parsed[0].invalidate_cache);
         assert!(parsed[0].cache_entry.is_none());
         assert!(matches!(parsed[0].messages, UnitMessageSource::Fresh(_)));
+    }
+
+    #[test]
+    fn antigravity_adapter_output_matches_parser_without_cache_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("antigravity.jsonl");
+        write_file(
+            &path,
+            r#"{"type":"session_meta","sessionId":"abc","modelId":"claude-sonnet-4.6"}
+{"type":"usage","sessionId":"abc","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-1"}
+"#,
+        );
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let parsed = ANTIGRAVITY_ADAPTER.parse(
+            vec![SourceUnit::no_cache(ClientId::Antigravity, path.clone())],
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+        );
+
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].cache_entry.is_none());
+        let mut sink = Vec::new();
+        ANTIGRAVITY_ADAPTER.fold(
+            parsed,
+            &mut FoldContext {
+                source_cache: &mut cache,
+                pricing: None,
+            },
+            &mut sink,
+        );
+        let expected = sessions::antigravity::parse_antigravity_file(&path);
+
+        assert_eq!(sink, expected);
     }
 }
