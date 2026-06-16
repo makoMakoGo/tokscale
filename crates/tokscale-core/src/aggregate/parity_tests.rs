@@ -27,14 +27,22 @@ fn ts(date: &str) -> i64 {
     );
     // Days since 1970-01-01 (Gregorian), *86400 + 12h, in ms. Good enough for
     // date-string bucketing (`date_string()` derives local date from timestamp).
-    let days = (y - 1970) * 365 + (y - 1969) / 4 - (y - 1901) / 100 + (y - 1601) / 400
+    let days = (y - 1970) * 365 + (y - 1969) / 4 - (y - 1901) / 100
+        + (y - 1601) / 400
         + [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][m.clamp(1, 12) as usize]
         + d
         - 1;
     days * 86_400_000 + 12 * 3_600_000
 }
 
-fn msg(client: &str, model: &str, provider: &str, session: &str, date: &str, cost: f64) -> UnifiedMessage {
+fn msg(
+    client: &str,
+    model: &str,
+    provider: &str,
+    session: &str,
+    date: &str,
+    cost: f64,
+) -> UnifiedMessage {
     UnifiedMessage::new(
         client,
         model,
@@ -59,20 +67,55 @@ fn msg(client: &str, model: &str, provider: &str, session: &str, date: &str, cos
 fn corpus() -> Vec<UnifiedMessage> {
     let mut msgs = vec![
         // Two equal-cost distinct models (model-entry NaN-last sort, no tie-break leg).
-        msg("claude", "claude-sonnet-4", "anthropic", "s1", "2024-06-10", 5.0),
-        msg("claude", "claude-opus-4", "anthropic", "s1", "2024-06-10", 5.0),
+        msg(
+            "claude",
+            "claude-sonnet-4",
+            "anthropic",
+            "s1",
+            "2024-06-10",
+            5.0,
+        ),
+        msg(
+            "claude",
+            "claude-opus-4",
+            "anthropic",
+            "s1",
+            "2024-06-10",
+            5.0,
+        ),
         // Two clients merged under GroupBy::Model, distinct arrival order.
         msg("codex", "gpt-5", "openai", "s2", "2024-06-11", 2.0),
         msg("gemini", "gpt-5", "openai", "s3", "2024-06-11", 8.0),
         // Same client:model across two providers (provider comma-merge + sort/dedup).
-        msg("claude", "claude-sonnet-4", "anthropic-bedrock", "s1", "2024-06-12", 1.0),
+        msg(
+            "claude",
+            "claude-sonnet-4",
+            "anthropic-bedrock",
+            "s1",
+            "2024-06-12",
+            1.0,
+        ),
         // A second month (month sort) + a NaN cost row (sanitation).
-        msg("claude", "claude-sonnet-4", "anthropic", "s1", "2024-05-01", f64::NAN),
+        msg(
+            "claude",
+            "claude-sonnet-4",
+            "anthropic",
+            "s1",
+            "2024-05-01",
+            f64::NAN,
+        ),
     ];
 
     // A timestamp<=0 row (hourly fallback bucket) with a valid date derived from
     // the timestamp epoch fallback. Build with new() then clear the timestamp.
-    let mut zero_ts = msg("claude", "claude-sonnet-4", "anthropic", "s1", "1970-01-01", 0.5);
+    let mut zero_ts = msg(
+        "claude",
+        "claude-sonnet-4",
+        "anthropic",
+        "s1",
+        "1970-01-01",
+        0.5,
+    );
     zero_ts.timestamp = 0;
     msgs.push(zero_ts);
     msgs
@@ -262,7 +305,9 @@ fn parity_time_metrics() {
         for m in &msgs {
             e.push(m);
         }
-        e.finish().time_metrics.expect("time-metrics view requested")
+        e.finish()
+            .time_metrics
+            .expect("time-metrics view requested")
     };
     assert_eq!(
         serde_json::to_string(&old).unwrap(),
@@ -312,11 +357,17 @@ fn contract_merged_clients_first_seen_tie_break() {
     // Equal tokens (50): first_seen decides -> b(0) before a(1).
     m.insert(
         "a".to_string(),
-        ClientContributionOrder { first_seen: 1, total_tokens: 50 },
+        ClientContributionOrder {
+            first_seen: 1,
+            total_tokens: 50,
+        },
     );
     m.insert(
         "b".to_string(),
-        ClientContributionOrder { first_seen: 0, total_tokens: 50 },
+        ClientContributionOrder {
+            first_seen: 0,
+            total_tokens: 50,
+        },
     );
     assert_eq!(ordered_clients_by_token_contribution(&m), "b, a");
 }
@@ -329,11 +380,17 @@ fn contract_merged_clients_name_tie_break() {
     let mut m = HashMap::new();
     m.insert(
         "zeta".to_string(),
-        ClientContributionOrder { first_seen: 0, total_tokens: 7 },
+        ClientContributionOrder {
+            first_seen: 0,
+            total_tokens: 7,
+        },
     );
     m.insert(
         "alpha".to_string(),
-        ClientContributionOrder { first_seen: 0, total_tokens: 7 },
+        ClientContributionOrder {
+            first_seen: 0,
+            total_tokens: 7,
+        },
     );
     assert_eq!(ordered_clients_by_token_contribution(&m), "alpha, zeta");
 }
@@ -349,12 +406,23 @@ fn contract_model_entry_cost_desc_nan_last() {
             "p",
             "s",
             ts("2024-06-10"),
-            TokenBreakdown { input: 1, output: 1, cache_read: 0, cache_write: 0, reasoning: 0 },
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
             cost,
         )
     }
     // Distinct costs, descending: 9.0, 5.0, 1.0, then NaN last.
-    let msgs = vec![mk("m1", 1.0), mk("m2", 9.0), mk("m3", f64::NAN), mk("m4", 5.0)];
+    let msgs = vec![
+        mk("m1", 1.0),
+        mk("m2", 9.0),
+        mk("m3", f64::NAN),
+        mk("m4", 5.0),
+    ];
     let entries = crate::aggregate_model_usage_entries_pub(msgs, &GroupBy::Model);
     let models: Vec<&str> = entries.iter().map(|e| e.model.as_str()).collect();
     assert_eq!(models, vec!["m2", "m4", "m1", "m3"]);
@@ -367,8 +435,18 @@ fn contract_model_entry_equal_cost_tie_break() {
     use crate::GroupBy;
     fn mk(model: &str, cost: f64) -> UnifiedMessage {
         UnifiedMessage::new(
-            "c", model, "p", "s", ts("2024-06-10"),
-            TokenBreakdown { input: 1, output: 1, cache_read: 0, cache_write: 0, reasoning: 0 },
+            "c",
+            model,
+            "p",
+            "s",
+            ts("2024-06-10"),
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
             cost,
         )
     }
@@ -384,8 +462,36 @@ fn contract_hourly_full_key_asc() {
     // lib.rs:2375 — hourly entries sort by the full "YYYY-MM-DD HH:00" key ASC.
     pin_tz();
     let msgs = vec![
-        UnifiedMessage::new("c", "m", "p", "s", ts("2024-06-10"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
-        UnifiedMessage::new("c", "m", "p", "s", ts("2024-05-01"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+        UnifiedMessage::new(
+            "c",
+            "m",
+            "p",
+            "s",
+            ts("2024-06-10"),
+            TokenBreakdown {
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            1.0,
+        ),
+        UnifiedMessage::new(
+            "c",
+            "m",
+            "p",
+            "s",
+            ts("2024-05-01"),
+            TokenBreakdown {
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            1.0,
+        ),
     ];
     let report = crate::hourly_report_from_messages_pub(msgs);
     assert_eq!(report.entries.len(), 2);
@@ -399,8 +505,18 @@ fn contract_hourly_timestamp_zero_fallback_bucket() {
     // lib.rs:2321 — a timestamp<=0 message lands in "{date} 00:00".
     pin_tz();
     let mut zero = UnifiedMessage::new(
-        "c", "m", "p", "s", ts("1970-01-01"),
-        TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 },
+        "c",
+        "m",
+        "p",
+        "s",
+        ts("1970-01-01"),
+        TokenBreakdown {
+            input: 1,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
         1.0,
     );
     zero.timestamp = 0;
@@ -415,8 +531,36 @@ fn contract_monthly_month_asc() {
     // lib.rs:2257 — monthly entries sort by month ASC.
     pin_tz();
     let msgs = vec![
-        UnifiedMessage::new("c", "m", "p", "s", ts("2024-06-15"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
-        UnifiedMessage::new("c", "m", "p", "s", ts("2024-05-15"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+        UnifiedMessage::new(
+            "c",
+            "m",
+            "p",
+            "s",
+            ts("2024-06-15"),
+            TokenBreakdown {
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            1.0,
+        ),
+        UnifiedMessage::new(
+            "c",
+            "m",
+            "p",
+            "s",
+            ts("2024-05-15"),
+            TokenBreakdown {
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            1.0,
+        ),
     ];
     let report = crate::monthly_report_from_messages_pub(msgs);
     assert_eq!(report.entries.len(), 2);
@@ -430,8 +574,36 @@ fn contract_monthly_models_sorted() {
     // MonthlyUsage.models is an unsorted HashSet->Vec today; C1.5 will sort it.
     pin_tz();
     let msgs = vec![
-        UnifiedMessage::new("c", "zzz-model", "p", "s", ts("2024-06-15"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
-        UnifiedMessage::new("c", "aaa-model", "p", "s", ts("2024-06-16"), TokenBreakdown { input: 1, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }, 1.0),
+        UnifiedMessage::new(
+            "c",
+            "zzz-model",
+            "p",
+            "s",
+            ts("2024-06-15"),
+            TokenBreakdown {
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            1.0,
+        ),
+        UnifiedMessage::new(
+            "c",
+            "aaa-model",
+            "p",
+            "s",
+            ts("2024-06-16"),
+            TokenBreakdown {
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            1.0,
+        ),
     ];
     let report = crate::monthly_report_from_messages_pub(msgs);
     assert_eq!(report.entries[0].models, vec!["aaa-model", "zzz-model"]);

@@ -44,7 +44,6 @@ fn trim_allocator() {
     }
 }
 
-
 pub struct DataLoader {
     _sessions_path: Option<PathBuf>,
     pub since: Option<String>,
@@ -60,8 +59,8 @@ pub struct DataLoader {
 pub use tokscale_core::aggregate::tui::{
     aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
     build_contribution_graph_for_today, build_period_usage, calculate_streaks,
-    calculate_streaks_for_today, find_peak_hour, PeriodBucket, UNKNOWN_WORKSPACE_LABEL,
-    WeekdayBucket,
+    calculate_streaks_for_today, find_peak_hour, PeriodBucket, WeekdayBucket,
+    UNKNOWN_WORKSPACE_LABEL,
 };
 
 impl DataLoader {
@@ -204,8 +203,7 @@ impl DataLoader {
         // Delegate to the core aggregation engine (#37: single site). The
         // 36 data-module tests exercise this entry point unchanged.
         Ok(tokscale_core::aggregate::tui::aggregate_usage_data(
-            messages,
-            group_by,
+            messages, group_by,
         ))
     }
 }

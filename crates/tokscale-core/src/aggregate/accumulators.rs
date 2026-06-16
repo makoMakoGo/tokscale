@@ -44,7 +44,9 @@ impl ModelEntries {
         let (key, merge_clients) = match group_by {
             GroupBy::Model => (normalized.clone(), true),
             GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized), false),
-            GroupBy::ClientProviderModel => (format!("{}:{}:{}", msg.client, provider, normalized), false),
+            GroupBy::ClientProviderModel => {
+                (format!("{}:{}:{}", msg.client, provider, normalized), false)
+            }
             GroupBy::WorkspaceModel => (
                 workspace_model_bucket_key(&workspace_group_key, &normalized),
                 true,
@@ -94,10 +96,7 @@ impl ModelEntries {
             });
 
         if merge_clients {
-            let client_totals = self
-                .client_totals_by_entry
-                .entry(key.clone())
-                .or_default();
+            let client_totals = self.client_totals_by_entry.entry(key.clone()).or_default();
             let client_count = client_totals.len();
             let totals = client_totals
                 .entry(msg.client.to_string())
@@ -163,7 +162,10 @@ impl ModelEntries {
                 (true, true) => std::cmp::Ordering::Equal,
                 (true, false) => std::cmp::Ordering::Greater,
                 (false, true) => std::cmp::Ordering::Less,
-                (false, false) => b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal),
+                (false, false) => b
+                    .cost
+                    .partial_cmp(&a.cost)
+                    .unwrap_or(std::cmp::Ordering::Equal),
             };
             // Deterministic secondary keys — identical to aggregate_model_usage_entries
             // (the C1.5 BLOCKER fix, applied to both paths together).
@@ -203,7 +205,8 @@ impl MonthAcc {
     }
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
-        self.models.insert(normalize_model_for_grouping(&msg.model_id));
+        self.models
+            .insert(normalize_model_for_grouping(&msg.model_id));
         self.input += msg.tokens.input;
         self.output += msg.tokens.output;
         self.cache_read += msg.tokens.cache_read;
@@ -271,7 +274,8 @@ pub(super) struct HourAcc {
 impl HourAcc {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         self.clients.insert(msg.client.to_string());
-        self.models.insert(normalize_model_for_grouping(&msg.model_id));
+        self.models
+            .insert(normalize_model_for_grouping(&msg.model_id));
         self.input += msg.tokens.input;
         self.output += msg.tokens.output;
         self.cache_read += msg.tokens.cache_read;
@@ -343,6 +347,8 @@ pub(super) fn graph_result_from_messages(
 }
 
 /// `SessionContribution` list via the existing `aggregate_by_session`.
-pub(super) fn sessions_from_messages(messages: &[UnifiedMessage]) -> Vec<crate::SessionContribution> {
+pub(super) fn sessions_from_messages(
+    messages: &[UnifiedMessage],
+) -> Vec<crate::SessionContribution> {
     aggregator::aggregate_by_session(messages.to_vec())
 }

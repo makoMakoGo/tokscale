@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use crate::{
     aggregate::accumulators::{
-        finish_hour_map, finish_month_map, graph_result_from_messages, hour_key, sessions_from_messages,
-        HourAcc, ModelEntries, MonthAcc,
+        finish_hour_map, finish_month_map, graph_result_from_messages, hour_key,
+        sessions_from_messages, HourAcc, ModelEntries, MonthAcc,
     },
     sessionize::{self},
     AggregatedViews, AggregationConfig, ViewSet,
@@ -29,7 +29,9 @@ impl AggregationEngine {
             || views.contains(ViewSet::SESSIONS)
             || views.contains(ViewSet::TIME_METRICS);
         Self {
-            model_entries: views.contains(ViewSet::MODEL).then(|| ModelEntries::new(config.group_by.clone())),
+            model_entries: views
+                .contains(ViewSet::MODEL)
+                .then(|| ModelEntries::new(config.group_by.clone())),
             month_map: views.contains(ViewSet::MONTHLY).then(HashMap::new),
             hour_map: views.contains(ViewSet::HOURLY).then(HashMap::new),
             graph_buffer: graph_needed.then(Vec::new),
@@ -100,30 +102,31 @@ impl AggregationEngine {
         // caller's responsibility (set after `finish`); 0 here.
         let (graph, session_contributions, time_metrics, daily_contributions) = match graph_buffer {
             Some(messages) => {
-                let intervals =
-                    sessionize::sessionize(&messages, sessionize::DEFAULT_IDLE_GAP_MS);
-                let metrics = sessionize::compute_time_metrics(
-                    &intervals,
-                    sessionize::DEFAULT_IDLE_GAP_MS,
-                );
-                let graph = config.views.contains(ViewSet::GRAPH).then(|| {
-                    graph_result_from_messages(&messages, 0)
-                });
+                let intervals = sessionize::sessionize(&messages, sessionize::DEFAULT_IDLE_GAP_MS);
+                let metrics =
+                    sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
+                let graph = config
+                    .views
+                    .contains(ViewSet::GRAPH)
+                    .then(|| graph_result_from_messages(&messages, 0));
                 let sessions = config
                     .views
                     .contains(ViewSet::SESSIONS)
                     .then(|| sessions_from_messages(&messages));
-                let time_metrics = config
-                    .views
-                    .contains(ViewSet::TIME_METRICS)
-                    .then_some(TimeMetricsReport {
-                        metrics,
-                        processing_time_ms: 0,
-                    });
-                let daily = config
-                    .views
-                    .contains(ViewSet::GRAPH)
-                    .then(|| graph.as_ref().map(|g| g.contributions.clone()).unwrap_or_default());
+                let time_metrics =
+                    config
+                        .views
+                        .contains(ViewSet::TIME_METRICS)
+                        .then_some(TimeMetricsReport {
+                            metrics,
+                            processing_time_ms: 0,
+                        });
+                let daily = config.views.contains(ViewSet::GRAPH).then(|| {
+                    graph
+                        .as_ref()
+                        .map(|g| g.contributions.clone())
+                        .unwrap_or_default()
+                });
                 (graph, sessions, time_metrics, daily)
             }
             None => (None, None, None, None),

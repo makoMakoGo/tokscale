@@ -96,7 +96,15 @@ fn daily_source_model_key(
     session_id: &str,
     model: &str,
 ) -> String {
-    grouped_model_bucket_key(group_by, client, provider_id, workspace_group_key, session_id, model).0
+    grouped_model_bucket_key(
+        group_by,
+        client,
+        provider_id,
+        workspace_group_key,
+        session_id,
+        model,
+    )
+    .0
 }
 
 fn daily_source_model_display_name(
@@ -136,8 +144,12 @@ fn sane_cost(cost: f64) -> f64 {
 fn add_unified_tokens(target: &mut UsageTokenBreakdown, src: &crate::TokenBreakdown) {
     target.input = target.input.saturating_add(src.input.max(0) as u64);
     target.output = target.output.saturating_add(src.output.max(0) as u64);
-    target.cache_read = target.cache_read.saturating_add(src.cache_read.max(0) as u64);
-    target.cache_write = target.cache_write.saturating_add(src.cache_write.max(0) as u64);
+    target.cache_read = target
+        .cache_read
+        .saturating_add(src.cache_read.max(0) as u64);
+    target.cache_write = target
+        .cache_write
+        .saturating_add(src.cache_write.max(0) as u64);
     target.reasoning = target.reasoning.saturating_add(src.reasoning.max(0) as u64);
 }
 
@@ -150,7 +162,12 @@ fn timestamp_to_hour(timestamp_ms: i64) -> Option<NaiveDateTime> {
     match Local.timestamp_opt(ts_secs, 0) {
         chrono::LocalResult::Single(dt) => {
             let naive = dt.naive_local();
-            Some(naive.date().and_hms_opt(naive.hour(), 0, 0).unwrap_or(naive))
+            Some(
+                naive
+                    .date()
+                    .and_hms_opt(naive.hour(), 0, 0)
+                    .unwrap_or(naive),
+            )
         }
         _ => None,
     }
@@ -308,7 +325,10 @@ pub fn build_contribution_graph(daily: &[DailyUsage]) -> UsageGraphData {
     build_contribution_graph_for_today(daily, Local::now().date_naive())
 }
 
-pub fn build_contribution_graph_for_today(daily: &[DailyUsage], today: NaiveDate) -> UsageGraphData {
+pub fn build_contribution_graph_for_today(
+    daily: &[DailyUsage],
+    today: NaiveDate,
+) -> UsageGraphData {
     if daily.is_empty() {
         return UsageGraphData { weeks: vec![] };
     }
@@ -322,7 +342,11 @@ pub fn build_contribution_graph_for_today(daily: &[DailyUsage], today: NaiveDate
     let mut current_date = start_date;
     while current_date <= end_date {
         let day = if let Some(usage) = daily_map.get(&current_date) {
-            let raw_intensity = if max_cost > 0.0 { usage.cost / max_cost } else { 0.0 };
+            let raw_intensity = if max_cost > 0.0 {
+                usage.cost / max_cost
+            } else {
+                0.0
+            };
             let intensity = if raw_intensity.is_finite() {
                 raw_intensity.clamp(0.0, 1.0)
             } else {
@@ -431,14 +455,24 @@ pub fn aggregate_by_period(hourly: &[HourlyUsage]) -> Vec<PeriodBucket> {
                     total_tokens = total_tokens.saturating_add(entry.tokens.total());
                 }
             }
-            PeriodBucket { label, hour_range, total_tokens }
+            PeriodBucket {
+                label,
+                hour_range,
+                total_tokens,
+            }
         })
         .collect()
 }
 
 pub fn aggregate_by_weekday(hourly: &[HourlyUsage]) -> Vec<WeekdayBucket> {
     let weekdays = [
-        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
     ];
     let mut buckets: Vec<u64> = vec![0; 7];
     for entry in hourly {
@@ -448,7 +482,10 @@ pub fn aggregate_by_weekday(hourly: &[HourlyUsage]) -> Vec<WeekdayBucket> {
     weekdays
         .iter()
         .enumerate()
-        .map(|(i, day)| WeekdayBucket { day, total_tokens: buckets[i] })
+        .map(|(i, day)| WeekdayBucket {
+            day,
+            total_tokens: buckets[i],
+        })
         .collect()
 }
 
@@ -496,25 +533,27 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
 
         let msg_cost = sane_cost(msg.cost);
 
-        let model_entry = model_map.entry(key.clone()).or_insert_with(|| UsageModelEntry {
-            model: normalized_model.clone(),
-            provider: provider.clone(),
-            client: msg.client.to_string(),
-            workspace_key: if *group_by == GroupBy::WorkspaceModel {
-                workspace_key.clone()
-            } else {
-                None
-            },
-            workspace_label: if *group_by == GroupBy::WorkspaceModel {
-                Some(workspace_label.clone())
-            } else {
-                None
-            },
-            tokens: UsageTokenBreakdown::default(),
-            cost: 0.0,
-            performance: ModelPerformance::default(),
-            session_count: 0,
-        });
+        let model_entry = model_map
+            .entry(key.clone())
+            .or_insert_with(|| UsageModelEntry {
+                model: normalized_model.clone(),
+                provider: provider.clone(),
+                client: msg.client.to_string(),
+                workspace_key: if *group_by == GroupBy::WorkspaceModel {
+                    workspace_key.clone()
+                } else {
+                    None
+                },
+                workspace_label: if *group_by == GroupBy::WorkspaceModel {
+                    Some(workspace_label.clone())
+                } else {
+                    None
+                },
+                tokens: UsageTokenBreakdown::default(),
+                cost: 0.0,
+                performance: ModelPerformance::default(),
+                session_count: 0,
+            });
 
         if merge_clients {
             let client_totals = client_totals_by_model.entry(key.clone()).or_default();
@@ -525,8 +564,9 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
                     first_seen: client_count,
                     total_tokens: 0,
                 });
-            totals.total_tokens =
-                totals.total_tokens.saturating_add(msg.tokens.total().max(0) as u64);
+            totals.total_tokens = totals
+                .total_tokens
+                .saturating_add(msg.tokens.total().max(0) as u64);
         }
 
         if *group_by != GroupBy::ClientProviderModel
@@ -565,8 +605,9 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
                 });
             add_unified_tokens(&mut agent_entry.tokens, &msg.tokens);
             agent_entry.cost += msg_cost;
-            agent_entry.message_count =
-                agent_entry.message_count.saturating_add(msg.message_count.max(0) as u32);
+            agent_entry.message_count = agent_entry
+                .message_count
+                .saturating_add(msg.message_count.max(0) as u32);
             agent_clients
                 .entry(normalized_agent.clone())
                 .or_default()
@@ -635,7 +676,9 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
                 });
             add_unified_tokens(&mut model_info.tokens, &msg.tokens);
             model_info.cost += msg_cost;
-            model_info.messages = model_info.messages.saturating_add(msg.message_count.max(0) as u64);
+            model_info.messages = model_info
+                .messages
+                .saturating_add(msg.message_count.max(0) as u64);
         }
 
         if let Some(bucket) = hour_bucket_with_fallback(msg.timestamp, msg.local_date()) {
@@ -714,7 +757,10 @@ pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -
     hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
     let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
-    let total_cost: f64 = models.iter().map(|m| if m.cost.is_finite() { m.cost } else { 0.0 }).sum();
+    let total_cost: f64 = models
+        .iter()
+        .map(|m| if m.cost.is_finite() { m.cost } else { 0.0 })
+        .sum();
 
     let graph = build_contribution_graph(&daily);
     let (current_streak, longest_streak) = calculate_streaks(&daily);

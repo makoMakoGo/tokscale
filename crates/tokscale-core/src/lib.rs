@@ -2016,11 +2016,12 @@ fn aggregate_model_usage_entries(
     // model fold). The unit tests below exercise this entry point; they now
     // drive the engine, which the C1.3 parity harness proves byte-identical to
     // the old inline implementation. The old fold body is gone (#33: one copy).
-    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-        group_by: group_by.clone(),
-        date_range: crate::aggregate::DateRange::none(),
-        views: crate::aggregate::ViewSet::MODEL,
-    });
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: group_by.clone(),
+            date_range: crate::aggregate::DateRange::none(),
+            views: crate::aggregate::ViewSet::MODEL,
+        });
     for msg in &messages {
         engine.push(msg);
     }
@@ -2060,11 +2061,12 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         &options.scanner_settings,
     )?;
 
-    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-        group_by: options.group_by.clone(),
-        date_range: crate::aggregate::DateRange::from_options(&options),
-        views: crate::aggregate::ViewSet::MODEL,
-    });
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::MODEL,
+        });
     for msg in &all_messages {
         engine.push(msg);
     }
@@ -2094,11 +2096,12 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         &options.scanner_settings,
     )?;
 
-    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-        group_by: options.group_by.clone(),
-        date_range: crate::aggregate::DateRange::from_options(&options),
-        views: crate::aggregate::ViewSet::MONTHLY,
-    });
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::MONTHLY,
+        });
     for msg in &all_messages {
         engine.push(msg);
     }
@@ -2135,11 +2138,12 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
         &options.scanner_settings,
     )?;
 
-    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-        group_by: options.group_by.clone(),
-        date_range: crate::aggregate::DateRange::from_options(&options),
-        views: crate::aggregate::ViewSet::HOURLY,
-    });
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::HOURLY,
+        });
     for msg in &all_messages {
         engine.push(msg);
     }
@@ -2174,11 +2178,12 @@ async fn generate_graph_with_loaded_pricing(
         &options.scanner_settings,
     )?;
 
-    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-        group_by: options.group_by.clone(),
-        date_range: crate::aggregate::DateRange::from_options(&options),
-        views: crate::aggregate::ViewSet::GRAPH | crate::aggregate::ViewSet::TIME_METRICS,
-    });
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::GRAPH | crate::aggregate::ViewSet::TIME_METRICS,
+        });
     for msg in &all_messages {
         engine.push(msg);
     }
@@ -2214,11 +2219,12 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
         &options.scanner_settings,
     )?;
 
-    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-        group_by: options.group_by.clone(),
-        date_range: crate::aggregate::DateRange::from_options(&options),
-        views: crate::aggregate::ViewSet::TIME_METRICS,
-    });
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::TIME_METRICS,
+        });
     for msg in &all_messages {
         engine.push(msg);
     }
@@ -2257,30 +2263,38 @@ pub(crate) fn monthly_report_from_messages_pub(messages: Vec<UnifiedMessage>) ->
     // Delegate to the engine (single source of truth). The parity harness uses
     // this message-list entry point to confirm the engine is deterministic and
     // matches what the async production path produces.
-    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-        group_by: crate::GroupBy::ClientModel,
-        date_range: crate::aggregate::DateRange::none(),
-        views: crate::aggregate::ViewSet::MONTHLY,
-    });
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: crate::GroupBy::ClientModel,
+            date_range: crate::aggregate::DateRange::none(),
+            views: crate::aggregate::ViewSet::MONTHLY,
+        });
     for msg in &messages {
         engine.push(msg);
     }
-    let mut report = engine.finish().monthly_report.expect("monthly view requested");
+    let mut report = engine
+        .finish()
+        .monthly_report
+        .expect("monthly view requested");
     report.processing_time_ms = 0;
     report
 }
 
 #[cfg(test)]
 pub(crate) fn hourly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> HourlyReport {
-    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-        group_by: crate::GroupBy::ClientModel,
-        date_range: crate::aggregate::DateRange::none(),
-        views: crate::aggregate::ViewSet::HOURLY,
-    });
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: crate::GroupBy::ClientModel,
+            date_range: crate::aggregate::DateRange::none(),
+            views: crate::aggregate::ViewSet::HOURLY,
+        });
     for msg in &messages {
         engine.push(msg);
     }
-    let mut report = engine.finish().hourly_report.expect("hourly view requested");
+    let mut report = engine
+        .finish()
+        .hourly_report
+        .expect("hourly view requested");
     report.processing_time_ms = 0;
     report
 }

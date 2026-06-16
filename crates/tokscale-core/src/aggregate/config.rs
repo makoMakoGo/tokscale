@@ -38,8 +38,14 @@ impl DateRange {
             .year
             .as_ref()
             .is_none_or(|year| date.starts_with(&format!("{year}-")));
-        let since_ok = self.since.as_ref().is_none_or(|since| date >= since.as_str());
-        let until_ok = self.until.as_ref().is_none_or(|until| date <= until.as_str());
+        let since_ok = self
+            .since
+            .as_ref()
+            .is_none_or(|since| date >= since.as_str());
+        let until_ok = self
+            .until
+            .as_ref()
+            .is_none_or(|until| date <= until.as_str());
         year_ok && since_ok && until_ok
     }
 }
