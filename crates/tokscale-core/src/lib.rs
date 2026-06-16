@@ -7334,4 +7334,37 @@ model = "gpt-5.5"
         assert_eq!(parsed.messages[0].input, 10);
         assert_eq!(parsed.messages[0].output, 2);
     }
+
+    #[test]
+    fn test_parse_local_clients_default_keeps_cursor_out_of_local_count() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+        std::fs::write(
+            cursor_cache_dir.join("usage.csv"),
+            r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","0""#,
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Cursor), 0);
+        assert!(
+            parsed
+                .messages
+                .iter()
+                .all(|message| message.client != "cursor"),
+            "Cursor cache rows must not enter the default parse_local_clients result"
+        );
+    }
 }
