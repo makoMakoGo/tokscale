@@ -46,7 +46,7 @@ impl LocalSourceAdapter for CodexAdapter {
             ctx,
         ));
 
-        adapter_discover::source_units_from_paths(
+        adapter_discover::source_units_from_paths_preserving_order(
             ClientId::Codex,
             adapter_discover::scan_roots(roots, def.pattern),
             FingerprintPolicy::PlainFile,
@@ -479,13 +479,12 @@ mod tests {
 
         let units = CODEX_ADAPTER.discover(&scan_context(home.path(), &settings));
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
-        let mut expected = vec![
+        let expected = vec![
             default_path.clone(),
             archived_path.clone(),
             headless_path.clone(),
             extra_path.clone(),
         ];
-        expected.sort_unstable();
 
         assert_eq!(paths, expected);
         assert!(units
@@ -504,6 +503,38 @@ mod tests {
                 .count()
                 == 3
         );
+    }
+
+    #[test]
+    fn codex_adapter_preserves_root_order_for_duplicate_dedup_keys() {
+        let home = tempfile::TempDir::new().unwrap();
+        let default_path = home.path().join(".codex/sessions/zz-default.jsonl");
+        let archived_path = home
+            .path()
+            .join(".codex/archived_sessions/aa-archived.jsonl");
+        let duplicate_history = concat!(
+            r#"{"timestamp":"2026-04-27T09:59:58Z","type":"session_meta","payload":{"id":"shared-upstream-session","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"total_tokens":15},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"total_tokens":15}}}}"#,
+            "\n",
+        );
+        write_file(&default_path, duplicate_history);
+        write_file(&archived_path, duplicate_history);
+
+        let settings = crate::scanner::ScannerSettings::default();
+        let units = CODEX_ADAPTER.discover(&scan_context(home.path(), &settings));
+
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].path, default_path);
+        assert_eq!(units[1].path, archived_path);
+
+        let mut cache = message_cache::SourceMessageCache::default();
+        let messages = parse_and_fold(units, &mut cache);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "zz-default");
     }
 
     #[test]
