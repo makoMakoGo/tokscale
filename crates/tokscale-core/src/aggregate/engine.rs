@@ -113,12 +113,13 @@ impl AggregationEngine {
                     .views
                     .contains(ViewSet::SESSIONS)
                     .then(|| sessions_from_messages(&messages));
-                let time_metrics = config.views.contains(ViewSet::TIME_METRICS).then(|| {
-                    TimeMetricsReport {
+                let time_metrics = config
+                    .views
+                    .contains(ViewSet::TIME_METRICS)
+                    .then_some(TimeMetricsReport {
                         metrics,
                         processing_time_ms: 0,
-                    }
-                });
+                    });
                 let daily = config
                     .views
                     .contains(ViewSet::GRAPH)

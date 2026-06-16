@@ -2004,6 +2004,10 @@ pub(crate) fn workspace_model_bucket_key(workspace_group_key: &str, model: &str)
     )
 }
 
+/// Test-only entry point: delegates to the aggregation engine. Kept as the
+/// stable name the 17 model-grouping unit tests call (now driving the engine,
+/// which the C1.3 parity harness proved byte-identical to the old fold).
+#[cfg(test)]
 fn aggregate_model_usage_entries(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
@@ -2170,25 +2174,17 @@ async fn generate_graph_with_loaded_pricing(
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
-    let time_metrics =
-        sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
-
-    let daily_active_time = sessionize::compute_daily_active_time(&intervals);
-    let contributions = aggregator::aggregate_by_date(filtered);
-
-    let processing_time_ms = start.elapsed().as_millis() as u32;
-    let mut result = aggregator::generate_graph_result(contributions, processing_time_ms);
-    result.time_metrics = Some(time_metrics);
-
-    for contribution in &mut result.contributions {
-        if let Some(&ms) = daily_active_time.get(&contribution.date) {
-            contribution.active_time_ms = Some(ms);
-        }
+    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+        group_by: options.group_by.clone(),
+        date_range: crate::aggregate::DateRange::from_options(&options),
+        views: crate::aggregate::ViewSet::GRAPH | crate::aggregate::ViewSet::TIME_METRICS,
+    });
+    for msg in &all_messages {
+        engine.push(msg);
     }
-
+    let processing_time_ms = start.elapsed().as_millis() as u32;
+    let mut result = engine.finish().graph.expect("graph view requested");
+    result.meta.processing_time_ms = processing_time_ms;
     Ok(result)
 }
 
@@ -2218,15 +2214,20 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
-    let metrics = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
-
-    Ok(TimeMetricsReport {
-        metrics,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
+    let mut engine = crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+        group_by: options.group_by.clone(),
+        date_range: crate::aggregate::DateRange::from_options(&options),
+        views: crate::aggregate::ViewSet::TIME_METRICS,
+    });
+    for msg in &all_messages {
+        engine.push(msg);
+    }
+    let mut report = engine
+        .finish()
+        .time_metrics
+        .expect("time-metrics view requested");
+    report.processing_time_ms = start.elapsed().as_millis() as u32;
+    Ok(report)
 }
 
 pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {
@@ -2237,20 +2238,6 @@ pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, Strin
 pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
     let pricing = load_pricing_for_local_parse().await;
     generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
-}
-
-fn filter_messages_for_report(
-    messages: Vec<UnifiedMessage>,
-    options: &ReportOptions,
-) -> Vec<UnifiedMessage> {
-    let mut filtered = messages;
-    retain_messages_in_date_range(
-        &mut filtered,
-        options.year.as_ref(),
-        options.since.as_ref(),
-        options.until.as_ref(),
-    );
-    filtered
 }
 
 // Test-only thin wrappers exposing the live aggregation logic with a message
