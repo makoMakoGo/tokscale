@@ -2122,14 +2122,21 @@ fn aggregate_model_usage_entries(
             entry
         })
         .collect();
-    entries.sort_by(|a, b| match (a.cost.is_nan(), b.cost.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-        (false, false) => b
-            .cost
-            .partial_cmp(&a.cost)
-            .unwrap_or(std::cmp::Ordering::Equal),
+    entries.sort_by(|a, b| {
+        let cost = match (a.cost.is_nan(), b.cost.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal),
+        };
+        // Deterministic secondary keys so equal-cost entries don't depend on
+        // HashMap drain order (the C1.5 BLOCKER). Mirrors the TUI model sort.
+        cost.then_with(|| a.model.cmp(&b.model))
+            .then_with(|| a.provider.cmp(&b.provider))
+            .then_with(|| a.client.cmp(&b.client))
+            .then_with(|| a.workspace_label.cmp(&b.workspace_label))
+            .then_with(|| a.workspace_key.cmp(&b.workspace_key))
+            .then_with(|| a.session_id.cmp(&b.session_id))
     });
 
     entries
@@ -2247,7 +2254,11 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         .into_iter()
         .map(|(month, agg)| MonthlyUsage {
             month,
-            models: agg.models.into_iter().collect(),
+            models: {
+                let mut v: Vec<String> = agg.models.into_iter().collect();
+                v.sort();
+                v
+            },
             input: agg.input,
             output: agg.output,
             cache_read: agg.cache_read,
@@ -2530,7 +2541,11 @@ pub(crate) fn monthly_report_from_messages_pub(messages: Vec<UnifiedMessage>) ->
         .into_iter()
         .map(|(month, agg)| MonthlyUsage {
             month,
-            models: agg.models.into_iter().collect(),
+            models: {
+                let mut v: Vec<String> = agg.models.into_iter().collect();
+                v.sort();
+                v
+            },
             input: agg.input,
             output: agg.output,
             cache_read: agg.cache_read,

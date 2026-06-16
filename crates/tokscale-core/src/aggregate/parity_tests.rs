@@ -15,65 +15,6 @@ fn pin_tz() {
     std::env::set_var("TZ", "UTC");
 }
 
-/// Compare two `serde_json::Value`s with the known nondeterministic array
-/// orders normalized: `contributions[].clients` (drained from a HashMap in
-/// `DayAccumulator::into_contribution`) and `entries[].models` (a HashSet in
-/// `MonthAggregator`) are sorted on both sides before comparison. These three
-/// sites — daily clients, monthly models, and equal-cost model entries — are
-/// the C1.5 BLOCKERs: structurally HashMap/HashSet-order-dependent today.
-/// Until C1.5 makes both paths deterministic, the harness normalizes their
-/// array order and asserts everything ELSE is byte-identical. After C1.5 these
-/// normalizers are removed in favor of strict `serde_json` string equality.
-fn assert_json_equal_normalized(left: &str, right: &str) {
-    let mut a: serde_json::Value = serde_json::from_str(left).expect("left json");
-    let mut b: serde_json::Value = serde_json::from_str(right).expect("right json");
-    normalize_nondeterministic_arrays(&mut a);
-    normalize_nondeterministic_arrays(&mut b);
-    assert_eq!(a, b, "byte parity (nondeterministic arrays normalized) failed");
-}
-
-fn normalize_nondeterministic_arrays(v: &mut serde_json::Value) {
-    match v {
-        serde_json::Value::Object(map) => {
-            // MonthlyUsage.models is an unsorted HashSet->Vec (C1.5 BLOCKER).
-            if let Some(models) = map.get_mut("models") {
-                sort_json_array(models);
-            }
-            for (_, child) in map.iter_mut() {
-                normalize_nondeterministic_arrays(child);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            // DailyContribution.clients is drained from a HashMap unsorted
-            // (C1.5 BLOCKER). Sort by the `client` field for comparison.
-            if arr.iter().all(is_client_contribution) {
-                arr.sort_by(json_client_key);
-            }
-            for item in arr.iter_mut() {
-                normalize_nondeterministic_arrays(item);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_client_contribution(v: &serde_json::Value) -> bool {
-    v.get("client").and_then(|c| c.as_str()).is_some()
-        && v.get("model_id").and_then(|c| c.as_str()).is_some()
-}
-
-fn json_client_key(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
-    let ak = a.get("client").and_then(|c| c.as_str()).unwrap_or("");
-    let bk = b.get("client").and_then(|c| c.as_str()).unwrap_or("");
-    ak.cmp(bk)
-}
-
-fn sort_json_array(v: &mut serde_json::Value) {
-    if let serde_json::Value::Array(arr) = v {
-        arr.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
-    }
-}
-
 /// A timestamp at local noon for `YYYY-MM-DD`, stable across timezones within
 /// a day shift of ±12h. Mirrors the existing `aggregator.rs` mock idiom.
 fn ts(date: &str) -> i64 {
@@ -206,11 +147,10 @@ fn parity_graph_result() {
     old.meta.processing_time_ms = 0;
     new.meta.processing_time_ms = 0;
 
-    // DailyContribution.clients is drained from a HashMap unsorted (C1.5
-    // BLOCKER); compare with those arrays normalized until C1.5.
-    assert_json_equal_normalized(
-        &serde_json::to_string(&old).unwrap(),
-        &serde_json::to_string(&new).unwrap(),
+    assert_eq!(
+        serde_json::to_string(&old).unwrap(),
+        serde_json::to_string(&new).unwrap(),
+        "GraphResult byte parity failed",
     );
 }
 
@@ -269,11 +209,10 @@ fn parity_monthly_report() {
         e.finish().monthly_report.expect("monthly view requested")
     };
 
-    // MonthlyUsage.models is an unsorted HashSet->Vec today (the C1.5
-    // BLOCKER); compare with models arrays normalized until C1.5.
-    assert_json_equal_normalized(
-        &serde_json::to_string(&old).unwrap(),
-        &serde_json::to_string(&new).unwrap(),
+    assert_eq!(
+        serde_json::to_string(&old).unwrap(),
+        serde_json::to_string(&new).unwrap(),
+        "MonthlyReport byte parity failed",
     );
 }
 
@@ -422,7 +361,6 @@ fn contract_model_entry_cost_desc_nan_last() {
 }
 
 #[test]
-#[ignore = "equal-cost tie-break is nondeterministic today (C1.5 BLOCKER 1); enable after C1.5"]
 fn contract_model_entry_equal_cost_tie_break() {
     // lib.rs:2122 has NO secondary key on equal cost. C1.5 will add
     // model -> provider -> ... so two equal-cost entries order by model ASC.
@@ -487,7 +425,6 @@ fn contract_monthly_month_asc() {
 }
 
 #[test]
-#[ignore = "monthly models order is nondeterministic today (C1.5 BLOCKER 2); enable after C1.5"]
 #[serial]
 fn contract_monthly_models_sorted() {
     // MonthlyUsage.models is an unsorted HashSet->Vec today; C1.5 will sort it.
