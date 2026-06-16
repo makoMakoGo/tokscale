@@ -1979,7 +1979,7 @@ fn filter_unified_messages(
     filtered
 }
 
-fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
+pub(crate) fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     match (&msg.workspace_key, &msg.workspace_label) {
         (Some(key), Some(label)) => (key.to_string(), Some(key.to_string()), label.to_string()),
         (Some(key), None) => (
@@ -1996,7 +1996,7 @@ fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
     }
 }
 
-fn workspace_model_bucket_key(workspace_group_key: &str, model: &str) -> String {
+pub(crate) fn workspace_model_bucket_key(workspace_group_key: &str, model: &str) -> String {
     format!(
         "{}:{workspace_group_key}:{model}",
         workspace_group_key.len()
@@ -2135,7 +2135,7 @@ fn aggregate_model_usage_entries(
     entries
 }
 
-fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
+pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
     tokens.input.max(0)
         + tokens.output.max(0)
         + tokens.cache_read.max(0)
