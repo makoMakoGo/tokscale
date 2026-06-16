@@ -121,10 +121,16 @@ pub(crate) fn resolve_messages(
 }
 
 fn fingerprint_for_unit(unit: &SourceUnit) -> Option<message_cache::SourceFingerprint> {
-    match unit.fingerprint_policy {
+    match &unit.fingerprint_policy {
         FingerprintPolicy::PlainFile => message_cache::SourceFingerprint::from_path(&unit.path),
         FingerprintPolicy::SqliteWithWal => {
             message_cache::SourceFingerprint::from_sqlite_path(&unit.path)
+        }
+        FingerprintPolicy::ClaudeCodeWithHome { home_dir } => {
+            message_cache::SourceFingerprint::from_claude_code_path_with_home(
+                &unit.path,
+                Some(home_dir),
+            )
         }
         FingerprintPolicy::None => None,
     }

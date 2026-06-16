@@ -1,4 +1,5 @@
 pub(crate) mod cache;
+mod claude;
 mod codebuff;
 mod crush;
 pub(crate) mod discover;
@@ -101,15 +102,36 @@ impl SourceUnit {
         }
     }
 
+    pub(crate) fn claude_code(client: ClientId, path: PathBuf, home_dir: PathBuf) -> Self {
+        Self {
+            client,
+            path,
+            fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome { home_dir },
+            meta: SourceUnitMeta::None,
+        }
+    }
+
     pub(crate) fn with_meta(mut self, meta: SourceUnitMeta) -> Self {
         self.meta = meta;
         self
     }
 
     pub(crate) fn digest_paths(&self) -> Vec<PathBuf> {
-        match self.fingerprint_policy {
+        match &self.fingerprint_policy {
             FingerprintPolicy::SqliteWithWal => {
                 vec![self.path.clone(), append_path_suffix(&self.path, "-wal")]
+            }
+            FingerprintPolicy::ClaudeCodeWithHome { home_dir } => {
+                let mut paths = vec![self.path.clone()];
+                if let Some(stem) = self.path.file_stem().and_then(|s| s.to_str()) {
+                    paths.push(self.path.with_file_name(format!("{stem}.meta.json")));
+                }
+                if let Some(variant_path) =
+                    crate::cc_mirror::variant_file_for_session_path(&self.path, Some(home_dir))
+                {
+                    paths.push(variant_path);
+                }
+                paths
             }
             FingerprintPolicy::PlainFile | FingerprintPolicy::None => vec![self.path.clone()],
         }
@@ -130,10 +152,13 @@ pub(crate) enum SourceUnitMeta {
     KiroSqlite,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FingerprintPolicy {
     PlainFile,
     SqliteWithWal,
+    ClaudeCodeWithHome {
+        home_dir: PathBuf,
+    },
     #[allow(dead_code)]
     None,
 }
@@ -152,10 +177,11 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 27] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 28] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
+    &claude::CLAUDE_ADAPTER,
     &opencode::OPENCODE_ADAPTER,
     &file::COPILOT_ADAPTER,
     &file::CURSOR_ADAPTER,
