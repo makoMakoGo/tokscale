@@ -59,9 +59,10 @@ Rename temporary C2 wording before migrating more clients:
 c2_adapters() -> local_source_adapters()
 ```
 
-`selected_adapters`, `adapter_clients`, and `legacy_clients` stay, but their
-meaning widens as C3 adds adapters. Keep `legacy_clients` during incremental C3
-PRs. Delete it only after the final legacy block is gone.
+`selected_adapters`, `adapter_clients`, and `legacy_clients` stay during
+incremental C3 PRs, but their meaning widens as C3 adds adapters. Delete
+`adapter_clients` and `legacy_clients` after the final legacy block is gone; at
+that point adapter selection is the only production local-source routing path.
 
 Before the SQLite and mixed clients, add small crate-private metadata support:
 
@@ -78,6 +79,9 @@ pub(crate) enum SourceUnitMeta {
     OpenCodeJson,
     KiroFile,
     KiroSqlite,
+    Codex {
+        is_headless: bool,
+    },
 }
 ```
 
@@ -409,6 +413,14 @@ Discovery:
 Fold preserves fork dedupe, fallback timestamp repair, incremental append cache
 viability checks, and headless agent assignment.
 
+Implementation note for the C3.5 PR: Codex is adapter-backed. The adapter owns
+session, archived-session, headless, and configured-extra discovery; Codex
+source units carry `SourceUnitMeta::Codex { is_headless }`; `UnitMessageSource`
+has Codex-specific deferred cache-hit and append variants so exact hits,
+fallback timestamp repair, and incremental append cache updates happen in
+`CodexAdapter::fold`. Headless adapter-discovered messages preserve the legacy
+agent label `headless`.
+
 ## Final Driver Cleanup
 
 After all clients are adapter-backed:
@@ -428,6 +440,14 @@ selection, cache load/prune, adapter iteration, requested-client filter, and one
 cache save. Final `parse_local_clients` should become adapter iteration into an
 in-memory cache, `unified_to_parsed`, summed `message_count.max(0)` counts, and
 date/client filtering.
+
+Implementation note for the C3.5 PR: final cleanup is part of the Codex slice.
+`parse_all_messages_with_pricing_with_env_strategy`,
+`parse_local_clients`, and `compute_source_digest` no longer build or consume
+legacy `ScanResult` data. `parse_local_clients` runs each selected adapter with
+an in-memory `SourceMessageCache` and records summed counts under
+`adapter.client()` so non-catalog parser outputs still count for the requested
+client identity.
 
 ## Final Grep Gates
 

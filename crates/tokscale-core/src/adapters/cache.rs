@@ -117,6 +117,9 @@ pub(crate) fn resolve_messages(
             apply_pricing_to_messages(&mut messages, ctx.pricing);
             messages
         }
+        UnitMessageSource::CodexCacheHit { .. } | UnitMessageSource::CodexAppend(_) => {
+            unreachable!("codex deferred messages must be resolved by CodexAdapter")
+        }
     }
 }
 

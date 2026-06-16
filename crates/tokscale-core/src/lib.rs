@@ -33,9 +33,8 @@ pub use sessionize::{
 };
 pub use sessions::UnifiedMessage;
 
-use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -802,344 +801,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    #[derive(Debug)]
-    struct CodexAppendSource {
-        path: PathBuf,
-        is_headless: bool,
-        fallback_timestamp: i64,
-        tail_messages: Vec<UnifiedMessage>,
-        tail_fallback_indices: Vec<usize>,
-        fingerprint: message_cache::SourceFingerprint,
-        codex_incremental: message_cache::CodexIncrementalCache,
-    }
-
-    #[derive(Debug)]
-    enum ParsedSource {
-        /// Codex fingerprint match; finalization parameters captured for the
-        /// serial fold.
-        CodexCacheHit {
-            path: PathBuf,
-            is_headless: bool,
-            fallback_timestamp: i64,
-        },
-        /// Codex append: cached prefix stays in the store; only the tail was
-        /// parsed. Viability (fingerprint + incremental state) was already
-        /// established on the parallel path.
-        CodexAppend(Box<CodexAppendSource>),
-        /// Freshly parsed (pricing already applied).
-        Fresh(Vec<UnifiedMessage>),
-    }
-
-    #[derive(Debug)]
-    struct CachedParseOutcome {
-        messages: ParsedSource,
-        cache_entry: Option<message_cache::CachedSourceEntry>,
-        invalidate_cache: bool,
-    }
-
-    /// Serial counterpart of the parallel parse: moves cache-hit messages out
-    /// of the store (no clone) and assembles deferred codex-append entries.
-    fn resolve_messages(
-        source: ParsedSource,
-        source_cache: &mut message_cache::SourceMessageCache,
-        pricing: Option<&pricing::PricingService>,
-    ) -> (
-        Vec<UnifiedMessage>,
-        Option<message_cache::CachedSourceEntry>,
-    ) {
-        match source {
-            ParsedSource::Fresh(messages) => (messages, None),
-            ParsedSource::CodexCacheHit {
-                path,
-                is_headless,
-                fallback_timestamp,
-            } => {
-                let (messages, indices) = source_cache
-                    .take_messages_with_fallback(&path)
-                    .unwrap_or_default();
-                (
-                    finalize_codex_messages(
-                        messages,
-                        pricing,
-                        is_headless,
-                        &indices,
-                        fallback_timestamp,
-                    ),
-                    None,
-                )
-            }
-            ParsedSource::CodexAppend(append) => {
-                let CodexAppendSource {
-                    path,
-                    is_headless,
-                    fallback_timestamp,
-                    tail_messages,
-                    tail_fallback_indices,
-                    fingerprint,
-                    codex_incremental,
-                } = *append;
-                let (mut raw_messages, mut fallback_timestamp_indices) = source_cache
-                    .take_messages_with_fallback(&path)
-                    .unwrap_or_default();
-                let existing_len = raw_messages.len();
-                fallback_timestamp_indices.extend(
-                    tail_fallback_indices
-                        .iter()
-                        .map(|index| existing_len + index),
-                );
-                raw_messages.extend(tail_messages);
-                let cache_entry = message_cache::CachedSourceEntry::new(
-                    &path,
-                    fingerprint,
-                    raw_messages.clone(),
-                    fallback_timestamp_indices.clone(),
-                    Some(codex_incremental),
-                );
-                let messages = finalize_codex_messages(
-                    raw_messages,
-                    pricing,
-                    is_headless,
-                    &fallback_timestamp_indices,
-                    fallback_timestamp,
-                );
-                (messages, Some(cache_entry))
-            }
-        }
-    }
-
-    fn apply_pricing_to_messages(
-        messages: &mut [UnifiedMessage],
-        pricing: Option<&pricing::PricingService>,
-    ) {
-        for message in messages {
-            message.refresh_derived_fields();
-            apply_pricing_if_available(message, pricing);
-        }
-    }
-
-    fn parse_full_log_source(
-        path: &Path,
-        pricing: Option<&pricing::PricingService>,
-        is_headless: bool,
-    ) -> CachedParseOutcome {
-        let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(path);
-        let parsed = sessions::codex::parse_codex_file_incremental(
-            path,
-            0,
-            sessions::codex::CodexParseState::default(),
-        );
-        let messages = finalize_codex_messages(
-            parsed.messages.clone(),
-            pricing,
-            is_headless,
-            &parsed.fallback_timestamp_indices,
-            fallback_timestamp,
-        );
-        if !parsed.parse_succeeded {
-            return CachedParseOutcome {
-                messages: ParsedSource::Fresh(messages),
-                cache_entry: None,
-                invalidate_cache: false,
-            };
-        }
-
-        if parsed.unresolved_model_events {
-            return CachedParseOutcome {
-                messages: ParsedSource::Fresh(messages),
-                cache_entry: None,
-                invalidate_cache: false,
-            };
-        }
-
-        let cache_entry = build_codex_cache_entry(
-            path,
-            parsed.messages,
-            parsed.consumed_offset,
-            parsed.state,
-            parsed.fallback_timestamp_indices,
-        );
-
-        CachedParseOutcome {
-            messages: ParsedSource::Fresh(messages),
-            cache_entry,
-            invalidate_cache: false,
-        }
-    }
-
-    fn finalize_codex_messages(
-        mut messages: Vec<UnifiedMessage>,
-        pricing: Option<&pricing::PricingService>,
-        is_headless: bool,
-        fallback_timestamp_indices: &[usize],
-        fallback_timestamp: i64,
-    ) -> Vec<UnifiedMessage> {
-        for index in fallback_timestamp_indices {
-            if let Some(message) = messages.get_mut(*index) {
-                message.set_timestamp(fallback_timestamp);
-            }
-        }
-        apply_pricing_to_messages(&mut messages, pricing);
-        for message in &mut messages {
-            apply_headless_agent(message, is_headless);
-        }
-        messages
-    }
-
-    fn build_codex_cache_entry(
-        path: &Path,
-        raw_messages: Vec<UnifiedMessage>,
-        consumed_offset: u64,
-        state: sessions::codex::CodexParseState,
-        fallback_timestamp_indices: Vec<usize>,
-    ) -> Option<message_cache::CachedSourceEntry> {
-        let fingerprint = message_cache::SourceFingerprint::from_path(path)?;
-        if fingerprint.size != consumed_offset {
-            return None;
-        }
-
-        let codex_incremental =
-            message_cache::build_codex_incremental_cache(path, consumed_offset, state)?;
-
-        Some(message_cache::CachedSourceEntry::new(
-            path,
-            fingerprint,
-            raw_messages,
-            fallback_timestamp_indices,
-            Some(codex_incremental),
-        ))
-    }
-
-    fn load_or_parse_codex_source(
-        path: &Path,
-        source_cache: &message_cache::SourceMessageCache,
-        pricing: Option<&pricing::PricingService>,
-        headless_roots: &[PathBuf],
-    ) -> CachedParseOutcome {
-        let is_headless = is_headless_path(path, headless_roots);
-        let Some(fingerprint) = message_cache::SourceFingerprint::from_path(path) else {
-            return parse_full_log_source(path, pricing, is_headless);
-        };
-        let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(path);
-
-        if let Some(cached) = source_cache.get(path) {
-            let reparse_from_start = |invalidate_cache: bool| {
-                let mut outcome = parse_full_log_source(path, pricing, is_headless);
-                outcome.invalidate_cache = invalidate_cache && outcome.cache_entry.is_none();
-                outcome
-            };
-
-            if cached.fingerprint == fingerprint {
-                if message_cache::codex_cache_entry_matches_fingerprint(cached, &fingerprint) {
-                    return CachedParseOutcome {
-                        messages: ParsedSource::CodexCacheHit {
-                            path: path.to_path_buf(),
-                            is_headless,
-                            fallback_timestamp,
-                        },
-                        cache_entry: None,
-                        invalidate_cache: false,
-                    };
-                }
-
-                return reparse_from_start(true);
-            }
-
-            if let Some(codex_incremental) = cached.codex_incremental.as_ref() {
-                if fingerprint.size > codex_incremental.consumed_offset
-                    && message_cache::codex_prefix_matches(path, codex_incremental)
-                {
-                    let parsed = sessions::codex::parse_codex_file_incremental(
-                        path,
-                        codex_incremental.consumed_offset,
-                        codex_incremental.state.clone(),
-                    );
-                    if parsed.parse_succeeded && !parsed.unresolved_model_events {
-                        // Viability checks from build_codex_cache_entry, done
-                        // here on the parallel path; the cached prefix is
-                        // merged without cloning in resolve_messages.
-                        let entry_fingerprint = message_cache::SourceFingerprint::from_path(path);
-                        let codex_incremental_cache = entry_fingerprint
-                            .as_ref()
-                            .filter(|entry_fingerprint| {
-                                entry_fingerprint.size == parsed.consumed_offset
-                            })
-                            .and_then(|_| {
-                                message_cache::build_codex_incremental_cache(
-                                    path,
-                                    parsed.consumed_offset,
-                                    parsed.state,
-                                )
-                            });
-                        if let (Some(entry_fingerprint), Some(codex_incremental_cache)) =
-                            (entry_fingerprint, codex_incremental_cache)
-                        {
-                            return CachedParseOutcome {
-                                messages: ParsedSource::CodexAppend(Box::new(CodexAppendSource {
-                                    path: path.to_path_buf(),
-                                    is_headless,
-                                    fallback_timestamp,
-                                    tail_messages: parsed.messages,
-                                    tail_fallback_indices: parsed.fallback_timestamp_indices,
-                                    fingerprint: entry_fingerprint,
-                                    codex_incremental: codex_incremental_cache,
-                                })),
-                                cache_entry: None,
-                                invalidate_cache: false,
-                            };
-                        }
-                    }
-                }
-            }
-
-            return reparse_from_start(true);
-        }
-
-        parse_full_log_source(path, pricing, is_headless)
-    }
-
     let selected_adapters = adapters::selected_adapters(clients);
-    let legacy_clients = adapters::legacy_clients(clients);
-    let scan_result = if legacy_clients.is_empty() {
-        scanner::ScanResult::default()
-    } else {
-        scanner::scan_all_clients_with_scanner_settings(
-            home_dir,
-            &legacy_clients,
-            use_env_roots,
-            scanner_settings,
-        )
-    };
-    let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
     let mut source_cache = message_cache::SourceMessageCache::load();
     source_cache.prune_missing_files();
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
-
-    let codex_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
-        .get(ClientId::Codex)
-        .par_iter()
-        .map(|path| {
-            (
-                path.clone(),
-                load_or_parse_codex_source(path, &source_cache, pricing, &headless_roots),
-            )
-        })
-        .collect();
-    let mut codex_seen: HashSet<u64> = HashSet::new();
-    for (path, outcome) in codex_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(
-            messages
-                .into_iter()
-                .filter(|message| should_keep_deduped_message(&mut codex_seen, message)),
-        );
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        } else if outcome.invalidate_cache {
-            source_cache.remove(&path);
-        }
-    }
 
     let scan_ctx = adapters::AdapterScanContext {
         home_dir,
@@ -1180,22 +846,7 @@ pub fn compute_source_digest(
     use std::hash::{Hash, Hasher};
 
     let selected_adapters = adapters::selected_adapters(clients);
-    let legacy_clients = adapters::legacy_clients(clients);
-    let scan_result = if legacy_clients.is_empty() {
-        scanner::ScanResult::default()
-    } else {
-        scanner::scan_all_clients_with_scanner_settings(
-            home_dir,
-            &legacy_clients,
-            use_env_roots,
-            scanner_settings,
-        )
-    };
-
     let mut paths: Vec<PathBuf> = Vec::new();
-    for files in &scan_result.files {
-        paths.extend(files.iter().cloned());
-    }
     let scan_ctx = adapters::AdapterScanContext {
         home_dir,
         use_env_roots,
@@ -1606,16 +1257,6 @@ pub(crate) fn hourly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> 
     report
 }
 
-fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
-    headless_roots.iter().any(|root| path.starts_with(root))
-}
-
-fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
-    if is_headless && message.agent.is_none() {
-        message.agent = Some(sessions::intern::intern("headless"));
-    }
-}
-
 fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
     // Zed bills hosted models at provider list price + 10%.
     // Source: https://zed.dev/docs/ai/plans-and-usage and https://zed.dev/docs/ai/models
@@ -1739,48 +1380,8 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let include_all = clients.is_empty();
 
     let selected_adapters = adapters::selected_adapters(&clients);
-    let legacy_clients = adapters::legacy_clients(&clients);
-    let scan_result = if legacy_clients.is_empty() {
-        scanner::ScanResult::default()
-    } else {
-        scanner::scan_all_clients_with_scanner_settings(
-            &home_dir,
-            &legacy_clients,
-            options.use_env_roots,
-            &options.scanner_settings,
-        )
-    };
-    let headless_roots =
-        scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
-
     let mut messages: Vec<ParsedMessage> = Vec::new();
     let mut counts = ClientCounts::new();
-
-    let codex_msgs_raw: Vec<UnifiedMessage> = scan_result
-        .get(ClientId::Codex)
-        .par_iter()
-        .flat_map(|path| {
-            let is_headless = is_headless_path(path, &headless_roots);
-            sessions::codex::parse_codex_file(path)
-                .into_iter()
-                .map(|mut msg| {
-                    apply_headless_agent(&mut msg, is_headless);
-                    msg
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let mut codex_seen: HashSet<u64> = HashSet::new();
-    let codex_msgs: Vec<ParsedMessage> = codex_msgs_raw
-        .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut codex_seen, message))
-        .map(|message| unified_to_parsed(&message))
-        .collect();
-    let codex_count = codex_msgs.len() as i32;
-    counts.set(ClientId::Codex, codex_count);
-    messages.extend(codex_msgs);
-
-    let mut adapter_messages = Vec::new();
     // parse_local_clients historically parsed directly without the persisted
     // source-message cache; keep that non-cached count path while reusing the
     // adapter fold contract.
@@ -1790,25 +1391,33 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         use_env_roots: options.use_env_roots,
         scanner_settings: &options.scanner_settings,
     };
-    adapters::run_local_source_adapters(
-        &selected_adapters,
-        &scan_ctx,
-        &mut adapter_source_cache,
-        None,
-        &mut adapter_messages,
-    );
-    let adapter_parsed: Vec<ParsedMessage> =
-        adapter_messages.iter().map(unified_to_parsed).collect();
     for adapter in selected_adapters {
-        let client = adapter.client();
+        let units = adapter.discover(&scan_ctx);
+        let parsed = {
+            let parse_ctx = adapters::ParseContext {
+                source_cache: &adapter_source_cache,
+                pricing: None,
+            };
+            adapter.parse(units, &parse_ctx)
+        };
+        let mut adapter_messages = Vec::new();
+        adapter.fold(
+            parsed,
+            &mut adapters::FoldContext {
+                source_cache: &mut adapter_source_cache,
+                pricing: None,
+            },
+            &mut adapter_messages,
+        );
+        let adapter_parsed: Vec<ParsedMessage> =
+            adapter_messages.iter().map(unified_to_parsed).collect();
         let count = adapter_parsed
             .iter()
-            .filter(|message| ClientId::from_str(&message.client) == Some(client))
             .map(|message| message.message_count.max(0))
             .sum::<i32>();
-        counts.set(client, count);
+        counts.set(adapter.client(), count);
+        messages.extend(adapter_parsed);
     }
-    messages.extend(adapter_parsed);
 
     if !include_all {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();

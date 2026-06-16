@@ -1,6 +1,7 @@
 pub(crate) mod cache;
 mod claude;
 mod codebuff;
+mod codex;
 mod crush;
 pub(crate) mod discover;
 pub(crate) mod file;
@@ -150,6 +151,9 @@ pub(crate) enum SourceUnitMeta {
     OpenCodeJson,
     KiroFile,
     KiroSqlite,
+    Codex {
+        is_headless: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +171,12 @@ pub(crate) enum FingerprintPolicy {
 pub(crate) enum UnitMessageSource {
     Fresh(Vec<UnifiedMessage>),
     CacheHit(PathBuf),
+    CodexCacheHit {
+        path: PathBuf,
+        is_headless: bool,
+        fallback_timestamp: i64,
+    },
+    CodexAppend(Box<codex::CodexAppendSource>),
 }
 
 #[derive(Debug)]
@@ -177,11 +187,12 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 28] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
     &claude::CLAUDE_ADAPTER,
+    &codex::CODEX_ADAPTER,
     &opencode::OPENCODE_ADAPTER,
     &file::COPILOT_ADAPTER,
     &file::CURSOR_ADAPTER,
@@ -220,13 +231,6 @@ pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalSourceAd
         .find(|adapter| adapter.client() == client)
 }
 
-pub(crate) fn adapter_clients() -> HashSet<ClientId> {
-    local_source_adapters()
-        .iter()
-        .map(|adapter| adapter.client())
-        .collect()
-}
-
 pub(crate) fn selected_adapters(clients: &[String]) -> Vec<&'static dyn LocalSourceAdapter> {
     let include_all = clients.is_empty();
     let requested = requested_client_ids(clients);
@@ -234,23 +238,6 @@ pub(crate) fn selected_adapters(clients: &[String]) -> Vec<&'static dyn LocalSou
         .iter()
         .copied()
         .filter(|adapter| include_all || requested.contains(&adapter.client()))
-        .collect()
-}
-
-pub(crate) fn legacy_clients(clients: &[String]) -> Vec<String> {
-    let adapter_clients = adapter_clients();
-    if clients.is_empty() {
-        return ClientId::iter()
-            .filter(|client| !adapter_clients.contains(client))
-            .map(|client| client.as_str().to_string())
-            .collect();
-    }
-
-    let requested = requested_client_ids(clients);
-    ClientId::iter()
-        .filter(|client| requested.contains(client))
-        .filter(|client| !adapter_clients.contains(client))
-        .map(|client| client.as_str().to_string())
         .collect()
 }
 
