@@ -5,6 +5,7 @@
 mod accumulators;
 mod config;
 mod engine;
+pub mod tui;
 mod views;
 
 pub use config::{AggregationConfig, DateRange, ViewSet};
