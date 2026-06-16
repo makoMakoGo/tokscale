@@ -1091,42 +1091,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         )
     }
 
-    fn load_or_parse_source<F>(
-        path: &Path,
-        source_cache: &message_cache::SourceMessageCache,
-        pricing: Option<&pricing::PricingService>,
-        parse: F,
-    ) -> CachedParseOutcome
-    where
-        F: Fn(&Path) -> Vec<UnifiedMessage>,
-    {
-        load_or_parse_source_with_fingerprint(
-            path,
-            source_cache,
-            pricing,
-            message_cache::SourceFingerprint::from_path,
-            parse,
-        )
-    }
-
-    fn load_or_parse_sqlite_source<F>(
-        path: &Path,
-        source_cache: &message_cache::SourceMessageCache,
-        pricing: Option<&pricing::PricingService>,
-        parse: F,
-    ) -> CachedParseOutcome
-    where
-        F: Fn(&Path) -> Vec<UnifiedMessage>,
-    {
-        load_or_parse_source_with_fingerprint(
-            path,
-            source_cache,
-            pricing,
-            message_cache::SourceFingerprint::from_sqlite_path,
-            parse,
-        )
-    }
-
     fn load_or_parse_codex_source(
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
@@ -1233,59 +1197,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
     let include_all = clients.is_empty();
 
-    // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
-    // suppress legacy JSON overlap by message identity.
-    let mut opencode_seen: HashSet<u64> = HashSet::new();
-
-    for db_path in &scan_result.opencode_dbs {
-        let CachedParseOutcome {
-            messages,
-            cache_entry,
-            ..
-        } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
-            sessions::opencode::parse_opencode_sqlite(path)
-        });
-        let (messages, extra_entry) = resolve_messages(messages, &mut source_cache, pricing);
-
-        // Dedup across channel-suffixed dbs: the same session can end up in
-        // both `opencode.db` and `opencode-<channel>.db` if the user
-        // switches channels mid-session. `discover_opencode_dbs` returns
-        // paths in sorted order, so the first-seen copy is deterministic.
-        all_messages.extend(messages.into_iter().filter(|message| {
-            message
-                .dedup_key
-                .is_none_or(|key| opencode_seen.insert(key))
-        }));
-
-        if let Some(entry) = cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    let opencode_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::OpenCode)
-        .par_iter()
-        .filter_map(|path| {
-            Some(load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::opencode::parse_opencode_file(path)
-                    .into_iter()
-                    .collect()
-            }))
-        })
-        .collect();
-    for outcome in opencode_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages.into_iter().filter(|message| {
-            message
-                .dedup_key
-                .is_none_or(|key| opencode_seen.insert(key))
-        }));
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
     let claude_home = PathBuf::from(home_dir);
     let claude_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Claude)
@@ -1345,81 +1256,6 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    // Kilo CLI: SQLite database
-    if let Some(db_path) = &scan_result.kilo_db {
-        let kilo_messages: Vec<UnifiedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
-            .into_iter()
-            .map(|mut msg| {
-                apply_pricing_if_available(&mut msg, pricing);
-                msg
-            })
-            .collect();
-        all_messages.extend(kilo_messages);
-    }
-
-    let mut hermes_seen: HashSet<u64> = HashSet::new();
-    for db_path in scan_result.hermes_db_paths() {
-        let hermes_messages = parse_hermes_sqlite_with_pricing(&db_path, pricing);
-        all_messages.extend(
-            hermes_messages
-                .into_iter()
-                .filter(|message| should_keep_deduped_message(&mut hermes_seen, message)),
-        );
-    }
-
-    if let Some(db_path) = &scan_result.goose_db {
-        let goose_messages: Vec<UnifiedMessage> = sessions::goose::parse_goose_sqlite(db_path)
-            .into_iter()
-            .map(|mut msg| {
-                apply_pricing_if_available(&mut msg, pricing);
-                msg
-            })
-            .collect();
-        all_messages.extend(goose_messages);
-    }
-
-    let kiro_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Kiro)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kiro::parse_kiro_file(path)
-            })
-        })
-        .collect();
-    for outcome in kiro_outcomes {
-        let (messages, extra_entry) =
-            resolve_messages(outcome.messages, &mut source_cache, pricing);
-        all_messages.extend(messages);
-        if let Some(entry) = outcome.cache_entry.or(extra_entry) {
-            source_cache.insert(entry);
-        }
-    }
-
-    if let Some(db_path) = &scan_result.kiro_db {
-        let kiro_db_messages: Vec<UnifiedMessage> = sessions::kiro::parse_kiro_sqlite(db_path)
-            .into_iter()
-            .map(|mut msg| {
-                apply_pricing_if_available(&mut msg, pricing);
-                msg
-            })
-            .collect();
-        all_messages.extend(kiro_db_messages);
-    }
-
-    for source in &scan_result.crush_dbs {
-        let crush_messages: Vec<UnifiedMessage> =
-            sessions::crush::parse_crush_sqlite(&source.db_path)
-                .into_iter()
-                .map(|mut msg| {
-                    msg.set_workspace(source.workspace_key.clone(), source.workspace_label.clone());
-                    apply_pricing_if_available(&mut msg, pricing);
-                    msg
-                })
-                .collect();
-        all_messages.extend(crush_messages);
-    }
-
     let scan_ctx = adapters::AdapterScanContext {
         home_dir,
         use_env_roots,
@@ -1475,17 +1311,6 @@ pub fn compute_source_digest(
     for files in &scan_result.files {
         paths.extend(files.iter().cloned());
     }
-    paths.extend(scan_result.opencode_dbs.iter().cloned());
-    paths.extend(scan_result.kilo_db.iter().cloned());
-    paths.extend(scan_result.hermes_db_paths());
-    paths.extend(scan_result.goose_db.iter().cloned());
-    paths.extend(scan_result.kiro_db.iter().cloned());
-    paths.extend(
-        scan_result
-            .crush_dbs
-            .iter()
-            .map(|source| source.db_path.clone()),
-    );
     let scan_ctx = adapters::AdapterScanContext {
         home_dir,
         use_env_roots,
@@ -1963,21 +1788,6 @@ fn pricing_provider_hint<'a>(model_id: &str, provider_id: &'a str) -> Option<&'a
     Some(trimmed)
 }
 
-fn parse_hermes_sqlite_with_pricing(
-    db_path: &Path,
-    pricing: Option<&pricing::PricingService>,
-) -> Vec<UnifiedMessage> {
-    sessions::hermes::parse_hermes_sqlite(db_path)
-        .into_iter()
-        .map(|mut msg| {
-            if msg.cost <= 0.0 {
-                apply_pricing_if_available(&mut msg, pricing);
-            }
-            msg
-        })
-        .collect()
-}
-
 fn select_local_parse_pricing<F>(
     fresh: Result<Arc<pricing::PricingService>, String>,
     stale: F,
@@ -2059,55 +1869,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
 
     let mut messages: Vec<ParsedMessage> = Vec::new();
-
-    // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
-    // suppress legacy JSON overlap by message identity.
     let mut counts = ClientCounts::new();
-
-    let opencode_count: i32 = {
-        let mut seen: HashSet<u64> = HashSet::new();
-        let mut count: i32 = 0;
-
-        for db_path in &scan_result.opencode_dbs {
-            let sqlite_msgs: Vec<ParsedMessage> =
-                sessions::opencode::parse_opencode_sqlite(db_path)
-                    .into_iter()
-                    .filter_map(|msg| {
-                        // Dedup across multiple channel-suffixed dbs: the
-                        // same session can end up in both `opencode.db` and
-                        // `opencode-<channel>.db` if the user switches
-                        // channels mid-session.
-                        if let Some(key) = msg.dedup_key {
-                            if !seen.insert(key) {
-                                return None;
-                            }
-                        }
-                        Some(unified_to_parsed(&msg))
-                    })
-                    .collect();
-            count += sqlite_msgs.len() as i32;
-            messages.extend(sqlite_msgs);
-        }
-
-        let json_msgs: Vec<(Option<u64>, ParsedMessage)> = scan_result
-            .get(ClientId::OpenCode)
-            .par_iter()
-            .filter_map(|path| {
-                let msg = sessions::opencode::parse_opencode_file(path)?;
-                Some((msg.dedup_key, unified_to_parsed(&msg)))
-            })
-            .collect();
-        let deduped: Vec<ParsedMessage> = json_msgs
-            .into_iter()
-            .filter(|(key, _)| key.is_none_or(|key| seen.insert(key)))
-            .map(|(_, msg)| msg)
-            .collect();
-        count += deduped.len() as i32;
-        messages.extend(deduped);
-
-        count
-    };
-    counts.set(ClientId::OpenCode, opencode_count);
 
     let claude_home = PathBuf::from(&home_dir);
     let claude_msgs_raw: Vec<(Option<u64>, ParsedMessage)> = scan_result
@@ -2159,85 +1921,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let codex_count = codex_msgs.len() as i32;
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
-
-    // Kilo CLI: SQLite database
-    let _kilo_count: i32 = if let Some(db_path) = &scan_result.kilo_db {
-        let kilo_msgs: Vec<ParsedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
-            .into_iter()
-            .map(|msg| unified_to_parsed(&msg))
-            .collect();
-        let count = summed_parsed_message_count(&kilo_msgs);
-        counts.set(ClientId::Kilo, count);
-        messages.extend(kilo_msgs);
-        count
-    } else {
-        0
-    };
-
-    let hermes_db_paths = scan_result.hermes_db_paths();
-    if !hermes_db_paths.is_empty() {
-        let mut hermes_seen: HashSet<u64> = HashSet::new();
-        let hermes_msgs: Vec<ParsedMessage> = hermes_db_paths
-            .iter()
-            .flat_map(|db_path| sessions::hermes::parse_hermes_sqlite(db_path))
-            .filter(|msg| should_keep_deduped_message(&mut hermes_seen, msg))
-            .map(|msg| unified_to_parsed(&msg))
-            .collect();
-        let count = summed_parsed_message_count(&hermes_msgs);
-        counts.set(ClientId::Hermes, count);
-        messages.extend(hermes_msgs);
-    }
-
-    if let Some(db_path) = &scan_result.goose_db {
-        let goose_msgs: Vec<ParsedMessage> = sessions::goose::parse_goose_sqlite(db_path)
-            .into_iter()
-            .map(|msg| unified_to_parsed(&msg))
-            .collect();
-        let count = summed_parsed_message_count(&goose_msgs);
-        counts.set(ClientId::Goose, count);
-        messages.extend(goose_msgs);
-    }
-
-    let kiro_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Kiro)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::kiro::parse_kiro_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let kiro_count = summed_parsed_message_count(&kiro_msgs);
-    counts.set(ClientId::Kiro, kiro_count);
-    messages.extend(kiro_msgs);
-
-    if let Some(db_path) = &scan_result.kiro_db {
-        let kiro_db_msgs: Vec<ParsedMessage> = sessions::kiro::parse_kiro_sqlite(db_path)
-            .into_iter()
-            .map(|msg| unified_to_parsed(&msg))
-            .collect();
-        let kiro_db_count = summed_parsed_message_count(&kiro_db_msgs);
-        counts.add(ClientId::Kiro, kiro_db_count);
-        messages.extend(kiro_db_msgs);
-    }
-
-    let crush_msgs: Vec<ParsedMessage> = scan_result
-        .crush_dbs
-        .par_iter()
-        .flat_map(|source| {
-            sessions::crush::parse_crush_sqlite(&source.db_path)
-                .into_iter()
-                .map(|mut msg| {
-                    msg.set_workspace(source.workspace_key.clone(), source.workspace_label.clone());
-                    unified_to_parsed(&msg)
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let crush_count = summed_parsed_message_count(&crush_msgs);
-    counts.set(ClientId::Crush, crush_count);
-    messages.extend(crush_msgs);
 
     let mut adapter_messages = Vec::new();
     // parse_local_clients historically parsed directly without the persisted
@@ -2325,13 +2008,6 @@ fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
 
 fn should_keep_deduped_message(seen_keys: &mut HashSet<u64>, message: &UnifiedMessage) -> bool {
     message.dedup_key.is_none_or(|key| seen_keys.insert(key))
-}
-
-fn summed_parsed_message_count(messages: &[ParsedMessage]) -> i32 {
-    messages
-        .iter()
-        .map(|msg| msg.message_count.max(0))
-        .sum::<i32>()
 }
 
 fn filter_parsed_messages(
