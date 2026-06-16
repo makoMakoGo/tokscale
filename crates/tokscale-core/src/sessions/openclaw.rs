@@ -232,7 +232,7 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                         "openclaw",
                         model,
                         provider,
-                        session_id.to_string(),
+                        session_id,
                         timestamp,
                         TokenBreakdown {
                             input: usage.input.unwrap_or(0).max(0),

@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Aggregate messages into daily contributions
-pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
+pub(crate) fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
     if messages.is_empty() {
         return Vec::new();
     }
@@ -63,7 +63,7 @@ pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution
 /// single session and exposes the same client/model breakdown shape as
 /// [`aggregate_by_date`].  Sessions are sorted by `last_seen` descending so the
 /// most recently active sessions appear first.
-pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
+pub(crate) fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
     if messages.is_empty() {
         return Vec::new();
     }
@@ -187,7 +187,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
 }
 
 /// Generate complete graph result
-pub fn generate_graph_result(
+pub(crate) fn generate_graph_result(
     contributions: Vec<DailyContribution>,
     processing_time_ms: u32,
 ) -> GraphResult {
@@ -415,7 +415,7 @@ impl DayAccumulator {
             reasoning: self.token_breakdown.reasoning.max(0),
         };
 
-        let clients: Vec<ClientContribution> = self
+        let mut clients: Vec<ClientContribution> = self
             .clients
             .into_values()
             .map(|mut s| {
@@ -428,6 +428,15 @@ impl DayAccumulator {
                 s
             })
             .collect();
+        // Deterministic order so the graph's per-day client list doesn't depend
+        // on HashMap drain order (the C1.5 BLOCKER). Presentation sorts in the
+        // TUI layer are independent of this canonical order.
+        clients.sort_by(|a, b| {
+            a.client
+                .cmp(&b.client)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_id.cmp(&b.provider_id))
+        });
 
         DailyContribution {
             date,

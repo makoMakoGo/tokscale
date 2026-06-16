@@ -17,7 +17,11 @@ pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
 
-pub use aggregator::*;
+pub mod aggregate;
+pub mod usage_views;
+
+pub use aggregate::{AggregatedViews, AggregationConfig, DateRange, ViewSet};
+pub use aggregator::{calculate_summary, calculate_years};
 pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
 pub use parser::*;
 pub use provider_identity::normalize_provider_for_grouping;
@@ -731,8 +735,8 @@ pub struct ModelReport {
     pub processing_time_ms: u32,
 }
 
-const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
-const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
+#[cfg(test)]
+pub(crate) use aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonthlyReport {
@@ -801,6 +805,17 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     /// the store to the serial fold (`resolve_messages`), so hit messages are
     /// never cloned (ADR 0008).
     #[derive(Debug)]
+    struct CodexAppendSource {
+        path: PathBuf,
+        is_headless: bool,
+        fallback_timestamp: i64,
+        tail_messages: Vec<UnifiedMessage>,
+        tail_fallback_indices: Vec<usize>,
+        fingerprint: message_cache::SourceFingerprint,
+        codex_incremental: message_cache::CodexIncrementalCache,
+    }
+
+    #[derive(Debug)]
     enum ParsedSource {
         /// Fingerprint matched; messages still live in the cache store.
         CacheHit(PathBuf),
@@ -814,15 +829,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         /// Codex append: cached prefix stays in the store; only the tail was
         /// parsed. Viability (fingerprint + incremental state) was already
         /// established on the parallel path.
-        CodexAppend {
-            path: PathBuf,
-            is_headless: bool,
-            fallback_timestamp: i64,
-            tail_messages: Vec<UnifiedMessage>,
-            tail_fallback_indices: Vec<usize>,
-            fingerprint: message_cache::SourceFingerprint,
-            codex_incremental: message_cache::CodexIncrementalCache,
-        },
+        CodexAppend(Box<CodexAppendSource>),
         /// Freshly parsed (pricing already applied).
         Fresh(Vec<UnifiedMessage>),
     }
@@ -870,15 +877,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                     None,
                 )
             }
-            ParsedSource::CodexAppend {
-                path,
-                is_headless,
-                fallback_timestamp,
-                tail_messages,
-                tail_fallback_indices,
-                fingerprint,
-                codex_incremental,
-            } => {
+            ParsedSource::CodexAppend(append) => {
+                let CodexAppendSource {
+                    path,
+                    is_headless,
+                    fallback_timestamp,
+                    tail_messages,
+                    tail_fallback_indices,
+                    fingerprint,
+                    codex_incremental,
+                } = *append;
                 let (mut raw_messages, mut fallback_timestamp_indices) = source_cache
                     .take_messages_with_fallback(&path)
                     .unwrap_or_default();
@@ -1183,7 +1191,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                             (entry_fingerprint, codex_incremental_cache)
                         {
                             return CachedParseOutcome {
-                                messages: ParsedSource::CodexAppend {
+                                messages: ParsedSource::CodexAppend(Box::new(CodexAppendSource {
                                     path: path.to_path_buf(),
                                     is_headless,
                                     fallback_timestamp,
@@ -1191,7 +1199,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                                     tail_fallback_indices: parsed.fallback_timestamp_indices,
                                     fingerprint: entry_fingerprint,
                                     codex_incremental: codex_incremental_cache,
-                                },
+                                })),
                                 cache_entry: None,
                                 invalidate_cache: false,
                             };
@@ -1976,163 +1984,32 @@ fn filter_unified_messages(
     filtered
 }
 
-fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
-    match (&msg.workspace_key, &msg.workspace_label) {
-        (Some(key), Some(label)) => (key.to_string(), Some(key.to_string()), label.to_string()),
-        (Some(key), None) => (
-            key.to_string(),
-            Some(key.to_string()),
-            sessions::workspace_label_from_key(key)
-                .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string()),
-        ),
-        _ => (
-            UNKNOWN_WORKSPACE_GROUP_KEY.to_string(),
-            None,
-            UNKNOWN_WORKSPACE_LABEL.to_string(),
-        ),
-    }
-}
-
-fn workspace_model_bucket_key(workspace_group_key: &str, model: &str) -> String {
-    format!(
-        "{}:{workspace_group_key}:{model}",
-        workspace_group_key.len()
-    )
-}
-
+/// Test-only entry point: delegates to the aggregation engine. Kept as the
+/// stable name the model-grouping unit tests call.
+#[cfg(test)]
 fn aggregate_model_usage_entries(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
 ) -> Vec<ModelUsage> {
-    let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
-    let mut client_totals_by_entry: HashMap<String, HashMap<String, ClientContributionOrder>> =
-        HashMap::new();
-
-    for msg in messages {
-        let normalized = normalize_model_for_grouping(&msg.model_id);
-        let provider = normalize_provider_for_grouping(&msg.provider_id);
-        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
-        let (key, merge_clients) = match group_by {
-            GroupBy::Model => (normalized.clone(), true),
-            GroupBy::ClientModel => (format!("{}:{}", msg.client, normalized), false),
-            GroupBy::ClientProviderModel => {
-                (format!("{}:{}:{}", msg.client, provider, normalized), false)
-            }
-            GroupBy::WorkspaceModel => (
-                workspace_model_bucket_key(&workspace_group_key, &normalized),
-                true,
-            ),
-            GroupBy::Session => (format!("{}:{}", msg.session_id, normalized), false),
-            GroupBy::ClientSession => (
-                format!("{}:{}:{}", msg.client, msg.session_id, normalized),
-                false,
-            ),
-        };
-        let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
-        let entry = model_map.entry(key.clone()).or_insert_with(|| ModelUsage {
-            client: msg.client.to_string(),
-            merged_clients: if merge_clients {
-                Some(msg.client.to_string())
-            } else {
-                None
-            },
-            workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
-                workspace_key.clone()
-            } else {
-                None
-            },
-            workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
-                Some(workspace_label.clone())
-            } else {
-                None
-            },
-            session_id: if session_grouped {
-                Some(msg.session_id.to_string())
-            } else {
-                None
-            },
-            model: normalized.clone(),
-            provider: provider.clone(),
-            input: 0,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-            message_count: 0,
-            cost: 0.0,
-            performance: ModelPerformance::default(),
+    // Delegate to the aggregation engine (the single source of truth for the
+    // model fold). The old inline implementation is gone (#33: one copy).
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: group_by.clone(),
+            date_range: crate::aggregate::DateRange::none(),
+            views: crate::aggregate::ViewSet::MODEL,
         });
-
-        if merge_clients {
-            let client_totals = client_totals_by_entry.entry(key.clone()).or_default();
-            let client_count = client_totals.len();
-            let totals = client_totals
-                .entry(msg.client.to_string())
-                .or_insert_with(|| ClientContributionOrder {
-                    first_seen: client_count,
-                    total_tokens: 0,
-                });
-            totals.total_tokens = totals
-                .total_tokens
-                .saturating_add(msg.tokens.total().max(0) as u64);
-        }
-
-        if *group_by != GroupBy::ClientProviderModel
-            && !entry.provider.split(", ").any(|p| p == provider)
-        {
-            entry.provider = format!("{}, {}", entry.provider, provider);
-        }
-
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
-        entry.message_count += msg.message_count.max(0);
-        entry.cost += msg.cost;
-        entry
-            .performance
-            .record_message(positive_token_total(&msg.tokens), msg.duration_ms);
+    for msg in &messages {
+        engine.push(msg);
     }
-
-    let mut entries: Vec<ModelUsage> = model_map
-        .into_iter()
-        .map(|(key, mut entry)| {
-            if let Some(client_totals) = client_totals_by_entry.get(&key) {
-                let ordered_clients = ordered_clients_by_token_contribution(client_totals);
-                entry.client = ordered_clients.clone();
-                if let Some(merged_clients) = &mut entry.merged_clients {
-                    *merged_clients = ordered_clients;
-                }
-            }
-
-            let total_tokens = entry.input.max(0)
-                + entry.output.max(0)
-                + entry.cache_read.max(0)
-                + entry.cache_write.max(0)
-                + entry.reasoning.max(0);
-            entry.performance.finalize(total_tokens);
-            let mut providers: Vec<&str> = entry.provider.split(", ").collect();
-            providers.sort_unstable();
-            providers.dedup();
-            entry.provider = providers.join(", ");
-            entry
-        })
-        .collect();
-    entries.sort_by(|a, b| match (a.cost.is_nan(), b.cost.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-        (false, false) => b
-            .cost
-            .partial_cmp(&a.cost)
-            .unwrap_or(std::cmp::Ordering::Equal),
-    });
-
-    entries
+    engine
+        .finish()
+        .model_report
+        .expect("model view requested")
+        .entries
 }
 
-fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
+pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
     tokens.input.max(0)
         + tokens.output.max(0)
         + tokens.cache_read.max(0)
@@ -2161,37 +2038,18 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-    let entries = aggregate_model_usage_entries(filtered, &options.group_by);
-
-    let total_input: i64 = entries.iter().map(|e| e.input).sum();
-    let total_output: i64 = entries.iter().map(|e| e.output).sum();
-    let total_cache_read: i64 = entries.iter().map(|e| e.cache_read).sum();
-    let total_cache_write: i64 = entries.iter().map(|e| e.cache_write).sum();
-    let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-
-    Ok(ModelReport {
-        entries,
-        total_input,
-        total_output,
-        total_cache_read,
-        total_cache_write,
-        total_messages,
-        total_cost,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
-}
-
-#[derive(Default)]
-struct MonthAggregator {
-    models: HashSet<String>,
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    cache_write: i64,
-    message_count: i32,
-    cost: f64,
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::MODEL,
+        });
+    for msg in &all_messages {
+        engine.push(msg);
+    }
+    let mut report = engine.finish().model_report.expect("model view requested");
+    report.processing_time_ms = start.elapsed().as_millis() as u32;
+    Ok(report)
 }
 
 pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
@@ -2215,75 +2073,21 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
-
-    for msg in filtered {
-        let date = msg.date_string();
-        let month = if date.len() >= 7 {
-            date[..7].to_string()
-        } else {
-            continue;
-        };
-
-        let entry = month_map.entry(month).or_default();
-
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.message_count += msg.message_count.max(0);
-        entry.cost += msg.cost;
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::MONTHLY,
+        });
+    for msg in &all_messages {
+        engine.push(msg);
     }
-
-    let mut entries: Vec<MonthlyUsage> = month_map
-        .into_iter()
-        .map(|(month, agg)| MonthlyUsage {
-            month,
-            models: agg.models.into_iter().collect(),
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            cost: agg.cost,
-        })
-        .collect();
-
-    entries.sort_by(|a, b| a.month.cmp(&b.month));
-
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-
-    Ok(MonthlyReport {
-        entries,
-        total_cost,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
-}
-
-#[derive(Default)]
-struct HourAggregator {
-    clients: HashSet<String>,
-    models: HashSet<String>,
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    cache_write: i64,
-    reasoning: i64,
-    message_count: i32,
-    turn_count: i32,
-    cost: f64,
-}
-
-fn hourly_report_label(hour_key: &str) -> Result<String, String> {
-    hour_key
-        .get(5..)
-        .map(str::to_string)
-        .ok_or_else(|| format!("Invalid hourly report key: {hour_key}"))
+    let mut report = engine
+        .finish()
+        .monthly_report
+        .expect("monthly view requested");
+    report.processing_time_ms = start.elapsed().as_millis() as u32;
+    Ok(report)
 }
 
 /// Generate hourly usage report with hour labels formatted as "MM-DD HH:00".
@@ -2291,8 +2095,6 @@ fn hourly_report_label(hour_key: &str) -> Result<String, String> {
 /// Derives the hour slot from `UnifiedMessage.timestamp` (Unix ms).
 /// Falls back to date + "00:00" when timestamp is zero or missing.
 pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, String> {
-    use chrono::{Local, TimeZone};
-
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
@@ -2313,75 +2115,21 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
-
-    for msg in filtered {
-        let hour_key = if msg.timestamp > 0 {
-            let ts_secs = msg.timestamp / 1000;
-            match Local.timestamp_opt(ts_secs, 0) {
-                chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
-                _ => format!("{} 00:00", msg.date_string()),
-            }
-        } else {
-            format!("{} 00:00", msg.date_string())
-        };
-
-        let entry = hour_map.entry(hour_key).or_default();
-
-        entry.clients.insert(msg.client.to_string());
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
-        entry.message_count += msg.message_count.max(0);
-        if msg.is_turn_start {
-            entry.turn_count += 1;
-        }
-        entry.cost += msg.cost;
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::HOURLY,
+        });
+    for msg in &all_messages {
+        engine.push(msg);
     }
-
-    let mut entries: Vec<(String, HourlyUsage)> = Vec::with_capacity(hour_map.len());
-    for (hour, agg) in hour_map {
-        let entry = HourlyUsage {
-            hour: hourly_report_label(&hour)?,
-            clients: {
-                let mut v: Vec<String> = agg.clients.into_iter().collect();
-                v.sort();
-                v
-            },
-            models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
-                v.sort();
-                v
-            },
-            input: agg.input,
-            output: agg.output,
-            cache_read: agg.cache_read,
-            cache_write: agg.cache_write,
-            message_count: agg.message_count,
-            turn_count: agg.turn_count,
-            reasoning: agg.reasoning,
-            cost: agg.cost,
-        };
-        entries.push((hour, entry));
-    }
-
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let entries: Vec<HourlyUsage> = entries.into_iter().map(|(_, entry)| entry).collect();
-
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-
-    Ok(HourlyReport {
-        entries,
-        total_cost,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
+    let mut report = engine
+        .finish()
+        .hourly_report
+        .expect("hourly view requested");
+    report.processing_time_ms = start.elapsed().as_millis() as u32;
+    Ok(report)
 }
 
 async fn generate_graph_with_loaded_pricing(
@@ -2407,25 +2155,17 @@ async fn generate_graph_with_loaded_pricing(
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
-    let time_metrics =
-        sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
-
-    let daily_active_time = sessionize::compute_daily_active_time(&intervals);
-    let contributions = aggregator::aggregate_by_date(filtered);
-
-    let processing_time_ms = start.elapsed().as_millis() as u32;
-    let mut result = aggregator::generate_graph_result(contributions, processing_time_ms);
-    result.time_metrics = Some(time_metrics);
-
-    for contribution in &mut result.contributions {
-        if let Some(&ms) = daily_active_time.get(&contribution.date) {
-            contribution.active_time_ms = Some(ms);
-        }
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::GRAPH | crate::aggregate::ViewSet::TIME_METRICS,
+        });
+    for msg in &all_messages {
+        engine.push(msg);
     }
-
+    let mut result = engine.finish().graph.expect("graph view requested");
+    result.meta.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(result)
 }
 
@@ -2455,15 +2195,21 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
         &options.scanner_settings,
     )?;
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
-    let metrics = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
-
-    Ok(TimeMetricsReport {
-        metrics,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: options.group_by.clone(),
+            date_range: crate::aggregate::DateRange::from_options(&options),
+            views: crate::aggregate::ViewSet::TIME_METRICS,
+        });
+    for msg in &all_messages {
+        engine.push(msg);
+    }
+    let mut report = engine
+        .finish()
+        .time_metrics
+        .expect("time-metrics view requested");
+    report.processing_time_ms = start.elapsed().as_millis() as u32;
+    Ok(report)
 }
 
 pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {
@@ -2476,18 +2222,56 @@ pub async fn generate_local_graph_report(options: ReportOptions) -> Result<Graph
     generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
 }
 
-fn filter_messages_for_report(
+// Test-only thin wrappers exposing the live aggregation logic with a message
+// list as input, so aggregate::parity_tests can exercise the same entrypoint
+// shape as production without parse/pricing setup. They are not public API.
+#[cfg(test)]
+pub(crate) fn aggregate_model_usage_entries_pub(
     messages: Vec<UnifiedMessage>,
-    options: &ReportOptions,
-) -> Vec<UnifiedMessage> {
-    let mut filtered = messages;
-    retain_messages_in_date_range(
-        &mut filtered,
-        options.year.as_ref(),
-        options.since.as_ref(),
-        options.until.as_ref(),
-    );
-    filtered
+    group_by: &GroupBy,
+) -> Vec<ModelUsage> {
+    aggregate_model_usage_entries(messages, group_by)
+}
+
+#[cfg(test)]
+pub(crate) fn monthly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> MonthlyReport {
+    // Delegate to the engine (single source of truth). The parity harness uses
+    // this message-list entry point to confirm the engine is deterministic and
+    // matches what the async production path produces.
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: crate::GroupBy::ClientModel,
+            date_range: crate::aggregate::DateRange::none(),
+            views: crate::aggregate::ViewSet::MONTHLY,
+        });
+    for msg in &messages {
+        engine.push(msg);
+    }
+    let mut report = engine
+        .finish()
+        .monthly_report
+        .expect("monthly view requested");
+    report.processing_time_ms = 0;
+    report
+}
+
+#[cfg(test)]
+pub(crate) fn hourly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> HourlyReport {
+    let mut engine =
+        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
+            group_by: crate::GroupBy::ClientModel,
+            date_range: crate::aggregate::DateRange::none(),
+            views: crate::aggregate::ViewSet::HOURLY,
+        });
+    for msg in &messages {
+        engine.push(msg);
+    }
+    let mut report = engine
+        .finish()
+        .hourly_report
+        .expect("hourly view requested");
+    report.processing_time_ms = 0;
+    report
 }
 
 fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
