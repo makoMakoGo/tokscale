@@ -63,7 +63,8 @@ impl LocalSourceAdapter for KiroAdapter {
                 SourceUnitMeta::None
                 | SourceUnitMeta::Crush { .. }
                 | SourceUnitMeta::OpenCodeSqlite
-                | SourceUnitMeta::OpenCodeJson => unreachable!("unexpected Kiro source unit meta"),
+                | SourceUnitMeta::OpenCodeJson
+                | SourceUnitMeta::Codex { .. } => unreachable!("unexpected Kiro source unit meta"),
             })
             .collect()
     }
