@@ -23,6 +23,8 @@ impl LocalSourceAdapter for CodebuffAdapter {
             .local_def()
             .expect("Codebuff adapter must have local scan policy");
         let (mut roots, has_env_override) = codebuff_roots(ctx.home_dir, ctx.use_env_roots);
+        // CODEBUFF_DATA_DIR is a runtime data-root override, so treat it as
+        // exclusive over configured extras instead of mixing channels.
         if !has_env_override {
             roots.extend(adapter_discover::extra_roots_for_client(
                 ClientId::Codebuff,
