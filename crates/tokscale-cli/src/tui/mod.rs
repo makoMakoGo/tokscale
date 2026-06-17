@@ -44,7 +44,10 @@ use crossterm::{
     },
 };
 use ratatui::prelude::*;
-use tokscale_core::ClientId;
+use tokscale_core::{
+    pricing::{DIAGNOSTIC_PRICING_UNAVAILABLE, DIAGNOSTIC_USING_CACHED_PRICING},
+    ClientId,
+};
 
 fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
     match load_result {
@@ -79,14 +82,14 @@ fn pricing_diagnostics_status(diagnostics: &[String]) -> Option<&'static str> {
 
     if diagnostics
         .iter()
-        .any(|line| line.contains("using cached pricing"))
+        .any(|line| line.starts_with(DIAGNOSTIC_USING_CACHED_PRICING))
     {
         return Some("Pricing refresh failed; using cached pricing");
     }
 
     if diagnostics
         .iter()
-        .any(|line| line.contains("pricing unavailable"))
+        .any(|line| line.starts_with(DIAGNOSTIC_PRICING_UNAVAILABLE))
     {
         return Some("Pricing unavailable; costs may be missing");
     }
@@ -509,8 +512,7 @@ mod tests {
     fn pricing_diagnostics_status_summarizes_cached_fallback() {
         let diagnostics = vec![
             "[tokscale] LiteLLM JSON parse failed: error decoding response body".to_string(),
-            "[tokscale] pricing refresh failed; using cached pricing: error decoding response body"
-                .to_string(),
+            format!("{DIAGNOSTIC_USING_CACHED_PRICING}: error decoding response body"),
         ];
 
         assert_eq!(
@@ -521,8 +523,7 @@ mod tests {
 
     #[test]
     fn pricing_diagnostics_status_summarizes_unavailable_pricing() {
-        let diagnostics =
-            vec!["[tokscale] pricing unavailable; costs may be missing: network error".to_string()];
+        let diagnostics = vec![format!("{DIAGNOSTIC_PRICING_UNAVAILABLE}: network error")];
 
         assert_eq!(
             pricing_diagnostics_status(&diagnostics),
