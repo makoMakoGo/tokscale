@@ -130,11 +130,14 @@ function deleted.
 
 ## C4 — Sharded cache
 
-- Layout: `cache/shards/<xx>/<hash>.bin`, one shard per SourceUnit, body =
-  today's `CachedSourceEntry` bincode + per-shard schema version (v25).
-- Reads happen inside `fold` per unit (no global load); writes happen only
-  for dirty units via the existing atomic temp+rename; no global lock, no
-  merge dance — concurrent processes touch disjoint shards atomically.
+- Layout: `cache/shards/<xx>/<hash>.bin`, one shard per SourceUnit. Each
+  v25 shard stores a small metadata header (path, fingerprint, fallback
+  timestamp indices, Codex incremental state, message count) before the
+  message body, so cache-hit decisions can read metadata without loading
+  cached messages.
+- Message bodies are loaded inside `fold` per unit; writes happen only for
+  dirty units via the existing atomic temp+rename. There is no global lock
+  or merge dance, so concurrent processes touch disjoint shards atomically.
 - Old monolithic `source-message-cache.bin` is deleted on first v25 run.
 - Prune: shards whose source path no longer exists are removed during
   discovery sweeps.

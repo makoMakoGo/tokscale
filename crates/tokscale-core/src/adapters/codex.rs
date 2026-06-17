@@ -221,7 +221,7 @@ fn load_or_parse_codex_unit(
     };
     let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
 
-    if let Some(cached) = source_cache.get(&path) {
+    if let Some(cached) = source_cache.get_meta(&path) {
         let reparse_from_start = |invalidate_cache: bool| {
             let mut parsed = parse_full_log_source(unit.clone(), pricing, is_headless);
             parsed.invalidate_cache = invalidate_cache && parsed.cache_entry.is_none();
@@ -229,7 +229,7 @@ fn load_or_parse_codex_unit(
         };
 
         if cached.fingerprint == fingerprint {
-            if message_cache::codex_cache_entry_matches_fingerprint(cached, &fingerprint) {
+            if message_cache::codex_cache_meta_matches_fingerprint(&cached, &fingerprint) {
                 return ParsedUnit {
                     unit,
                     messages: UnitMessageSource::CodexCacheHit {
@@ -549,8 +549,8 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert!(cache
-            .get(&path)
-            .and_then(|entry| entry.codex_incremental.as_ref())
+            .get_meta(&path)
+            .and_then(|meta| meta.codex_incremental)
             .is_some());
     }
 

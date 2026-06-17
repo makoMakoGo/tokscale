@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::fs::{self, File};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -22,10 +22,14 @@ use std::time::UNIX_EPOCH;
 // metadata, so cached transcript messages must be rebuilt.
 // 24: UnifiedMessage drops the stored date string (derived from timestamp)
 // and Phase B shrinks per-message data; serialized layout changed.
-const CACHE_SCHEMA_VERSION: u32 = 24;
+// 25: source-message cache is sharded one source per file; v24 monolith is not
+// migrated and is deleted on first v25 load.
+const CACHE_SCHEMA_VERSION: u32 = 25;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
+const SHARDS_DIRNAME: &str = "shards";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SHARD_HEADER_BYTES: u64 = 16 * 1024 * 1024;
 const FINGERPRINT_SAMPLE_BYTES: usize = 4096;
 const FINGERPRINT_SAMPLE_POINTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -290,103 +294,103 @@ impl CachedSourceEntry {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct CachedSourceStore {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedShardHeader {
     schema_version: u32,
-    entries: Vec<CachedSourceEntry>,
+    path: CachedPath,
+    fingerprint: SourceFingerprint,
+    fallback_timestamp_indices: Vec<usize>,
+    codex_incremental: Option<CodexIncrementalCache>,
+    message_count: usize,
 }
 
-/// Serialization view over borrowed entries; bincode encodes `Vec<&T>`
-/// identically to `Vec<T>`, so `CachedSourceStore` reads it back (ADR 0008:
-/// saving must not clone the corpus).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedShardBody {
+    messages: Vec<UnifiedMessage>,
+}
+
 #[derive(Serialize)]
-struct BorrowedSourceStore<'a> {
-    schema_version: u32,
-    entries: Vec<&'a CachedSourceEntry>,
+struct BorrowedCachedShardBody<'a> {
+    messages: &'a [UnifiedMessage],
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CachedSourceMeta {
+    pub fingerprint: SourceFingerprint,
+    pub has_messages: bool,
+    pub codex_incremental: Option<CodexIncrementalCache>,
 }
 
 #[derive(Default)]
 pub(crate) struct SourceMessageCache {
-    pub entries: HashMap<CachedPath, CachedSourceEntry>,
-    dirty: bool,
-    dirty_keys: HashSet<CachedPath>,
+    cache_dir: Option<PathBuf>,
+    dirty_entries: HashMap<CachedPath, CachedSourceEntry>,
     deleted_paths: HashSet<CachedPath>,
+    taken_paths: HashSet<CachedPath>,
+    dirty: bool,
 }
 
 impl SourceMessageCache {
     pub(crate) fn load() -> Self {
-        let Some(path) = cache_path() else {
-            return Self::default();
-        };
-        let Some(lock_path) = cache_lock_path() else {
-            return Self::default();
-        };
-        if let Some(lock_dir) = lock_path.parent() {
-            if ensure_cache_dir(lock_dir).is_err() {
-                return Self::default();
+        let cache_dir = cache_dir().and_then(|dir| {
+            if ensure_cache_dir(&dir).is_err() {
+                return None;
             }
-        }
-        let lock_file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path)
-        {
-            Ok(file) => file,
-            Err(_) => return Self::default(),
-        };
-        if fs2::FileExt::lock_shared(&lock_file).is_err() {
-            return Self::default();
-        }
 
-        let store = match read_store_from_path_status(&path) {
-            CacheReadStatus::Loaded(store) => Some(store),
-            CacheReadStatus::Missing => legacy_cache_paths()
-                .into_iter()
-                .find_map(|path| read_store_from_path(&path)),
-            CacheReadStatus::Invalid => None,
-        };
-        let Some(store) = store else {
-            return Self::default();
-        };
-
-        let entries = store
-            .entries
-            .into_iter()
-            .map(|entry| (entry.path.clone(), entry))
-            .collect();
+            delete_monolithic_cache_files();
+            Some(dir)
+        });
 
         Self {
-            entries,
-            dirty: false,
-            dirty_keys: HashSet::new(),
+            cache_dir,
+            dirty_entries: HashMap::new(),
             deleted_paths: HashSet::new(),
+            taken_paths: HashSet::new(),
+            dirty: false,
         }
     }
 
     pub(crate) fn insert(&mut self, entry: CachedSourceEntry) {
         let key = entry.path.clone();
-        self.entries.insert(key.clone(), entry);
+        self.dirty_entries.insert(key.clone(), entry);
         self.deleted_paths.remove(&key);
-        self.dirty_keys.insert(key);
+        self.taken_paths.remove(&key);
         self.dirty = true;
     }
 
-    pub(crate) fn get(&self, path: &Path) -> Option<&CachedSourceEntry> {
+    pub(crate) fn get_meta(&self, path: &Path) -> Option<CachedSourceMeta> {
         let key = CachedPath::from_path(path);
-        self.entries.get(&key)
+        if self.deleted_paths.contains(&key) || self.taken_paths.contains(&key) {
+            return None;
+        }
+
+        if let Some(entry) = self.dirty_entries.get(&key) {
+            return Some(meta_from_entry(entry));
+        }
+
+        let shard_path = self.shard_path_for_cached_path(&key)?;
+        let header = read_shard_header(&shard_path)?;
+        if header.path != key {
+            return None;
+        }
+
+        Some(meta_from_header(header))
     }
 
     /// Move the messages out of a cache entry, leaving it empty. Safe for
-    /// clean entries: `save_if_dirty` merges clean entries from the on-disk
-    /// store, never from memory. Callers must not re-read the same path's
-    /// messages within one parse run.
+    /// clean entries because shards are read lazily and callers must not
+    /// re-read the same path's messages within one parse run.
     pub(crate) fn take_messages(&mut self, path: &Path) -> Option<Vec<UnifiedMessage>> {
         let key = CachedPath::from_path(path);
-        self.entries
-            .get_mut(&key)
-            .map(|entry| std::mem::take(&mut entry.messages))
+        if self.deleted_paths.contains(&key) || !self.taken_paths.insert(key.clone()) {
+            return None;
+        }
+
+        if let Some(entry) = self.dirty_entries.get_mut(&key) {
+            return Some(std::mem::take(&mut entry.messages));
+        }
+
+        read_shard_entry(&self.shard_path_for_cached_path(&key)?).map(|entry| entry.messages)
     }
 
     /// Codex variant of [`Self::take_messages`]: also moves out the
@@ -396,40 +400,53 @@ impl SourceMessageCache {
         path: &Path,
     ) -> Option<(Vec<UnifiedMessage>, Vec<usize>)> {
         let key = CachedPath::from_path(path);
-        self.entries.get_mut(&key).map(|entry| {
-            (
+        if self.deleted_paths.contains(&key) || !self.taken_paths.insert(key.clone()) {
+            return None;
+        }
+
+        if let Some(entry) = self.dirty_entries.get_mut(&key) {
+            return Some((
                 std::mem::take(&mut entry.messages),
                 std::mem::take(&mut entry.fallback_timestamp_indices),
-            )
-        })
+            ));
+        }
+
+        read_shard_entry(&self.shard_path_for_cached_path(&key)?)
+            .map(|entry| (entry.messages, entry.fallback_timestamp_indices))
     }
 
     pub(crate) fn remove(&mut self, path: &Path) {
         let key = CachedPath::from_path(path);
-        if self.entries.remove(&key).is_some() {
-            self.dirty_keys.remove(&key);
-            self.deleted_paths.insert(key);
-            self.dirty = true;
-        }
+        self.dirty_entries.remove(&key);
+        self.taken_paths.remove(&key);
+        self.deleted_paths.insert(key);
+        self.dirty = true;
     }
 
     pub(crate) fn prune_missing_files(&mut self) {
-        let removed_paths: Vec<CachedPath> = self
-            .entries
+        let removed_dirty_paths: Vec<CachedPath> = self
+            .dirty_entries
             .keys()
             .filter(|path| !path.to_path_buf().exists())
             .cloned()
             .collect();
-        if removed_paths.is_empty() {
-            return;
+        for path in removed_dirty_paths {
+            self.dirty_entries.remove(&path);
+            self.deleted_paths.insert(path);
+            self.dirty = true;
         }
 
-        for path in removed_paths {
-            self.entries.remove(&path);
-            self.dirty_keys.remove(&path);
-            self.deleted_paths.insert(path);
+        let Some(shards_dir) = self.shards_dir() else {
+            return;
+        };
+        for shard_path in shard_paths(&shards_dir) {
+            let Some(header) = read_shard_header(&shard_path) else {
+                continue;
+            };
+            if !header.path.to_path_buf().exists() {
+                let _ = fs::remove_file(shard_path);
+            }
         }
-        self.dirty = true;
     }
 
     pub(crate) fn save_if_dirty(&mut self) {
@@ -437,151 +454,251 @@ impl SourceMessageCache {
             return;
         }
 
-        let Some(dir) = cache_dir() else {
+        let Some(dir) = self.cache_dir.clone() else {
             return;
         };
         if ensure_cache_dir(&dir).is_err() {
             return;
         }
+        delete_monolithic_cache_files();
 
-        let Some(final_path) = cache_path() else {
-            return;
-        };
-        let Some(lock_path) = cache_lock_path() else {
-            return;
-        };
-        let lock_file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path)
-        {
-            Ok(file) => file,
-            Err(_) => return,
-        };
-        if fs2::FileExt::lock_exclusive(&lock_file).is_err() {
-            return;
-        }
-
-        let disk_store = read_store_from_path(&final_path);
-        let mut merged: HashMap<&CachedPath, &CachedSourceEntry> = HashMap::new();
-        if let Some(store) = disk_store.as_ref() {
-            for entry in &store.entries {
-                merged.insert(&entry.path, entry);
-            }
-        }
-
+        let mut had_error = false;
         for path in &self.deleted_paths {
-            if !path.to_path_buf().exists() {
-                merged.remove(path);
-            }
-        }
-        for path in &self.dirty_keys {
-            if let Some(entry) = self.entries.get(path) {
-                merged.insert(&entry.path, entry);
+            if let Some(shard_path) = shard_path_for_cached_path(&dir, path) {
+                if fs::remove_file(shard_path).is_err() {
+                    // Best effort: deletion failure must not fail user parsing.
+                }
             }
         }
 
-        let store = BorrowedSourceStore {
-            schema_version: CACHE_SCHEMA_VERSION,
-            entries: merged.into_values().collect(),
-        };
+        for entry in self.dirty_entries.values() {
+            if write_shard_entry(&dir, entry).is_err() {
+                had_error = true;
+            }
+        }
 
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let tmp_path = dir.join(format!(
-            ".{}.{}.{:x}.tmp",
-            CACHE_FILENAME,
-            std::process::id(),
-            nanos
-        ));
-
-        // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
-        // the canonical cache file before writing — a partial save or process
-        // crash between delete and rename would lose the cache. The temp-file
-        // pattern makes corruption-on-crash impossible.
-        let write_result = (|| -> std::io::Result<()> {
-            let file = File::create(&tmp_path)?;
-            let mut writer = BufWriter::new(file);
-            bincode::options()
-                .with_limit(MAX_CACHE_FILE_BYTES)
-                .serialize_into(&mut writer, &store)
-                .map_err(std::io::Error::other)?;
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-            crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
-            let final_file = File::open(&final_path)?;
-            final_file.sync_all()?;
-            Ok(())
-        })();
-
-        if write_result.is_err() {
-            let _ = fs::remove_file(&tmp_path);
+        if had_error {
             return;
         }
 
-        // In-memory entries intentionally do not absorb the merged union:
-        // every caller drops the cache right after saving, and a repeat save
-        // is a no-op because the dirty flags clear here.
         self.dirty = false;
-        self.dirty_keys.clear();
+        self.dirty_entries.clear();
         self.deleted_paths.clear();
+        self.taken_paths.clear();
+    }
+
+    fn shards_dir(&self) -> Option<PathBuf> {
+        Some(self.cache_dir.as_ref()?.join(SHARDS_DIRNAME))
+    }
+
+    fn shard_path_for_cached_path(&self, path: &CachedPath) -> Option<PathBuf> {
+        shard_path_for_cached_path(self.cache_dir.as_ref()?, path)
     }
 }
 
-fn read_store_from_path(path: &Path) -> Option<CachedSourceStore> {
-    let file = File::open(path).ok()?;
+fn delete_monolithic_cache_files() {
+    if let Some(path) = cache_path() {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = cache_lock_path() {
+        let _ = fs::remove_file(path);
+    }
+    for path in legacy_cache_paths() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn meta_from_entry(entry: &CachedSourceEntry) -> CachedSourceMeta {
+    CachedSourceMeta {
+        fingerprint: entry.fingerprint.clone(),
+        has_messages: !entry.messages.is_empty(),
+        codex_incremental: entry.codex_incremental.clone(),
+    }
+}
+
+fn meta_from_header(header: CachedShardHeader) -> CachedSourceMeta {
+    CachedSourceMeta {
+        fingerprint: header.fingerprint,
+        has_messages: header.message_count > 0,
+        codex_incremental: header.codex_incremental,
+    }
+}
+
+fn shard_key_for_cached_path(path: &CachedPath) -> Option<[u8; 32]> {
+    let bytes = bincode::options().serialize(path).ok()?;
+    Some(Sha256::digest(&bytes).into())
+}
+
+#[cfg(test)]
+fn shard_path(path: &Path) -> Option<PathBuf> {
+    let dir = cache_dir()?;
+    shard_path_for_cached_path(&dir, &CachedPath::from_path(path))
+}
+
+fn shard_path_for_cached_path(cache_dir: &Path, path: &CachedPath) -> Option<PathBuf> {
+    let key = shard_key_for_cached_path(path)?;
+    let hex = hex_sha256(&key);
+    Some(
+        cache_dir
+            .join(SHARDS_DIRNAME)
+            .join(&hex[..2])
+            .join(format!("{hex}.bin")),
+    )
+}
+
+fn hex_sha256(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn header_from_entry(entry: &CachedSourceEntry) -> CachedShardHeader {
+    CachedShardHeader {
+        schema_version: CACHE_SCHEMA_VERSION,
+        path: entry.path.clone(),
+        fingerprint: entry.fingerprint.clone(),
+        fallback_timestamp_indices: entry.fallback_timestamp_indices.clone(),
+        codex_incremental: entry.codex_incremental.clone(),
+        message_count: entry.messages.len(),
+    }
+}
+
+fn read_shard_header(path: &Path) -> Option<CachedShardHeader> {
+    let mut file = File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
     if metadata.len() > MAX_CACHE_FILE_BYTES {
         return None;
     }
 
-    let reader = BufReader::new(file);
-    let store: CachedSourceStore = bincode::options()
-        .with_limit(MAX_CACHE_FILE_BYTES)
-        .deserialize_from(reader)
-        .ok()?;
-    if store.schema_version != CACHE_SCHEMA_VERSION {
+    read_shard_header_from_file(&mut file)
+}
+
+fn read_shard_entry(path: &Path) -> Option<CachedSourceEntry> {
+    let mut file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if metadata.len() > MAX_CACHE_FILE_BYTES {
         return None;
     }
-    Some(store)
-}
 
-enum CacheReadStatus {
-    Missing,
-    Invalid,
-    Loaded(CachedSourceStore),
-}
-
-fn read_store_from_path_status(path: &Path) -> CacheReadStatus {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return CacheReadStatus::Missing,
-        Err(_) => return CacheReadStatus::Invalid,
-    };
-    let metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return CacheReadStatus::Invalid,
-    };
-    if metadata.len() > MAX_CACHE_FILE_BYTES {
-        return CacheReadStatus::Invalid;
-    }
-
-    let reader = BufReader::new(file);
-    let store: CachedSourceStore = match bincode::options()
+    let header = read_shard_header_from_file(&mut file)?;
+    let body: CachedShardBody = bincode::options()
         .with_limit(MAX_CACHE_FILE_BYTES)
-        .deserialize_from(reader)
-    {
-        Ok(store) => store,
-        Err(_) => return CacheReadStatus::Invalid,
-    };
-    if store.schema_version != CACHE_SCHEMA_VERSION {
-        return CacheReadStatus::Invalid;
+        .deserialize_from(&mut file)
+        .ok()?;
+    if body.messages.len() != header.message_count {
+        return None;
     }
-    CacheReadStatus::Loaded(store)
+
+    Some(CachedSourceEntry {
+        path: header.path,
+        fingerprint: header.fingerprint,
+        messages: body.messages,
+        fallback_timestamp_indices: header.fallback_timestamp_indices,
+        codex_incremental: header.codex_incremental,
+    })
+}
+
+fn read_shard_header_from_file(file: &mut File) -> Option<CachedShardHeader> {
+    let mut len_bytes = [0_u8; 8];
+    file.read_exact(&mut len_bytes).ok()?;
+    let header_len = u64::from_le_bytes(len_bytes);
+    if header_len == 0 || header_len > MAX_SHARD_HEADER_BYTES {
+        return None;
+    }
+
+    let mut header_bytes = vec![0_u8; header_len as usize];
+    file.read_exact(&mut header_bytes).ok()?;
+    let header: CachedShardHeader = bincode::options()
+        .with_limit(MAX_SHARD_HEADER_BYTES)
+        .deserialize(&header_bytes)
+        .ok()?;
+    if header.schema_version != CACHE_SCHEMA_VERSION {
+        return None;
+    }
+    Some(header)
+}
+
+fn write_shard_entry(cache_dir: &Path, entry: &CachedSourceEntry) -> std::io::Result<()> {
+    let final_path = shard_path_for_cached_path(cache_dir, &entry.path)
+        .ok_or_else(|| std::io::Error::other("failed to compute cache shard path"))?;
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache shard path has no parent"))?;
+    ensure_cache_dir(parent)?;
+
+    let header = header_from_entry(entry);
+    let header_bytes = bincode::options()
+        .serialize(&header)
+        .map_err(std::io::Error::other)?;
+    let body = BorrowedCachedShardBody {
+        messages: &entry.messages,
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let tmp_path = parent.join(format!(
+        ".{}.{}.{:x}.tmp",
+        final_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("source-message-cache-shard"),
+        std::process::id(),
+        nanos
+    ));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let file = File::create(&tmp_path)?;
+        let mut writer = BufWriter::new(file);
+        writer.write_all(&(header_bytes.len() as u64).to_le_bytes())?;
+        writer.write_all(&header_bytes)?;
+        bincode::options()
+            .with_limit(MAX_CACHE_FILE_BYTES)
+            .serialize_into(&mut writer, &body)
+            .map_err(std::io::Error::other)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
+        let final_file = File::open(&final_path)?;
+        final_file.sync_all()?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+fn shard_paths(shards_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let Ok(prefixes) = fs::read_dir(shards_dir) else {
+        return paths;
+    };
+    for prefix in prefixes.flatten() {
+        let Ok(file_type) = prefix.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(prefix.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let Ok(file_type) = file.file_type() else {
+                continue;
+            };
+            if file_type.is_file() && file.path().extension().is_some_and(|ext| ext == "bin") {
+                paths.push(file.path());
+            }
+        }
+    }
+    paths
 }
 
 fn read_sample_hash(file: &mut File, offset: u64, len: usize) -> Option<FileSampleHash> {
@@ -738,14 +855,13 @@ pub(crate) fn codex_prefix_matches(path: &Path, cached: &CodexIncrementalCache) 
     }
 }
 
-pub(crate) fn codex_cache_entry_matches_fingerprint(
-    cached: &CachedSourceEntry,
+pub(crate) fn codex_cache_meta_matches_fingerprint(
+    cached: &CachedSourceMeta,
     fingerprint: &SourceFingerprint,
 ) -> bool {
     let Some(codex_incremental) = cached.codex_incremental.as_ref() else {
         return false;
     };
-
     codex_incremental.consumed_offset == fingerprint.size
         && codex_incremental.ends_with_newline
         && codex_incremental.prefix_hash == fingerprint.content_hash
@@ -1087,81 +1203,135 @@ mod tests {
             None,
         );
 
-        let mut cache = SourceMessageCache::default();
+        let expected_fingerprint = entry.fingerprint.clone();
+        let mut cache = SourceMessageCache::load();
         cache.insert(entry);
         cache.save_if_dirty();
 
-        let loaded = SourceMessageCache::load();
-        assert_eq!(loaded.entries.len(), 1);
-        assert!(loaded.get(file.path()).is_some());
+        let shard = shard_path(file.path()).unwrap();
+        assert!(shard.exists());
+        assert!(!cache_path().unwrap().exists());
+        assert!(!cache_lock_path().unwrap().exists());
+
+        let mut loaded = SourceMessageCache::load();
+        let meta = loaded.get_meta(file.path()).unwrap();
+        assert_eq!(meta.fingerprint, expected_fingerprint);
+        assert!(meta.has_messages);
+        let messages = loaded.take_messages(file.path()).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "session-1");
 
         restore_cache_env(prev_env);
     }
 
     #[test]
-    fn test_prune_missing_files_removes_deleted_entries() {
-        let file = write_temp_file(b"{}\n");
-        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
-        let path = file.path().to_path_buf();
+    #[serial_test::serial]
+    fn test_prune_missing_files_removes_deleted_shards() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
 
-        let mut cache = SourceMessageCache::default();
+        let file = write_temp_file(b"{}\n");
+        let path = file.path().to_path_buf();
+        let mut cache = SourceMessageCache::load();
         cache.insert(CachedSourceEntry::new(
             &path,
-            fingerprint,
-            Vec::new(),
+            SourceFingerprint::from_path(&path).unwrap(),
+            vec![UnifiedMessage::new(
+                "client",
+                "gpt-5",
+                "provider",
+                "session-1",
+                1,
+                TokenBreakdown {
+                    input: 1,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            )],
             Vec::new(),
             None,
         ));
+        cache.save_if_dirty();
+        let shard = shard_path(&path).unwrap();
+        assert!(shard.exists());
 
         std::fs::remove_file(&path).unwrap();
         cache.prune_missing_files();
 
-        assert!(cache.entries.is_empty());
+        assert!(!shard.exists());
+        assert!(cache.get_meta(&path).is_none());
+
+        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_load_ignores_oversized_cache_file() {
+    fn test_load_deletes_current_monolithic_cache_files() {
         let temp_home = TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        restore_env_var("HOME", Some(temp_home.path()));
+        let prev_env = sandbox_cache_env(temp_home.path());
 
-        {
-            let cache_file = cache_path().unwrap();
-            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-            let file = File::create(&cache_file).unwrap();
-            file.set_len(MAX_CACHE_FILE_BYTES + 1).unwrap();
+        let cache_file = cache_path().unwrap();
+        let lock_file = cache_lock_path().unwrap();
+        ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
+        std::fs::write(&cache_file, b"old-monolith").unwrap();
+        std::fs::write(&lock_file, b"old-lock").unwrap();
 
-            let loaded = SourceMessageCache::load();
-            assert!(loaded.entries.is_empty());
-        }
+        let _loaded = SourceMessageCache::load();
+        assert!(!cache_file.exists());
+        assert!(!lock_file.exists());
 
-        restore_env_var("HOME", original_home);
+        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_load_ignores_stale_schema_version() {
+    fn test_get_meta_ignores_oversized_shard() {
         let temp_home = TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        restore_env_var("HOME", Some(temp_home.path()));
+        let prev_env = sandbox_cache_env(temp_home.path());
 
-        {
-            let cache_file = cache_path().unwrap();
-            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-            let store = CachedSourceStore {
-                schema_version: CACHE_SCHEMA_VERSION - 1,
-                entries: Vec::new(),
-            };
+        let source = write_temp_file(b"source\n");
+        let shard = shard_path(source.path()).unwrap();
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        let file = File::create(&shard).unwrap();
+        file.set_len(MAX_CACHE_FILE_BYTES + 1).unwrap();
 
-            let writer = BufWriter::new(File::create(&cache_file).unwrap());
-            bincode::options().serialize_into(writer, &store).unwrap();
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get_meta(source.path()).is_none());
 
-            let loaded = SourceMessageCache::load();
-            assert!(loaded.entries.is_empty());
-        }
+        restore_cache_env(prev_env);
+    }
 
-        restore_env_var("HOME", original_home);
+    #[test]
+    #[serial_test::serial]
+    fn test_get_meta_ignores_stale_shard_schema_version() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+
+        let source = write_temp_file(b"source\n");
+        let shard = shard_path(source.path()).unwrap();
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        let header = CachedShardHeader {
+            schema_version: CACHE_SCHEMA_VERSION - 1,
+            path: CachedPath::from_path(source.path()),
+            fingerprint: SourceFingerprint::from_path(source.path()).unwrap(),
+            fallback_timestamp_indices: Vec::new(),
+            codex_incremental: None,
+            message_count: 0,
+        };
+        let header_bytes = bincode::options().serialize(&header).unwrap();
+        let mut file = File::create(&shard).unwrap();
+        file.write_all(&(header_bytes.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header_bytes).unwrap();
+        file.flush().unwrap();
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get_meta(source.path()).is_none());
+
+        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -1185,10 +1355,8 @@ mod tests {
     #[serial_test::serial]
     fn test_save_if_dirty_marks_cache_clean() {
         let temp_home = TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        restore_env_var("HOME", Some(temp_home.path()));
-
-        let mut cache = SourceMessageCache::default();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let mut cache = SourceMessageCache::load();
         assert!(!cache.dirty);
 
         {
@@ -1207,15 +1375,14 @@ mod tests {
             assert!(!cache.dirty);
         }
 
-        restore_env_var("HOME", original_home);
+        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_save_if_dirty_merges_concurrent_writers() {
+    fn test_save_if_dirty_preserves_disjoint_concurrent_shards() {
         let temp_home = TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        restore_env_var("HOME", Some(temp_home.path()));
+        let prev_env = sandbox_cache_env(temp_home.path());
 
         {
             let file_one = write_temp_file(b"{\"id\":1}\n");
@@ -1243,11 +1410,13 @@ mod tests {
             writer_two.save_if_dirty();
 
             let loaded = SourceMessageCache::load();
-            assert!(loaded.get(file_one.path()).is_some());
-            assert!(loaded.get(file_two.path()).is_some());
+            assert!(loaded.get_meta(file_one.path()).is_some());
+            assert!(loaded.get_meta(file_two.path()).is_some());
+            assert!(shard_path(file_one.path()).unwrap().exists());
+            assert!(shard_path(file_two.path()).unwrap().exists());
         }
 
-        restore_env_var("HOME", original_home);
+        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -1261,7 +1430,7 @@ mod tests {
             let path = source_dir.path().join("session.jsonl");
             std::fs::write(&path, b"{\"id\":\"old\"}\n").unwrap();
 
-            let mut seed = SourceMessageCache::default();
+            let mut seed = SourceMessageCache::load();
             seed.insert(CachedSourceEntry::new(
                 &path,
                 SourceFingerprint::from_path(&path).unwrap(),
@@ -1316,11 +1485,11 @@ mod tests {
 
             stale_deleter.save_if_dirty();
 
-            let loaded = SourceMessageCache::load();
-            let entry = loaded
-                .get(&path)
+            let mut loaded = SourceMessageCache::load();
+            let messages = loaded
+                .take_messages(&path)
                 .expect("recreated source cache entry should survive stale delete");
-            assert_eq!(entry.messages[0].session_id.as_ref(), "fresh-session");
+            assert_eq!(messages[0].session_id.as_ref(), "fresh-session");
         }
 
         restore_cache_env(prev_env);
@@ -1328,7 +1497,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn load_falls_back_to_legacy_dirs_cache_path() {
+    fn load_deletes_legacy_dirs_monolithic_cache_path() {
         let temp_home = TempDir::new().unwrap();
         let temp_xdg_cache = TempDir::new().unwrap();
         let original_home = std::env::var_os("HOME");
@@ -1341,28 +1510,14 @@ mod tests {
         restore_env_var("XDG_CONFIG_HOME", Some(temp_home.path().join(".config")));
         restore_env_var("TOKSCALE_CONFIG_DIR", None::<&str>);
 
-        let source = write_temp_file(b"legacy-dirs\n");
-        let entry = CachedSourceEntry::new(
-            source.path(),
-            SourceFingerprint::from_path(source.path()).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            None,
-        );
-
         let legacy_path = crate::paths::legacy_dirs_cache_dir()
             .unwrap()
             .join(CACHE_FILENAME);
         ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
-        let store = CachedSourceStore {
-            schema_version: CACHE_SCHEMA_VERSION,
-            entries: vec![entry],
-        };
-        let writer = BufWriter::new(File::create(&legacy_path).unwrap());
-        bincode::options().serialize_into(writer, &store).unwrap();
+        std::fs::write(&legacy_path, b"legacy-monolith").unwrap();
 
-        let loaded = SourceMessageCache::load();
-        assert!(loaded.get(source.path()).is_some());
+        let _loaded = SourceMessageCache::load();
+        assert!(!legacy_path.exists());
 
         restore_env_var("HOME", original_home);
         restore_env_var("XDG_CACHE_HOME", original_xdg_cache);
@@ -1372,7 +1527,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn load_falls_back_to_legacy_dot_cache_path() {
+    fn load_deletes_legacy_dot_cache_monolithic_cache_path() {
         let temp_home = TempDir::new().unwrap();
         let original_home = std::env::var_os("HOME");
         let original_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
@@ -1384,28 +1539,14 @@ mod tests {
         restore_env_var("XDG_CONFIG_HOME", Some(temp_home.path().join(".config")));
         restore_env_var("TOKSCALE_CONFIG_DIR", None::<&str>);
 
-        let source = write_temp_file(b"legacy-dot\n");
-        let entry = CachedSourceEntry::new(
-            source.path(),
-            SourceFingerprint::from_path(source.path()).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            None,
-        );
-
         let legacy_path = crate::paths::legacy_dot_cache_tokscale_dir()
             .unwrap()
             .join(CACHE_FILENAME);
         ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
-        let store = CachedSourceStore {
-            schema_version: CACHE_SCHEMA_VERSION,
-            entries: vec![entry],
-        };
-        let writer = BufWriter::new(File::create(&legacy_path).unwrap());
-        bincode::options().serialize_into(writer, &store).unwrap();
+        std::fs::write(&legacy_path, b"legacy-monolith").unwrap();
 
-        let loaded = SourceMessageCache::load();
-        assert!(loaded.get(source.path()).is_some());
+        let _loaded = SourceMessageCache::load();
+        assert!(!legacy_path.exists());
 
         restore_env_var("HOME", original_home);
         restore_env_var("XDG_CACHE_HOME", original_xdg_cache);
