@@ -1381,6 +1381,38 @@ async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> 
     )
 }
 
+async fn load_pricing_for_local_parse_with_diagnostics(
+    diagnostics: &mut pricing::PricingDiagnostics,
+) -> Option<Arc<pricing::PricingService>> {
+    if std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+    {
+        return pricing::PricingService::load_cached_any_age().map(Arc::new);
+    }
+
+    match pricing::PricingService::get_or_init_with_diagnostics(diagnostics).await {
+        Ok(pricing) => Some(pricing),
+        Err(error) => {
+            let stale = pricing::PricingService::load_cached_any_age().map(Arc::new);
+            if stale.is_some() {
+                diagnostics.push(format!(
+                    "{}: {}",
+                    pricing::DIAGNOSTIC_USING_CACHED_PRICING,
+                    error
+                ));
+            } else {
+                diagnostics.push(format!(
+                    "{}: {}",
+                    pricing::DIAGNOSTIC_PRICING_UNAVAILABLE,
+                    error
+                ));
+            }
+            stale
+        }
+    }
+}
+
 fn resolve_local_parse_request(
     options: &LocalParseOptions,
 ) -> Result<(String, Vec<String>), String> {
@@ -1517,6 +1549,25 @@ pub fn load_usage_data_with_pricing(
         pricing,
     })?;
     Ok(views.tui_usage.expect("tui view requested"))
+}
+
+#[derive(Debug)]
+pub struct UsageDataWithDiagnostics {
+    pub data: usage_views::UsageData,
+    pub pricing_diagnostics: pricing::PricingDiagnostics,
+}
+
+pub async fn load_usage_data_with_diagnostics(
+    options: LocalParseOptions,
+    group_by: GroupBy,
+) -> Result<UsageDataWithDiagnostics, String> {
+    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
+    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
+    let data = load_usage_data_with_pricing(options, group_by, pricing.as_deref())?;
+    Ok(UsageDataWithDiagnostics {
+        data,
+        pricing_diagnostics,
+    })
 }
 
 pub async fn load_usage_data(

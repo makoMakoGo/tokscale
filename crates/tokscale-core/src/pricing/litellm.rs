@@ -1,4 +1,4 @@
-use super::cache;
+use super::{cache, emit_diagnostic, PricingDiagnosticSink, PricingDiagnostics};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -38,6 +38,20 @@ pub fn load_cached_any_age() -> Option<PricingDataset> {
 }
 
 pub async fn fetch() -> Result<PricingDataset, reqwest::Error> {
+    let mut diagnostics = None;
+    fetch_with_sink(&mut diagnostics).await
+}
+
+pub(crate) async fn fetch_with_diagnostics(
+    diagnostics: &mut PricingDiagnostics,
+) -> Result<PricingDataset, reqwest::Error> {
+    let mut diagnostics = Some(diagnostics);
+    fetch_with_sink(&mut diagnostics).await
+}
+
+async fn fetch_with_sink(
+    diagnostics: &mut PricingDiagnosticSink<'_>,
+) -> Result<PricingDataset, reqwest::Error> {
     if let Some(cached) = load_cached() {
         return Ok(cached);
     }
@@ -55,11 +69,14 @@ pub async fn fetch() -> Result<PricingDataset, reqwest::Error> {
                 let status = response.status();
 
                 if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    eprintln!(
-                        "[tokscale] LiteLLM HTTP {} (attempt {}/{})",
-                        status,
-                        attempt + 1,
-                        MAX_RETRIES
+                    emit_diagnostic(
+                        diagnostics,
+                        format!(
+                            "[tokscale] LiteLLM HTTP {} (attempt {}/{})",
+                            status,
+                            attempt + 1,
+                            MAX_RETRIES
+                        ),
                     );
                     let _ = response.bytes().await;
                     if attempt < MAX_RETRIES - 1 {
@@ -72,33 +89,42 @@ pub async fn fetch() -> Result<PricingDataset, reqwest::Error> {
                 }
 
                 if !status.is_success() {
-                    eprintln!("[tokscale] LiteLLM HTTP {}", status);
+                    emit_diagnostic(diagnostics, format!("[tokscale] LiteLLM HTTP {status}"));
                     return Err(response.error_for_status().unwrap_err());
                 }
 
                 match response.json::<PricingDataset>().await {
                     Ok(data) => {
                         if let Err(e) = cache::save_cache(CACHE_FILENAME, &data) {
-                            eprintln!(
-                                "[tokscale] Warning: Failed to cache LiteLLM pricing at {}: {}",
-                                cache::get_cache_path(CACHE_FILENAME).display(),
-                                e
+                            emit_diagnostic(
+                                diagnostics,
+                                format!(
+                                    "[tokscale] Warning: Failed to cache LiteLLM pricing at {}: {}",
+                                    cache::get_cache_path(CACHE_FILENAME).display(),
+                                    e
+                                ),
                             );
                         }
                         return Ok(data);
                     }
                     Err(e) => {
-                        eprintln!("[tokscale] LiteLLM JSON parse failed: {}", e);
+                        emit_diagnostic(
+                            diagnostics,
+                            format!("[tokscale] LiteLLM JSON parse failed: {e}"),
+                        );
                         return Err(e);
                     }
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "[tokscale] LiteLLM network error (attempt {}/{}): {}",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    e
+                emit_diagnostic(
+                    diagnostics,
+                    format!(
+                        "[tokscale] LiteLLM network error (attempt {}/{}): {}",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        e
+                    ),
                 );
                 last_error = Some(e);
                 if attempt < MAX_RETRIES - 1 {

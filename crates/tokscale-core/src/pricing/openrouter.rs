@@ -1,5 +1,5 @@
-use super::cache;
 use super::litellm::ModelPricing;
+use super::{cache, emit_diagnostic, PricingDiagnosticSink, PricingDiagnostics};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -186,6 +186,20 @@ fn select_models_for_author_pricing(model_ids: Vec<String>) -> Vec<(String, &'st
 
 /// Fetch all models and get author pricing for each
 pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
+    let mut diagnostics = None;
+    fetch_all_models_with_sink(&mut diagnostics).await
+}
+
+pub(crate) async fn fetch_all_models_with_diagnostics(
+    diagnostics: &mut PricingDiagnostics,
+) -> HashMap<String, ModelPricing> {
+    let mut diagnostics = Some(diagnostics);
+    fetch_all_models_with_sink(&mut diagnostics).await
+}
+
+async fn fetch_all_models_with_sink(
+    diagnostics: &mut PricingDiagnosticSink<'_>,
+) -> HashMap<String, ModelPricing> {
     if let Some(cached) = load_cached() {
         return cached;
     }
@@ -235,14 +249,20 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
             }
 
             if !status.is_success() {
-                eprintln!("[tokscale] OpenRouter models API returned {}", status);
+                emit_diagnostic(
+                    diagnostics,
+                    format!("[tokscale] OpenRouter models API returned {status}"),
+                );
                 break 'retry Vec::new();
             }
 
             let data: ModelsListResponse = match response.json().await {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("[tokscale] OpenRouter models JSON parse failed: {}", e);
+                    emit_diagnostic(
+                        diagnostics,
+                        format!("[tokscale] OpenRouter models JSON parse failed: {e}"),
+                    );
                     break 'retry Vec::new();
                 }
             };
@@ -251,9 +271,12 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
         }
 
         if let Some(err) = &last_error {
-            eprintln!(
-                "[tokscale] OpenRouter fetch failed after {} retries: {}",
-                MAX_RETRIES, err
+            emit_diagnostic(
+                diagnostics,
+                format!(
+                    "[tokscale] OpenRouter fetch failed after {} retries: {}",
+                    MAX_RETRIES, err
+                ),
             );
         }
         Vec::new()
@@ -296,17 +319,26 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
                 result.insert(model_id, pricing);
             }
             Ok(Ok((_model_id, None))) => {}
-            Ok(Err(err)) => eprintln!("[tokscale] OpenRouter author pricing skipped: {err}"),
-            Err(err) => eprintln!("[tokscale] OpenRouter author pricing task failed: {err}"),
+            Ok(Err(err)) => emit_diagnostic(
+                diagnostics,
+                format!("[tokscale] OpenRouter author pricing skipped: {err}"),
+            ),
+            Err(err) => emit_diagnostic(
+                diagnostics,
+                format!("[tokscale] OpenRouter author pricing task failed: {err}"),
+            ),
         }
     }
 
     if !result.is_empty() {
         if let Err(e) = cache::save_cache(CACHE_FILENAME, &result) {
-            eprintln!(
-                "[tokscale] Warning: Failed to cache OpenRouter pricing at {}: {}",
-                cache::get_cache_path(CACHE_FILENAME).display(),
-                e
+            emit_diagnostic(
+                diagnostics,
+                format!(
+                    "[tokscale] Warning: Failed to cache OpenRouter pricing at {}: {}",
+                    cache::get_cache_path(CACHE_FILENAME).display(),
+                    e
+                ),
             );
         }
     }
@@ -316,6 +348,12 @@ pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
 
 pub async fn fetch_all_mapped() -> HashMap<String, ModelPricing> {
     fetch_all_models().await
+}
+
+pub(crate) async fn fetch_all_mapped_with_diagnostics(
+    diagnostics: &mut PricingDiagnostics,
+) -> HashMap<String, ModelPricing> {
+    fetch_all_models_with_diagnostics(diagnostics).await
 }
 
 #[cfg(test)]

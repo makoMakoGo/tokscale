@@ -1,5 +1,5 @@
-use super::cache;
 use super::litellm::ModelPricing;
+use super::{cache, emit_diagnostic, PricingDiagnosticSink, PricingDiagnostics};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -45,10 +45,22 @@ pub(crate) fn parse_dataset(content: &str) -> Result<PricingDataset, serde_json:
 }
 
 pub async fn fetch() -> Result<PricingDataset, reqwest::Error> {
-    fetch_inner(MODELS_DEV_URL, true).await
+    let mut diagnostics = None;
+    fetch_inner(MODELS_DEV_URL, true, &mut diagnostics).await
 }
 
-async fn fetch_inner(url: &str, use_cache: bool) -> Result<PricingDataset, reqwest::Error> {
+pub(crate) async fn fetch_with_diagnostics(
+    diagnostics: &mut PricingDiagnostics,
+) -> Result<PricingDataset, reqwest::Error> {
+    let mut diagnostics = Some(diagnostics);
+    fetch_inner(MODELS_DEV_URL, true, &mut diagnostics).await
+}
+
+async fn fetch_inner(
+    url: &str,
+    use_cache: bool,
+    diagnostics: &mut PricingDiagnosticSink<'_>,
+) -> Result<PricingDataset, reqwest::Error> {
     if use_cache {
         if let Some(cached) = load_cached() {
             return Ok(cached);
@@ -68,11 +80,14 @@ async fn fetch_inner(url: &str, use_cache: bool) -> Result<PricingDataset, reqwe
                 let status = response.status();
 
                 if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    eprintln!(
-                        "[tokscale] models.dev HTTP {} (attempt {}/{})",
-                        status,
-                        attempt + 1,
-                        MAX_RETRIES
+                    emit_diagnostic(
+                        diagnostics,
+                        format!(
+                            "[tokscale] models.dev HTTP {} (attempt {}/{})",
+                            status,
+                            attempt + 1,
+                            MAX_RETRIES
+                        ),
                     );
                     if attempt == MAX_RETRIES - 1 {
                         return Err(response.error_for_status().unwrap_err());
@@ -86,7 +101,7 @@ async fn fetch_inner(url: &str, use_cache: bool) -> Result<PricingDataset, reqwe
                 }
 
                 if !status.is_success() {
-                    eprintln!("[tokscale] models.dev HTTP {}", status);
+                    emit_diagnostic(diagnostics, format!("[tokscale] models.dev HTTP {status}"));
                     return Err(response.error_for_status().unwrap_err());
                 }
 
@@ -94,26 +109,35 @@ async fn fetch_inner(url: &str, use_cache: bool) -> Result<PricingDataset, reqwe
                 match parse_dataset(&content) {
                     Ok(data) => {
                         if let Err(e) = cache::save_cache(CACHE_FILENAME, &data) {
-                            eprintln!(
-                                "[tokscale] Warning: Failed to cache models.dev pricing at {}: {}",
-                                cache::get_cache_path(CACHE_FILENAME).display(),
-                                e
+                            emit_diagnostic(
+                                diagnostics,
+                                format!(
+                                    "[tokscale] Warning: Failed to cache models.dev pricing at {}: {}",
+                                    cache::get_cache_path(CACHE_FILENAME).display(),
+                                    e
+                                ),
                             );
                         }
                         return Ok(data);
                     }
                     Err(e) => {
-                        eprintln!("[tokscale] models.dev JSON parse failed: {}", e);
+                        emit_diagnostic(
+                            diagnostics,
+                            format!("[tokscale] models.dev JSON parse failed: {e}"),
+                        );
                         return Ok(HashMap::new());
                     }
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "[tokscale] models.dev network error (attempt {}/{}): {}",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    e
+                emit_diagnostic(
+                    diagnostics,
+                    format!(
+                        "[tokscale] models.dev network error (attempt {}/{}): {}",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        e
+                    ),
                 );
                 last_error = Some(e);
                 if attempt < MAX_RETRIES - 1 {
@@ -199,9 +223,27 @@ mod tests {
     #[tokio::test]
     async fn fetch_returns_error_after_retryable_http_statuses() {
         let url = retryable_status_server("HTTP/1.1 503 Service Unavailable");
+        let mut diagnostics = None;
 
-        let result = fetch_inner(&url, false).await;
+        let result = fetch_inner(&url, false, &mut diagnostics).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_with_diagnostics_collects_retryable_http_statuses() {
+        let url = retryable_status_server("HTTP/1.1 503 Service Unavailable");
+        let mut diagnostics = Vec::new();
+        let mut sink = Some(&mut diagnostics);
+
+        let result = fetch_inner(&url, false, &mut sink).await;
+
+        assert!(result.is_err());
+        assert!(
+            diagnostics
+                .iter()
+                .any(|line| line.contains("models.dev HTTP 503")),
+            "diagnostics missing retryable status: {diagnostics:?}"
+        );
     }
 }
