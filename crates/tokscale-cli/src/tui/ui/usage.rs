@@ -157,13 +157,13 @@ pub(crate) fn build_usage_lines(app: &App, outputs: &[UsageOutput]) -> Vec<Line<
 }
 
 fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
-    let lines = build_usage_lines(app, &app.subscription_usage);
+    let mut lines = build_usage_lines(app, &app.subscription_usage);
     let total_lines = lines.len();
     let visible_height = area.height as usize;
     app.set_usage_text_viewport(visible_height, total_lines);
 
-    let range = app.usage_text_visible_range(total_lines);
-    let paragraph = Paragraph::new(lines[range].to_vec());
+    let range = app.usage_text_visible_range();
+    let paragraph = Paragraph::new(lines.drain(range).collect::<Vec<_>>());
     frame.render_widget(paragraph, area);
 
     if total_lines > visible_height {

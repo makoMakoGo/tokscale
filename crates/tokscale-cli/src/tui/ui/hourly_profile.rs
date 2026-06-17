@@ -29,13 +29,14 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let lines = build_hourly_profile_lines(app, inner.width);
+    let mut lines = build_hourly_profile_lines(app, inner.width);
     let total_lines = lines.len();
     let visible_height = inner.height as usize;
     app.set_hourly_profile_text_viewport(visible_height, total_lines);
 
-    let range = app.hourly_profile_text_visible_range(total_lines);
-    let paragraph = Paragraph::new(lines[range].to_vec()).alignment(Alignment::Left);
+    let range = app.hourly_profile_text_visible_range();
+    let paragraph =
+        Paragraph::new(lines.drain(range).collect::<Vec<_>>()).alignment(Alignment::Left);
     frame.render_widget(paragraph, inner);
 
     if total_lines > visible_height {

@@ -926,8 +926,9 @@ impl App {
         self.usage_viewport.set_visible(visible, total_lines);
     }
 
-    pub(crate) fn usage_text_visible_range(&self, total_lines: usize) -> std::ops::Range<usize> {
-        self.usage_viewport.visible_range(total_lines)
+    pub(crate) fn usage_text_visible_range(&self) -> std::ops::Range<usize> {
+        self.usage_viewport
+            .visible_range(self.usage_text_total_lines)
     }
 
     pub(crate) fn set_hourly_profile_text_viewport(&mut self, visible: usize, total_lines: usize) {
@@ -936,11 +937,9 @@ impl App {
             .set_visible(visible, total_lines);
     }
 
-    pub(crate) fn hourly_profile_text_visible_range(
-        &self,
-        total_lines: usize,
-    ) -> std::ops::Range<usize> {
-        self.hourly_profile_viewport.visible_range(total_lines)
+    pub(crate) fn hourly_profile_text_visible_range(&self) -> std::ops::Range<usize> {
+        self.hourly_profile_viewport
+            .visible_range(self.hourly_profile_text_total_lines)
     }
 
     fn active_text_viewport_mut(&mut self) -> Option<&mut TextViewport> {
