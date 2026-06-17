@@ -1071,69 +1071,86 @@ pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
         + tokens.reasoning.max(0)
 }
 
-pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
-    let start = Instant::now();
-
+fn resolve_report_request(options: &ReportOptions) -> Result<(String, Vec<String>), String> {
     let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
+    let clients = options.clients.clone().unwrap_or_else(|| {
         ClientId::ALL
             .iter()
             .map(|c| c.as_str().to_string())
             .collect()
     });
+    Ok((home_dir, clients))
+}
 
-    let pricing = load_pricing_for_local_parse().await;
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by: options.group_by.clone(),
-            date_range: crate::aggregate::DateRange::from_options(&options),
-            views: crate::aggregate::ViewSet::MODEL,
-        });
+struct ResolvedAggregationRequest<'a> {
+    home_dir: &'a str,
+    clients: &'a [String],
+    group_by: GroupBy,
+    date_range: DateRange,
+    use_env_roots: bool,
+    scanner_settings: &'a scanner::ScannerSettings,
+    views: ViewSet,
+    pricing: Option<&'a pricing::PricingService>,
+}
+
+fn load_aggregated_views_resolved(
+    request: ResolvedAggregationRequest<'_>,
+) -> Result<AggregatedViews, String> {
+    let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
+        group_by: request.group_by,
+        date_range: request.date_range,
+        views: request.views,
+    });
     stream_local_sources_into_engine(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
+        request.home_dir,
+        request.clients,
+        request.pricing,
+        request.use_env_roots,
+        request.scanner_settings,
         &mut engine,
     )?;
-    let mut report = engine.finish().model_report.expect("model view requested");
+    Ok(engine.finish())
+}
+
+/// Build any requested union of aggregation views with one adapter fold.
+///
+/// This is the canonical local-report aggregation path for callers that need
+/// multiple views in one process. It intentionally does not reuse a mutable
+/// `SourceMessageCache` across independent runs; cache message bodies remain
+/// consumptive within each fold.
+#[doc(hidden)]
+pub fn load_aggregated_views_with_pricing(
+    options: &ReportOptions,
+    views: ViewSet,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<AggregatedViews, String> {
+    let (home_dir, clients) = resolve_report_request(options)?;
+    load_aggregated_views_resolved(ResolvedAggregationRequest {
+        home_dir: &home_dir,
+        clients: &clients,
+        group_by: options.group_by.clone(),
+        date_range: DateRange::from_options(options),
+        use_env_roots: options.use_env_roots,
+        scanner_settings: &options.scanner_settings,
+        views,
+        pricing,
+    })
+}
+
+pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
+    let start = Instant::now();
+    let pricing = load_pricing_for_local_parse().await;
+    let views = load_aggregated_views_with_pricing(&options, ViewSet::MODEL, pricing.as_deref())?;
+    let mut report = views.model_report.expect("model view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
 }
 
 pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
     let start = Instant::now();
-
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect()
-    });
-
     let pricing = load_pricing_for_local_parse().await;
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by: options.group_by.clone(),
-            date_range: crate::aggregate::DateRange::from_options(&options),
-            views: crate::aggregate::ViewSet::MONTHLY,
-        });
-    stream_local_sources_into_engine(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-        &mut engine,
-    )?;
-    let mut report = engine
-        .finish()
-        .monthly_report
-        .expect("monthly view requested");
+    let views = load_aggregated_views_with_pricing(&options, ViewSet::MONTHLY, pricing.as_deref())?;
+    let mut report = views.monthly_report.expect("monthly view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
 }
@@ -1144,35 +1161,9 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
 /// Falls back to date + "00:00" when timestamp is zero or missing.
 pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, String> {
     let start = Instant::now();
-
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect()
-    });
-
     let pricing = load_pricing_for_local_parse().await;
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by: options.group_by.clone(),
-            date_range: crate::aggregate::DateRange::from_options(&options),
-            views: crate::aggregate::ViewSet::HOURLY,
-        });
-    stream_local_sources_into_engine(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-        &mut engine,
-    )?;
-    let mut report = engine
-        .finish()
-        .hourly_report
-        .expect("hourly view requested");
+    let views = load_aggregated_views_with_pricing(&options, ViewSet::HOURLY, pricing.as_deref())?;
+    let mut report = views.hourly_report.expect("hourly view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
 }
@@ -1182,31 +1173,12 @@ async fn generate_graph_with_loaded_pricing(
     pricing: Option<&pricing::PricingService>,
 ) -> Result<GraphResult, String> {
     let start = Instant::now();
-
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect()
-    });
-
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by: options.group_by.clone(),
-            date_range: crate::aggregate::DateRange::from_options(&options),
-            views: crate::aggregate::ViewSet::GRAPH | crate::aggregate::ViewSet::TIME_METRICS,
-        });
-    stream_local_sources_into_engine(
-        &home_dir,
-        &clients,
+    let views = load_aggregated_views_with_pricing(
+        &options,
+        ViewSet::GRAPH | ViewSet::TIME_METRICS,
         pricing,
-        options.use_env_roots,
-        &options.scanner_settings,
-        &mut engine,
     )?;
-    let mut result = engine.finish().graph.expect("graph view requested");
+    let mut result = views.graph.expect("graph view requested");
     result.meta.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(result)
 }
@@ -1219,34 +1191,8 @@ pub struct TimeMetricsReport {
 
 pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetricsReport, String> {
     let start = Instant::now();
-
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect()
-    });
-
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by: options.group_by.clone(),
-            date_range: crate::aggregate::DateRange::from_options(&options),
-            views: crate::aggregate::ViewSet::TIME_METRICS,
-        });
-    stream_local_sources_into_engine(
-        &home_dir,
-        &clients,
-        None,
-        options.use_env_roots,
-        &options.scanner_settings,
-        &mut engine,
-    )?;
-    let mut report = engine
-        .finish()
-        .time_metrics
-        .expect("time-metrics view requested");
+    let views = load_aggregated_views_with_pricing(&options, ViewSet::TIME_METRICS, None)?;
+    let mut report = views.time_metrics.expect("time-metrics view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
 }
@@ -1515,25 +1461,21 @@ pub fn load_usage_data_with_pricing(
     pricing: Option<&pricing::PricingService>,
 ) -> Result<usage_views::UsageData, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by,
-            date_range: crate::aggregate::DateRange {
-                since: options.since.clone(),
-                until: options.until.clone(),
-                year: options.year.clone(),
-            },
-            views: crate::aggregate::ViewSet::TUI,
-        });
-    stream_local_sources_into_engine(
-        &home_dir,
-        &clients,
+    let views = load_aggregated_views_resolved(ResolvedAggregationRequest {
+        home_dir: &home_dir,
+        clients: &clients,
+        group_by,
+        date_range: DateRange {
+            since: options.since.clone(),
+            until: options.until.clone(),
+            year: options.year.clone(),
+        },
+        use_env_roots: options.use_env_roots,
+        scanner_settings: &options.scanner_settings,
+        views: ViewSet::TUI,
         pricing,
-        options.use_env_roots,
-        &options.scanner_settings,
-        &mut engine,
-    )?;
-    Ok(engine.finish().tui_usage.expect("tui view requested"))
+    })?;
+    Ok(views.tui_usage.expect("tui view requested"))
 }
 
 pub async fn load_usage_data(
@@ -1621,11 +1563,11 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        generate_graph_with_loaded_pricing, load_usage_data_with_pricing, message_cache,
-        normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
-        pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
-        stream_local_sources_into_engine, unified_to_parsed, AggregatedViews, AggregationConfig,
+        generate_graph_with_loaded_pricing, load_aggregated_views_with_pricing,
+        load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
+        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
+        select_local_parse_pricing, unified_to_parsed, AggregatedViews, AggregationConfig,
         ClientId, DateRange, GraphResult, GroupBy, LocalParseOptions, ReportOptions,
         TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
     };
@@ -1778,23 +1720,7 @@ mod tests {
     }
 
     fn streaming_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
-        let home_dir = options.home_dir.as_deref().unwrap();
-        let clients = options.clients.clone().unwrap();
-        let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
-            group_by: options.group_by.clone(),
-            date_range: DateRange::from_options(options),
-            views,
-        });
-        stream_local_sources_into_engine(
-            home_dir,
-            &clients,
-            None,
-            options.use_env_roots,
-            &options.scanner_settings,
-            &mut engine,
-        )
-        .unwrap();
-        engine.finish()
+        load_aggregated_views_with_pricing(options, views, None).unwrap()
     }
 
     fn vec_compat_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
@@ -1832,6 +1758,127 @@ mod tests {
     fn normalized_time_metrics_value(mut report: TimeMetricsReport) -> serde_json::Value {
         report.processing_time_ms = 0;
         json_value(&report)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_batched_model_monthly_hourly_views_match_single_view_runs() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+
+        let batched = streaming_views(
+            &options,
+            ViewSet::MODEL | ViewSet::MONTHLY | ViewSet::HOURLY,
+        );
+        let model = streaming_views(&options, ViewSet::MODEL)
+            .model_report
+            .unwrap();
+        let monthly = streaming_views(&options, ViewSet::MONTHLY)
+            .monthly_report
+            .unwrap();
+        let hourly = streaming_views(&options, ViewSet::HOURLY)
+            .hourly_report
+            .unwrap();
+
+        assert_eq!(
+            json_value(&batched.model_report.unwrap()),
+            json_value(&model)
+        );
+        assert_eq!(
+            json_value(&batched.monthly_report.unwrap()),
+            json_value(&monthly)
+        );
+        assert_eq!(
+            json_value(&batched.hourly_report.unwrap()),
+            json_value(&hourly)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_batched_graph_and_time_metrics_views_match_single_view_runs() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+
+        let batched = streaming_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
+        let graph = streaming_views(&options, ViewSet::GRAPH).graph.unwrap();
+        let time_metrics = streaming_views(&options, ViewSet::TIME_METRICS)
+            .time_metrics
+            .unwrap();
+
+        assert_eq!(
+            normalized_graph_value(batched.graph.unwrap()),
+            normalized_graph_value(graph)
+        );
+        assert_eq!(
+            normalized_time_metrics_value(batched.time_metrics.unwrap()),
+            normalized_time_metrics_value(time_metrics)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_batched_tui_and_model_views_match_individual_outputs() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let report_options =
+            streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+        let local_options = LocalParseOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        };
+
+        let batched = streaming_views(&report_options, ViewSet::TUI | ViewSet::MODEL);
+        let tui = load_usage_data_with_pricing(local_options, GroupBy::ClientModel, None).unwrap();
+        let model = streaming_views(&report_options, ViewSet::MODEL)
+            .model_report
+            .unwrap();
+
+        assert_eq!(
+            format!("{:?}", batched.tui_usage.unwrap()),
+            format!("{tui:?}")
+        );
+        assert_eq!(
+            json_value(&batched.model_report.unwrap()),
+            json_value(&model)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_batched_requested_client_filter_matches_single_view_run() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+        let options = streaming_report_options(source_home.path(), vec!["codex"]);
+
+        let batched = streaming_views(&options, ViewSet::MODEL | ViewSet::MONTHLY);
+        let model = streaming_views(&options, ViewSet::MODEL)
+            .model_report
+            .unwrap();
+        let batched_model = batched.model_report.unwrap();
+
+        assert_eq!(json_value(&batched_model), json_value(&model));
+        assert_eq!(batched_model.entries.len(), 1);
+        assert_eq!(batched_model.entries[0].client, "codex");
     }
 
     #[test]
