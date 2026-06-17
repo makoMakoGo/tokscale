@@ -15,6 +15,9 @@ use super::data::{
     build_period_usage, AgentUsage, DailySourceInfo, DailyUsage, DataLoader, HourlyUsage,
     ModelUsage, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
 };
+use super::interaction::{
+    InteractionOutcome, ListInteraction, MoveCommand, TextViewport, WrapMode,
+};
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
@@ -188,6 +191,18 @@ struct DetailRowAccumulator {
     messages: u64,
 }
 
+fn move_command_from_key(key: KeyCode) -> Option<MoveCommand> {
+    match key {
+        KeyCode::Up => Some(MoveCommand::Up),
+        KeyCode::Down => Some(MoveCommand::Down),
+        KeyCode::PageUp => Some(MoveCommand::PageUp),
+        KeyCode::PageDown => Some(MoveCommand::PageDown),
+        KeyCode::Home => Some(MoveCommand::Home),
+        KeyCode::End => Some(MoveCommand::End),
+        _ => None,
+    }
+}
+
 fn add_detail_tokens(target: &mut TokenBreakdown, source: &TokenBreakdown) {
     target.input = target.input.saturating_add(source.input);
     target.output = target.output.saturating_add(source.output);
@@ -313,6 +328,10 @@ pub struct App {
     pub scroll_offset: usize,
     pub selected_index: usize,
     pub max_visible_items: usize,
+    pub(crate) usage_viewport: TextViewport,
+    usage_text_total_lines: usize,
+    pub(crate) hourly_profile_viewport: TextViewport,
+    hourly_profile_text_total_lines: usize,
     pub selected_daily_detail_date: Option<NaiveDate>,
     daily_list_selected_index: usize,
     daily_list_scroll_offset: usize,
@@ -446,6 +465,10 @@ impl App {
             scroll_offset: 0,
             selected_index: 0,
             max_visible_items: 20,
+            usage_viewport: TextViewport::default(),
+            usage_text_total_lines: 0,
+            hourly_profile_viewport: TextViewport::default(),
+            hourly_profile_text_total_lines: 0,
             selected_daily_detail_date: None,
             daily_list_selected_index: 0,
             daily_list_scroll_offset: 0,
@@ -662,15 +685,21 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        if self.dialog_stack.is_active() {
+            self.dialog_stack.handle_key(key);
+            self.consume_dialog_reload_if_ready();
+            return false;
+        }
+
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
             return true;
         }
 
-        if self.dialog_stack.is_active() {
-            self.dialog_stack.handle_key(key.code);
-            self.consume_dialog_reload_if_ready();
-            return false;
+        if let Some(command) = move_command_from_key(key.code) {
+            if self.apply_text_viewport_move(command) {
+                return false;
+            }
         }
 
         match key.code {
@@ -866,10 +895,10 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::ScrollUp => {
+            MouseEventKind::ScrollUp if !self.scroll_active_text_viewport(MoveCommand::Up) => {
                 self.move_selection_up();
             }
-            MouseEventKind::ScrollDown => {
+            MouseEventKind::ScrollDown if !self.scroll_active_text_viewport(MoveCommand::Down) => {
                 self.move_selection_down();
             }
             _ => {}
@@ -890,6 +919,64 @@ impl App {
     pub(crate) fn set_max_visible_items(&mut self, max_visible_items: usize) {
         self.max_visible_items = max_visible_items.max(1);
         self.clamp_selection();
+    }
+
+    pub(crate) fn set_usage_text_viewport(&mut self, visible: usize, total_lines: usize) {
+        self.usage_text_total_lines = total_lines;
+        self.usage_viewport.set_visible(visible, total_lines);
+    }
+
+    pub(crate) fn usage_text_visible_range(&self, total_lines: usize) -> std::ops::Range<usize> {
+        self.usage_viewport.visible_range(total_lines)
+    }
+
+    pub(crate) fn set_hourly_profile_text_viewport(&mut self, visible: usize, total_lines: usize) {
+        self.hourly_profile_text_total_lines = total_lines;
+        self.hourly_profile_viewport
+            .set_visible(visible, total_lines);
+    }
+
+    pub(crate) fn hourly_profile_text_visible_range(
+        &self,
+        total_lines: usize,
+    ) -> std::ops::Range<usize> {
+        self.hourly_profile_viewport.visible_range(total_lines)
+    }
+
+    fn active_text_viewport_mut(&mut self) -> Option<&mut TextViewport> {
+        match self.current_tab {
+            Tab::Usage => Some(&mut self.usage_viewport),
+            Tab::Hourly if self.hourly_view_mode == HourlyViewMode::Profile => {
+                Some(&mut self.hourly_profile_viewport)
+            }
+            _ => None,
+        }
+    }
+
+    fn current_text_total_lines(&self) -> Option<usize> {
+        match self.current_tab {
+            Tab::Usage => Some(self.usage_text_total_lines),
+            Tab::Hourly if self.hourly_view_mode == HourlyViewMode::Profile => {
+                Some(self.hourly_profile_text_total_lines)
+            }
+            _ => None,
+        }
+    }
+
+    fn apply_text_viewport_move(&mut self, command: MoveCommand) -> bool {
+        let Some(total_lines) = self.current_text_total_lines() else {
+            return false;
+        };
+        let Some(viewport) = self.active_text_viewport_mut() else {
+            return false;
+        };
+
+        let _ = viewport.apply_move(command, total_lines);
+        true
+    }
+
+    fn scroll_active_text_viewport(&mut self, command: MoveCommand) -> bool {
+        self.apply_text_viewport_move(command)
     }
 
     /// Clamp selection and scroll offset to valid bounds after data/resize changes.
@@ -921,6 +1008,8 @@ impl App {
     fn reset_selection(&mut self) {
         self.scroll_offset = 0;
         self.selected_index = 0;
+        self.usage_viewport.scroll = 0;
+        self.hourly_profile_viewport.scroll = 0;
         self.selected_daily_detail_date = None;
         self.daily_list_selected_index = 0;
         self.daily_list_scroll_offset = 0;
@@ -1093,110 +1182,47 @@ impl App {
     }
 
     fn move_selection_up(&mut self) {
-        if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
-            let len = self.get_current_list_len();
-            if len == 0 {
-                return;
-            }
-
-            if self.selected_index > 0 {
-                self.selected_index -= 1;
-                if self.selected_index < self.scroll_offset {
-                    self.scroll_offset = self.selected_index;
-                }
-            }
-            return;
-        }
-
-        let len = self.get_current_list_len();
-        if len == 0 {
-            return;
-        }
-        if self.selected_index == 0 {
-            self.selected_index = len - 1;
-            self.scroll_offset = len.saturating_sub(self.max_visible_items);
-        } else {
-            self.selected_index -= 1;
-            if self.selected_index < self.scroll_offset {
-                self.scroll_offset = self.selected_index;
-            }
-        }
+        self.apply_list_move(MoveCommand::Up);
     }
 
     fn move_selection_down(&mut self) {
-        if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
-            let len = self.get_current_list_len();
-            if len == 0 {
-                return;
-            }
-
-            let max_index = len - 1;
-            if self.selected_index < max_index {
-                self.selected_index += 1;
-                if self.selected_index >= self.scroll_offset + self.max_visible_items {
-                    self.scroll_offset = self.selected_index - self.max_visible_items + 1;
-                }
-            }
-            return;
-        }
-
-        let len = self.get_current_list_len();
-        if len == 0 {
-            return;
-        }
-        let max_index = len - 1;
-        if self.selected_index >= max_index {
-            self.selected_index = 0;
-            self.scroll_offset = 0;
-        } else {
-            self.selected_index += 1;
-            if self.selected_index >= self.scroll_offset + self.max_visible_items {
-                self.scroll_offset = self.selected_index - self.max_visible_items + 1;
-            }
-        }
+        self.apply_list_move(MoveCommand::Down);
     }
 
     fn move_page_up(&mut self) {
-        let len = self.get_current_list_len();
-        if len == 0 {
-            return;
-        }
-        let jump = (self.max_visible_items / 2).max(1);
-        self.selected_index = self.selected_index.saturating_sub(jump);
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        }
+        self.apply_list_move(MoveCommand::PageUp);
     }
 
     fn move_page_down(&mut self) {
-        let len = self.get_current_list_len();
-        if len == 0 {
-            return;
-        }
-        let jump = (self.max_visible_items / 2).max(1);
-        let max_index = len - 1;
-        self.selected_index = (self.selected_index + jump).min(max_index);
-        if self.selected_index >= self.scroll_offset + self.max_visible_items {
-            self.scroll_offset = self.selected_index - self.max_visible_items + 1;
-        }
+        self.apply_list_move(MoveCommand::PageDown);
     }
 
     fn move_to_top(&mut self) {
-        let len = self.get_current_list_len();
-        if len == 0 {
-            return;
-        }
-        self.selected_index = 0;
-        self.scroll_offset = 0;
+        self.apply_list_move(MoveCommand::Home);
     }
 
     fn move_to_bottom(&mut self) {
+        self.apply_list_move(MoveCommand::End);
+    }
+
+    fn apply_list_move(&mut self, command: MoveCommand) -> InteractionOutcome {
         let len = self.get_current_list_len();
-        if len == 0 {
-            return;
-        }
-        self.selected_index = len - 1;
-        self.scroll_offset = len.saturating_sub(self.max_visible_items);
+        let wrap = if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
+            WrapMode::Clamp
+        } else {
+            WrapMode::Wrap
+        };
+
+        let mut interaction = ListInteraction {
+            selected: self.selected_index,
+            scroll: self.scroll_offset,
+            visible: self.max_visible_items,
+        };
+        let outcome = interaction.apply_move(command, len, wrap);
+        self.selected_index = interaction.selected;
+        self.scroll_offset = interaction.scroll;
+        self.max_visible_items = interaction.visible;
+        outcome
     }
 
     fn get_current_list_len(&self) -> usize {
@@ -2313,6 +2339,18 @@ mod tests {
         assert!(app.should_quit);
     }
 
+    #[test]
+    fn test_dialog_receives_ctrl_c_before_global_quit() {
+        let mut app = make_app();
+        app.open_client_picker();
+
+        let quit = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(!quit);
+        assert!(!app.should_quit);
+        assert!(*app.dialog_needs_reload.borrow());
+    }
+
     // ── handle_key_event: tab switching ─────────────────────────────
 
     #[test]
@@ -3183,6 +3221,57 @@ mod tests {
         // At bottom boundary - wraps to first item (index 0)
         app.handle_key_event(key(KeyCode::Down));
         assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn usage_tab_key_scrolls_text_viewport_without_table_selection() {
+        let mut app = make_app_with_usage();
+        app.current_tab = Tab::Usage;
+        app.selected_index = 3;
+        app.scroll_offset = 2;
+        app.set_usage_text_viewport(4, 10);
+
+        app.handle_key_event(key(KeyCode::Down));
+
+        assert_eq!(app.usage_viewport.scroll, 1);
+        assert_eq!(app.selected_index, 3);
+        assert_eq!(app.scroll_offset, 2);
+    }
+
+    #[test]
+    fn hourly_profile_key_scrolls_text_viewport_without_table_selection() {
+        let mut app = make_app();
+        app.current_tab = Tab::Hourly;
+        app.hourly_view_mode = HourlyViewMode::Profile;
+        app.selected_index = 2;
+        app.scroll_offset = 1;
+        app.set_hourly_profile_text_viewport(4, 10);
+
+        app.handle_key_event(key(KeyCode::PageDown));
+
+        assert_eq!(app.hourly_profile_viewport.scroll, 2);
+        assert_eq!(app.selected_index, 2);
+        assert_eq!(app.scroll_offset, 1);
+    }
+
+    #[test]
+    fn usage_tab_mouse_wheel_scrolls_text_viewport_without_table_selection() {
+        let mut app = make_app_with_usage();
+        app.current_tab = Tab::Usage;
+        app.selected_index = 4;
+        app.scroll_offset = 3;
+        app.set_usage_text_viewport(4, 10);
+
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.usage_viewport.scroll, 1);
+        assert_eq!(app.selected_index, 4);
+        assert_eq!(app.scroll_offset, 3);
     }
 
     // ── wrap-around navigation ──────────────────────────────────────

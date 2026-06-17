@@ -1,8 +1,9 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
-use crate::commands::usage::helpers;
+use crate::commands::usage::{helpers, UsageOutput};
 use crate::tui::app::App;
+use crate::tui::ui::widgets::viewport_scrollbar_state;
 
 const BAR_WIDTH: usize = 20;
 
@@ -18,6 +19,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     if app.subscription_usage.is_empty() {
+        app.set_usage_text_viewport(inner.height as usize, 0);
         if app.is_fetching_usage() {
             render_fetching(frame, app, inner);
         } else if app.usage_fetch_attempted {
@@ -26,9 +28,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             render_loading(frame, app, inner);
         }
     } else if app.subscription_usage.iter().all(|o| o.metrics.is_empty()) {
+        app.set_usage_text_viewport(inner.height as usize, 0);
         render_empty(frame, app, inner);
     } else {
-        render_loaded(frame, app, inner, &app.subscription_usage);
+        render_loaded(frame, app, inner);
     }
 }
 
@@ -86,12 +89,7 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, center);
 }
 
-fn render_loaded(
-    frame: &mut Frame,
-    app: &App,
-    area: Rect,
-    outputs: &[crate::commands::usage::UsageOutput],
-) {
+pub(crate) fn build_usage_lines(app: &App, outputs: &[UsageOutput]) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
     for (i, output) in outputs.iter().enumerate() {
@@ -155,6 +153,34 @@ fn render_loaded(
         }
     }
 
-    let paragraph = Paragraph::new(lines);
+    lines
+}
+
+fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lines = build_usage_lines(app, &app.subscription_usage);
+    let total_lines = lines.len();
+    let visible_height = area.height as usize;
+    app.set_usage_text_viewport(visible_height, total_lines);
+
+    let range = app.usage_text_visible_range(total_lines);
+    let paragraph = Paragraph::new(lines[range].to_vec());
     frame.render_widget(paragraph, area);
+
+    if total_lines > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+
+        let mut scrollbar_state =
+            viewport_scrollbar_state(total_lines, app.usage_viewport.scroll, visible_height);
+
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                horizontal: 0,
+                vertical: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
 }

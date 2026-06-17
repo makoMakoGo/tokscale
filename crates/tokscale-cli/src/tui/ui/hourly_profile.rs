@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
-use super::widgets::{format_cost, format_tokens};
+use super::widgets::{format_cost, format_tokens, viewport_scrollbar_state};
 use crate::tui::app::App;
 use crate::tui::data::{aggregate_by_period, aggregate_by_weekday, find_peak_hour};
 
@@ -21,6 +21,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     if app.data.hourly.is_empty() {
+        app.set_hourly_profile_text_viewport(inner.height as usize, 0);
         let empty_msg = Paragraph::new("No hourly usage data found. Press 'r' to refresh.")
             .style(Style::default().fg(app.theme.muted))
             .alignment(Alignment::Center);
@@ -28,6 +29,38 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let lines = build_hourly_profile_lines(app, inner.width);
+    let total_lines = lines.len();
+    let visible_height = inner.height as usize;
+    app.set_hourly_profile_text_viewport(visible_height, total_lines);
+
+    let range = app.hourly_profile_text_visible_range(total_lines);
+    let paragraph = Paragraph::new(lines[range].to_vec()).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner);
+
+    if total_lines > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+
+        let mut scrollbar_state = viewport_scrollbar_state(
+            total_lines,
+            app.hourly_profile_viewport.scroll,
+            visible_height,
+        );
+
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                horizontal: 0,
+                vertical: 1,
+            }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line<'static>> {
     let hourly = &app.data.hourly;
     let total_tokens = app.data.total_tokens;
     let total_cost = app.data.total_cost;
@@ -37,9 +70,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // Weekday line: day name (10) + spaces (3) + percentage (8) = 21 chars overhead
     // Use period overhead since it's larger, then subtract a margin for safety
     let overhead = 36; // 34 + small margin
-    let bar_width = (inner.width as usize)
-        .saturating_sub(overhead)
-        .clamp(20, 80);
+    let bar_width = (area_width as usize).saturating_sub(overhead).clamp(20, 80);
 
     // Get date range
     let min_date = hourly.iter().map(|h| h.datetime.date()).min();
@@ -67,7 +98,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(&date_range, Style::default().fg(app.theme.muted)),
+        Span::styled(date_range, Style::default().fg(app.theme.muted)),
     ]));
     lines.push(Line::from(""));
 
@@ -237,6 +268,5 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         ),
     ]));
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
-    frame.render_widget(paragraph, inner);
+    lines
 }
