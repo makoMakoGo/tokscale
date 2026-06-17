@@ -1630,10 +1630,30 @@ mod tests {
         TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::ffi::OsString;
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::sync::Arc;
+
+    struct HomeEnvGuard(Option<OsString>);
+
+    impl HomeEnvGuard {
+        fn set(home: &Path) -> Self {
+            let original_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", home);
+            Self(original_home)
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 
     fn make_workspace_message(
         client: &str,
@@ -1819,8 +1839,7 @@ mod tests {
     fn test_streaming_model_monthly_hourly_reports_match_vec_compat() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", cache_home.path());
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
 
         write_streaming_fold_fixture(source_home.path());
         let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
@@ -1846,11 +1865,6 @@ mod tests {
             json_value(&streaming.hourly_report.unwrap()),
             json_value(&compat.hourly_report.unwrap())
         );
-
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
@@ -1858,8 +1872,7 @@ mod tests {
     fn test_streaming_graph_and_time_metrics_match_vec_compat() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", cache_home.path());
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
 
         write_streaming_fold_fixture(source_home.path());
         let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
@@ -1875,11 +1888,6 @@ mod tests {
             normalized_time_metrics_value(streaming.time_metrics.unwrap()),
             normalized_time_metrics_value(compat.time_metrics.unwrap())
         );
-
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
@@ -1887,8 +1895,7 @@ mod tests {
     fn test_streaming_tui_usage_matches_vec_compat() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", cache_home.path());
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
 
         write_streaming_fold_fixture(source_home.path());
         let options = LocalParseOptions {
@@ -1909,11 +1916,52 @@ mod tests {
             .unwrap();
 
         assert_eq!(format!("{streaming:?}"), format!("{compat:?}"));
+    }
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_tui_usage_applies_date_range() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+        write_streaming_fold_fixture(source_home.path());
+
+        let included = load_usage_data_with_pricing(
+            LocalParseOptions {
+                home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+                use_env_roots: false,
+                clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
+                since: Some("2024-12-01".to_string()),
+                until: Some("2024-12-01".to_string()),
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            },
+            GroupBy::ClientModel,
+            None,
+        )
+        .unwrap();
+        let excluded = load_usage_data_with_pricing(
+            LocalParseOptions {
+                home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+                use_env_roots: false,
+                clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
+                since: Some("2024-12-02".to_string()),
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            },
+            GroupBy::ClientModel,
+            None,
+        )
+        .unwrap();
+
+        assert!(included.total_tokens > 0);
+        assert!(!included.models.is_empty());
+        assert_eq!(excluded.total_tokens, 0);
+        assert!(excluded.models.is_empty());
+        assert!(excluded.daily.is_empty());
+        assert!(excluded.hourly.is_empty());
     }
 
     #[test]
@@ -1921,8 +1969,7 @@ mod tests {
     fn test_streaming_requested_client_filter_matches_vec_compat() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", cache_home.path());
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
 
         write_streaming_fold_fixture(source_home.path());
         let options = streaming_report_options(source_home.path(), vec!["codex"]);
@@ -1937,11 +1984,6 @@ mod tests {
         );
         assert_eq!(streaming_report.entries.len(), 1);
         assert_eq!(streaming_report.entries[0].client, "codex");
-
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
@@ -1949,8 +1991,7 @@ mod tests {
     fn test_streaming_warm_cache_matches_cold_streaming_report() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", cache_home.path());
+        let _home_guard = HomeEnvGuard::set(cache_home.path());
 
         write_streaming_fold_fixture(source_home.path());
         let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
@@ -1963,11 +2004,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(json_value(&cold), json_value(&warm));
-
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[allow(clippy::too_many_arguments)]

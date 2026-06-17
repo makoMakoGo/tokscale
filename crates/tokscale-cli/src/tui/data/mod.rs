@@ -120,11 +120,10 @@ impl DataLoader {
             })
         } else {
             Runtime::new()?.block_on(load_usage_data(opts, group_by.clone()))
-        }
-        .map_err(anyhow::Error::msg)?;
+        };
 
         trim_allocator();
-        Ok(usage_data)
+        usage_data.map_err(anyhow::Error::msg)
     }
 
     /// Digest of the sources `load` would scan, used by the auto-refresh
