@@ -261,7 +261,7 @@ impl DialogContent for ClientPickerDialog {
         frame.render_widget(List::new(items), list_area);
 
         let hint_text = self.last_error.unwrap_or(
-            "↑↓ navigate • Enter toggle • type filter • Ctrl+hotkey toggle • Backspace edit • Esc close",
+            "↑↓ navigate • Enter toggle • type filter • Alt+hotkey toggle • Backspace edit • Esc close",
         );
         let hint_style = if self.last_error.is_some() {
             Style::default().fg(Color::Yellow)
@@ -293,7 +293,7 @@ impl DialogContent for ClientPickerDialog {
                 DialogResult::Handled
             }
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if key.modifiers.contains(KeyModifiers::ALT) {
                     if let Some(client_id) = client_ui::from_hotkey(c) {
                         self.toggle(client_id).into()
                     } else {
@@ -351,8 +351,8 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn ctrl_key(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    fn alt_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
     }
 
     fn click(column: u16, row: u16) -> MouseEvent {
@@ -390,11 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn source_picker_ctrl_hotkey_toggles() {
+    fn source_picker_alt_hotkey_toggles() {
         let (client, key_char) = first_hotkey_client();
         let mut dialog = make_dialog();
 
-        let result = dialog.handle_key(ctrl_key(key_char));
+        let result = dialog.handle_key(alt_key(key_char));
 
         assert!(matches!(result, DialogResult::NeedsReload));
         assert!(!dialog.enabled.borrow().contains(&client));

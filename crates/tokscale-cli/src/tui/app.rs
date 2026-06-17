@@ -685,15 +685,15 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
+            return true;
+        }
+
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_key(key);
             self.consume_dialog_reload_if_ready();
             return false;
-        }
-
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
-            return true;
         }
 
         if let Some(command) = move_command_from_key(key.code) {
@@ -2340,15 +2340,15 @@ mod tests {
     }
 
     #[test]
-    fn test_dialog_receives_ctrl_c_before_global_quit() {
+    fn test_dialog_ctrl_c_still_global_quit() {
         let mut app = make_app();
         app.open_client_picker();
 
         let quit = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
-        assert!(!quit);
-        assert!(!app.should_quit);
-        assert!(*app.dialog_needs_reload.borrow());
+        assert!(quit);
+        assert!(app.should_quit);
+        assert!(!*app.dialog_needs_reload.borrow());
     }
 
     // ── handle_key_event: tab switching ─────────────────────────────
