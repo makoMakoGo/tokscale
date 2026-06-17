@@ -1,6 +1,7 @@
-use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{layout::Rect, Frame};
 
+use crate::tui::interaction::InteractionOutcome;
 use crate::tui::themes::Theme;
 
 use super::{overlay, DialogContent, DialogResult};
@@ -85,31 +86,30 @@ impl DialogStack {
         top.render(frame, area, &self.theme);
     }
 
-    /// Handle a key event, returns true if the event was consumed
-    pub fn handle_key(&mut self, key: KeyCode) -> bool {
+    /// Handle a key event and report the dialog-level outcome.
+    pub fn handle_key(&mut self, key: KeyEvent) -> InteractionOutcome {
         if self.stack.is_empty() {
-            return false;
+            return InteractionOutcome::Ignored("no dialog");
         }
 
         // Esc always closes the dialog
-        if key == KeyCode::Esc {
+        if key.code == KeyCode::Esc {
             self.close();
-            return true;
+            return InteractionOutcome::Close;
         }
 
         if let Some(top) = self.stack.last_mut() {
             let result = top.handle_key(key);
-            self.apply_result(result);
-            return true;
+            return self.apply_result(result);
         }
 
-        false
+        InteractionOutcome::Ignored("no dialog")
     }
 
-    /// Handle a mouse event, returns true if the event was consumed
-    pub fn handle_mouse(&mut self, event: MouseEvent) -> bool {
+    /// Handle a mouse event and report the dialog-level outcome.
+    pub fn handle_mouse(&mut self, event: MouseEvent) -> InteractionOutcome {
         if self.stack.is_empty() {
-            return false;
+            return InteractionOutcome::Ignored("no dialog");
         }
 
         // Click outside dialog closes it
@@ -121,7 +121,7 @@ impl DialogStack {
                     && event.row < rect.y + rect.height;
                 if !inside {
                     self.close();
-                    return true;
+                    return InteractionOutcome::Close;
                 }
             }
         }
@@ -129,19 +129,25 @@ impl DialogStack {
         // Route event to topmost dialog
         if let (Some(top), Some(rect)) = (self.stack.last_mut(), self.top_rect) {
             let result = top.handle_mouse(event, rect);
-            self.apply_result(result);
+            return self.apply_result(result);
         }
 
-        true
+        InteractionOutcome::Ignored("dialog area unavailable")
     }
 
-    fn apply_result(&mut self, result: DialogResult) {
+    fn apply_result(&mut self, result: DialogResult) -> InteractionOutcome {
         match result {
-            DialogResult::None => {}
-            DialogResult::Close => self.close(),
+            DialogResult::Handled => InteractionOutcome::Handled,
+            DialogResult::Ignored(reason) => InteractionOutcome::Ignored(reason),
+            DialogResult::Close => {
+                self.close();
+                InteractionOutcome::Close
+            }
+            DialogResult::NeedsReload => InteractionOutcome::NeedsReload,
             DialogResult::Replace(next) => {
                 self.stack.clear();
                 self.stack.push(next);
+                InteractionOutcome::Handled
             }
         }
     }

@@ -6,6 +6,7 @@ pub mod config;
 pub mod data;
 mod event;
 mod export;
+mod interaction;
 pub mod settings;
 mod themes;
 mod ui;
