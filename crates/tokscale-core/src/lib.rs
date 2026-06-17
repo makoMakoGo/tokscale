@@ -1112,6 +1112,25 @@ fn load_aggregated_views_resolved(
     Ok(engine.finish())
 }
 
+fn load_aggregated_views_for_resolved_report(
+    options: &ReportOptions,
+    home_dir: &str,
+    clients: &[String],
+    views: ViewSet,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<AggregatedViews, String> {
+    load_aggregated_views_resolved(ResolvedAggregationRequest {
+        home_dir,
+        clients,
+        group_by: options.group_by.clone(),
+        date_range: DateRange::from_options(options),
+        use_env_roots: options.use_env_roots,
+        scanner_settings: &options.scanner_settings,
+        views,
+        pricing,
+    })
+}
+
 /// Build any requested union of aggregation views with one adapter fold.
 ///
 /// This is the canonical local-report aggregation path for callers that need
@@ -1125,22 +1144,20 @@ pub fn load_aggregated_views_with_pricing(
     pricing: Option<&pricing::PricingService>,
 ) -> Result<AggregatedViews, String> {
     let (home_dir, clients) = resolve_report_request(options)?;
-    load_aggregated_views_resolved(ResolvedAggregationRequest {
-        home_dir: &home_dir,
-        clients: &clients,
-        group_by: options.group_by.clone(),
-        date_range: DateRange::from_options(options),
-        use_env_roots: options.use_env_roots,
-        scanner_settings: &options.scanner_settings,
-        views,
-        pricing,
-    })
+    load_aggregated_views_for_resolved_report(options, &home_dir, &clients, views, pricing)
 }
 
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
     let start = Instant::now();
+    let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
-    let views = load_aggregated_views_with_pricing(&options, ViewSet::MODEL, pricing.as_deref())?;
+    let views = load_aggregated_views_for_resolved_report(
+        &options,
+        &home_dir,
+        &clients,
+        ViewSet::MODEL,
+        pricing.as_deref(),
+    )?;
     let mut report = views.model_report.expect("model view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
@@ -1148,8 +1165,15 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
 
 pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
     let start = Instant::now();
+    let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
-    let views = load_aggregated_views_with_pricing(&options, ViewSet::MONTHLY, pricing.as_deref())?;
+    let views = load_aggregated_views_for_resolved_report(
+        &options,
+        &home_dir,
+        &clients,
+        ViewSet::MONTHLY,
+        pricing.as_deref(),
+    )?;
     let mut report = views.monthly_report.expect("monthly view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
@@ -1161,8 +1185,15 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
 /// Falls back to date + "00:00" when timestamp is zero or missing.
 pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, String> {
     let start = Instant::now();
+    let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
-    let views = load_aggregated_views_with_pricing(&options, ViewSet::HOURLY, pricing.as_deref())?;
+    let views = load_aggregated_views_for_resolved_report(
+        &options,
+        &home_dir,
+        &clients,
+        ViewSet::HOURLY,
+        pricing.as_deref(),
+    )?;
     let mut report = views.hourly_report.expect("hourly view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
@@ -1173,8 +1204,11 @@ async fn generate_graph_with_loaded_pricing(
     pricing: Option<&pricing::PricingService>,
 ) -> Result<GraphResult, String> {
     let start = Instant::now();
-    let views = load_aggregated_views_with_pricing(
+    let (home_dir, clients) = resolve_report_request(&options)?;
+    let views = load_aggregated_views_for_resolved_report(
         &options,
+        &home_dir,
+        &clients,
         ViewSet::GRAPH | ViewSet::TIME_METRICS,
         pricing,
     )?;
@@ -1191,7 +1225,14 @@ pub struct TimeMetricsReport {
 
 pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetricsReport, String> {
     let start = Instant::now();
-    let views = load_aggregated_views_with_pricing(&options, ViewSet::TIME_METRICS, None)?;
+    let (home_dir, clients) = resolve_report_request(&options)?;
+    let views = load_aggregated_views_for_resolved_report(
+        &options,
+        &home_dir,
+        &clients,
+        ViewSet::TIME_METRICS,
+        None,
+    )?;
     let mut report = views.time_metrics.expect("time-metrics view requested");
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
