@@ -253,6 +253,10 @@ impl PricingService {
             .map(Arc::clone)
     }
 
+    /// Initializes the pricing service while collecting diagnostics for a fresh fetch.
+    ///
+    /// If the service has already been initialized, `OnceCell` returns the cached
+    /// service and skips the fetch closure, so no new diagnostics are collected.
     pub async fn get_or_init_with_diagnostics(
         diagnostics: &mut PricingDiagnostics,
     ) -> Result<Arc<PricingService>, String> {

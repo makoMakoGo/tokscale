@@ -1367,11 +1367,14 @@ where
     fresh.ok().or_else(|| stale().map(Arc::new))
 }
 
-async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
-    if std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
+fn pricing_cache_only_enabled() -> bool {
+    std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
-    {
+}
+
+async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
+    if pricing_cache_only_enabled() {
         return pricing::PricingService::load_cached_any_age().map(Arc::new);
     }
 
@@ -1384,10 +1387,7 @@ async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> 
 async fn load_pricing_for_local_parse_with_diagnostics(
     diagnostics: &mut pricing::PricingDiagnostics,
 ) -> Option<Arc<pricing::PricingService>> {
-    if std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
-    {
+    if pricing_cache_only_enabled() {
         return pricing::PricingService::load_cached_any_age().map(Arc::new);
     }
 
