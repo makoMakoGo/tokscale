@@ -1367,11 +1367,14 @@ where
     fresh.ok().or_else(|| stale().map(Arc::new))
 }
 
-async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
-    if std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
+fn pricing_cache_only_enabled() -> bool {
+    std::env::var("TOKSCALE_PRICING_CACHE_ONLY")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
-    {
+}
+
+async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> {
+    if pricing_cache_only_enabled() {
         return pricing::PricingService::load_cached_any_age().map(Arc::new);
     }
 
@@ -1379,6 +1382,52 @@ async fn load_pricing_for_local_parse() -> Option<Arc<pricing::PricingService>> 
         pricing::PricingService::get_or_init().await,
         pricing::PricingService::load_cached_any_age,
     )
+}
+
+fn load_cache_only_pricing_with_diagnostics(
+    diagnostics: &mut pricing::PricingDiagnostics,
+    load_cached: impl FnOnce() -> Option<pricing::PricingService>,
+) -> Option<Arc<pricing::PricingService>> {
+    let cached = load_cached().map(Arc::new);
+    if cached.is_none() {
+        diagnostics.push(format!(
+            "{}: cache-only mode and no cached pricing",
+            pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
+        ));
+    }
+    cached
+}
+
+async fn load_pricing_for_local_parse_with_diagnostics(
+    diagnostics: &mut pricing::PricingDiagnostics,
+) -> Option<Arc<pricing::PricingService>> {
+    if pricing_cache_only_enabled() {
+        return load_cache_only_pricing_with_diagnostics(
+            diagnostics,
+            pricing::PricingService::load_cached_any_age,
+        );
+    }
+
+    match pricing::PricingService::get_or_init_with_diagnostics(diagnostics).await {
+        Ok(pricing) => Some(pricing),
+        Err(error) => {
+            let stale = pricing::PricingService::load_cached_any_age().map(Arc::new);
+            if stale.is_some() {
+                diagnostics.push(format!(
+                    "{}: {}",
+                    pricing::DIAGNOSTIC_USING_CACHED_PRICING,
+                    error
+                ));
+            } else {
+                diagnostics.push(format!(
+                    "{}: {}",
+                    pricing::DIAGNOSTIC_PRICING_UNAVAILABLE,
+                    error
+                ));
+            }
+            stale
+        }
+    }
 }
 
 fn resolve_local_parse_request(
@@ -1519,6 +1568,25 @@ pub fn load_usage_data_with_pricing(
     Ok(views.tui_usage.expect("tui view requested"))
 }
 
+#[derive(Debug)]
+pub struct UsageDataWithDiagnostics {
+    pub data: usage_views::UsageData,
+    pub pricing_diagnostics: pricing::PricingDiagnostics,
+}
+
+pub async fn load_usage_data_with_diagnostics(
+    options: LocalParseOptions,
+    group_by: GroupBy,
+) -> Result<UsageDataWithDiagnostics, String> {
+    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
+    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
+    let data = load_usage_data_with_pricing(options, group_by, pricing.as_deref())?;
+    Ok(UsageDataWithDiagnostics {
+        data,
+        pricing_diagnostics,
+    })
+}
+
 pub async fn load_usage_data(
     options: LocalParseOptions,
     group_by: GroupBy,
@@ -1605,12 +1673,13 @@ mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
         generate_graph_with_loaded_pricing, load_aggregated_views_with_pricing,
-        load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
-        parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, AggregatedViews, AggregationConfig,
-        ClientId, DateRange, GraphResult, GroupBy, LocalParseOptions, ReportOptions,
-        TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
+        load_cache_only_pricing_with_diagnostics, load_usage_data_with_pricing, message_cache,
+        normalize_model_for_grouping, parse_all_messages_with_pricing,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
+        pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
+        unified_to_parsed, AggregatedViews, AggregationConfig, ClientId, DateRange, GraphResult,
+        GroupBy, LocalParseOptions, ReportOptions, TimeMetricsReport, TokenBreakdown,
+        UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::ffi::OsString;
@@ -1799,6 +1868,22 @@ mod tests {
     fn normalized_time_metrics_value(mut report: TimeMetricsReport) -> serde_json::Value {
         report.processing_time_ms = 0;
         json_value(&report)
+    }
+
+    #[test]
+    fn cache_only_pricing_diagnostics_reports_missing_cache() {
+        let mut diagnostics = pricing::PricingDiagnostics::new();
+
+        let loaded = load_cache_only_pricing_with_diagnostics(&mut diagnostics, || None);
+
+        assert!(loaded.is_none());
+        assert_eq!(
+            diagnostics,
+            vec![format!(
+                "{}: cache-only mode and no cached pricing",
+                pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
+            )]
+        );
     }
 
     #[test]

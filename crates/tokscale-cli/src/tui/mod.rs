@@ -44,7 +44,10 @@ use crossterm::{
     },
 };
 use ratatui::prelude::*;
-use tokscale_core::ClientId;
+use tokscale_core::{
+    pricing::{DIAGNOSTIC_PRICING_UNAVAILABLE, DIAGNOSTIC_USING_CACHED_PRICING},
+    ClientId,
+};
 
 fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
     match load_result {
@@ -66,9 +69,32 @@ fn background_data_loader(
 enum BackgroundLoad {
     Unchanged,
     Loaded {
-        data: UsageData,
+        data: Box<UsageData>,
         digest: Option<u64>,
+        pricing_diagnostics: Vec<String>,
     },
+}
+
+fn pricing_diagnostics_status(diagnostics: &[String]) -> Option<&'static str> {
+    if diagnostics.is_empty() {
+        return None;
+    }
+
+    if diagnostics
+        .iter()
+        .any(|line| line.starts_with(DIAGNOSTIC_USING_CACHED_PRICING))
+    {
+        return Some("Pricing refresh failed; using cached pricing");
+    }
+
+    if diagnostics
+        .iter()
+        .any(|line| line.starts_with(DIAGNOSTIC_PRICING_UNAVAILABLE))
+    {
+        return Some("Pricing unavailable; costs may be missing");
+    }
+
+    Some("Pricing refreshed with warnings")
 }
 
 fn send_background_result(
@@ -194,19 +220,26 @@ pub fn run(
             // Digest before the load: changes landing mid-parse stay visible
             // to the next probe instead of being masked by a post-load hash.
             let digest = loader.source_digest(&bg_clients);
-            let result = loader.load(&bg_clients, &bg_group_by);
+            let result = loader.load_with_diagnostics(&bg_clients, &bg_group_by);
 
-            if let Ok(ref data) = result {
-                if let Err(err) =
-                    save_cached_data(data, &bg_enabled_clients, &bg_group_by, &bg_report_scope)
-                {
+            if let Ok(ref result) = result {
+                if let Err(err) = save_cached_data(
+                    &result.data,
+                    &bg_enabled_clients,
+                    &bg_group_by,
+                    &bg_report_scope,
+                ) {
                     tracing::error!("failed to save TUI cache: {err}");
                 }
             }
 
             send_background_result(
                 &tx,
-                result.map(|data| BackgroundLoad::Loaded { data, digest }),
+                result.map(|result| BackgroundLoad::Loaded {
+                    data: Box::new(result.data),
+                    digest,
+                    pricing_diagnostics: result.pricing_diagnostics,
+                }),
             );
         });
     }
@@ -286,10 +319,17 @@ fn run_loop_with_background(
             Ok(result) => {
                 app.set_background_loading(false);
                 match result {
-                    Ok(BackgroundLoad::Loaded { data, digest }) => {
-                        app.update_data(data);
+                    Ok(BackgroundLoad::Loaded {
+                        data,
+                        digest,
+                        pricing_diagnostics,
+                    }) => {
+                        app.update_data(*data);
                         app.last_source_digest = digest;
-                        app.set_status("Data loaded");
+                        app.set_status(
+                            pricing_diagnostics_status(&pricing_diagnostics)
+                                .unwrap_or("Data loaded"),
+                        );
                     }
                     Ok(BackgroundLoad::Unchanged) => {
                         app.mark_refresh_checked();
@@ -334,17 +374,21 @@ fn run_loop_with_background(
                     send_background_result(&tx, Ok(BackgroundLoad::Unchanged));
                     return;
                 }
-                let result = loader.load(&clients, &group_by);
-                if let Ok(ref data) = result {
+                let result = loader.load_with_diagnostics(&clients, &group_by);
+                if let Ok(ref result) = result {
                     if let Err(err) =
-                        save_cached_data(data, &enabled_clients, &group_by, &report_scope)
+                        save_cached_data(&result.data, &enabled_clients, &group_by, &report_scope)
                     {
                         tracing::error!("failed to save TUI cache: {err}");
                     }
                 }
                 send_background_result(
                     &tx,
-                    result.map(|data| BackgroundLoad::Loaded { data, digest }),
+                    result.map(|result| BackgroundLoad::Loaded {
+                        data: Box::new(result.data),
+                        digest,
+                        pricing_diagnostics: result.pricing_diagnostics,
+                    }),
                 );
             });
         }
@@ -462,5 +506,39 @@ mod tests {
         assert_eq!(loader.since.as_deref(), Some("2026-05-01"));
         assert_eq!(loader.until.as_deref(), Some("2026-05-19"));
         assert_eq!(loader.year.as_deref(), Some("2026"));
+    }
+
+    #[test]
+    fn pricing_diagnostics_status_summarizes_cached_fallback() {
+        let diagnostics = vec![
+            "[tokscale] LiteLLM JSON parse failed: error decoding response body".to_string(),
+            format!("{DIAGNOSTIC_USING_CACHED_PRICING}: error decoding response body"),
+        ];
+
+        assert_eq!(
+            pricing_diagnostics_status(&diagnostics),
+            Some("Pricing refresh failed; using cached pricing")
+        );
+    }
+
+    #[test]
+    fn pricing_diagnostics_status_summarizes_unavailable_pricing() {
+        let diagnostics = vec![format!("{DIAGNOSTIC_PRICING_UNAVAILABLE}: network error")];
+
+        assert_eq!(
+            pricing_diagnostics_status(&diagnostics),
+            Some("Pricing unavailable; costs may be missing")
+        );
+    }
+
+    #[test]
+    fn pricing_diagnostics_status_summarizes_nonfatal_warnings() {
+        let diagnostics =
+            vec!["[tokscale] OpenRouter author pricing skipped: endpoint failed".to_string()];
+
+        assert_eq!(
+            pricing_diagnostics_status(&diagnostics),
+            Some("Pricing refreshed with warnings")
+        );
     }
 }

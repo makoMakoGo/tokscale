@@ -8,7 +8,7 @@ use chrono::NaiveDate;
 
 #[cfg(test)]
 use tokscale_core::sessions::UnifiedMessage;
-use tokscale_core::{load_usage_data, ClientId, GroupBy, LocalParseOptions};
+use tokscale_core::{load_usage_data_with_diagnostics, ClientId, GroupBy, LocalParseOptions};
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
 // aggregation engine can produce them directly (#37). Re-export them under the
@@ -52,6 +52,11 @@ pub struct DataLoader {
     pub year: Option<String>,
 }
 
+pub struct DataLoadResult {
+    pub data: UsageData,
+    pub pricing_diagnostics: Vec<String>,
+}
+
 // Re-export the TUI aggregation helpers that live in core (#37). The CLI
 // keeps no aggregation logic of its own. Several are consumed only by the
 // test module below (`build_contribution_graph`, `PeriodBucket`, the
@@ -89,6 +94,15 @@ impl DataLoader {
     }
 
     pub fn load(&self, enabled_clients: &[ClientId], group_by: &GroupBy) -> Result<UsageData> {
+        self.load_with_diagnostics(enabled_clients, group_by)
+            .map(|result| result.data)
+    }
+
+    pub fn load_with_diagnostics(
+        &self,
+        enabled_clients: &[ClientId],
+        group_by: &GroupBy,
+    ) -> Result<DataLoadResult> {
         let home = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
             .to_string_lossy()
@@ -113,17 +127,22 @@ impl DataLoader {
             std::thread::scope(|s| {
                 s.spawn(|| {
                     let rt = Runtime::new().map_err(|e| e.to_string())?;
-                    rt.block_on(load_usage_data(opts, group_by.clone()))
+                    rt.block_on(load_usage_data_with_diagnostics(opts, group_by.clone()))
                 })
                 .join()
                 .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
             })
         } else {
-            Runtime::new()?.block_on(load_usage_data(opts, group_by.clone()))
+            Runtime::new()?.block_on(load_usage_data_with_diagnostics(opts, group_by.clone()))
         };
 
         trim_allocator();
-        usage_data.map_err(anyhow::Error::msg)
+        usage_data
+            .map(|result| DataLoadResult {
+                data: result.data,
+                pricing_diagnostics: result.pricing_diagnostics,
+            })
+            .map_err(anyhow::Error::msg)
     }
 
     /// Digest of the sources `load` would scan, used by the auto-refresh

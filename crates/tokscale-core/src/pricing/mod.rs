@@ -18,6 +18,22 @@ pub use litellm::ModelPricing;
 
 static PRICING_SERVICE: OnceCell<Arc<PricingService>> = OnceCell::const_new();
 
+pub type PricingDiagnostics = Vec<String>;
+pub(crate) type PricingDiagnosticSink<'a> = Option<&'a mut PricingDiagnostics>;
+
+pub const DIAGNOSTIC_USING_CACHED_PRICING: &str =
+    "[tokscale] pricing refresh failed; using cached pricing";
+pub const DIAGNOSTIC_PRICING_UNAVAILABLE: &str =
+    "[tokscale] pricing unavailable; costs may be missing";
+
+pub(crate) fn emit_diagnostic(sink: &mut PricingDiagnosticSink<'_>, message: String) {
+    if let Some(messages) = sink.as_mut() {
+        (**messages).push(message);
+    } else {
+        eprintln!("{message}");
+    }
+}
+
 // @keep: documents non-obvious filtering behavior — without this, the next person
 // will wonder why github_copilot entries disappear from the pricing data.
 /// Provider prefixes in LiteLLM data that use subscription-based pricing ($0.00)
@@ -170,6 +186,41 @@ impl PricingService {
         ))
     }
 
+    async fn fetch_inner_with_diagnostics(
+        diagnostics: &mut PricingDiagnostics,
+    ) -> Result<Self, String> {
+        let mut litellm_diagnostics = PricingDiagnostics::new();
+        let mut openrouter_diagnostics = PricingDiagnostics::new();
+        let mut models_dev_diagnostics = PricingDiagnostics::new();
+
+        let (litellm_result, openrouter_data, models_dev_result) = tokio::join!(
+            litellm::fetch_with_diagnostics(&mut litellm_diagnostics),
+            openrouter::fetch_all_mapped_with_diagnostics(&mut openrouter_diagnostics),
+            models_dev::fetch_with_diagnostics(&mut models_dev_diagnostics)
+        );
+
+        diagnostics.extend(litellm_diagnostics);
+        diagnostics.extend(openrouter_diagnostics);
+        diagnostics.extend(models_dev_diagnostics);
+
+        let litellm_data = litellm_result.map_err(|e| e.to_string())?;
+        let litellm_data = Self::filter_litellm_data(litellm_data);
+        let models_dev_data = match models_dev_result {
+            Ok(data) => data,
+            Err(e) => {
+                diagnostics.push(format!("[tokscale] models.dev fetch failed: {e}"));
+                HashMap::new()
+            }
+        };
+
+        Ok(Self::new_with_custom_and_models_dev(
+            CustomPricing::load_from_default_path(),
+            litellm_data,
+            openrouter_data,
+            models_dev_data,
+        ))
+    }
+
     fn from_cached_datasets(
         litellm_data: Option<HashMap<String, ModelPricing>>,
         openrouter_data: Option<HashMap<String, ModelPricing>>,
@@ -198,6 +249,23 @@ impl PricingService {
     pub async fn get_or_init() -> Result<Arc<PricingService>, String> {
         PRICING_SERVICE
             .get_or_try_init(|| async { Self::fetch_inner().await.map(Arc::new) })
+            .await
+            .map(Arc::clone)
+    }
+
+    /// Initializes the pricing service while collecting diagnostics for a fresh fetch.
+    ///
+    /// If the service has already been initialized, `OnceCell` returns the cached
+    /// service and skips the fetch closure, so no new diagnostics are collected.
+    pub async fn get_or_init_with_diagnostics(
+        diagnostics: &mut PricingDiagnostics,
+    ) -> Result<Arc<PricingService>, String> {
+        PRICING_SERVICE
+            .get_or_try_init(|| async {
+                Self::fetch_inner_with_diagnostics(diagnostics)
+                    .await
+                    .map(Arc::new)
+            })
             .await
             .map(Arc::clone)
     }
