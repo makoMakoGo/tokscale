@@ -118,36 +118,6 @@ jobs:
             --fail-under 45 \
             --verbose
 
-      - name: Extract coverage percentage
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        id: coverage
-        run: |
-          COVERAGE=$(cat ./coverage/tarpaulin-report.json | jq -r '
-            [.files[]] |
-            (map(.covered) | add) as $total_covered |
-            (map(.coverable) | add) as $total_coverable |
-            if $total_coverable > 0 then
-              ($total_covered / $total_coverable * 100)
-            else
-              0
-            end
-          ')
-          COVERAGE_INT=$(printf "%.0f" $COVERAGE)
-          echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
-          echo "percentage_int=$COVERAGE_INT" >> $GITHUB_OUTPUT
-          echo "Coverage: $COVERAGE%"
-          
-          # Determine badge color
-          if [ $COVERAGE_INT -gt 80 ]; then
-            echo "color=green" >> $GITHUB_OUTPUT
-          elif [ $COVERAGE_INT -gt 60 ]; then
-            echo "color=yellow" >> $GITHUB_OUTPUT
-          elif [ $COVERAGE_INT -gt 40 ]; then
-            echo "color=orange" >> $GITHUB_OUTPUT
-          else
-            echo "color=red" >> $GITHUB_OUTPUT
-          fi
-
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: "!cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
