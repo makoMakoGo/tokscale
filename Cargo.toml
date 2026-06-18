@@ -81,6 +81,8 @@ fs2 = "0.4"
 
 # Benchmarking
 codspeed-criterion-compat = "4.7.0"
+tempfile = "3"
+serial_test = "3"
 
 # Trae iCubeAuthInfo decryption: AES-128-CBC + base64
 aes = "0.8"

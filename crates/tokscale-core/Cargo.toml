@@ -37,8 +37,8 @@ fs2 = { workspace = true }
 
 [dev-dependencies]
 codspeed-criterion-compat = { workspace = true }
-tempfile = "3"
-serial_test = "3"
+tempfile = { workspace = true }
+serial_test = { workspace = true }
 
 [build-dependencies]
 serde = { workspace = true, features = ["rc"] }
