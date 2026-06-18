@@ -100,3 +100,11 @@ lto = true
 opt-level = 3
 codegen-units = 1
 strip = true
+
+# Benchmark builds (used by cargo-codspeed) inherit from `release` by default,
+# which enables full LTO and a single codegen unit. Release binaries keep that
+# profile, while benchmarks trade some link-time optimization for faster CI.
+[profile.bench]
+lto = false
+opt-level = 3
+codegen-units = 16

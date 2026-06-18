@@ -14,6 +14,10 @@ crate-type = ["rlib"]
 name = "normalization"
 harness = false
 
+[[bench]]
+name = "core_benchmarks"
+harness = false
+
 [dependencies]
 rayon = { workspace = true }
 simd-json = { workspace = true }
