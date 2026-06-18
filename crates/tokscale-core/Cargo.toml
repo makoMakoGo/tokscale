@@ -10,6 +10,10 @@ description = "Core library for tokscale - session parsing, scanning, aggregatio
 [lib]
 crate-type = ["rlib"]
 
+[[bench]]
+name = "normalization"
+harness = false
+
 [dependencies]
 rayon = { workspace = true }
 simd-json = { workspace = true }
@@ -32,6 +36,7 @@ libc = { workspace = true }
 fs2 = { workspace = true }
 
 [dev-dependencies]
+codspeed-criterion-compat = "4.7.0"
 tempfile = "3"
 serial_test = "3"
 

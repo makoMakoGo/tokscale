@@ -1,0 +1,63 @@
+name: CodSpeed
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - personal/local-clients
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/codspeed.yml"
+  pull_request:
+    branches:
+      - personal/local-clients
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/codspeed.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-core:
+    name: CodSpeed / rust-core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: codspeed-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            codspeed-${{ runner.os }}-cargo-
+
+      - name: Install cargo-codspeed
+        run: cargo install cargo-codspeed --locked --version 4.7.0
+
+      - name: Build benchmark targets
+        run: cargo codspeed build
+
+      - name: Run benchmark targets
+        uses: CodSpeedHQ/action@63f3e98b61959fe67f146a3ff022e4136fe9bb9c
+        with:
+          mode: simulation
+          run: cargo codspeed run

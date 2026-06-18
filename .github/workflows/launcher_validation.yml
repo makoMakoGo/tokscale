@@ -3,7 +3,7 @@ name: Launcher Validation
 on:
   workflow_dispatch:
   push:
-    branches: [main, develop]
+    branches: [main, develop, personal/local-clients]
     paths:
       - "packages/cli/bin.js"
       - "packages/cli/src/**"
@@ -19,7 +19,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, personal/local-clients]
     paths:
       - "packages/cli/bin.js"
       - "packages/cli/src/**"

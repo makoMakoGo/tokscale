@@ -3,14 +3,14 @@ name: Frontend CI
 on:
   workflow_dispatch:
   push:
-    branches: [main, develop]
+    branches: [main, develop, personal/local-clients]
     paths:
       - "packages/frontend/**"
       - "package.json"
       - "bun.lock"
       - ".github/workflows/frontend_ci.yml"
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, personal/local-clients]
     paths:
       - "packages/frontend/**"
       - "package.json"
