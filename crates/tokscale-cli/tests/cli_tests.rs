@@ -660,6 +660,16 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     }
 }
 
+fn create_pricing_fixture_dir() -> TempDir {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    write_pricing_cache(tmp.path(), now);
+    tmp
+}
+
 fn write_fireworks_pricing_cache(base: &Path) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2572,7 +2582,8 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode()
 
 #[test]
 fn test_pricing_command_success() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
+    let tmp = create_pricing_fixture_dir();
+    let mut cmd = cmd_with_home(tmp.path());
     cmd.args(["pricing", "claude-sonnet-4-20250514", "--no-spinner"])
         .assert()
         .success()
@@ -2583,7 +2594,8 @@ fn test_pricing_command_success() {
 
 #[test]
 fn test_pricing_command_json() {
-    let output = cargo_bin_cmd!("tokscale")
+    let tmp = create_pricing_fixture_dir();
+    let output = cmd_with_home(tmp.path())
         .args([
             "pricing",
             "claude-sonnet-4-20250514",
@@ -2606,7 +2618,8 @@ fn test_pricing_command_json() {
 
 #[test]
 fn test_pricing_command_with_provider() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
+    let tmp = create_pricing_fixture_dir();
+    let mut cmd = cmd_with_home(tmp.path());
     cmd.args([
         "pricing",
         "claude-sonnet-4-20250514",
@@ -2620,7 +2633,8 @@ fn test_pricing_command_with_provider() {
 
 #[test]
 fn test_pricing_command_invalid_provider() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
+    let tmp = create_pricing_fixture_dir();
+    let mut cmd = cmd_with_home(tmp.path());
     cmd.args([
         "pricing",
         "claude-sonnet-4-20250514",

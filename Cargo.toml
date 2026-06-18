@@ -79,6 +79,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 fs2 = "0.4"
 
+# Benchmarking
+codspeed-criterion-compat = "4.7.0"
+tempfile = "3"
+serial_test = "3"
+
 # Trae iCubeAuthInfo decryption: AES-128-CBC + base64
 aes = "0.8"
 cbc = { version = "0.1", features = ["std"] }
@@ -95,3 +100,11 @@ lto = true
 opt-level = 3
 codegen-units = 1
 strip = true
+
+# Benchmark builds (used by cargo-codspeed) inherit from `release` by default,
+# which enables full LTO and a single codegen unit. Release binaries keep that
+# profile, while benchmarks trade some link-time optimization for faster CI.
+[profile.bench]
+lto = false
+opt-level = 3
+codegen-units = 16
