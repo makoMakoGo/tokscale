@@ -1,8 +1,7 @@
 //! CodSpeed performance benchmarks for tokscale-core.
 //!
 //! These benchmarks exercise CPU-bound hot paths that run on every message
-//! during a scan: model-name normalization and SIMD-accelerated JSON/JSONL
-//! parsing.
+//! during a scan: SIMD-accelerated JSON/JSONL parsing.
 
 use std::fmt::Write;
 
@@ -11,35 +10,7 @@ use codspeed_criterion_compat::{
 };
 use serde::Deserialize;
 use tempfile::TempDir;
-use tokscale_core::{normalize_model_for_grouping, parse_json_file, parse_jsonl_file};
-
-/// Representative model identifiers covering the various normalization branches.
-const MODEL_IDS: &[&str] = &[
-    "claude-3-5-sonnet-20241022",
-    "anthropic/claude-sonnet-4-5",
-    "gpt-4o-2024-08-06",
-    "gpt-4o-mini",
-    "custom:openrouter/meta-llama/llama-3.1-70b-instruct:free",
-    "gemini-2.0-flash-exp",
-    "o1-preview-2024-09-12",
-    "k2p5",
-    "longcat-flash-3b-all-quant-int4",
-    "deepseek-chat (high)",
-];
-
-fn bench_normalize_model(c: &mut Criterion) {
-    let mut group = c.benchmark_group("normalize_model_for_grouping");
-
-    group.bench_function("mixed_batch", |b| {
-        b.iter(|| {
-            for model_id in MODEL_IDS {
-                black_box(normalize_model_for_grouping(black_box(model_id)));
-            }
-        })
-    });
-
-    group.finish();
-}
+use tokscale_core::{parse_json_file, parse_jsonl_file};
 
 #[derive(Debug, Deserialize)]
 struct BenchMessage {
@@ -118,10 +89,5 @@ fn bench_parse_json(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_normalize_model,
-    bench_parse_jsonl,
-    bench_parse_json
-);
+criterion_group!(benches, bench_parse_jsonl, bench_parse_json);
 criterion_main!(benches);
