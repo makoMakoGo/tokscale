@@ -43,14 +43,13 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: codspeed-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: codspeed-v2-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            codspeed-${{ runner.os }}-cargo-
+            codspeed-v2-${{ runner.os }}-cargo-
 
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --locked --version 4.7.0
