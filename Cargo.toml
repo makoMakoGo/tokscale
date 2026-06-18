@@ -95,3 +95,13 @@ lto = true
 opt-level = 3
 codegen-units = 1
 strip = true
+
+# Benchmark builds (used by cargo-codspeed) inherit from `release` by default,
+# which enables full LTO and a single codegen unit. That makes benchmark
+# compilation prohibitively slow without changing what CodSpeed measures, so we
+# keep optimizations on while disabling cross-crate LTO and allowing parallel
+# codegen units for the bench profile only. Release binaries are unaffected.
+[profile.bench]
+lto = false
+opt-level = 3
+codegen-units = 16
