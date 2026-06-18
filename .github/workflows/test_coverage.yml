@@ -76,10 +76,12 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -98,7 +100,7 @@ jobs:
             coverage-${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
       - name: Install cargo-tarpaulin
         if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -145,33 +147,6 @@ jobs:
           else
             echo "color=red" >> $GITHUB_OUTPUT
           fi
-
-      - name: Create badges directory
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        run: mkdir -p .github/badges
-
-      - name: Generate coverage badge
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        uses: emibcn/badge-action@f9150fde070fcca0c4e832437611b44838fcd325 # v2.0.4
-        with:
-          label: 'coverage'
-          status: ${{ steps.coverage.outputs.percentage_int }}%
-          color: ${{ steps.coverage.outputs.color }}
-          path: .github/badges/coverage.svg
-
-      - name: Commit coverage badge
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add .github/badges/coverage.svg
-          git diff --staged --quiet && exit 0
-          git commit -m "ci: update coverage badge [skip ci]"
-          for i in 1 2 3; do
-            git push && exit 0
-            git pull --rebase -X theirs origin "${{ github.event.repository.default_branch }}" || exit 1
-          done
-          git push
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

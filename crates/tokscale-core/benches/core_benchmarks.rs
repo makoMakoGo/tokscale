@@ -1,7 +1,9 @@
 //! CodSpeed performance benchmarks for tokscale-core.
 //!
-//! These benchmarks exercise CPU-bound hot paths that run on every message
-//! during a scan: SIMD-accelerated JSON/JSONL parsing.
+//! These benchmarks run under CodSpeed simulation. The production APIs benchmarked
+//! here read from files, but syscall and filesystem walltime are not part of the
+//! primary simulation metric; use these numbers for user-space JSON parsing,
+//! deserialization, allocation, and copy regressions.
 
 use std::fmt::Write;
 
@@ -39,7 +41,7 @@ fn make_jsonl(lines: usize) -> String {
 }
 
 fn bench_parse_jsonl(c: &mut Criterion) {
-    let mut group = c.benchmark_group("parse_jsonl_file");
+    let mut group = c.benchmark_group("parse_jsonl_file_userspace");
 
     for &lines in &[100usize, 1000, 5000] {
         let dir = TempDir::new().unwrap();
@@ -81,7 +83,7 @@ fn bench_parse_json(c: &mut Criterion) {
     payload.push(']');
     std::fs::write(&path, &payload).unwrap();
 
-    c.bench_function("parse_json_file/1000_objects", |b| {
+    c.bench_function("parse_json_file_userspace/1000_objects", |b| {
         b.iter(|| {
             let parsed: Vec<BenchMessage> = parse_json_file(&path).unwrap();
             black_box(parsed.len())

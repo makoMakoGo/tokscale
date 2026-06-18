@@ -19,9 +19,7 @@ on:
       - "Cargo.lock"
       - ".github/workflows/codspeed.yml"
 
-permissions:
-  contents: read
-  id-token: write
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,6 +28,9 @@ jobs:
   rust-core:
     name: CodSpeed / rust-core
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -55,10 +56,10 @@ jobs:
         run: cargo install cargo-codspeed --locked --version 4.7.0
 
       - name: Build benchmark targets
-        run: cargo codspeed build
+        run: cargo codspeed build -p tokscale-core
 
       - name: Run benchmark targets
-        uses: CodSpeedHQ/action@63f3e98b61959fe67f146a3ff022e4136fe9bb9c
+        uses: CodSpeedHQ/action@63f3e98b61959fe67f146a3ff022e4136fe9bb9c # v4
         with:
           mode: simulation
-          run: cargo codspeed run
+          run: cargo codspeed run -p tokscale-core
