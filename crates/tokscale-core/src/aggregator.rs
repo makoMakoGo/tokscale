@@ -149,6 +149,7 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
     }
 }
 
+/// Normalize `-0.0` to `0.0` so serialized reports do not display negative zero.
 fn clean_total_cost(cost: f64) -> f64 {
     if cost == 0.0 {
         0.0

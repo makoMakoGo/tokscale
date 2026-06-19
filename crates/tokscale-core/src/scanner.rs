@@ -32,6 +32,10 @@ fn local_def(client_id: ClientId) -> &'static LocalClientDef {
         .expect("scanner client must have local scan policy")
 }
 
+fn scanner_enabled_client(client: ClientId) -> bool {
+    !matches!(client, ClientId::Crush | ClientId::Warp)
+}
+
 /// User-controlled scanner settings loaded from a config file.
 ///
 /// This is the persistent, declarative counterpart to environment variables
@@ -622,13 +626,13 @@ fn scan_all_clients_with_env_strategy_inner(
     let include_all = clients.is_empty();
     let enabled: HashSet<ClientId> = if include_all {
         ClientId::iter()
-            .filter(|client| client.parse_local())
+            .filter(|client| scanner_enabled_client(*client))
             .collect()
     } else {
         clients
             .iter()
             .filter_map(|s| ClientId::from_str(s))
-            .filter(|client| client.parse_local())
+            .filter(|client| scanner_enabled_client(*client))
             .collect()
     };
 
@@ -2542,6 +2546,33 @@ mod tests {
         assert!(all_clients.get(ClientId::Crush).is_empty());
         assert_eq!(explicit_warp.total_files(), 0);
         assert_eq!(explicit_crush.total_files(), 0);
+    }
+
+    #[test]
+    fn test_scan_all_clients_keeps_cursor_cache_scanning() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let cursor_file = home
+            .join(".config")
+            .join("tokscale")
+            .join("cursor-cache")
+            .join("usage.csv");
+        fs::create_dir_all(cursor_file.parent().unwrap()).unwrap();
+        fs::write(&cursor_file, "Date,Model,Input Tokens,Output Tokens\n").unwrap();
+
+        let all_clients = scan_all_clients_with_env_strategy(home.to_str().unwrap(), &[], false);
+        let explicit_cursor = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["cursor".to_string()],
+            false,
+        );
+
+        assert_eq!(
+            all_clients.get(ClientId::Cursor),
+            &vec![cursor_file.clone()]
+        );
+        assert_eq!(explicit_cursor.get(ClientId::Cursor), &vec![cursor_file]);
     }
 
     #[test]
