@@ -1064,11 +1064,32 @@ fn aggregate_model_usage_entries(
 }
 
 pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
-    tokens.input.max(0)
-        + tokens.output.max(0)
-        + tokens.cache_read.max(0)
-        + tokens.cache_write.max(0)
-        + tokens.reasoning.max(0)
+    [
+        tokens.input,
+        tokens.output,
+        tokens.cache_read,
+        tokens.cache_write,
+        tokens.reasoning,
+    ]
+    .into_iter()
+    .map(|value| value.max(0))
+    .fold(0, i64::saturating_add)
+}
+
+pub(crate) fn has_positive_tokens(tokens: &TokenBreakdown) -> bool {
+    tokens.input > 0
+        || tokens.output > 0
+        || tokens.cache_read > 0
+        || tokens.cache_write > 0
+        || tokens.reasoning > 0
+}
+
+fn normalize_token_breakdown(tokens: &mut TokenBreakdown) {
+    tokens.input = tokens.input.max(0);
+    tokens.output = tokens.output.max(0);
+    tokens.cache_read = tokens.cache_read.max(0);
+    tokens.cache_write = tokens.cache_write.max(0);
+    tokens.reasoning = tokens.reasoning.max(0);
 }
 
 fn resolve_report_request(options: &ReportOptions) -> Result<(String, Vec<String>), String> {
@@ -1300,28 +1321,6 @@ pub(crate) fn hourly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> 
     report
 }
 
-fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
-    // Zed bills hosted models at provider list price + 10%.
-    // Source: https://zed.dev/docs/ai/plans-and-usage and https://zed.dev/docs/ai/models
-    //
-    // The multiplier is keyed on the message's `provider_id`, not on the
-    // provenance of the matched LiteLLM pricing row. Today this is safe because
-    // tokscale's bundled LiteLLM dataset only carries upstream-provider rows
-    // (anthropic, openai, google) for the underlying models. If a future
-    // LiteLLM update adds rows under provider `zed.dev` that already include
-    // Zed's markup, this function would double-bill — revisit by threading
-    // the matched-price provenance through `apply_token_pricing`.
-    if message.client.as_ref() == "zed"
-        && message
-            .provider_id
-            .eq_ignore_ascii_case(sessions::zed::ZED_HOSTED_PROVIDER)
-    {
-        1.1
-    } else {
-        1.0
-    }
-}
-
 fn apply_token_pricing(message: &mut UnifiedMessage, pricing: Option<&pricing::PricingService>) {
     message.cost = 0.0;
 
@@ -1331,12 +1330,26 @@ fn apply_token_pricing(message: &mut UnifiedMessage, pricing: Option<&pricing::P
 
     let provider_hint = pricing_provider_hint(&message.model_id, &message.provider_id);
     let calculated_cost =
-        pricing.calculate_cost_with_provider(&message.model_id, provider_hint, &message.tokens)
-            * pricing_multiplier(message);
+        pricing.calculate_cost_with_provider(&message.model_id, provider_hint, &message.tokens);
 
     if calculated_cost > 0.0 {
         message.cost = calculated_cost;
     }
+}
+
+pub(crate) fn finalize_token_priced_messages(
+    messages: &mut Vec<UnifiedMessage>,
+    pricing: Option<&pricing::PricingService>,
+) {
+    messages.retain_mut(|message| {
+        normalize_token_breakdown(&mut message.tokens);
+        message.refresh_derived_fields();
+        if !has_positive_tokens(&message.tokens) {
+            return false;
+        }
+        apply_token_pricing(message, pricing);
+        true
+    });
 }
 
 fn pricing_provider_hint<'a>(model_id: &str, provider_id: &'a str) -> Option<&'a str> {
@@ -1671,14 +1684,15 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_token_pricing, dedupe_latest_trae_messages,
-        generate_graph_with_loaded_pricing, load_aggregated_views_with_pricing,
-        load_cache_only_pricing_with_diagnostics, load_usage_data_with_pricing, message_cache,
-        normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients, parsed_to_unified,
-        pricing, retain_for_requested_clients, scanner, select_local_parse_pricing,
-        unified_to_parsed, AggregatedViews, AggregationConfig, ClientId, DateRange, GraphResult,
-        GroupBy, LocalParseOptions, ReportOptions, TimeMetricsReport, TokenBreakdown,
-        UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
+        finalize_token_priced_messages, generate_graph_with_loaded_pricing,
+        load_aggregated_views_with_pricing, load_cache_only_pricing_with_diagnostics,
+        load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
+        parse_local_clients, parsed_to_unified, positive_token_total, pricing,
+        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
+        AggregatedViews, AggregationConfig, ClientId, DateRange, GraphResult, GroupBy,
+        LocalParseOptions, ReportOptions, TimeMetricsReport, TokenBreakdown, UnifiedMessage,
+        ViewSet, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::ffi::OsString;
@@ -5119,6 +5133,83 @@ model = "gpt-5.5"
     }
 
     #[test]
+    fn test_finalize_token_priced_messages_drops_rows_without_positive_tokens() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4o".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut messages = vec![
+            UnifiedMessage::new(
+                "gemini",
+                "gpt-4o",
+                "openai",
+                "zero",
+                1_733_011_200_000,
+                TokenBreakdown::default(),
+                0.42,
+            ),
+            UnifiedMessage::new(
+                "gemini",
+                "gpt-4o",
+                "openai",
+                "negative",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: -10,
+                    output: -5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.42,
+            ),
+            UnifiedMessage::new(
+                "gemini",
+                "gpt-4o",
+                "openai",
+                "mixed",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: -10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.42,
+            ),
+        ];
+
+        finalize_token_priced_messages(&mut messages, Some(&pricing));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "mixed");
+        assert_eq!(messages[0].tokens.input, 0);
+        assert_eq!(messages[0].tokens.output, 5);
+        assert_eq!(messages[0].cost, 0.01);
+    }
+
+    #[test]
+    fn test_positive_token_total_saturates() {
+        let tokens = TokenBreakdown {
+            input: i64::MAX,
+            output: i64::MAX,
+            cache_read: i64::MAX,
+            cache_write: i64::MAX,
+            reasoning: i64::MAX,
+        };
+
+        assert_eq!(positive_token_total(&tokens), i64::MAX);
+    }
+
+    #[test]
     fn test_apply_token_pricing_overrides_cost_when_pricing_exists() {
         let mut litellm = HashMap::new();
         litellm.insert(
@@ -5187,7 +5278,7 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_apply_token_pricing_applies_zed_hosted_markup() {
+    fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "claude-sonnet-4-5".into(),
@@ -5198,6 +5289,56 @@ model = "gpt-5.5"
             },
         );
         let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let tokens = TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        let mut zed_msg = UnifiedMessage::new(
+            "zed",
+            "claude-sonnet-4-5",
+            crate::sessions::zed::ZED_HOSTED_PROVIDER,
+            "session-1",
+            1_733_011_200_000,
+            tokens.clone(),
+            0.0,
+        );
+        let mut claude_msg = UnifiedMessage::new(
+            "claudecode",
+            "claude-sonnet-4-5",
+            crate::sessions::zed::ZED_HOSTED_PROVIDER,
+            "session-1",
+            1_733_011_200_000,
+            tokens,
+            0.0,
+        );
+
+        apply_token_pricing(&mut zed_msg, Some(&pricing));
+        apply_token_pricing(&mut claude_msg, Some(&pricing));
+
+        assert_eq!(zed_msg.cost, claude_msg.cost);
+        assert!((zed_msg.cost - 0.020).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_apply_token_pricing_custom_zed_price_is_final_price() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "claude-sonnet-4-5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.003),
+                output_cost_per_token: Some(0.004),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(custom),
+            HashMap::new(),
+            HashMap::new(),
+        );
 
         let mut msg = UnifiedMessage::new(
             "zed",
@@ -5217,51 +5358,11 @@ model = "gpt-5.5"
 
         apply_token_pricing(&mut msg, Some(&pricing));
 
-        assert!((msg.cost - 0.022).abs() < 1e-12);
+        assert!((msg.cost - 0.050).abs() < 1e-12);
     }
 
     #[test]
-    fn test_apply_token_pricing_skips_zed_markup_for_non_zed_client() {
-        // Non-zed client with provider_id "zed.dev" must not receive the +10%
-        // markup. The multiplier is gated on (client == "zed" AND provider).
-        let mut litellm = HashMap::new();
-        litellm.insert(
-            "claude-sonnet-4-5".into(),
-            pricing::ModelPricing {
-                input_cost_per_token: Some(0.001),
-                output_cost_per_token: Some(0.002),
-                ..Default::default()
-            },
-        );
-        let pricing = pricing::PricingService::new(litellm, HashMap::new());
-
-        let mut msg = UnifiedMessage::new(
-            "claudecode",
-            "claude-sonnet-4-5",
-            crate::sessions::zed::ZED_HOSTED_PROVIDER,
-            "session-1",
-            1_733_011_200_000,
-            TokenBreakdown {
-                input: 10,
-                output: 5,
-                cache_read: 0,
-                cache_write: 0,
-                reasoning: 0,
-            },
-            0.0,
-        );
-
-        apply_token_pricing(&mut msg, Some(&pricing));
-
-        // 10 * 0.001 + 5 * 0.002 = 0.020, no markup.
-        assert!((msg.cost - 0.020).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_apply_token_pricing_skips_zed_markup_for_byok_provider() {
-        // A Zed message whose provider_id is the upstream provider directly
-        // (BYOK / non-hosted path) must not be marked up — the user is paying
-        // the upstream API directly, not through Zed.
+    fn test_apply_token_pricing_uses_upstream_provider_for_zed_byok() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "claude-sonnet-4-5".into(),

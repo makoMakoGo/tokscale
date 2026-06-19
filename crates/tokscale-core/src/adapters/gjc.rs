@@ -37,9 +37,7 @@ impl LocalSourceAdapter for GjcAdapter {
             .into_par_iter()
             .map(|unit| {
                 let mut messages = sessions::gjc::parse_gjc_file(&unit.path);
-                for message in &mut messages {
-                    crate::apply_token_pricing(message, ctx.pricing);
-                }
+                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),

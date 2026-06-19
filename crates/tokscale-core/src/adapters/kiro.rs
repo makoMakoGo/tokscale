@@ -62,9 +62,7 @@ impl LocalSourceAdapter for KiroAdapter {
                 ),
                 SourceUnitMeta::KiroSqlite => {
                     let mut messages = sessions::kiro::parse_kiro_sqlite(&unit.path);
-                    for message in &mut messages {
-                        crate::apply_token_pricing(message, ctx.pricing);
-                    }
+                    crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                     ParsedUnit {
                         unit,
                         messages: UnitMessageSource::Fresh(messages),

@@ -112,16 +112,6 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     }
 }
 
-fn apply_pricing_to_messages(
-    messages: &mut [UnifiedMessage],
-    pricing: Option<&pricing::PricingService>,
-) {
-    for message in messages {
-        message.refresh_derived_fields();
-        crate::apply_token_pricing(message, pricing);
-    }
-}
-
 fn parse_full_log_source(
     unit: SourceUnit,
     pricing: Option<&pricing::PricingService>,
@@ -178,7 +168,7 @@ fn finalize_codex_messages(
             message.set_timestamp(fallback_timestamp);
         }
     }
-    apply_pricing_to_messages(&mut messages, pricing);
+    crate::finalize_token_priced_messages(&mut messages, pricing);
     for message in &mut messages {
         apply_headless_agent(message, is_headless);
     }

@@ -51,8 +51,8 @@ impl LocalSourceAdapter for CrushAdapter {
                 };
                 for message in &mut messages {
                     message.set_workspace(workspace_key.clone(), workspace_label.clone());
-                    crate::apply_token_pricing(message, ctx.pricing);
                 }
+                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),

@@ -46,9 +46,7 @@ impl LocalSourceAdapter for HermesAdapter {
             .into_par_iter()
             .map(|unit| {
                 let mut messages = sessions::hermes::parse_hermes_sqlite(&unit.path);
-                for message in &mut messages {
-                    crate::apply_token_pricing(message, ctx.pricing);
-                }
+                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
