@@ -21,6 +21,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "openai" | "openai_codex" | "openai_pro" => "openai",
         "github_copilot" => "github-copilot",
         "commandcode" | "command_code" => "commandcode",
+        "unisound" | "uni_sound" | "yunzhisheng" | "yun_zhi_sheng" => "unisound",
         s if s == "opencode" || s.starts_with("opencode_") => "opencode",
         "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
@@ -61,6 +62,13 @@ pub fn normalize_provider_for_grouping(raw: &str) -> String {
         s if s.starts_with("tencent") || s.starts_with("tecent") => "tencent".to_string(),
         s if s == "opencode" || s.starts_with("opencode_") => "opencode".to_string(),
         s if s.starts_with("github_cop") || s.contains("copilot") => "github-copilot".to_string(),
+        s if s.starts_with("unisound")
+            || s.starts_with("uni_sound")
+            || s.starts_with("yunzhisheng")
+            || s.starts_with("yun_zhi_sheng") =>
+        {
+            "unisound".to_string()
+        }
         _ => canonical_provider(trimmed)
             .map(|provider| provider_group_from_canonical(&provider).to_string())
             .unwrap_or(normalized),
@@ -199,9 +207,18 @@ pub(crate) fn provider_override_from_model_and_provider(
 
 pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     let lower = model.to_lowercase();
+    let model_part = lower
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(&lower);
 
     if let Some(provider) = provider_override_from_model(model) {
         return Some(provider);
+    }
+
+    if model_part == "u2" {
+        return Some("unisound");
     }
 
     if lower.contains("glm")
@@ -230,6 +247,11 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
 
     if lower.contains("gpt")
         || lower.contains("openai")
+        || contains_delimited(&lower, "codex")
+        || lower.contains("text-embedding")
+        || lower.contains("dall-e")
+        || lower.contains("whisper")
+        || contains_delimited(&lower, "tts")
         || contains_delimited(&lower, "o1")
         || contains_delimited(&lower, "o3")
         || contains_delimited(&lower, "o4")
@@ -279,11 +301,15 @@ pub fn is_anthropic_model(model: &str) -> bool {
         .rsplit('/')
         .find(|segment| !segment.is_empty())
         .unwrap_or(&lower);
+    let anthropic_model_part = model_part
+        .strip_prefix("anthropic.")
+        .or_else(|| model_part.split_once(".anthropic.").map(|(_, model)| model))
+        .unwrap_or(model_part);
 
-    model_part.starts_with("claude-")
-        || model_part.starts_with("opus-")
-        || model_part.starts_with("sonnet-")
-        || model_part.starts_with("haiku-")
+    anthropic_model_part.starts_with("claude-")
+        || anthropic_model_part.starts_with("opus-")
+        || anthropic_model_part.starts_with("sonnet-")
+        || anthropic_model_part.starts_with("haiku-")
 }
 
 #[cfg(test)]
@@ -310,6 +336,8 @@ mod tests {
             ("openai-pro", vec!["openai"]),
             ("command-code", vec!["commandcode"]),
             ("command_code", vec!["commandcode"]),
+            ("UniSound", vec!["unisound"]),
+            ("yunzhisheng", vec!["unisound"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
         ];
@@ -330,6 +358,8 @@ mod tests {
             canonical_provider("pandora-deepseek"),
             Some("deepseek".into())
         );
+        assert_eq!(canonical_provider("UniSound"), Some("unisound".into()));
+        assert_eq!(canonical_provider("yunzhisheng"), Some("unisound".into()));
         assert_eq!(canonical_provider("openai-pro"), Some("openai".into()));
         assert_eq!(canonical_provider("<synthetic>"), None);
         assert_eq!(canonical_provider("unknown"), None);
@@ -379,6 +409,8 @@ mod tests {
             ("opencode-zen", "opencode"),
             ("command-code", "commandcode"),
             ("command_code", "commandcode"),
+            ("UniSound", "unisound"),
+            ("yunzhisheng", "unisound"),
         ];
 
         for (raw, expected) in cases {
@@ -484,6 +516,39 @@ mod tests {
         );
         assert_eq!(inferred_provider_from_model("llama-3"), Some("meta"));
         assert_eq!(inferred_provider_from_model("qwen3-coder"), Some("qwen"));
+        assert_eq!(inferred_provider_from_model("u2"), Some("unisound"));
+        assert_eq!(
+            inferred_provider_from_model("unisound/u2"),
+            Some("unisound")
+        );
+        assert_eq!(inferred_provider_from_model("foo/u2"), Some("unisound"));
+        assert_eq!(
+            inferred_provider_from_model("codex-mini-latest"),
+            Some("openai")
+        );
+        assert_eq!(
+            inferred_provider_from_model("text-embedding-3-small"),
+            Some("openai")
+        );
+        assert_eq!(inferred_provider_from_model("dall-e-3"), Some("openai"));
+        assert_eq!(inferred_provider_from_model("whisper-1"), Some("openai"));
+        assert_eq!(inferred_provider_from_model("tts-1"), Some("openai"));
+        assert_eq!(
+            inferred_provider_from_model("gpt-4o-mini-tts"),
+            Some("openai")
+        );
+        assert_eq!(
+            inferred_provider_from_model("anthropic.claude-sonnet-4"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            inferred_provider_from_model("bedrock/anthropic.claude-sonnet-4"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            inferred_provider_from_model("us.anthropic.claude-3-5-sonnet-20241022-v1:0"),
+            Some("anthropic")
+        );
         assert_eq!(inferred_provider_from_model("unknown-model"), None);
     }
 
@@ -543,6 +608,14 @@ mod tests {
         assert_eq!(inferred_provider_from_model("metamorphic-v1"), None);
         assert_eq!(inferred_provider_from_model("model10"), None);
         assert_eq!(inferred_provider_from_model("my-model1"), None);
+        assert_eq!(inferred_provider_from_model("foo-u2"), None);
+        assert_eq!(inferred_provider_from_model("u20"), None);
+        assert_eq!(inferred_provider_from_model("codexchange"), None);
+        assert_eq!(inferred_provider_from_model("mitts-model"), None);
+        assert_eq!(
+            inferred_provider_from_model("notanthropic.claude-sonnet-4"),
+            None
+        );
     }
 
     #[test]
