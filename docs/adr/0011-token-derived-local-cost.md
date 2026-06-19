@@ -31,8 +31,8 @@ reports look precise while measuring different things.
   credits-only records are dropped instead of being converted into zero-token
   cost.
 - Aggregate-only clients without a token-level source do not contribute usage
-  rows. Crush is disabled under this rule. Warp remains a temporary explicit
-  exception while its BYOK/token-source behavior is investigated separately.
+  rows. Crush and Warp are disabled under this rule; Warp BYOK support can be
+  added later only if a token-level source is found.
 - Cache schema changes that affect local cost semantics bump
   `CACHE_SCHEMA_VERSION` so stale parser costs are rebuilt.
 

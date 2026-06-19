@@ -1079,53 +1079,16 @@ fn emit_cursor_setup_warnings(warnings: &[String]) {
 }
 
 fn warp_setup_warnings_for_report(
-    home_dir: &Option<String>,
+    _home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
 ) -> Vec<String> {
     if !client_filter_explicitly_requests_warp(clients) {
         return Vec::new();
     }
 
-    let (home_path, home_override) = match home_dir {
-        Some(home) => (PathBuf::from(home), true),
-        None => match dirs::home_dir() {
-            Some(home) => (home, false),
-            None => {
-                return vec![
-                    "Warp usage requires Tokscale's Warp aggregate cache, but the home directory could not be resolved. Tokscale does not parse local Warp transcripts.".to_string(),
-                ];
-            }
-        },
-    };
-    let has_cache = if home_override {
-        warp::has_usage_cache_in_home(&home_path)
-    } else {
-        warp::load_usage_cache().is_some()
-    };
-    if has_cache {
-        return Vec::new();
-    }
-
-    let cache_glob = if home_override {
-        home_path
-            .join(".config/tokscale/warp-cache/usage*.json")
-            .to_string_lossy()
-            .to_string()
-    } else {
-        "~/.config/tokscale/warp-cache/usage*.json".to_string()
-    };
-    let action = if home_override {
-        "run `tokscale warp sync` for the default profile or populate that cache before running a report with --home"
-    } else if warp::has_credentials() {
-        "run `tokscale warp sync`"
-    } else {
-        "run `tokscale warp login` and `tokscale warp sync`"
-    };
-
-    vec![format!(
-        "Warp usage requires Tokscale's aggregate API cache at `{}`; {}. Tokscale does not parse local Warp/Oz session transcripts and does not infer tokens from request counts.",
-        cache_glob, action
-    )]
+    vec![
+        "Warp aggregate request/spend data is not included in local reports because it has no token buckets. Tokscale does not parse local Warp/Oz session transcripts; add Warp again only when a token-level source is available.".to_string(),
+    ]
 }
 
 fn setup_warnings_for_report(
@@ -6574,7 +6537,7 @@ mod tests {
     }
 
     #[test]
-    fn warp_setup_warning_explains_missing_aggregate_cache() {
+    fn warp_setup_warning_explains_aggregate_cache_is_not_reported() {
         let temp = tempfile::TempDir::new().unwrap();
         let warnings = warp_setup_warnings_for_report(
             &Some(temp.path().to_string_lossy().to_string()),
@@ -6582,8 +6545,8 @@ mod tests {
         );
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("tokscale warp"));
-        assert!(warnings[0].contains("does not infer tokens from request counts"));
+        assert!(warnings[0].contains("not included in local reports"));
+        assert!(warnings[0].contains("no token buckets"));
     }
 
     #[test]

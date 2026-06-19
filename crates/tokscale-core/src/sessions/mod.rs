@@ -445,7 +445,7 @@ mod tests {
     use chrono::FixedOffset;
 
     #[test]
-    fn warp_cache_parser_preserves_requests_and_spend_without_tokens() {
+    fn warp_cache_parser_returns_empty_for_aggregate_spend_without_tokens() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             file.path(),
@@ -471,19 +471,7 @@ mod tests {
         .unwrap();
 
         let messages = crate::sessions::warp::parse_warp_file(file.path());
-        assert_eq!(messages.len(), 1);
-
-        let workspace = messages
-            .iter()
-            .find(|message| message.session_id.as_ref() == "warp-aggregate-workspace-1")
-            .unwrap();
-        assert_eq!(workspace.client.as_ref(), "warp");
-        assert_eq!(workspace.model_id.as_ref(), "aggregate-requests");
-        assert_eq!(workspace.provider_id.as_ref(), "warp");
-        assert_eq!(workspace.workspace_label.as_deref(), Some("Personal"));
-        assert_eq!(workspace.message_count, 12);
-        assert_eq!(workspace.tokens, TokenBreakdown::default());
-        assert!((workspace.cost - 3.45).abs() < 1e-9);
+        assert!(messages.is_empty());
 
         std::fs::write(
             file.path(),
@@ -502,12 +490,7 @@ mod tests {
         .unwrap();
 
         let messages = crate::sessions::warp::parse_warp_file(file.path());
-        assert_eq!(messages.len(), 1);
-        let account = &messages[0];
-        assert_eq!(account.session_id.as_ref(), "warp-aggregate-account");
-        assert_eq!(account.message_count, 42);
-        assert_eq!(account.tokens, TokenBreakdown::default());
-        assert!((account.cost - 12.34).abs() < 1e-9);
+        assert!(messages.is_empty());
     }
 
     #[test]
