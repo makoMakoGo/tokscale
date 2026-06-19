@@ -25,7 +25,7 @@ pub use aggregate::{AggregatedViews, AggregationConfig, DateRange, ViewSet};
 pub use aggregator::{calculate_summary, calculate_years};
 pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
 pub use parser::*;
-pub use provider_identity::normalize_provider_for_grouping;
+pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
 pub use scanner::*;
 pub use sessionize::{
     compute_daily_active_time, compute_time_metrics, sessionize, SessionInterval, TimeMetrics,

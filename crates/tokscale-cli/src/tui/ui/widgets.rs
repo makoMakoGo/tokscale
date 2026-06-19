@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::ScrollbarState;
-use tokscale_core::{normalize_provider_for_grouping, ClientId};
+use tokscale_core::{inferred_provider_from_model, normalize_provider_for_grouping, ClientId};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::client_ui;
@@ -289,35 +289,12 @@ const UNKNOWN_SHADES: [(u8, u8, u8); 7] = [
 ];
 
 pub fn get_provider_from_model(model: &str) -> &'static str {
-    let model_lower = model.to_lowercase();
+    if let Some(provider) = inferred_provider_from_model(model) {
+        return provider;
+    }
 
-    if model_lower.contains("claude")
-        || model_lower.contains("sonnet")
-        || model_lower.contains("opus")
-        || model_lower.contains("haiku")
-    {
-        "anthropic"
-    } else if model_lower.contains("gpt")
-        || model_lower.starts_with("o1")
-        || model_lower.starts_with("o3")
-        || model_lower.contains("codex")
-        || model_lower.contains("text-embedding")
-        || model_lower.contains("dall-e")
-        || model_lower.contains("whisper")
-        || model_lower.contains("tts")
-    {
-        "openai"
-    } else if model_lower.contains("gemini") {
-        "google"
-    } else if model_lower.contains("deepseek") {
-        "deepseek"
-    } else if model_lower.contains("grok") {
-        "xai"
-    } else if model_lower.contains("llama") {
-        "meta"
-    } else if model_lower.contains("mixtral") {
-        "mistral"
-    } else if model_lower == "auto" || model_lower.contains("cursor") {
+    let model_lower = model.to_lowercase();
+    if model_lower == "auto" || model_lower.contains("cursor") {
         "cursor"
     } else {
         "unknown"
@@ -377,6 +354,9 @@ fn get_single_provider_display_name(provider: &str) -> String {
     if let Some(name) = config.get_provider_display_name(provider) {
         return name.to_string();
     }
+    if is_aws_provider_for_display(provider) {
+        return "AWS".to_string();
+    }
     match normalize_provider_for_grouping(provider).as_str() {
         "anthropic" => "Anthropic".to_string(),
         "openai" => "OpenAI".to_string(),
@@ -400,8 +380,29 @@ fn get_single_provider_display_name(provider: &str) -> String {
         "opencode" => "OpenCode".to_string(),
         "owl" => "Owl".to_string(),
         "github-copilot" => "GitHub Copilot".to_string(),
+        "commandcode" => "Command".to_string(),
+        "unisound" => "UniSound".to_string(),
         _ => provider.to_string(),
     }
+}
+
+fn is_aws_provider_for_display(provider: &str) -> bool {
+    provider
+        .to_lowercase()
+        .split('/')
+        .any(is_aws_provider_segment_for_display)
+}
+
+fn is_aws_provider_segment_for_display(segment: &str) -> bool {
+    matches!(segment, "amazon" | "aws" | "bedrock")
+        || segment.starts_with("amazon-")
+        || segment.starts_with("amazon_")
+        || segment.starts_with("aws-")
+        || segment.starts_with("aws_")
+        || segment.starts_with("bedrock-")
+        || segment.starts_with("bedrock_")
+        || segment.ends_with("-bedrock")
+        || segment.ends_with("_bedrock")
 }
 
 fn display_comma_list<F>(value: &str, format_segment: F) -> String
@@ -528,7 +529,7 @@ mod tests {
     fn provider_display_formats_each_segment_in_merged_list() {
         assert_eq!(
             get_provider_display_name("openai, openai-codex, amazon-bedrock"),
-            "OpenAI, amazon-bedrock"
+            "OpenAI, AWS"
         );
     }
 
@@ -566,6 +567,20 @@ mod tests {
             ("opencode", "OpenCode"),
             ("opencode-go", "OpenCode"),
             ("opencode-zen", "OpenCode"),
+            ("commandcode", "Command"),
+            ("command-code", "Command"),
+            ("command_code", "Command"),
+            ("unisound", "UniSound"),
+            ("yunzhisheng", "UniSound"),
+            ("amazon", "AWS"),
+            ("aws", "AWS"),
+            ("bedrock", "AWS"),
+            ("amazon-bedrock", "AWS"),
+            ("anthropic-bedrock", "AWS"),
+            ("bedrock/anthropic", "AWS"),
+            ("openrouter/amazon", "AWS"),
+            ("not-aws", "not-aws"),
+            ("awesome-provider", "awesome-provider"),
         ];
 
         for (provider, expected) in cases {
@@ -591,6 +606,10 @@ mod tests {
             get_provider_display_name("opencode, opencode-go, opencode-zen"),
             "OpenCode"
         );
+        assert_eq!(
+            get_provider_display_name("anthropic-bedrock, amazon-bedrock, aws"),
+            "AWS"
+        );
     }
 
     #[test]
@@ -598,6 +617,33 @@ mod tests {
         assert_eq!(
             get_client_display_name("opencode, codex, kiro, unknown-client"),
             "OpenCode, Codex, Kiro, unknown-client"
+        );
+    }
+
+    #[test]
+    fn provider_from_model_preserves_core_and_tui_fallbacks() {
+        assert_eq!(get_provider_from_model("u2"), "unisound");
+        assert_eq!(get_provider_from_model("foo/u2"), "unisound");
+        assert_eq!(get_provider_from_model("foo-u2"), "unknown");
+        assert_eq!(get_provider_from_model("u20"), "unknown");
+        assert_eq!(get_provider_from_model("codex-mini-latest"), "openai");
+        assert_eq!(get_provider_from_model("text-embedding-3-small"), "openai");
+        assert_eq!(get_provider_from_model("dall-e-3"), "openai");
+        assert_eq!(get_provider_from_model("whisper-1"), "openai");
+        assert_eq!(get_provider_from_model("tts-1"), "openai");
+        assert_eq!(get_provider_from_model("auto"), "cursor");
+        assert_eq!(get_provider_from_model("cursor-small"), "cursor");
+        assert_eq!(
+            get_provider_from_model("anthropic.claude-sonnet-4"),
+            "anthropic"
+        );
+        assert_eq!(
+            get_provider_from_model("bedrock/anthropic.claude-sonnet-4"),
+            "anthropic"
+        );
+        assert_eq!(
+            get_provider_from_model("us.anthropic.claude-3-5-sonnet-20241022-v1:0"),
+            "anthropic"
         );
     }
 
