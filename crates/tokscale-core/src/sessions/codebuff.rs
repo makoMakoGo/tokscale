@@ -87,7 +87,7 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
                 cache_write: usage.cache_creation_input_tokens.max(0),
                 reasoning: 0,
             },
-            usage.credits.max(0.0),
+            0.0,
             Some(crate::sessions::dedup_hash_str(&dedup_key)),
         ));
     }
@@ -205,7 +205,6 @@ fn message_timestamp(msg: &Value) -> Option<i64> {
 #[derive(Default, Debug, Clone)]
 struct AssistantUsage {
     model: Option<String>,
-    credits: f64,
     input_tokens: i64,
     output_tokens: i64,
     cache_read_input_tokens: i64,
@@ -218,7 +217,6 @@ impl AssistantUsage {
             || self.output_tokens > 0
             || self.cache_read_input_tokens > 0
             || self.cache_creation_input_tokens > 0
-            || self.credits > 0.0
     }
 
     fn merge_fallback(&mut self, other: AssistantUsage) {
@@ -236,9 +234,6 @@ impl AssistantUsage {
         }
         if self.model.is_none() {
             self.model = other.model;
-        }
-        if self.credits <= 0.0 {
-            self.credits = other.credits;
         }
     }
 }
@@ -263,12 +258,6 @@ fn extract_assistant_usage(msg: &Value) -> AssistantUsage {
         }
         if let Some(run_state_usage) = extract_usage_from_run_state(meta) {
             usage.merge_fallback(run_state_usage);
-        }
-    }
-
-    if let Some(credits) = msg.get("credits").and_then(|v| v.as_f64()) {
-        if credits > 0.0 && usage.credits <= 0.0 {
-            usage.credits = credits;
         }
     }
 
@@ -382,9 +371,6 @@ fn parse_usage_object(value: &Value) -> AssistantUsage {
     usage.cache_read_input_tokens = cache_read.unwrap_or(0);
     usage.cache_creation_input_tokens = cache_write.unwrap_or(0);
 
-    if let Some(credits) = value.get("credits").and_then(|v| v.as_f64()) {
-        usage.credits = credits;
-    }
     if let Some(model) = value.get("model").and_then(|v| v.as_str()) {
         usage.model = Some(model.to_string());
     }
@@ -449,7 +435,6 @@ mod tests {
         assert_eq!(usage.output_tokens, 400);
         assert_eq!(usage.cache_read_input_tokens, 200);
         assert_eq!(usage.cache_creation_input_tokens, 50);
-        assert_eq!(usage.credits, 1.5);
         assert_eq!(usage.model.as_deref(), Some("claude-sonnet-4-20250514"));
     }
 

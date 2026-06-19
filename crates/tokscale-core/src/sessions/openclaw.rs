@@ -65,12 +65,6 @@ struct OpenClawUsage {
     #[serde(rename = "totalTokens")]
     #[allow(dead_code)]
     total_tokens: Option<i64>,
-    cost: Option<OpenClawCost>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenClawCost {
-    total: Option<f64>,
 }
 
 pub fn parse_openclaw_index(index_path: &Path) -> Vec<UnifiedMessage> {
@@ -226,22 +220,19 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                     current_model = Some(model.clone());
                     current_provider = Some(provider.clone());
                     let timestamp = msg.timestamp.unwrap_or(file_mtime_ms);
-                    let cost = usage.cost.and_then(|c| c.total).unwrap_or(0.0);
+                    let tokens = TokenBreakdown {
+                        input: usage.input.unwrap_or(0).max(0),
+                        output: usage.output.unwrap_or(0).max(0),
+                        cache_read: usage.cache_read.unwrap_or(0).max(0),
+                        cache_write: usage.cache_write.unwrap_or(0).max(0),
+                        reasoning: 0,
+                    };
+                    if crate::positive_token_total(&tokens) == 0 {
+                        continue;
+                    }
 
                     messages.push(UnifiedMessage::new(
-                        "openclaw",
-                        model,
-                        provider,
-                        session_id,
-                        timestamp,
-                        TokenBreakdown {
-                            input: usage.input.unwrap_or(0).max(0),
-                            output: usage.output.unwrap_or(0).max(0),
-                            cache_read: usage.cache_read.unwrap_or(0).max(0),
-                            cache_write: usage.cache_write.unwrap_or(0).max(0),
-                            reasoning: 0,
-                        },
-                        cost.max(0.0),
+                        "openclaw", model, provider, session_id, timestamp, tokens, 0.0,
                     ));
                 }
             }
@@ -281,7 +272,7 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 200);
-        assert_eq!(messages[0].cost, 0.05);
+        assert_eq!(messages[0].cost, 0.0);
     }
 
     #[test]

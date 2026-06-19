@@ -24,7 +24,9 @@ use std::time::UNIX_EPOCH;
 // and Phase B shrinks per-message data; serialized layout changed.
 // 25: source-message cache is sharded one source per file; v24 monolith is not
 // migrated and is deleted on first v25 load.
-const CACHE_SCHEMA_VERSION: u32 = 25;
+// 26: local source costs are token-derived only; cached app-reported costs and
+// cost-only rows must be rebuilt.
+const CACHE_SCHEMA_VERSION: u32 = 26;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const SHARDS_DIRNAME: &str = "shards";

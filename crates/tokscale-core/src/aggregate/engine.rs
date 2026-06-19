@@ -91,7 +91,7 @@ impl AggregationEngine {
             let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
             MonthlyReport {
                 entries,
-                total_cost,
+                total_cost: clean_total_cost(total_cost),
                 processing_time_ms: 0,
             }
         });
@@ -101,7 +101,7 @@ impl AggregationEngine {
             let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
             HourlyReport {
                 entries,
-                total_cost,
+                total_cost: clean_total_cost(total_cost),
                 processing_time_ms: 0,
             }
         });
@@ -149,7 +149,15 @@ fn wrap_model_report(entries: Vec<crate::ModelUsage>) -> ModelReport {
         total_cache_read,
         total_cache_write,
         total_messages,
-        total_cost,
+        total_cost: clean_total_cost(total_cost),
         processing_time_ms: 0,
+    }
+}
+
+fn clean_total_cost(cost: f64) -> f64 {
+    if cost == 0.0 {
+        0.0
+    } else {
+        cost
     }
 }

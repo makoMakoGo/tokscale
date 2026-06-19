@@ -22,7 +22,6 @@ pub struct KiloMessage {
     pub model_id: Option<String>,
     #[serde(rename = "providerID", default)]
     pub provider_id: Option<String>,
-    pub cost: Option<f64>,
     pub tokens: Option<KiloTokens>,
     pub time: Option<KiloTime>,
     pub agent: Option<String>,
@@ -133,20 +132,25 @@ pub fn parse_kilo_sqlite_with_fallback(
             .unwrap_or("kilo")
             .to_string();
 
+        let token_breakdown = TokenBreakdown {
+            input: tokens.input.max(0),
+            output: tokens.output.max(0),
+            cache_read: tokens.cache.read.max(0),
+            cache_write: tokens.cache.write.max(0),
+            reasoning: tokens.reasoning.unwrap_or(0).max(0),
+        };
+        if crate::positive_token_total(&token_breakdown) == 0 {
+            continue;
+        }
+
         let mut unified = UnifiedMessage::new_with_agent(
             "kilo",
             model_id,
             provider,
             session_id,
             timestamp,
-            TokenBreakdown {
-                input: tokens.input.max(0),
-                output: tokens.output.max(0),
-                cache_read: tokens.cache.read.max(0),
-                cache_write: tokens.cache.write.max(0),
-                reasoning: tokens.reasoning.unwrap_or(0).max(0),
-            },
-            msg.cost.unwrap_or(0.0).max(0.0),
+            token_breakdown,
+            0.0,
             agent,
         );
         unified.dedup_key = dedup_key;
@@ -207,7 +211,6 @@ mod tests {
         let mut bytes = json.as_bytes().to_vec();
         let msg: KiloMessage = simd_json::from_slice(&mut bytes).unwrap();
         assert_eq!(msg.role, "assistant");
-        assert_eq!(msg.cost, Some(0.15));
         assert_eq!(msg.model_id, Some("minimax/m2.5".to_string()));
     }
 
@@ -250,7 +253,7 @@ mod tests {
         assert_eq!(msg.tokens.reasoning, 40);
         assert_eq!(msg.tokens.cache_read, 75);
         assert_eq!(msg.tokens.cache_write, 25);
-        assert_eq!(msg.cost, 0.42);
+        assert_eq!(msg.cost, 0.0);
         assert_eq!(msg.agent.as_deref(), Some("architect"));
         assert_eq!(
             msg.dedup_key,
@@ -307,7 +310,7 @@ mod tests {
                 "mode": "debug",
                 "tokens": {
                     "input": -100,
-                    "output": -50,
+                    "output": 50,
                     "reasoning": -5,
                     "cache": {"read": -20, "write": -10}
                 }
@@ -324,7 +327,7 @@ mod tests {
         assert_eq!(msg.provider_id.as_ref(), "openai");
         assert_eq!(msg.timestamp, 1_800_000_000_000);
         assert_eq!(msg.tokens.input, 0);
-        assert_eq!(msg.tokens.output, 0);
+        assert_eq!(msg.tokens.output, 50);
         assert_eq!(msg.tokens.reasoning, 0);
         assert_eq!(msg.tokens.cache_read, 0);
         assert_eq!(msg.tokens.cache_write, 0);

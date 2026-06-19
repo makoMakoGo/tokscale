@@ -145,6 +145,6 @@ fn apply_pricing_to_messages(
 ) {
     for message in messages {
         message.refresh_derived_fields();
-        crate::apply_pricing_if_available(message, pricing);
+        crate::apply_token_pricing(message, pricing);
     }
 }

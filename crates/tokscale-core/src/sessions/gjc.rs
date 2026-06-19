@@ -7,13 +7,8 @@
 //! - `session` — header carrying `id` (session id) and `cwd` (workspace). No
 //!   message is emitted for it.
 //! - `service_tier_change` — skipped.
-//! - `message` — emits ONLY assistant messages. The assistant `message` object
-//!   carries `model`/`provider`/`api`, a unix-ms `timestamp`, and a `usage`
-//!   object that includes an authoritative `usage.cost` (USD) breakdown.
-//!
-//! Cost policy (A1): the embedded `usage.cost.total` (USD) is reused verbatim
-//! when present, finite, and non-negative. Otherwise cost is left at `0.0` so
-//! the lib.rs dispatch Hermes guard can reprice from tokens.
+//! - `message` — emits ONLY assistant messages with token usage. App-reported
+//!   `usage.cost` is ignored; report cost is derived by Tokscale pricing.
 //!
 //! Dedup (codebuff-style): a stable `dedup_key` of `<session id>:<message id>`
 //! is preferred; when ids are absent a deterministic fallback derived from the
@@ -62,22 +57,6 @@ struct GjcUsage {
     cache_write: Option<i64>,
     #[allow(dead_code)]
     total_tokens: Option<i64>,
-    cost: Option<GjcCost>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GjcCost {
-    /// Authoritative total cost in USD.
-    total: Option<f64>,
-}
-
-/// Reuse the embedded `usage.cost.total` (USD) only when present, finite, and
-/// non-negative. Otherwise return `0.0` so the dispatch Hermes guard reprices.
-fn embedded_cost(usage: &GjcUsage) -> f64 {
-    match usage.cost.as_ref().and_then(|c| c.total) {
-        Some(total) if total.is_finite() && total >= 0.0 => total,
-        _ => 0.0,
-    }
 }
 
 /// Build a deterministic fallback dedup key for messages lacking a stable
@@ -192,8 +171,9 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             cache_write: usage.cache_write.unwrap_or(0).max(0),
             reasoning: 0,
         };
-
-        let cost = embedded_cost(&usage);
+        if crate::positive_token_total(&tokens) == 0 {
+            continue;
+        }
 
         let session = session_id.clone().unwrap_or_else(|| "unknown".to_string());
         let dedup_key = match entry.id.filter(|s| !s.is_empty()) {
@@ -208,7 +188,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             session,
             timestamp,
             tokens,
-            cost,
+            0.0,
             Some(crate::sessions::dedup_hash_str(&dedup_key)),
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
@@ -323,13 +303,13 @@ not valid json at all
     }
 
     #[test]
-    fn test_parse_gjc_reads_embedded_cost_total() {
+    fn test_parse_gjc_ignores_embedded_cost_total() {
         let content = r#"{"type":"session","id":"gjc_ses_007","cwd":"/tmp"}
 {"type":"message","id":"msg_c","message":{"role":"assistant","model":"some-model","provider":"anthropic","timestamp":1767225601000,"usage":{"input":10,"output":5,"cost":{"input":0.5,"output":0.7,"total":1.25}}}}"#;
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].cost, 1.25);
+        assert_eq!(messages[0].cost, 0.0);
     }
 
     #[test]
@@ -415,7 +395,7 @@ not valid json at all
     #[test]
     fn test_adv_negative_token_values_clamped_to_zero() {
         let content = r#"{"type":"session","id":"gjc_adv_e","cwd":"/tmp"}
-{"type":"message","id":"msg_neg","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":-100,"output":-50,"cacheRead":-10,"cacheWrite":-5,"cost":{"total":0.0}}}}"#;
+{"type":"message","id":"msg_neg","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":-100,"output":50,"cacheRead":-10,"cacheWrite":-5,"cost":{"total":0.0}}}}"#;
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(
@@ -425,23 +405,20 @@ not valid json at all
         );
         let t = &messages[0].tokens;
         assert_eq!(t.input, 0, "negative input clamped to 0");
-        assert_eq!(t.output, 0, "negative output clamped to 0");
+        assert_eq!(t.output, 50);
         assert_eq!(t.cache_read, 0, "negative cache_read clamped to 0");
         assert_eq!(t.cache_write, 0, "negative cache_write clamped to 0");
     }
 
-    /// (f) Embedded cost.total negative -> falls back to 0.0.
+    /// (f) Embedded cost.total negative is ignored.
     #[test]
-    fn test_adv_negative_cost_total_falls_back_to_zero() {
+    fn test_adv_negative_cost_total_is_ignored() {
         let content = r#"{"type":"session","id":"gjc_adv_f","cwd":"/tmp"}
 {"type":"message","id":"msg_negcost","message":{"role":"assistant","model":"m","provider":"p","timestamp":1700000001000,"usage":{"input":5,"output":3,"cost":{"total":-9.99}}}}"#;
         let file = create_test_file(content);
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0].cost, 0.0,
-            "negative cost.total must fall back to 0.0"
-        );
+        assert_eq!(messages[0].cost, 0.0, "cost.total must be ignored");
     }
 
     /// (g) cost.total absent entirely -> 0.0.

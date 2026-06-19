@@ -103,15 +103,17 @@ pub(crate) fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<Session
 /// Calculate summary statistics
 pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
     let total_tokens: i64 = contributions.iter().map(|c| c.totals.tokens).sum();
-    let total_cost: f64 = contributions.iter().map(|c| c.totals.cost).sum();
+    let total_cost = clean_total_cost(contributions.iter().map(|c| c.totals.cost).sum());
     let active_days = contributions
         .iter()
         .filter(|c| c.totals.tokens > 0 || c.totals.cost > 0.0 || c.totals.messages > 0)
         .count() as i32;
-    let max_cost = contributions
-        .iter()
-        .map(|c| c.totals.cost)
-        .fold(0.0, f64::max);
+    let max_cost = clean_total_cost(
+        contributions
+            .iter()
+            .map(|c| c.totals.cost)
+            .fold(0.0, f64::max),
+    );
 
     let mut clients_set = std::collections::HashSet::with_capacity(5);
     let mut models_set = std::collections::HashSet::with_capacity(20);
@@ -144,6 +146,14 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
             v.sort();
             v
         },
+    }
+}
+
+fn clean_total_cost(cost: f64) -> f64 {
+    if cost == 0.0 {
+        0.0
+    } else {
+        cost
     }
 }
 

@@ -1792,10 +1792,7 @@ fn test_models_json_offline_without_pricing_cache_still_succeeds() {
     assert_eq!(json["totalMessages"].as_i64().unwrap(), 3);
     assert_eq!(json["entries"].as_array().unwrap().len(), 2);
     let total_cost = json["totalCost"].as_f64().unwrap();
-    assert!(
-        (total_cost - 0.10).abs() < 1e-9,
-        "unexpected totalCost without pricing: {total_cost}"
-    );
+    assert_eq!(total_cost, 0.0);
 }
 
 #[test]
@@ -1817,10 +1814,7 @@ fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
     assert_eq!(entries[0]["month"].as_str().unwrap(), "2024-06");
     assert_eq!(entries[1]["month"].as_str().unwrap(), "2025-01");
     let total_cost = json["totalCost"].as_f64().unwrap();
-    assert!(
-        (total_cost - 0.10).abs() < 1e-9,
-        "unexpected totalCost without pricing: {total_cost}"
-    );
+    assert_eq!(total_cost, 0.0);
 }
 
 #[test]
@@ -1841,10 +1835,7 @@ fn test_graph_offline_without_pricing_cache_still_succeeds() {
     assert_eq!(json["summary"]["activeDays"].as_i64().unwrap(), 2);
     assert_eq!(json["contributions"].as_array().unwrap().len(), 2);
     let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
-    assert!(
-        (total_cost - 0.10).abs() < 1e-9,
-        "unexpected totalCost without pricing: {total_cost}"
-    );
+    assert_eq!(total_cost, 0.0);
 }
 
 #[test]
@@ -1894,10 +1885,7 @@ fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
         1000
     );
     let total_cost = json["totalCost"].as_f64().unwrap();
-    assert!(
-        (total_cost - 0.10).abs() < 1e-9,
-        "unexpected totalCost without pricing: {total_cost}"
-    );
+    assert_eq!(total_cost, 0.0);
 }
 
 #[test]

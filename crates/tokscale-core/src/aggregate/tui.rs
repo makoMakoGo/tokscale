@@ -68,7 +68,7 @@ fn hourly_model_display_name(group_by: &GroupBy, model: &str) -> String {
 
 /// Sanitize a message cost: non-finite/negative -> 0 (the TUI never shows debt).
 fn sane_cost(cost: f64) -> f64 {
-    if cost.is_finite() && cost >= 0.0 {
+    if cost.is_finite() && cost > 0.0 {
         cost
     } else {
         0.0
@@ -753,7 +753,7 @@ impl TuiAcc {
             hourly,
             graph: Some(graph),
             total_tokens,
-            total_cost,
+            total_cost: sane_cost(total_cost),
             loading: false,
             error: None,
             current_streak,

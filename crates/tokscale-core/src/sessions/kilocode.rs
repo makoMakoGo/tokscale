@@ -55,7 +55,7 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_read, 7);
         assert_eq!(messages[0].tokens.cache_write, 3);
-        assert_eq!(messages[0].cost, 0.05);
+        assert_eq!(messages[0].cost, 0.0);
     }
 
     #[test]

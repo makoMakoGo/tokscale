@@ -21,46 +21,14 @@ pub(crate) struct CachedFileAdapter {
     parse: fn(&Path) -> Vec<UnifiedMessage>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum PricingPolicy {
-    ApplyAlways,
-    ApplyIfCostNonPositive,
-    Never,
-}
-
-impl PricingPolicy {
-    pub(crate) fn apply(
-        self,
-        message: &mut UnifiedMessage,
-        pricing: Option<&crate::pricing::PricingService>,
-    ) {
-        match self {
-            PricingPolicy::ApplyAlways => crate::apply_pricing_if_available(message, pricing),
-            PricingPolicy::ApplyIfCostNonPositive if message.cost <= 0.0 => {
-                crate::apply_pricing_if_available(message, pricing);
-            }
-            PricingPolicy::ApplyIfCostNonPositive | PricingPolicy::Never => {}
-        }
-    }
-}
-
 pub(crate) struct NonCachedFileAdapter {
     client: ClientId,
     parse: fn(&Path) -> Vec<UnifiedMessage>,
-    pricing_policy: PricingPolicy,
 }
 
 impl NonCachedFileAdapter {
-    pub(crate) const fn new(
-        client: ClientId,
-        parse: fn(&Path) -> Vec<UnifiedMessage>,
-        pricing_policy: PricingPolicy,
-    ) -> Self {
-        Self {
-            client,
-            parse,
-            pricing_policy,
-        }
+    pub(crate) const fn new(client: ClientId, parse: fn(&Path) -> Vec<UnifiedMessage>) -> Self {
+        Self { client, parse }
     }
 }
 
@@ -75,13 +43,12 @@ impl LocalSourceAdapter for NonCachedFileAdapter {
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
-        let pricing_policy = self.pricing_policy;
         units
             .into_par_iter()
             .map(|unit| {
                 let mut messages = parse(&unit.path);
                 for message in &mut messages {
-                    pricing_policy.apply(message, ctx.pricing);
+                    crate::apply_token_pricing(message, ctx.pricing);
                 }
                 ParsedUnit {
                     unit,
@@ -267,7 +234,6 @@ pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::ne
 pub(crate) static ANTIGRAVITY_ADAPTER: NonCachedFileAdapter = NonCachedFileAdapter::new(
     ClientId::Antigravity,
     sessions::antigravity::parse_antigravity_file,
-    PricingPolicy::ApplyAlways,
 );
 
 #[cfg(test)]

@@ -1,12 +1,8 @@
-//! G7 end-to-end cost-precedence integration test for the gjc (gajae-code) client.
+//! GJC end-to-end token-pricing integration test.
 //!
-//! Tests that embedded `usage.cost.total` values in gjc JSONL session files take
-//! precedence over recomputed pricing (A1 / Hermes guard), and that messages
-//! without an embedded cost ARE repriced by the PricingService (A2 path).
-//!
-//! Binding note N1: the gjc dispatch cluster in lib.rs applies the Hermes guard
-//! (`if msg.cost <= 0.0 { apply_pricing_if_available(...) }`) to honour
-//! `usage.cost.total` verbatim. This test is the integration-level proof.
+//! GJC may store embedded `usage.cost.total` values, but Tokscale local report
+//! cost is token-derived. Both embedded-cost and no-cost messages must be
+//! priced from their token buckets by the PricingService.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -17,9 +13,8 @@ use tokscale_core::{parse_local_unified_messages_with_pricing, LocalParseOptions
 
 /// Build a minimal `PricingService` that knows about one model.
 /// input_cost = 0.001 per token, output_cost = 0.002 per token.
-/// With 100 input tokens and 50 output tokens (message B below):
+/// With 100 input tokens and 50 output tokens:
 ///   recomputed = 100 * 0.001 + 50 * 0.002 = 0.100 + 0.100 = 0.200
-/// That is clearly != 0.3 (the embedded cost on message A).
 fn make_pricing_service() -> PricingService {
     let mut litellm_data: HashMap<String, ModelPricing> = HashMap::new();
     litellm_data.insert(
@@ -33,22 +28,19 @@ fn make_pricing_service() -> PricingService {
     PricingService::new(litellm_data, HashMap::new())
 }
 
-/// The expected recomputed cost for message B (no embedded cost):
+/// The expected token-derived cost:
 ///   100 * 0.001 + 50 * 0.002 = 0.200
-const EXPECTED_RECOMPUTED_COST: f64 = 100.0 * 0.001 + 50.0 * 0.002;
+const EXPECTED_TOKEN_PRICED_COST: f64 = 100.0 * 0.001 + 50.0 * 0.002;
 
-/// The embedded cost on message A.
-const EXPECTED_EMBEDDED_COST: f64 = 0.3;
-
-/// G7: Embedded cost wins; absent-cost messages get recomputed.
+/// Embedded app cost is ignored; both messages get token pricing.
 ///
 /// - Message A: `gjc-priceable-model` WITH `usage.cost.total = 0.3`
-///   → reported cost must equal 0.3 (embedded wins; N1 guard holds)
-/// - Message B: `gjc-priceable-model` WITHOUT a cost object (cost = 0.0 in parser)
-///   → reported cost must equal EXPECTED_RECOMPUTED_COST (repriced by PricingService)
+///   -> reported cost must equal EXPECTED_TOKEN_PRICED_COST
+/// - Message B: `gjc-priceable-model` WITHOUT a cost object
+///   -> reported cost must also equal EXPECTED_TOKEN_PRICED_COST
 #[tokio::test]
-async fn test_gjc_cost_precedence_end_to_end() {
-    // ── Build a temporary home directory with the gjc session file ──────────
+async fn test_gjc_embedded_cost_is_ignored_end_to_end() {
+    // Build a temporary home directory with the gjc session file.
     let home_dir = tempfile::TempDir::new().expect("failed to create temp dir");
     let home_path = home_dir.path();
 
@@ -92,10 +84,8 @@ async fn test_gjc_cost_precedence_end_to_end() {
         f.flush().expect("failed to flush");
     }
 
-    // ── Build PricingService ─────────────────────────────────────────────────
     let pricing = make_pricing_service();
 
-    // ── Call parse_local_unified_messages_with_pricing ───────────────────────
     // use_env_roots: false ensures we only scan home-derived paths (no env vars).
     let options = LocalParseOptions {
         home_dir: Some(home_path.to_str().unwrap().to_string()),
@@ -111,7 +101,6 @@ async fn test_gjc_cost_precedence_end_to_end() {
         .await
         .expect("parse failed");
 
-    // ── Assertions ───────────────────────────────────────────────────────────
     assert_eq!(
         messages.len(),
         2,
@@ -133,34 +122,21 @@ async fn test_gjc_cost_precedence_end_to_end() {
     assert_eq!(msg_b.client.as_ref(), "gjc");
     assert_eq!(msg_b.model_id.as_ref(), "gjc-priceable-model");
 
-    // G7 / A1: message A embedded cost MUST be preserved (0.3), NOT repriced.
-    // If this fails, the N1 binding is violated: the Hermes guard is overwriting
-    // authoritative embedded costs with recomputed values.
     assert!(
-        (msg_a.cost - EXPECTED_EMBEDDED_COST).abs() < 1e-10,
-        "G7 FAIL (N1 violation): message A cost should be embedded 0.3 but got {}",
+        (msg_a.cost - EXPECTED_TOKEN_PRICED_COST).abs() < 1e-10,
+        "message A cost should be token-priced {EXPECTED_TOKEN_PRICED_COST} but got {}",
         msg_a.cost
     );
 
-    // G7 / A2: message B had no embedded cost — PricingService must have repriced it.
     assert!(
-        (msg_b.cost - EXPECTED_RECOMPUTED_COST).abs() < 1e-10,
-        "G7 FAIL: message B cost should be recomputed {EXPECTED_RECOMPUTED_COST} but got {}",
+        (msg_b.cost - EXPECTED_TOKEN_PRICED_COST).abs() < 1e-10,
+        "message B cost should be token-priced {EXPECTED_TOKEN_PRICED_COST} but got {}",
         msg_b.cost
     );
 
-    // Sanity: the two values must be different (proves the test distinguishes them).
-    assert!(
-        (msg_a.cost - msg_b.cost).abs() > 1e-10,
-        "G7 FAIL: embedded cost ({}) and recomputed cost ({}) must be different",
-        msg_a.cost,
-        msg_b.cost
-    );
-
-    // Recomputed cost must be > 0 (confirms the PricingService actually fired).
     assert!(
         msg_b.cost > 0.0,
-        "G7 FAIL: recomputed cost for message B must be > 0, got {}",
+        "token-priced cost for message B must be > 0, got {}",
         msg_b.cost
     );
 }

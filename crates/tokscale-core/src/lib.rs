@@ -1310,7 +1310,7 @@ fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
     // (anthropic, openai, google) for the underlying models. If a future
     // LiteLLM update adds rows under provider `zed.dev` that already include
     // Zed's markup, this function would double-bill — revisit by threading
-    // the matched-price provenance through `apply_pricing_if_available`.
+    // the matched-price provenance through `apply_token_pricing`.
     if message.client.as_ref() == "zed"
         && message
             .provider_id
@@ -1322,10 +1322,9 @@ fn pricing_multiplier(message: &UnifiedMessage) -> f64 {
     }
 }
 
-fn apply_pricing_if_available(
-    message: &mut UnifiedMessage,
-    pricing: Option<&pricing::PricingService>,
-) {
+fn apply_token_pricing(message: &mut UnifiedMessage, pricing: Option<&pricing::PricingService>) {
+    message.cost = 0.0;
+
     let Some(pricing) = pricing else {
         return;
     };
@@ -1671,7 +1670,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
+        aggregate_model_usage_entries, apply_token_pricing, dedupe_latest_trae_messages,
         generate_graph_with_loaded_pricing, load_aggregated_views_with_pricing,
         load_cache_only_pricing_with_diagnostics, load_usage_data_with_pricing, message_cache,
         normalize_model_for_grouping, parse_all_messages_with_pricing,
@@ -4092,7 +4091,7 @@ model = "gpt-5.5"
             assert_eq!(messages.len(), 3);
             assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 600);
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 250);
-            assert_eq!(messages.iter().map(|m| m.cost).sum::<f64>(), 0.06);
+            assert_eq!(messages.iter().map(|m| m.cost).sum::<f64>(), 0.0);
         }
 
         match original_home {
@@ -5096,7 +5095,7 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_apply_pricing_if_available_keeps_existing_cost_without_pricing() {
+    fn test_apply_token_pricing_clears_existing_cost_without_pricing() {
         let mut msg = UnifiedMessage::new_with_agent(
             "roocode",
             "gpt-4o",
@@ -5114,13 +5113,13 @@ model = "gpt-5.5"
             Some("planner".to_string()),
         );
 
-        apply_pricing_if_available(&mut msg, None);
+        apply_token_pricing(&mut msg, None);
 
-        assert_eq!(msg.cost, 0.42);
+        assert_eq!(msg.cost, 0.0);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_overrides_cost_when_pricing_exists() {
+    fn test_apply_token_pricing_overrides_cost_when_pricing_exists() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gpt-4o".into(),
@@ -5148,13 +5147,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.02);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_resolves_longcat_quant_variant() {
+    fn test_apply_token_pricing_resolves_longcat_quant_variant() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "longcat-flash-3b".into(),
@@ -5182,13 +5181,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.02);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_applies_zed_hosted_markup() {
+    fn test_apply_token_pricing_applies_zed_hosted_markup() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "claude-sonnet-4-5".into(),
@@ -5216,13 +5215,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert!((msg.cost - 0.022).abs() < 1e-12);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_skips_zed_markup_for_non_zed_client() {
+    fn test_apply_token_pricing_skips_zed_markup_for_non_zed_client() {
         // Non-zed client with provider_id "zed.dev" must not receive the +10%
         // markup. The multiplier is gated on (client == "zed" AND provider).
         let mut litellm = HashMap::new();
@@ -5252,14 +5251,14 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         // 10 * 0.001 + 5 * 0.002 = 0.020, no markup.
         assert!((msg.cost - 0.020).abs() < 1e-12);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_skips_zed_markup_for_byok_provider() {
+    fn test_apply_token_pricing_skips_zed_markup_for_byok_provider() {
         // A Zed message whose provider_id is the upstream provider directly
         // (BYOK / non-hosted path) must not be marked up — the user is paying
         // the upstream API directly, not through Zed.
@@ -5290,13 +5289,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert!((msg.cost - 0.020).abs() < 1e-12);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_uses_reasoning_for_gemini() {
+    fn test_apply_token_pricing_uses_reasoning_for_gemini() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gemini-2.5-pro".into(),
@@ -5324,13 +5323,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.034);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_uses_cache_read_pricing_for_gemini() {
+    fn test_apply_token_pricing_uses_cache_read_pricing_for_gemini() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gemini-2.5-pro".into(),
@@ -5359,13 +5358,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.0267);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_uses_market_rate_for_free_variant() {
+    fn test_apply_token_pricing_uses_market_rate_for_free_variant() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "z-ai/glm-4.7".into(),
@@ -5393,13 +5392,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.02);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_prefers_provider_aware_match() {
+    fn test_apply_token_pricing_prefers_provider_aware_match() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "xai/grok-code-fast-1-0825".into(),
@@ -5435,13 +5434,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_uses_nested_reseller_exact_match() {
+    fn test_apply_token_pricing_uses_nested_reseller_exact_match() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gpt-4".into(),
@@ -5477,13 +5476,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_keeps_scoped_fireworks_cost_without_exact_pricing() {
+    fn test_apply_token_pricing_clears_cost_without_exact_pricing() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "fireworks_ai/accounts/fireworks/models/deepseek-r1-0528-distill-qwen3-8b".into(),
@@ -5521,13 +5520,13 @@ model = "gpt-5.5"
             0.123,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
-        assert_eq!(msg.cost, 0.123);
+        assert_eq!(msg.cost, 0.0);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_prefers_provider_specific_exact_match_over_plain_exact() {
+    fn test_apply_token_pricing_prefers_provider_specific_exact_match_over_plain_exact() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gemini-2.5-pro".into(),
@@ -5568,13 +5567,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.05);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_normalizes_openai_codex_provider() {
+    fn test_apply_token_pricing_normalizes_openai_codex_provider() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "openai/gpt-5.2-preview".into(),
@@ -5610,13 +5609,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_normalizes_openai_pro_provider() {
+    fn test_apply_token_pricing_normalizes_openai_pro_provider() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "openai/gpt-5.2-preview".into(),
@@ -5644,13 +5643,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_prices_owl_gpt_as_openai() {
+    fn test_apply_token_pricing_prices_owl_gpt_as_openai() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "openai/gpt-5.2-preview".into(),
@@ -5678,13 +5677,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_prices_owl_claude_as_anthropic() {
+    fn test_apply_token_pricing_prices_owl_claude_as_anthropic() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "anthropic/claude-sonnet-4-5".into(),
@@ -5712,13 +5711,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_prices_owl_minimax_as_minimax() {
+    fn test_apply_token_pricing_prices_owl_minimax_as_minimax() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "minimax/minimax-m2.1".into(),
@@ -5746,13 +5745,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_prices_claude_code_gpt_5_3_codex() {
+    fn test_apply_token_pricing_prices_claude_code_gpt_5_3_codex() {
         let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
 
         let mut msg = UnifiedMessage::new(
@@ -5771,14 +5770,14 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         let expected = 1.75 + 1.4 + 0.00875;
         assert!((msg.cost - expected).abs() < 1e-12);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_prices_claude_code_minimax_model() {
+    fn test_apply_token_pricing_prices_claude_code_minimax_model() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "minimax/minimax-m2.1".into(),
@@ -5806,13 +5805,13 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.2);
     }
 
     #[test]
-    fn test_apply_pricing_if_available_prices_kimi_k2p6_alias() {
+    fn test_apply_token_pricing_prices_kimi_k2p6_alias() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "moonshotai/kimi-k2.6".into(),
@@ -5840,7 +5839,7 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(&pricing));
+        apply_token_pricing(&mut msg, Some(&pricing));
 
         let expected = 1_000_000.0 * 9.5e-7 + 250_000.0 * 0.000004;
         assert!((msg.cost - expected).abs() < 1e-12);
@@ -5878,7 +5877,7 @@ model = "gpt-5.5"
             0.0,
         );
 
-        apply_pricing_if_available(&mut msg, Some(selected.as_ref()));
+        apply_token_pricing(&mut msg, Some(selected.as_ref()));
 
         assert!(msg.cost > 0.0);
     }

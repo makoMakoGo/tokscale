@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::Deserialize;
 
-use crate::adapters::file::PricingPolicy;
 use crate::adapters::{
     AdapterScanContext, FoldContext, LocalSourceAdapter, MessageSink, ParseContext, ParsedUnit,
     SourceUnit, SourceUnitMeta, UnitMessageSource,
@@ -52,7 +51,7 @@ impl LocalSourceAdapter for CrushAdapter {
                 };
                 for message in &mut messages {
                     message.set_workspace(workspace_key.clone(), workspace_label.clone());
-                    PricingPolicy::ApplyAlways.apply(message, ctx.pricing);
+                    crate::apply_token_pricing(message, ctx.pricing);
                 }
                 ParsedUnit {
                     unit,

@@ -4,7 +4,6 @@ use rayon::prelude::*;
 
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
-use crate::adapters::file::PricingPolicy;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
     ParseContext, ParsedUnit, SourceUnit, SourceUnitMeta, UnitMessageSource,
@@ -64,7 +63,7 @@ impl LocalSourceAdapter for KiroAdapter {
                 SourceUnitMeta::KiroSqlite => {
                     let mut messages = sessions::kiro::parse_kiro_sqlite(&unit.path);
                     for message in &mut messages {
-                        PricingPolicy::ApplyAlways.apply(message, ctx.pricing);
+                        crate::apply_token_pricing(message, ctx.pricing);
                     }
                     ParsedUnit {
                         unit,
