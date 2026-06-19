@@ -76,7 +76,6 @@ impl LocalSourceAdapter for KiroAdapter {
                     sessions::kiro::parse_kiro_file,
                 ),
                 SourceUnitMeta::None
-                | SourceUnitMeta::Crush { .. }
                 | SourceUnitMeta::OpenCodeSqlite
                 | SourceUnitMeta::OpenCodeJson
                 | SourceUnitMeta::Codex { .. } => unreachable!("unexpected Kiro source unit meta"),

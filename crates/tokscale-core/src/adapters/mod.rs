@@ -3,7 +3,6 @@ pub(crate) mod cache;
 mod claude;
 mod codebuff;
 mod codex;
-mod crush;
 pub(crate) mod discover;
 pub(crate) mod file;
 mod gjc;
@@ -145,10 +144,6 @@ impl SourceUnit {
 pub(crate) enum SourceUnitMeta {
     #[default]
     None,
-    Crush {
-        workspace_key: Option<String>,
-        workspace_label: Option<String>,
-    },
     OpenCodeSqlite,
     OpenCodeJson,
     KiroFile,
@@ -190,7 +185,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 32] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 30] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -201,7 +196,6 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 32] = [
     &file::CURSOR_ADAPTER,
     &file::GEMINI_ADAPTER,
     &file::GROK_ADAPTER,
-    &file::WARP_ADAPTER,
     &file::AMP_ADAPTER,
     &file::DROID_ADAPTER,
     &file::KIMI_ADAPTER,
@@ -222,7 +216,6 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 32] = [
     &goose::GOOSE_ADAPTER,
     &kiro::KIRO_ADAPTER,
     &file::COMMANDCODE_ADAPTER,
-    &crush::CRUSH_ADAPTER,
 ];
 
 pub(crate) fn local_source_adapters() -> &'static [&'static dyn LocalSourceAdapter] {
@@ -282,4 +275,17 @@ fn append_path_suffix(path: &std::path::Path, suffix: &str) -> PathBuf {
     let mut os = std::ffi::OsString::from(path.as_os_str());
     os.push(suffix);
     PathBuf::from(os)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_cost_only_clients_are_not_registered_as_local_adapters() {
+        assert!(adapter_for(ClientId::Warp).is_none());
+        assert!(adapter_for(ClientId::Crush).is_none());
+        assert!(selected_adapters(&["warp".to_string()]).is_empty());
+        assert!(selected_adapters(&["crush".to_string()]).is_empty());
+    }
 }

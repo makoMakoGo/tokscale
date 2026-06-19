@@ -11,7 +11,6 @@ pub mod codebuff;
 pub mod codex;
 pub mod commandcode;
 pub mod copilot;
-pub mod crush;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
@@ -33,7 +32,6 @@ pub mod qwen;
 pub mod roocode;
 pub mod trae;
 pub(crate) mod utils;
-pub mod warp;
 pub mod zed;
 
 use crate::TokenBreakdown;
@@ -443,55 +441,6 @@ where
 mod tests {
     use super::*;
     use chrono::FixedOffset;
-
-    #[test]
-    fn warp_cache_parser_returns_empty_for_aggregate_spend_without_tokens() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            file.path(),
-            r#"{
-  "version": 1,
-  "syncedAt": "2026-05-29T12:00:00Z",
-  "usage": {
-    "requestsUsed": 42,
-    "requestLimit": 100,
-    "spendCents": 1234,
-    "nextRefreshTime": "2026-06-01T00:00:00Z"
-  },
-  "workspaces": [
-    {
-      "id": "workspace-1",
-      "name": "Personal",
-      "requestsUsed": 12,
-      "spendCents": 345
-    }
-  ]
-}"#,
-        )
-        .unwrap();
-
-        let messages = crate::sessions::warp::parse_warp_file(file.path());
-        assert!(messages.is_empty());
-
-        std::fs::write(
-            file.path(),
-            r#"{
-  "version": 1,
-  "syncedAt": "2026-05-29T12:00:00Z",
-  "usage": {
-    "requestsUsed": 42,
-    "requestLimit": 100,
-    "spendCents": 1234,
-    "nextRefreshTime": "2026-06-01T00:00:00Z"
-  },
-  "workspaces": []
-}"#,
-        )
-        .unwrap();
-
-        let messages = crate::sessions::warp::parse_warp_file(file.path());
-        assert!(messages.is_empty());
-    }
 
     #[test]
     fn test_timestamp_to_date_with_positive_offset() {

@@ -1078,10 +1078,7 @@ fn emit_cursor_setup_warnings(warnings: &[String]) {
     }
 }
 
-fn warp_setup_warnings_for_report(
-    _home_dir: &Option<String>,
-    clients: &Option<Vec<String>>,
-) -> Vec<String> {
+fn warp_setup_warnings_for_report(clients: &Option<Vec<String>>) -> Vec<String> {
     if !client_filter_explicitly_requests_warp(clients) {
         return Vec::new();
     }
@@ -1096,7 +1093,7 @@ fn setup_warnings_for_report(
     clients: &Option<Vec<String>>,
 ) -> Vec<String> {
     let mut warnings = cursor_setup_warnings_for_report(home_dir, clients);
-    warnings.extend(warp_setup_warnings_for_report(home_dir, clients));
+    warnings.extend(warp_setup_warnings_for_report(clients));
     warnings
 }
 
@@ -6538,11 +6535,7 @@ mod tests {
 
     #[test]
     fn warp_setup_warning_explains_aggregate_cache_is_not_reported() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let warnings = warp_setup_warnings_for_report(
-            &Some(temp.path().to_string_lossy().to_string()),
-            &Some(vec!["warp".to_string()]),
-        );
+        let warnings = warp_setup_warnings_for_report(&Some(vec!["warp".to_string()]));
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("not included in local reports"));

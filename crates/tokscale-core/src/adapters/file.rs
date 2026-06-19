@@ -213,8 +213,6 @@ pub(crate) static GEMINI_ADAPTER: PolicyFileAdapter =
     PolicyFileAdapter::new(ClientId::Gemini, parse_gemini_file_with_policy);
 pub(crate) static GROK_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new(ClientId::Grok, sessions::grok::parse_grok_updates_file);
-pub(crate) static WARP_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Warp, sessions::warp::parse_warp_file);
 pub(crate) static AMP_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new(ClientId::Amp, sessions::amp::parse_amp_file);
 pub(crate) static DROID_ADAPTER: CachedFileAdapter =
