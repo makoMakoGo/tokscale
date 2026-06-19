@@ -4437,17 +4437,11 @@ fn is_legacy_tokenless_cursor_row(client: &tokscale_core::ClientContribution) ->
         && client_token_total(&client.tokens) == 0
 }
 
-fn is_aggregate_only_warp_row(client: &tokscale_core::ClientContribution) -> bool {
-    client.client == "warp"
-        && client.model_id == "aggregate-requests"
-        && client_token_total(&client.tokens) == 0
-}
-
 /// A row the server's "Cost submitted without tokens" sanity check would
 /// reject: real cost with every token bucket at zero, excluding the Cursor
 /// `premium-tool-call` carve-out above.
 fn is_tokenless_costed_row(client: &tokscale_core::ClientContribution) -> bool {
-    (is_aggregate_only_warp_row(client) || client.cost > 0.0)
+    client.cost > 0.0
         && client_token_total(&client.tokens) == 0
         && !is_legacy_tokenless_cursor_row(client)
 }
@@ -4457,10 +4451,10 @@ fn is_tokenless_costed_row(client: &tokscale_core::ClientContribution) -> bool {
 /// rejected wholesale.
 ///
 /// Cursor's usage export lists historical request/On-Demand charges (e.g.
-/// `auto`, `claude-3.5-sonnet`, `o3`) with empty token columns, and Warp/Oz
-/// only exposes aggregate request/spend counters. The server rejects cost with
-/// no tokens, and request counts must not be submitted as fabricated tokens, so
-/// we exclude the offending rows here and report them to the user.
+/// `auto`, `claude-3.5-sonnet`, `o3`) with empty token columns. The server
+/// rejects cost with no tokens, and request counts must not be submitted as
+/// fabricated tokens, so we exclude the offending rows here and report them to
+/// the user.
 ///
 /// Excluded rows always carry zero tokens, so only cost/messages change; token
 /// totals, breakdowns, and intensities are untouched. Summary and year rollups
@@ -6289,31 +6283,6 @@ mod tests {
         assert!(excluded.is_empty());
         assert_eq!(graph.contributions[0].clients.len(), 2);
         assert_eq!(graph.summary.total_cost, original_cost);
-    }
-
-    #[test]
-    fn test_exclude_tokenless_cost_drops_warp_aggregate_requests() {
-        let mut graph = graph_result_with_contributions(vec![day_with_clients(
-            "2026-01-02",
-            0,
-            vec![client_contribution(
-                "warp",
-                "aggregate-requests",
-                "warp",
-                0,
-                12.34,
-                42,
-            )],
-        )]);
-
-        let excluded = exclude_tokenless_cost_contributions(&mut graph);
-
-        assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].client, "warp");
-        assert_eq!(excluded[0].model_id, "aggregate-requests");
-        assert!(graph.contributions[0].clients.is_empty());
-        assert_eq!(graph.summary.total_tokens, 0);
-        assert_eq!(graph.summary.total_cost, 0.0);
     }
 
     #[test]

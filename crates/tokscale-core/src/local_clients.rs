@@ -275,7 +275,7 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "crush/projects.json",
             pattern: "projects.json",
             headless: false,
-            parse_local: true,
+            parse_local: false,
         },
     },
     LocalClientEntry {
@@ -394,7 +394,7 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "warp-cache",
             pattern: "usage*.json",
             headless: false,
-            parse_local: true,
+            parse_local: false,
         },
     },
     LocalClientEntry {
@@ -501,6 +501,17 @@ mod tests {
         assert_eq!(def.relative_path, ".config/tokscale/cursor-cache");
         assert_eq!(def.pattern, "usage*.csv");
         assert!(!ClientId::Cursor.parse_local());
+    }
+
+    #[test]
+    fn cost_only_clients_are_registered_but_not_locally_parsed() {
+        let crush = ClientId::Crush.local_def().expect("crush has scan policy");
+        assert_eq!(crush.relative_path, "crush/projects.json");
+        assert!(!ClientId::Crush.parse_local());
+
+        let warp = ClientId::Warp.local_def().expect("warp has scan policy");
+        assert_eq!(warp.relative_path, "warp-cache");
+        assert!(!ClientId::Warp.parse_local());
     }
 
     #[test]

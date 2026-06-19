@@ -8,10 +8,8 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::clients::ClientId;
-use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
 use crate::LocalClientDef;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// Emit a one-time `tracing::warn!` if `path` does not start with the user's
 /// home directory. The scan is NOT blocked — this is a heads-up only.
@@ -69,13 +67,6 @@ pub struct ScannerSettings {
     pub extra_scan_paths: BTreeMap<String, Vec<PathBuf>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CrushDbSource {
-    pub db_path: PathBuf,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
-}
-
 /// Result of scanning all session directories
 #[derive(Debug)]
 pub struct ScanResult {
@@ -93,7 +84,6 @@ pub struct ScanResult {
     pub goose_db: Option<PathBuf>,
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
-    pub crush_dbs: Vec<CrushDbSource>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -108,7 +98,6 @@ impl Default for ScanResult {
             goose_db: None,
             zed_db: None,
             kiro_db: None,
-            crush_dbs: Vec::new(),
             opencode_json_dir: None,
         }
     }
@@ -422,18 +411,6 @@ pub fn built_in_extra_scan_paths_for(
     paths
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct CrushProjectList {
-    #[serde(default)]
-    projects: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CrushProject {
-    path: String,
-    data_dir: String,
-}
-
 /// Discover every OpenCode SQLite database under the opencode data dir.
 ///
 /// Matches:
@@ -504,57 +481,6 @@ fn is_opencode_db_filename(name: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-fn crush_db_path(data_dir: &Path) -> Option<PathBuf> {
-    let candidate = data_dir.join("crush.db");
-    candidate.is_file().then_some(candidate)
-}
-
-fn resolve_crush_data_dir(project: &CrushProject) -> PathBuf {
-    let data_dir = PathBuf::from(&project.data_dir);
-    if data_dir.is_absolute() {
-        data_dir
-    } else {
-        PathBuf::from(&project.path).join(data_dir)
-    }
-}
-
-fn scan_crush_registry(registry_path: &Path) -> Vec<CrushDbSource> {
-    let registry = match std::fs::read_to_string(registry_path) {
-        Ok(contents) => contents,
-        Err(_) => return Vec::new(),
-    };
-
-    let list: CrushProjectList = match serde_json::from_str(&registry) {
-        Ok(list) => list,
-        Err(_) => return Vec::new(),
-    };
-
-    list.projects
-        .into_iter()
-        .filter_map(|project| serde_json::from_value::<CrushProject>(project).ok())
-        .filter_map(|project| {
-            let db_path = crush_db_path(&resolve_crush_data_dir(&project))?;
-            let workspace_key = normalize_workspace_key(&project.path);
-            let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
-            Some(CrushDbSource {
-                db_path,
-                workspace_key,
-                workspace_label,
-            })
-        })
-        .collect()
-}
-
-fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource> {
-    let registry_path = PathBuf::from(
-        local_def(ClientId::Crush).resolve_path_with_env_strategy(home_dir, use_env_roots),
-    );
-    let mut dbs = scan_crush_registry(&registry_path);
-    dbs.sort_by(|a, b| a.db_path.cmp(&b.db_path));
-    dbs.dedup_by(|a, b| a.db_path == b.db_path);
-    dbs
-}
-
 fn cline_additional_vscode_task_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     let mut roots = vec![PathBuf::from(home_dir)
         .join("Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks")];
@@ -581,15 +507,11 @@ fn cline_additional_vscode_task_roots(home_dir: &str, use_env_roots: bool) -> Ve
 }
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
-    // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
-    // Roo/KiloCode require local + remote and server task roots, and Crush
-    // discovers SQLite DBs via the project registry rather than scanned file
-    // paths. Hermes/Zed profile databases are named consistently enough for
-    // `scan_directory` to find them from user-provided roots.
-    !matches!(
-        client_id,
-        ClientId::Kilo | ClientId::Crush | ClientId::Goose
-    )
+    // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`.
+    // Roo/KiloCode require local + remote and server task roots. Hermes/Zed
+    // profile databases are named consistently enough for `scan_directory` to
+    // find them from user-provided roots.
+    !matches!(client_id, ClientId::Kilo | ClientId::Goose)
 }
 
 fn push_unique_scan_task(
@@ -699,11 +621,14 @@ fn scan_all_clients_with_env_strategy_inner(
 
     let include_all = clients.is_empty();
     let enabled: HashSet<ClientId> = if include_all {
-        ClientId::iter().collect()
+        ClientId::iter()
+            .filter(|client| client.parse_local())
+            .collect()
     } else {
         clients
             .iter()
             .filter_map(|s| ClientId::from_str(s))
+            .filter(|client| client.parse_local())
             .collect()
     };
 
@@ -726,7 +651,6 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Hermes
                 | ClientId::Goose
                 | ClientId::Zed
-                | ClientId::Crush
                 | ClientId::Codebuff
                 | ClientId::Kimi
                 | ClientId::Gjc
@@ -1032,10 +956,6 @@ fn scan_all_clients_with_env_strategy_inner(
                 }
             }
         }
-    }
-
-    if enabled.contains(&ClientId::Crush) {
-        result.crush_dbs = discover_crush_dbs(home_dir, use_env_roots);
     }
 
     if enabled.contains(&ClientId::Kiro) {
@@ -1655,11 +1575,6 @@ mod tests {
         File::create(macos.join("ui_messages.json")).unwrap();
         File::create(windows.join("ui_messages.json")).unwrap();
         File::create(server.join("ui_messages.json")).unwrap();
-    }
-
-    fn setup_mock_crush_registry(registry_path: &Path, projects_json: &str) {
-        fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
-        fs::write(registry_path, projects_json).unwrap();
     }
 
     #[test]
@@ -2586,153 +2501,47 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_crush_registry_resolves_relative_and_absolute_data_dirs() {
+    fn test_scan_all_clients_skips_cost_only_clients() {
         let dir = TempDir::new().unwrap();
-        let project_a = dir.path().join("project-a");
-        let project_b_data = dir.path().join("project-b-data");
-        fs::create_dir_all(project_a.join(".crush")).unwrap();
-        fs::create_dir_all(&project_b_data).unwrap();
-        File::create(project_a.join(".crush").join("crush.db")).unwrap();
-        File::create(project_b_data.join("crush.db")).unwrap();
+        let home = dir.path();
+        let settings = ScannerSettings {
+            extra_scan_paths: BTreeMap::from([
+                (
+                    "warp".to_string(),
+                    vec![home.join(".config/tokscale/warp-cache")],
+                ),
+                ("crush".to_string(), vec![home.join(".local/share/crush")]),
+            ]),
+            ..Default::default()
+        };
 
-        let registry_path = dir.path().join("projects.json");
-        let projects_json = format!(
-            r#"{{
-  "projects": [
-    {{ "path": "{}", "data_dir": ".crush" }},
-    {{ "path": "{}", "data_dir": "{}" }},
-    {{ "path": "{}", "data_dir": ".crush" }}
-  ]
-}}"#,
-            project_a.display(),
-            dir.path().join("project-b").display(),
-            project_b_data.display(),
-            dir.path().join("missing-project").display(),
+        let warp_file = home.join(".config/tokscale/warp-cache/usage.json");
+        fs::create_dir_all(warp_file.parent().unwrap()).unwrap();
+        fs::write(&warp_file, "{}").unwrap();
+
+        let crush_db = home.join(".local/share/crush/project/crush.db");
+        fs::create_dir_all(crush_db.parent().unwrap()).unwrap();
+        File::create(&crush_db).unwrap();
+
+        let all_clients =
+            scan_all_clients_with_scanner_settings(home.to_str().unwrap(), &[], false, &settings);
+        let explicit_warp = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["warp".to_string()],
+            false,
+            &settings,
         );
-        setup_mock_crush_registry(&registry_path, &projects_json);
-
-        let result = scan_crush_registry(&registry_path);
-        assert_eq!(
-            result,
-            vec![
-                CrushDbSource {
-                    db_path: project_a.join(".crush").join("crush.db"),
-                    workspace_key: Some(project_a.display().to_string()),
-                    workspace_label: Some("project-a".to_string()),
-                },
-                CrushDbSource {
-                    db_path: project_b_data.join("crush.db"),
-                    workspace_key: Some(dir.path().join("project-b").display().to_string()),
-                    workspace_label: Some("project-b".to_string()),
-                },
-            ]
+        let explicit_crush = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["crush".to_string()],
+            false,
+            &settings,
         );
-    }
 
-    #[test]
-    fn test_scan_crush_registry_skips_malformed_project_entries() {
-        let dir = TempDir::new().unwrap();
-        let valid_project = dir.path().join("valid-project");
-        fs::create_dir_all(valid_project.join(".crush")).unwrap();
-        File::create(valid_project.join(".crush").join("crush.db")).unwrap();
-
-        let registry_path = dir.path().join("projects.json");
-        let projects_json = format!(
-            r#"{{
-  "projects": [
-    {{ "path": "{}", "data_dir": ".crush" }},
-    {{ "path": 123, "data_dir": ".crush" }},
-    {{ "data_dir": ".crush" }},
-    "not-an-object"
-  ]
-}}"#,
-            valid_project.display()
-        );
-        setup_mock_crush_registry(&registry_path, &projects_json);
-
-        let result = scan_crush_registry(&registry_path);
-        assert_eq!(
-            result,
-            vec![CrushDbSource {
-                db_path: valid_project.join(".crush").join("crush.db"),
-                workspace_key: Some(valid_project.display().to_string()),
-                workspace_label: Some("valid-project".to_string()),
-            }]
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn test_discover_crush_dbs_ignores_cwd_without_override() {
-        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
-        let previous_dir = std::env::current_dir().unwrap();
-
-        let dir = TempDir::new().unwrap();
-        let home = dir.path().join("home");
-        let project = dir.path().join("workspace");
-        let nested = project.join("src/subdir");
-        let xdg = dir.path().join("xdg");
-
-        fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(xdg.join("crush")).unwrap();
-        fs::create_dir_all(project.join(".crush")).unwrap();
-        File::create(project.join(".crush").join("crush.db")).unwrap();
-        fs::write(
-            xdg.join("crush").join("projects.json"),
-            r#"{"projects":[]}"#,
-        )
-        .unwrap();
-
-        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
-        std::env::set_current_dir(&nested).unwrap();
-
-        let result = discover_crush_dbs(home.to_str().unwrap(), false);
-        assert!(result.is_empty());
-
-        restore_current_dir(&previous_dir);
-        restore_env("XDG_DATA_HOME", previous_xdg);
-    }
-
-    #[test]
-    #[serial]
-    fn test_scan_all_clients_crush_populates_crush_db_paths() {
-        let previous_xdg = std::env::var("XDG_DATA_HOME").ok();
-
-        let dir = TempDir::new().unwrap();
-        let home = dir.path().join("home");
-        let xdg = dir.path().join("xdg");
-        let project = dir.path().join("project");
-        let data_dir = project.join(".crush");
-
-        fs::create_dir_all(xdg.join("crush")).unwrap();
-        fs::create_dir_all(&data_dir).unwrap();
-        File::create(data_dir.join("crush.db")).unwrap();
-
-        let registry_path = xdg.join("crush").join("projects.json");
-        let projects_json = format!(
-            r#"{{
-  "projects": [
-    {{ "path": "{}", "data_dir": ".crush" }}
-  ]
-}}"#,
-            project.display()
-        );
-        setup_mock_crush_registry(&registry_path, &projects_json);
-
-        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
-
-        let result = scan_all_clients(home.to_str().unwrap(), &["crush".to_string()]);
-        assert_eq!(
-            result.crush_dbs,
-            vec![CrushDbSource {
-                db_path: data_dir.join("crush.db"),
-                workspace_key: Some(project.display().to_string()),
-                workspace_label: Some("project".to_string()),
-            }]
-        );
-        assert!(result.get(ClientId::Crush).is_empty());
-
-        restore_env("XDG_DATA_HOME", previous_xdg);
+        assert!(all_clients.get(ClientId::Warp).is_empty());
+        assert!(all_clients.get(ClientId::Crush).is_empty());
+        assert_eq!(explicit_warp.total_files(), 0);
+        assert_eq!(explicit_crush.total_files(), 0);
     }
 
     #[test]
