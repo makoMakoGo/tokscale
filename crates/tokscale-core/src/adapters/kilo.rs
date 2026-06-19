@@ -1,7 +1,6 @@
 use rayon::prelude::*;
 
 use crate::adapters::discover as adapter_discover;
-use crate::adapters::file::PricingPolicy;
 use crate::adapters::{
     AdapterScanContext, FoldContext, LocalSourceAdapter, MessageSink, ParseContext, ParsedUnit,
     SourceUnit, UnitMessageSource,
@@ -38,9 +37,7 @@ impl LocalSourceAdapter for KiloAdapter {
             .into_par_iter()
             .map(|unit| {
                 let mut messages = sessions::kilo::parse_kilo_sqlite(&unit.path);
-                for message in &mut messages {
-                    PricingPolicy::ApplyAlways.apply(message, ctx.pricing);
-                }
+                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),

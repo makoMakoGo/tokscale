@@ -32,7 +32,6 @@ pub struct MuxModelUsage {
 #[derive(Debug, Deserialize)]
 pub struct MuxTokenBucket {
     pub tokens: Option<i64>,
-    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,18 +75,11 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
         .filter_map(|(model_key, model_usage)| {
             let tokens =
                 |b: &Option<MuxTokenBucket>| b.as_ref().and_then(|b| b.tokens).unwrap_or(0).max(0);
-            let cost =
-                |b: &Option<MuxTokenBucket>| b.as_ref().and_then(|b| b.cost_usd).unwrap_or(0.0);
             let input = tokens(&model_usage.input);
             let cached = tokens(&model_usage.cached);
             let cache_create = tokens(&model_usage.cache_create);
             let output = tokens(&model_usage.output);
             let reasoning = tokens(&model_usage.reasoning);
-            let source_cost = cost(&model_usage.input)
-                + cost(&model_usage.cached)
-                + cost(&model_usage.cache_create)
-                + cost(&model_usage.output)
-                + cost(&model_usage.reasoning);
 
             if input == 0 && cached == 0 && cache_create == 0 && output == 0 && reasoning == 0 {
                 return None;
@@ -116,7 +108,7 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
                     cache_write: cache_create,
                     reasoning,
                 },
-                source_cost,
+                0.0,
             ))
         })
         .collect()
@@ -275,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_cost_summed() {
+    fn test_source_cost_ignored() {
         let json = r#"{
             "version": 1,
             "byModel": {
@@ -292,8 +284,7 @@ mod tests {
         let f = write_temp_json(json);
         let msgs = parse_mux_file(f.path());
         assert_eq!(msgs.len(), 1);
-        let expected_cost = 0.01 + 0.02 + 0.005 + 0.03;
-        assert!((msgs[0].cost - expected_cost).abs() < 1e-10);
+        assert_eq!(msgs[0].cost, 0.0);
     }
 
     #[test]

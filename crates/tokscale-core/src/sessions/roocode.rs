@@ -62,6 +62,16 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
         };
 
         let provider = provider_from_api_protocol(payload.api_protocol.as_deref());
+        let token_breakdown = TokenBreakdown {
+            input: payload.tokens_in,
+            output: payload.tokens_out,
+            cache_read: payload.cache_reads,
+            cache_write: payload.cache_writes,
+            reasoning: 0,
+        };
+        if crate::positive_token_total(&token_breakdown) == 0 {
+            continue;
+        }
 
         messages.push(UnifiedMessage::new_with_agent(
             source,
@@ -69,14 +79,8 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
             provider,
             session_id.clone(),
             timestamp,
-            TokenBreakdown {
-                input: payload.tokens_in,
-                output: payload.tokens_out,
-                cache_read: payload.cache_reads,
-                cache_write: payload.cache_writes,
-                reasoning: 0,
-            },
-            payload.cost,
+            token_breakdown,
+            0.0,
             agent.clone(),
         ));
     }
@@ -178,7 +182,6 @@ fn parse_entry_timestamp(ts: Option<&Value>) -> Option<i64> {
 }
 
 struct ApiReqStartedPayload {
-    cost: f64,
     tokens_in: i64,
     tokens_out: i64,
     cache_reads: i64,
@@ -190,7 +193,6 @@ fn parse_api_req_started_payload(text: &str) -> Option<ApiReqStartedPayload> {
     let mut bytes = text.as_bytes().to_vec();
     let value: Value = simd_json::from_slice(&mut bytes).ok()?;
 
-    let cost = extract_f64(value.get("cost")).unwrap_or(0.0).max(0.0);
     let tokens_in = extract_i64(value.get("tokensIn")).unwrap_or(0).max(0);
     let tokens_out = extract_i64(value.get("tokensOut")).unwrap_or(0).max(0);
     let cache_reads = extract_i64(value.get("cacheReads")).unwrap_or(0).max(0);
@@ -201,21 +203,11 @@ fn parse_api_req_started_payload(text: &str) -> Option<ApiReqStartedPayload> {
         .map(|s| s.to_string());
 
     Some(ApiReqStartedPayload {
-        cost,
         tokens_in,
         tokens_out,
         cache_reads,
         cache_writes,
         api_protocol,
-    })
-}
-
-fn extract_f64(value: Option<&Value>) -> Option<f64> {
-    value.and_then(|val| {
-        val.as_f64()
-            .or_else(|| val.as_i64().map(|v| v as f64))
-            .or_else(|| val.as_u64().map(|v| v as f64))
-            .or_else(|| val.as_str().and_then(|s| s.parse::<f64>().ok()))
     })
 }
 
@@ -284,7 +276,7 @@ after"#;
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 5);
-        assert_eq!(messages[0].cost, 0.12);
+        assert_eq!(messages[0].cost, 0.0);
         assert_eq!(messages[0].agent.as_deref(), Some("architect"));
     }
 

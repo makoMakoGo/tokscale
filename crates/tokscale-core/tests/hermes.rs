@@ -76,7 +76,7 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
     assert_eq!(msg.tokens.cache_read, 50);
     assert_eq!(msg.tokens.cache_write, 20);
     assert_eq!(msg.tokens.reasoning, 10);
-    assert_eq!(msg.cost, 0.34);
+    assert_eq!(msg.cost, 0.0);
     assert_eq!(
         msg.dedup_key,
         Some(tokscale_core::sessions::dedup_hash_str("session-1"))
@@ -84,8 +84,7 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
 }
 
 #[test]
-fn test_parse_hermes_sqlite_skips_empty_sessions_and_falls_back_to_estimated_cost_and_provider_inference(
-) {
+fn test_parse_hermes_sqlite_skips_empty_sessions_and_uses_provider_inference() {
     let dir = TempDir::new().unwrap();
     let db_path = create_test_db(&dir);
     let conn = Connection::open(&db_path).unwrap();
@@ -174,7 +173,7 @@ fn test_parse_hermes_sqlite_skips_empty_sessions_and_falls_back_to_estimated_cos
     let msg = &messages[0];
     assert_eq!(msg.session_id.as_ref(), "session-valid");
     assert_eq!(msg.provider_id.as_ref(), "openai");
-    assert_eq!(msg.cost, 1.25);
+    assert_eq!(msg.cost, 0.0);
     assert_eq!(msg.message_count, 3);
 }
 

@@ -21,46 +21,14 @@ pub(crate) struct CachedFileAdapter {
     parse: fn(&Path) -> Vec<UnifiedMessage>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum PricingPolicy {
-    ApplyAlways,
-    ApplyIfCostNonPositive,
-    Never,
-}
-
-impl PricingPolicy {
-    pub(crate) fn apply(
-        self,
-        message: &mut UnifiedMessage,
-        pricing: Option<&crate::pricing::PricingService>,
-    ) {
-        match self {
-            PricingPolicy::ApplyAlways => crate::apply_pricing_if_available(message, pricing),
-            PricingPolicy::ApplyIfCostNonPositive if message.cost <= 0.0 => {
-                crate::apply_pricing_if_available(message, pricing);
-            }
-            PricingPolicy::ApplyIfCostNonPositive | PricingPolicy::Never => {}
-        }
-    }
-}
-
 pub(crate) struct NonCachedFileAdapter {
     client: ClientId,
     parse: fn(&Path) -> Vec<UnifiedMessage>,
-    pricing_policy: PricingPolicy,
 }
 
 impl NonCachedFileAdapter {
-    pub(crate) const fn new(
-        client: ClientId,
-        parse: fn(&Path) -> Vec<UnifiedMessage>,
-        pricing_policy: PricingPolicy,
-    ) -> Self {
-        Self {
-            client,
-            parse,
-            pricing_policy,
-        }
+    pub(crate) const fn new(client: ClientId, parse: fn(&Path) -> Vec<UnifiedMessage>) -> Self {
+        Self { client, parse }
     }
 }
 
@@ -75,14 +43,11 @@ impl LocalSourceAdapter for NonCachedFileAdapter {
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
-        let pricing_policy = self.pricing_policy;
         units
             .into_par_iter()
             .map(|unit| {
                 let mut messages = parse(&unit.path);
-                for message in &mut messages {
-                    pricing_policy.apply(message, ctx.pricing);
-                }
+                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
@@ -248,8 +213,6 @@ pub(crate) static GEMINI_ADAPTER: PolicyFileAdapter =
     PolicyFileAdapter::new(ClientId::Gemini, parse_gemini_file_with_policy);
 pub(crate) static GROK_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new(ClientId::Grok, sessions::grok::parse_grok_updates_file);
-pub(crate) static WARP_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Warp, sessions::warp::parse_warp_file);
 pub(crate) static AMP_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new(ClientId::Amp, sessions::amp::parse_amp_file);
 pub(crate) static DROID_ADAPTER: CachedFileAdapter =
@@ -267,7 +230,6 @@ pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::ne
 pub(crate) static ANTIGRAVITY_ADAPTER: NonCachedFileAdapter = NonCachedFileAdapter::new(
     ClientId::Antigravity,
     sessions::antigravity::parse_antigravity_file,
-    PricingPolicy::ApplyAlways,
 );
 
 #[cfg(test)]

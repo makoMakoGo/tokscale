@@ -79,7 +79,7 @@ fn test_parse_codebuff_emits_one_event_per_assistant_message_with_usage() {
     assert_eq!(first.tokens.output, 200);
     assert_eq!(first.tokens.cache_write, 300);
     assert_eq!(first.tokens.cache_read, 100);
-    assert_eq!(first.cost, 1.25);
+    assert_eq!(first.cost, 0.0);
     assert!(first
         .session_id
         .ends_with("/my-project/2025-12-20T12-00-00.000Z"));

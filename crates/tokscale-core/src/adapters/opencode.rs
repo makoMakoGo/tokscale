@@ -85,7 +85,6 @@ impl LocalSourceAdapter for OpenCodeAdapter {
                     })
                 }
                 SourceUnitMeta::None
-                | SourceUnitMeta::Crush { .. }
                 | SourceUnitMeta::KiroFile
                 | SourceUnitMeta::KiroSqlite
                 | SourceUnitMeta::KiroGlobalStorage
@@ -211,7 +210,7 @@ mod tests {
                 output: 5,
                 ..Default::default()
             },
-            1.0,
+            0.0,
             Some(key),
         );
         let json_message = UnifiedMessage::new_with_dedup(
@@ -225,7 +224,7 @@ mod tests {
                 output: 5,
                 ..Default::default()
             },
-            2.0,
+            0.0,
             Some(key),
         );
         let parsed = vec![
@@ -258,6 +257,5 @@ mod tests {
 
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].session_id.as_ref(), "sqlite-session");
-        assert_eq!(sink[0].cost, 1.0);
     }
 }

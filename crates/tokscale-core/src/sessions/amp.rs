@@ -13,7 +13,6 @@ use std::path::Path;
 pub struct AmpUsageEvent {
     pub timestamp: Option<String>,
     pub model: Option<String>,
-    pub credits: Option<f64>,
     pub tokens: Option<AmpTokens>,
     #[serde(rename = "operationType")]
     pub _operation_type: Option<String>,
@@ -45,7 +44,6 @@ pub struct AmpMessageUsage {
     pub cache_read_input_tokens: Option<i64>,
     #[serde(rename = "cacheCreationInputTokens")]
     pub cache_creation_input_tokens: Option<i64>,
-    pub credits: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,7 +81,6 @@ struct AmpUsageRecord {
     message_id: Option<i64>,
     ledger_to_message_id: Option<i64>,
     tokens: TokenBreakdown,
-    cost: f64,
 }
 
 impl AmpUsageRecord {
@@ -99,7 +96,7 @@ impl AmpUsageRecord {
             thread_id,
             self.timestamp,
             self.tokens,
-            self.cost,
+            0.0,
         )
     }
 }
@@ -148,20 +145,24 @@ fn parse_amp_ledger_records(
                 cache_creation_input_tokens: Some(0),
             });
 
+            let tokens = TokenBreakdown {
+                input: tokens.input.unwrap_or(0).max(0),
+                output: tokens.output.unwrap_or(0).max(0),
+                cache_read: tokens.cache_read_input_tokens.unwrap_or(0).max(0),
+                cache_write: tokens.cache_creation_input_tokens.unwrap_or(0).max(0),
+                reasoning: 0,
+            };
+            if crate::positive_token_total(&tokens) == 0 {
+                return None;
+            }
+
             Some(AmpUsageRecord {
                 model,
                 timestamp,
                 has_explicit_timestamp: explicit_timestamp.is_some(),
                 message_id: None,
                 ledger_to_message_id: event.to_message_id.filter(|id| *id > 0),
-                tokens: TokenBreakdown {
-                    input: tokens.input.unwrap_or(0).max(0),
-                    output: tokens.output.unwrap_or(0).max(0),
-                    cache_read: tokens.cache_read_input_tokens.unwrap_or(0).max(0),
-                    cache_write: tokens.cache_creation_input_tokens.unwrap_or(0).max(0),
-                    reasoning: 0,
-                },
-                cost: event.credits.unwrap_or(0.0).max(0.0),
+                tokens,
             })
         })
         .collect()
@@ -194,20 +195,24 @@ fn parse_amp_message_records(
             let message_id = msg.message_id.unwrap_or(0).max(0);
             let timestamp = base_timestamp.saturating_add(message_id.saturating_mul(1000));
 
+            let tokens = TokenBreakdown {
+                input: usage.input_tokens.unwrap_or(0).max(0),
+                output: usage.output_tokens.unwrap_or(0).max(0),
+                cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
+                cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
+                reasoning: 0,
+            };
+            if crate::positive_token_total(&tokens) == 0 {
+                return None;
+            }
+
             Some(AmpUsageRecord {
                 model,
                 timestamp,
                 has_explicit_timestamp: false,
                 message_id: Some(message_id).filter(|id| *id > 0),
                 ledger_to_message_id: None,
-                tokens: TokenBreakdown {
-                    input: usage.input_tokens.unwrap_or(0).max(0),
-                    output: usage.output_tokens.unwrap_or(0).max(0),
-                    cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
-                    cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
-                    reasoning: 0,
-                },
-                cost: usage.credits.unwrap_or(0.0).max(0.0),
+                tokens,
             })
         })
         .collect()
@@ -243,14 +248,9 @@ fn merge_amp_records(
     message_record: &AmpUsageRecord,
 ) -> AmpUsageRecord {
     if ledger_record.has_explicit_timestamp {
-        if ledger_record.cost > 0.0 || message_record.cost <= 0.0 {
-            ledger_record
-        } else {
-            AmpUsageRecord {
-                cost: message_record.cost,
-                message_id: message_record.message_id,
-                ..ledger_record
-            }
+        AmpUsageRecord {
+            message_id: message_record.message_id,
+            ..ledger_record
         }
     } else {
         AmpUsageRecord {
@@ -260,11 +260,6 @@ fn merge_amp_records(
             message_id: message_record.message_id,
             ledger_to_message_id: ledger_record.ledger_to_message_id,
             tokens: ledger_record.tokens,
-            cost: if ledger_record.cost > 0.0 {
-                ledger_record.cost
-            } else {
-                message_record.cost
-            },
         }
     }
 }

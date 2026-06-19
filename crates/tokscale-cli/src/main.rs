@@ -1078,54 +1078,14 @@ fn emit_cursor_setup_warnings(warnings: &[String]) {
     }
 }
 
-fn warp_setup_warnings_for_report(
-    home_dir: &Option<String>,
-    clients: &Option<Vec<String>>,
-) -> Vec<String> {
+fn warp_setup_warnings_for_report(clients: &Option<Vec<String>>) -> Vec<String> {
     if !client_filter_explicitly_requests_warp(clients) {
         return Vec::new();
     }
 
-    let (home_path, home_override) = match home_dir {
-        Some(home) => (PathBuf::from(home), true),
-        None => match dirs::home_dir() {
-            Some(home) => (home, false),
-            None => {
-                return vec![
-                    "Warp usage requires Tokscale's Warp aggregate cache, but the home directory could not be resolved. Tokscale does not parse local Warp transcripts.".to_string(),
-                ];
-            }
-        },
-    };
-    let has_cache = if home_override {
-        warp::has_usage_cache_in_home(&home_path)
-    } else {
-        warp::load_usage_cache().is_some()
-    };
-    if has_cache {
-        return Vec::new();
-    }
-
-    let cache_glob = if home_override {
-        home_path
-            .join(".config/tokscale/warp-cache/usage*.json")
-            .to_string_lossy()
-            .to_string()
-    } else {
-        "~/.config/tokscale/warp-cache/usage*.json".to_string()
-    };
-    let action = if home_override {
-        "run `tokscale warp sync` for the default profile or populate that cache before running a report with --home"
-    } else if warp::has_credentials() {
-        "run `tokscale warp sync`"
-    } else {
-        "run `tokscale warp login` and `tokscale warp sync`"
-    };
-
-    vec![format!(
-        "Warp usage requires Tokscale's aggregate API cache at `{}`; {}. Tokscale does not parse local Warp/Oz session transcripts and does not infer tokens from request counts.",
-        cache_glob, action
-    )]
+    vec![
+        "Warp aggregate request/spend data is not included in local reports because it has no token buckets. Tokscale does not parse local Warp/Oz session transcripts; add Warp again only when a token-level source is available.".to_string(),
+    ]
 }
 
 fn setup_warnings_for_report(
@@ -1133,7 +1093,7 @@ fn setup_warnings_for_report(
     clients: &Option<Vec<String>>,
 ) -> Vec<String> {
     let mut warnings = cursor_setup_warnings_for_report(home_dir, clients);
-    warnings.extend(warp_setup_warnings_for_report(home_dir, clients));
+    warnings.extend(warp_setup_warnings_for_report(clients));
     warnings
 }
 
@@ -4450,158 +4410,6 @@ fn cap_graph_result_to_utc_today(
     true
 }
 
-/// A client row dropped from a submission because it carried cost without any
-/// token attribution. See [`exclude_tokenless_cost_contributions`].
-#[derive(Debug, Clone, PartialEq)]
-struct ExcludedTokenlessRow {
-    date: String,
-    client: String,
-    model_id: String,
-    provider_id: String,
-    cost: f64,
-}
-
-fn client_token_total(tokens: &tokscale_core::TokenBreakdown) -> i64 {
-    tokens.input + tokens.output + tokens.cache_read + tokens.cache_write + tokens.reasoning
-}
-
-/// Cursor's pre-2025-05 exports include `premium-tool-call` rows billed per
-/// tool invocation with no token attribution. The server grandfathers these
-/// (cost > 0, tokens = 0) rather than rejecting them, so the client must not
-/// drop them either — otherwise that legitimate cost silently disappears from
-/// the submission. Keep in sync with `CURSOR_LEGACY_TOKENLESS_MODELS` in
-/// packages/frontend/src/lib/validation/submission.ts.
-fn is_legacy_tokenless_cursor_row(client: &tokscale_core::ClientContribution) -> bool {
-    client.client == "cursor"
-        && client.model_id == "premium-tool-call"
-        && client_token_total(&client.tokens) == 0
-}
-
-fn is_aggregate_only_warp_row(client: &tokscale_core::ClientContribution) -> bool {
-    client.client == "warp"
-        && client.model_id == "aggregate-requests"
-        && client_token_total(&client.tokens) == 0
-}
-
-/// A row the server's "Cost submitted without tokens" sanity check would
-/// reject: real cost with every token bucket at zero, excluding the Cursor
-/// `premium-tool-call` carve-out above.
-fn is_tokenless_costed_row(client: &tokscale_core::ClientContribution) -> bool {
-    (is_aggregate_only_warp_row(client) || client.cost > 0.0)
-        && client_token_total(&client.tokens) == 0
-        && !is_legacy_tokenless_cursor_row(client)
-}
-
-/// Drop client rows that report cost without any tokens so the submission
-/// passes the server's cost-without-tokens validation instead of being
-/// rejected wholesale.
-///
-/// Cursor's usage export lists historical request/On-Demand charges (e.g.
-/// `auto`, `claude-3.5-sonnet`, `o3`) with empty token columns, and Warp/Oz
-/// only exposes aggregate request/spend counters. The server rejects cost with
-/// no tokens, and request counts must not be submitted as fabricated tokens, so
-/// we exclude the offending rows here and report them to the user.
-///
-/// Excluded rows always carry zero tokens, so only cost/messages change; token
-/// totals, breakdowns, and intensities are untouched. Summary and year rollups
-/// are recomputed from the trimmed contributions.
-fn exclude_tokenless_cost_contributions(
-    graph_result: &mut tokscale_core::GraphResult,
-) -> Vec<ExcludedTokenlessRow> {
-    let mut excluded: Vec<ExcludedTokenlessRow> = Vec::new();
-
-    for day in graph_result.contributions.iter_mut() {
-        let date = day.date.clone();
-        let mut removed_cost = 0.0;
-        let mut removed_messages: i32 = 0;
-
-        day.clients.retain(|client| {
-            if is_tokenless_costed_row(client) {
-                excluded.push(ExcludedTokenlessRow {
-                    date: date.clone(),
-                    client: client.client.clone(),
-                    model_id: client.model_id.clone(),
-                    provider_id: client.provider_id.clone(),
-                    cost: client.cost,
-                });
-                removed_cost += client.cost;
-                removed_messages = removed_messages.saturating_add(client.messages);
-                false
-            } else {
-                true
-            }
-        });
-
-        if removed_cost > 0.0 || removed_messages > 0 {
-            day.totals.cost = (day.totals.cost - removed_cost).max(0.0);
-            day.totals.messages = day.totals.messages.saturating_sub(removed_messages).max(0);
-        }
-    }
-
-    if !excluded.is_empty() {
-        graph_result.summary = tokscale_core::calculate_summary(&graph_result.contributions);
-        graph_result.years = tokscale_core::calculate_years(&graph_result.contributions);
-    }
-
-    excluded
-}
-
-/// Print the rows dropped by [`exclude_tokenless_cost_contributions`] so the
-/// user can see exactly what was left out, capping the per-row detail so a long
-/// history of legacy Cursor charges doesn't flood the terminal.
-fn report_excluded_tokenless_rows(excluded: &[ExcludedTokenlessRow]) {
-    use colored::Colorize;
-
-    if excluded.is_empty() {
-        return;
-    }
-
-    const MAX_DETAIL_ROWS: usize = 20;
-    let total_cost: f64 = excluded.iter().map(|row| row.cost).sum();
-
-    println!(
-        "{}",
-        format!(
-            "  Excluded {} aggregate/cost-only row(s) with no token data:",
-            excluded.len()
-        )
-        .yellow()
-    );
-
-    for row in excluded.iter().take(MAX_DETAIL_ROWS) {
-        let provider = if row.provider_id.is_empty() {
-            String::new()
-        } else {
-            format!(" (provider={})", row.provider_id)
-        };
-        println!(
-            "{}",
-            format!(
-                "    - {}/{}{} on {}: ${:.4}",
-                row.client, row.model_id, provider, row.date, row.cost
-            )
-            .bright_black()
-        );
-    }
-
-    if excluded.len() > MAX_DETAIL_ROWS {
-        println!(
-            "{}",
-            format!("    ... and {} more", excluded.len() - MAX_DETAIL_ROWS).bright_black()
-        );
-    }
-
-    println!(
-        "{}",
-        format!(
-            "    Excluded {} total; the rest is submitted.",
-            format_currency(total_cost)
-        )
-        .bright_black()
-    );
-    println!();
-}
-
 fn run_submit_command(
     clients: Option<Vec<String>>,
     since: Option<String>,
@@ -4698,12 +4506,6 @@ fn run_submit_command(
     let utc_today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let mut graph_result = graph_result;
     cap_graph_result_to_utc_today(&mut graph_result, &utc_today);
-
-    // Drop cost-only rows the server would reject (Cursor historical exports
-    // record per-request cost with empty token columns) and report what was
-    // left out, so a single legacy charge can't block the whole submission.
-    let excluded_rows = exclude_tokenless_cost_contributions(&mut graph_result);
-    report_excluded_tokenless_rows(&excluded_rows);
 
     println!("{}", "  Data to submit:".white());
     println!(
@@ -6213,149 +6015,6 @@ mod tests {
         assert_eq!(graph.years.len(), original_years.len());
     }
 
-    fn client_contribution(
-        client: &str,
-        model_id: &str,
-        provider_id: &str,
-        total_tokens: i64,
-        cost: f64,
-        messages: i32,
-    ) -> ClientContribution {
-        ClientContribution {
-            client: client.to_string(),
-            model_id: model_id.to_string(),
-            provider_id: provider_id.to_string(),
-            tokens: token_breakdown(total_tokens),
-            cost,
-            messages,
-        }
-    }
-
-    fn day_with_clients(
-        date: &str,
-        token_breakdown_total: i64,
-        clients: Vec<ClientContribution>,
-    ) -> DailyContribution {
-        let tokens: i64 = clients.iter().map(|c| client_token_total(&c.tokens)).sum();
-        let cost: f64 = clients.iter().map(|c| c.cost).sum();
-        let messages: i32 = clients.iter().map(|c| c.messages).sum();
-        DailyContribution {
-            date: date.to_string(),
-            totals: DailyTotals {
-                tokens,
-                cost,
-                messages,
-            },
-            intensity: 0,
-            token_breakdown: token_breakdown(token_breakdown_total),
-            clients,
-            active_time_ms: None,
-        }
-    }
-
-    #[test]
-    fn test_exclude_tokenless_cost_drops_offenders_and_keeps_the_rest() {
-        // A token-bearing row shares the day with a tokenless cursor charge
-        // (cost, no tokens) and a grandfathered premium-tool-call row.
-        let mut graph = graph_result_with_contributions(vec![day_with_clients(
-            "2025-05-28",
-            100,
-            vec![
-                client_contribution("cursor", "claude-3.7-sonnet", "anthropic", 100, 0.03, 1),
-                client_contribution("cursor", "auto", "cursor", 0, 0.04, 1),
-                client_contribution("cursor", "premium-tool-call", "cursor", 0, 2.05, 44),
-            ],
-        )]);
-
-        let excluded = exclude_tokenless_cost_contributions(&mut graph);
-
-        // Only the tokenless `auto` row is dropped.
-        assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].model_id, "auto");
-        assert!((excluded[0].cost - 0.04).abs() < 1e-9);
-
-        let day = &graph.contributions[0];
-        assert_eq!(day.clients.len(), 2);
-        assert!(day.clients.iter().all(|c| c.model_id != "auto"));
-        // premium-tool-call is preserved (server carve-out).
-        assert!(day
-            .clients
-            .iter()
-            .any(|c| c.model_id == "premium-tool-call"));
-        // Tokens untouched; cost/messages reduced by the dropped row only.
-        assert_eq!(day.totals.tokens, 100);
-        assert!((day.totals.cost - 2.08).abs() < 1e-9);
-        assert_eq!(day.totals.messages, 45);
-        assert!((graph.summary.total_cost - 2.08).abs() < 1e-9);
-        assert_eq!(graph.summary.total_tokens, 100);
-    }
-
-    #[test]
-    fn test_exclude_tokenless_cost_zeroes_a_fully_tokenless_day() {
-        let mut graph = graph_result_with_contributions(vec![day_with_clients(
-            "2025-05-30",
-            0,
-            vec![
-                client_contribution("cursor", "auto", "cursor", 0, 0.04, 1),
-                client_contribution("cursor", "auto", "cursor", 0, 0.04, 1),
-            ],
-        )]);
-
-        let excluded = exclude_tokenless_cost_contributions(&mut graph);
-
-        assert_eq!(excluded.len(), 2);
-        let day = &graph.contributions[0];
-        assert!(day.clients.is_empty());
-        assert_eq!(day.totals.cost, 0.0);
-        assert_eq!(day.totals.tokens, 0);
-        assert_eq!(graph.summary.total_cost, 0.0);
-    }
-
-    #[test]
-    fn test_exclude_tokenless_cost_is_noop_without_offenders() {
-        let mut graph = graph_result_with_contributions(vec![day_with_clients(
-            "2025-05-28",
-            100,
-            vec![
-                client_contribution("codex", "gpt-5", "openai", 100, 0.03, 1),
-                // Grandfathered cursor legacy row must not be dropped.
-                client_contribution("cursor", "premium-tool-call", "cursor", 0, 2.05, 44),
-            ],
-        )]);
-        let original_cost = graph.summary.total_cost;
-
-        let excluded = exclude_tokenless_cost_contributions(&mut graph);
-
-        assert!(excluded.is_empty());
-        assert_eq!(graph.contributions[0].clients.len(), 2);
-        assert_eq!(graph.summary.total_cost, original_cost);
-    }
-
-    #[test]
-    fn test_exclude_tokenless_cost_drops_warp_aggregate_requests() {
-        let mut graph = graph_result_with_contributions(vec![day_with_clients(
-            "2026-01-02",
-            0,
-            vec![client_contribution(
-                "warp",
-                "aggregate-requests",
-                "warp",
-                0,
-                12.34,
-                42,
-            )],
-        )]);
-
-        let excluded = exclude_tokenless_cost_contributions(&mut graph);
-
-        assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].client, "warp");
-        assert_eq!(excluded[0].model_id, "aggregate-requests");
-        assert!(graph.contributions[0].clients.is_empty());
-        assert_eq!(graph.summary.total_tokens, 0);
-        assert_eq!(graph.summary.total_cost, 0.0);
-    }
-
     #[test]
     fn test_submit_payload_includes_device_when_provided() {
         let graph = graph_result_with_contributions(vec![daily_contribution(
@@ -6574,16 +6233,12 @@ mod tests {
     }
 
     #[test]
-    fn warp_setup_warning_explains_missing_aggregate_cache() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let warnings = warp_setup_warnings_for_report(
-            &Some(temp.path().to_string_lossy().to_string()),
-            &Some(vec!["warp".to_string()]),
-        );
+    fn warp_setup_warning_explains_aggregate_cache_is_not_reported() {
+        let warnings = warp_setup_warnings_for_report(&Some(vec!["warp".to_string()]));
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("tokscale warp"));
-        assert!(warnings[0].contains("does not infer tokens from request counts"));
+        assert!(warnings[0].contains("not included in local reports"));
+        assert!(warnings[0].contains("no token buckets"));
     }
 
     #[test]

@@ -52,23 +52,6 @@ fn infer_provider(model: &str) -> &'static str {
     provider_identity::inferred_provider_from_model(model).unwrap_or("cursor")
 }
 
-/// Parse a cost string like "$0.50" or "0.50" to f64
-/// Returns 0.0 for empty strings, NaN values, or invalid formats
-fn parse_cost(cost_str: &str) -> f64 {
-    let cleaned = cost_str.replace(['$', ','], "");
-    let trimmed = cleaned.trim();
-
-    // Handle empty, NaN, or non-numeric values (e.g., "Included", "-" in v3)
-    if trimmed.is_empty()
-        || trimmed.eq_ignore_ascii_case("nan")
-        || !trimmed.chars().any(|c| c.is_ascii_digit())
-    {
-        return 0.0;
-    }
-
-    trimmed.parse().unwrap_or(0.0)
-}
-
 /// Parse a Cursor usage CSV file
 ///
 /// Handles both formats:
@@ -100,23 +83,17 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
     let column_count = header_fields.len();
 
     // Column indices based on format
-    let (
-        model_idx,
-        input_cache_write_idx,
-        input_no_cache_idx,
-        cache_read_idx,
-        output_idx,
-        cost_idx,
-    ) = if has_kind_column && column_count >= 11 {
-        // v3 format: Date,Cloud Agent ID,Automation ID,Kind,Model,...
-        (4, 6, 7, 8, 9, 11)
-    } else if has_kind_column {
-        // v2 format: Date,Kind,Model,Max Mode,Input (w/ Cache Write),...
-        (2, 4, 5, 6, 7, 9)
-    } else {
-        // v1 format: Date,Model,Input (w/ Cache Write),...
-        (1, 2, 3, 4, 5, 7)
-    };
+    let (model_idx, input_cache_write_idx, input_no_cache_idx, cache_read_idx, output_idx) =
+        if has_kind_column && column_count >= 11 {
+            // v3 format: Date,Cloud Agent ID,Automation ID,Kind,Model,...
+            (4, 6, 7, 8, 9)
+        } else if has_kind_column {
+            // v2 format: Date,Kind,Model,Max Mode,Input (w/ Cache Write),...
+            (2, 4, 5, 6, 7)
+        } else {
+            // v1 format: Date,Model,Input (w/ Cache Write),...
+            (1, 2, 3, 4, 5)
+        };
 
     let account_id = account_id_from_cursor_cache_path(path);
 
@@ -129,7 +106,7 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         let fields: Vec<&str> = parse_csv_line(line);
 
         // Need at least enough columns for the format
-        let min_fields = cost_idx + 1;
+        let min_fields = output_idx + 1;
         if fields.len() < min_fields {
             continue;
         }
@@ -156,8 +133,6 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
             .trim_matches('"')
             .parse()
             .unwrap_or(0);
-        let cost_str = fields[cost_idx].trim().trim_matches('"');
-        let cost = parse_cost(cost_str);
 
         // Skip empty or errored entries
         if model.is_empty() {
@@ -174,6 +149,16 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         let cache_write = (input_with_cache_write - input_without_cache_write).max(0);
         // Input tokens = input_without_cache_write
         let input = input_without_cache_write;
+        let tokens = TokenBreakdown {
+            input: input.max(0),
+            output: output_tokens.max(0),
+            cache_read: cache_read.max(0),
+            cache_write, // Already clamped above with .max(0)
+            reasoning: 0,
+        };
+        if crate::positive_token_total(&tokens) == 0 {
+            continue;
+        }
 
         messages.push(UnifiedMessage::new(
             "cursor",
@@ -181,14 +166,8 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
             infer_provider(model),
             format!("cursor-{}-{}", account_id, date_str),
             timestamp,
-            TokenBreakdown {
-                input: input.max(0),
-                output: output_tokens.max(0),
-                cache_read: cache_read.max(0),
-                cache_write, // Already clamped above with .max(0)
-                reasoning: 0,
-            },
-            cost.max(0.0),
+            tokens,
+            0.0,
         ));
     }
 
@@ -271,20 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_cost() {
-        assert_eq!(parse_cost("$0.50"), 0.50);
-        assert_eq!(parse_cost("0.50"), 0.50);
-        assert_eq!(parse_cost("$1,234.56"), 1234.56);
-        assert_eq!(parse_cost(""), 0.0);
-        assert_eq!(parse_cost("NaN"), 0.0);
-        assert_eq!(parse_cost("nan"), 0.0);
-        assert_eq!(parse_cost("  "), 0.0);
-        // v3 format values
-        assert_eq!(parse_cost("Included"), 0.0);
-        assert_eq!(parse_cost("-"), 0.0);
-    }
-
-    #[test]
     fn test_parse_csv_line() {
         let line = "2025-02-01,gpt-4o,10,5,0,15,30,$0.10,$0.10";
         let fields = parse_csv_line(line);
@@ -332,7 +297,7 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 5);
         assert_eq!(messages[0].tokens.output, 15);
         assert_eq!(messages[0].tokens.cache_write, 5); // 10 - 5
-        assert!((messages[0].cost - 0.10).abs() < 0.001);
+        assert_eq!(messages[0].cost, 0.0);
 
         assert_eq!(messages[1].model_id.as_ref(), "gpt-4o-mini");
     }
@@ -359,7 +324,7 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 21282);
         assert_eq!(messages[0].tokens.cache_read, 105891);
         assert_eq!(messages[0].tokens.cache_write, 28342 - 775); // 27567
-        assert!((messages[0].cost - 0.19).abs() < 0.001);
+        assert_eq!(messages[0].cost, 0.0);
 
         // Second message: gpt-5-codex
         assert_eq!(messages[1].model_id.as_ref(), "gpt-5-codex");
@@ -389,9 +354,9 @@ mod tests {
         assert_eq!(messages[0].cost, 0.0);
         assert_eq!(messages[0].tokens.cache_read, 29045760);
 
-        // Second message: actual cost from "On-Demand"
+        // Second message: app-reported cost is ignored.
         assert_eq!(messages[1].model_id.as_ref(), "composer-2");
-        assert!((messages[1].cost - 0.11).abs() < 0.001);
+        assert_eq!(messages[1].cost, 0.0);
 
         // Third message: "-" cost should be 0 (Errored, No Charge)
         assert_eq!(messages[2].model_id.as_ref(), "composer-2");

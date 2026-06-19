@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 
 use crate::adapters::discover as adapter_discover;
-use crate::adapters::file::PricingPolicy;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
     ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
@@ -38,9 +37,7 @@ impl LocalSourceAdapter for GjcAdapter {
             .into_par_iter()
             .map(|unit| {
                 let mut messages = sessions::gjc::parse_gjc_file(&unit.path);
-                for message in &mut messages {
-                    PricingPolicy::ApplyIfCostNonPositive.apply(message, ctx.pricing);
-                }
+                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
@@ -132,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn gjc_adapter_preserves_embedded_cost_and_prices_missing_cost() {
+    fn gjc_adapter_ignores_embedded_cost_and_applies_token_pricing() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("project/session.jsonl");
         write_file(
@@ -170,7 +167,7 @@ mod tests {
             .iter()
             .find(|message| message.dedup_key == Some(sessions::dedup_hash_str("gjc_ses:missing")))
             .unwrap();
-        assert_eq!(embedded.cost, 1.25);
-        assert!(missing.cost > 0.0);
+        assert_eq!(embedded.cost, 0.02);
+        assert_eq!(missing.cost, 0.02);
     }
 }

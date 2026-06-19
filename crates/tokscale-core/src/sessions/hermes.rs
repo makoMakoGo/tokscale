@@ -3,6 +3,9 @@
 //! Parses aggregated session rows from Hermes Agent's SQLite state database:
 //! - `~/.hermes/state.db`
 //! - `$HERMES_HOME/state.db`
+//!
+//! App-reported estimated and actual costs are ignored. Tokscale reports cost
+//! only from token usage and its own pricing table.
 
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
@@ -55,9 +58,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
-            reasoning_tokens,
-            estimated_cost_usd,
-            actual_cost_usd
+            reasoning_tokens
         FROM sessions
         WHERE model IS NOT NULL
           AND TRIM(model) != ''
@@ -66,8 +67,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             COALESCE(output_tokens, 0) > 0 OR
             COALESCE(cache_read_tokens, 0) > 0 OR
             COALESCE(cache_write_tokens, 0) > 0 OR
-            COALESCE(reasoning_tokens, 0) > 0 OR
-            COALESCE(actual_cost_usd, estimated_cost_usd, 0) > 0
+            COALESCE(reasoning_tokens, 0) > 0
           )
     "#;
 
@@ -95,8 +95,6 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             row.get::<_, Option<i64>>(7)?.unwrap_or(0),
             row.get::<_, Option<i64>>(8)?.unwrap_or(0),
             row.get::<_, Option<i64>>(9)?.unwrap_or(0),
-            row.get::<_, Option<f64>>(10)?,
-            row.get::<_, Option<f64>>(11)?,
         ))
     }) {
         Ok(r) => r,
@@ -133,8 +131,6 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             cache_read,
             cache_write,
             reasoning,
-            estimated_cost,
-            actual_cost,
         )| {
             let provider = resolved_provider(billing_provider, &model_id);
             let mut msg = UnifiedMessage::new_with_agent(
@@ -150,7 +146,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                     cache_write: cache_write.max(0),
                     reasoning: reasoning.max(0),
                 },
-                actual_cost.or(estimated_cost).unwrap_or(0.0).max(0.0),
+                0.0,
                 Some(HERMES_AGENT_NAME.to_string()),
             );
             msg.message_count = message_count.max(0);

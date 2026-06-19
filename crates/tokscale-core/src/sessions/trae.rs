@@ -3,8 +3,8 @@
 //! Reads `trae-cache/sessions/*.json` — the raw JSON dumped
 //! from the usage API — and converts each entry into a `UnifiedMessage`.
 //!
-//! The API already returns exact token counts, so this parser does not
-//! go through `pricing/lookup`.
+//! The API returns token counts and vendor spend. Tokscale ignores vendor spend
+//! and derives report cost from token usage through its own pricing table.
 
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
@@ -52,7 +52,7 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
     let mode = session["mode"].as_str().unwrap_or("");
     // Auto-mode sessions come back with `model_name: ""` because the
     // system picks a model per turn. Bucket them under `trae-<mode>` (e.g.
-    // `trae-auto`) so the cost is still attributed instead of disappearing
+    // `trae-auto`) so token usage is still attributed instead of disappearing
     // into an empty Model cell.
     let model_id = if !model_raw.is_empty() {
         normalize_trae_model(model_raw)
@@ -76,15 +76,15 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
     // `usage_time` near `i64::MAX` would panic in debug builds and silently
     // wrap to a negative timestamp in release builds.
     let timestamp_ms = usage_time.checked_mul(1000)?;
-    let cost = session["dollar_float"].as_f64().unwrap_or(0.0);
-
     let extra = &session["extra_info"];
-    let input = extra["input_token"].as_i64().unwrap_or(0);
-    let output = extra["output_token"].as_i64().unwrap_or(0);
-    let cache_read = extra["cache_read_token"].as_i64().unwrap_or(0);
-    let cache_write = extra["cache_write_token"].as_i64().unwrap_or(0);
-
-    if input + output + cache_read + cache_write == 0 {
+    let tokens = TokenBreakdown {
+        input: extra["input_token"].as_i64().unwrap_or(0).max(0),
+        output: extra["output_token"].as_i64().unwrap_or(0).max(0),
+        cache_read: extra["cache_read_token"].as_i64().unwrap_or(0).max(0),
+        cache_write: extra["cache_write_token"].as_i64().unwrap_or(0).max(0),
+        reasoning: 0,
+    };
+    if crate::positive_token_total(&tokens) == 0 {
         return None;
     }
 
@@ -99,14 +99,8 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
         provider,
         session_id,
         timestamp_ms,
-        TokenBreakdown {
-            input,
-            output,
-            cache_read,
-            cache_write,
-            reasoning: 0,
-        },
-        cost,
+        tokens,
+        0.0,
         dedup_key,
     ))
 }
@@ -175,7 +169,7 @@ mod tests {
         assert_eq!(m.tokens.output, 500);
         assert_eq!(m.tokens.cache_read, 200);
         assert_eq!(m.tokens.cache_write, 100);
-        assert_eq!(m.cost, 0.5);
+        assert_eq!(m.cost, 0.0);
         // timestamp: epoch seconds → ms
         assert_eq!(m.timestamp, 1_776_000_000_000);
     }
@@ -222,7 +216,7 @@ mod tests {
     fn test_auto_mode_fallback_uses_mode_as_model() {
         // Trae's "Auto" mode returns `model_name: ""` because no single
         // model is bound to the session. The parser must still keep the
-        // cost and bucket it under `trae-auto`.
+        // token usage and bucket it under `trae-auto`.
         let json = serde_json::json!([{
             "model_name": "",
             "mode": "Auto",
@@ -242,7 +236,7 @@ mod tests {
         let m = &msgs[0];
         assert_eq!(m.model_id.as_ref(), "trae-auto");
         assert_eq!(m.provider_id.as_ref(), "trae");
-        assert_eq!(m.cost, 0.27);
+        assert_eq!(m.cost, 0.0);
     }
 
     #[test]

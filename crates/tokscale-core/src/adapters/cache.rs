@@ -45,7 +45,7 @@ where
 {
     let Some(fingerprint) = fingerprint_for_unit(&unit) else {
         let (mut messages, _) = parse(&unit.path);
-        apply_pricing_to_messages(&mut messages, ctx.pricing);
+        crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
         return ParsedUnit {
             unit,
             messages: UnitMessageSource::Fresh(messages),
@@ -66,6 +66,7 @@ where
     }
 
     let (mut messages, cacheable) = parse(&unit.path);
+    crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
     let cache_entry = if messages.is_empty() || !cacheable {
         None
     } else {
@@ -77,7 +78,6 @@ where
             None,
         ))
     };
-    apply_pricing_to_messages(&mut messages, ctx.pricing);
 
     ParsedUnit {
         unit,
@@ -114,7 +114,7 @@ pub(crate) fn resolve_messages(
         UnitMessageSource::Fresh(messages) => messages,
         UnitMessageSource::CacheHit(path) => {
             let mut messages = ctx.source_cache.take_messages(&path).unwrap_or_default();
-            apply_pricing_to_messages(&mut messages, ctx.pricing);
+            crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
             messages
         }
         UnitMessageSource::CodexCacheHit { .. } | UnitMessageSource::CodexAppend(_) => {
@@ -136,15 +136,5 @@ fn fingerprint_for_unit(unit: &SourceUnit) -> Option<message_cache::SourceFinger
             )
         }
         FingerprintPolicy::None => None,
-    }
-}
-
-fn apply_pricing_to_messages(
-    messages: &mut [UnifiedMessage],
-    pricing: Option<&crate::pricing::PricingService>,
-) {
-    for message in messages {
-        message.refresh_derived_fields();
-        crate::apply_pricing_if_available(message, pricing);
     }
 }

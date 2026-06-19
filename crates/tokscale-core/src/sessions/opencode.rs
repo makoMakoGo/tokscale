@@ -29,7 +29,6 @@ pub struct OpenCodeMessage {
     pub model_id: Option<String>,
     #[serde(rename = "providerID")]
     pub provider_id: Option<String>,
-    pub cost: Option<f64>,
     pub tokens: Option<OpenCodeTokens>,
     pub time: OpenCodeTime,
     pub agent: Option<String>,
@@ -88,7 +87,6 @@ struct OpenCodeSqliteFingerprint {
     reasoning: i64,
     cache_read: i64,
     cache_write: i64,
-    cost_bits: u64,
     agent: Option<String>,
 }
 
@@ -167,20 +165,25 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
         .or_else(|| path.file_stem().and_then(|s| s.to_str()))
         .map(crate::sessions::dedup_hash_str);
 
+    let token_breakdown = TokenBreakdown {
+        input: tokens.input.max(0),
+        output: tokens.output.max(0),
+        cache_read: tokens.cache.read.max(0),
+        cache_write: tokens.cache.write.max(0),
+        reasoning: tokens.reasoning.unwrap_or(0).max(0),
+    };
+    if crate::positive_token_total(&token_breakdown) == 0 {
+        return None;
+    }
+
     let mut unified = UnifiedMessage::new_with_agent(
         "opencode",
         model_id,
         msg.provider_id.unwrap_or_else(|| "unknown".to_string()),
         session_id,
         msg.time.created as i64,
-        TokenBreakdown {
-            input: tokens.input.max(0),
-            output: tokens.output.max(0),
-            cache_read: tokens.cache.read.max(0),
-            cache_write: tokens.cache.write.max(0),
-            reasoning: tokens.reasoning.unwrap_or(0).max(0),
-        },
-        msg.cost.unwrap_or(0.0).max(0.0),
+        token_breakdown,
+        0.0,
         agent,
     );
     unified.duration_ms = opencode_duration_ms(&msg.time);
@@ -275,7 +278,16 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         let reasoning = tokens.reasoning.unwrap_or(0).max(0);
         let cache_read = tokens.cache.read.max(0);
         let cache_write = tokens.cache.write.max(0);
-        let cost = msg.cost.unwrap_or(0.0).max(0.0);
+        let token_breakdown = TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+        };
+        if crate::positive_token_total(&token_breakdown) == 0 {
+            continue;
+        }
         let dedup_key = message_id.clone().unwrap_or(row_id);
         let fingerprint = OpenCodeSqliteFingerprint {
             created_bits: msg.time.created.to_bits(),
@@ -287,7 +299,6 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             reasoning,
             cache_read,
             cache_write,
-            cost_bits: cost.to_bits(),
             agent: agent.clone(),
         };
 
@@ -297,14 +308,8 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             provider_id,
             session_id,
             msg.time.created as i64,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning,
-            },
-            cost,
+            token_breakdown,
+            0.0,
             agent,
         );
         unified.duration_ms = opencode_duration_ms(&msg.time);
@@ -549,7 +554,7 @@ mod tests {
             "cost": -0.05,
             "tokens": {
                 "input": -100,
-                "output": -50,
+                "output": 50,
                 "reasoning": -25,
                 "cache": { "read": -200, "write": -10 }
             },
@@ -564,10 +569,7 @@ mod tests {
 
         let msg = result.unwrap();
         assert_eq!(msg.tokens.input, 0, "Negative input should be clamped to 0");
-        assert_eq!(
-            msg.tokens.output, 0,
-            "Negative output should be clamped to 0"
-        );
+        assert_eq!(msg.tokens.output, 50, "Positive output should be preserved");
         assert_eq!(
             msg.tokens.cache_read, 0,
             "Negative cache_read should be clamped to 0"
@@ -581,8 +583,8 @@ mod tests {
             "Negative reasoning should be clamped to 0"
         );
         assert!(
-            msg.cost >= 0.0,
-            "Negative cost should be clamped to 0.0, got {}",
+            msg.cost == 0.0,
+            "App-reported cost should be ignored, got {}",
             msg.cost
         );
     }

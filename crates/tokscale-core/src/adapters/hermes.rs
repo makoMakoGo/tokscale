@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use rayon::prelude::*;
 
 use crate::adapters::discover as adapter_discover;
-use crate::adapters::file::PricingPolicy;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
     ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
@@ -47,9 +46,7 @@ impl LocalSourceAdapter for HermesAdapter {
             .into_par_iter()
             .map(|unit| {
                 let mut messages = sessions::hermes::parse_hermes_sqlite(&unit.path);
-                for message in &mut messages {
-                    PricingPolicy::ApplyIfCostNonPositive.apply(message, ctx.pricing);
-                }
+                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),

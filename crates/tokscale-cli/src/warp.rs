@@ -132,12 +132,6 @@ pub(crate) fn load_usage_cache() -> Option<WarpUsageCache> {
     serde_json::from_str(&content).ok()
 }
 
-pub fn has_usage_cache_in_home(home_dir: &Path) -> bool {
-    home_dir
-        .join(".config/tokscale/warp-cache/usage.json")
-        .exists()
-}
-
 pub fn run_warp_login(token: Option<String>, cookie: bool) -> Result<()> {
     println!("\n  {}\n", "Warp/Oz - Login".cyan());
     let auth_value = match token {

@@ -1,7 +1,6 @@
 use rayon::prelude::*;
 
 use crate::adapters::discover as adapter_discover;
-use crate::adapters::file::PricingPolicy;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
     ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
@@ -29,9 +28,7 @@ impl LocalSourceAdapter for TraeAdapter {
             .into_par_iter()
             .map(|unit| {
                 let mut messages = sessions::trae::parse_trae_file("trae", &unit.path);
-                for message in &mut messages {
-                    PricingPolicy::Never.apply(message, ctx.pricing);
-                }
+                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
@@ -86,7 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn trae_adapter_dedupes_latest_session_and_never_reprices() {
+    fn trae_adapter_dedupes_latest_session_and_applies_token_pricing() {
         let dir = tempfile::TempDir::new().unwrap();
         let older = dir.path().join("older.json");
         let newer = dir.path().join("newer.json");
@@ -123,6 +120,6 @@ mod tests {
 
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].timestamp, 1_776_000_001_000);
-        assert_eq!(sink[0].cost, 0.2);
+        assert_eq!(sink[0].cost, 110.0);
     }
 }
