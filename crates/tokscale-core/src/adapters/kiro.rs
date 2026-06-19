@@ -36,6 +36,19 @@ impl LocalSourceAdapter for KiroAdapter {
             );
         }
 
+        units.extend(
+            adapter_discover::source_units_from_paths(
+                ClientId::Kiro,
+                adapter_discover::scan_roots(
+                    kiro_global_storage_roots(ctx.home_dir, ctx.use_env_roots),
+                    "kiro-globalstorage",
+                ),
+                FingerprintPolicy::PlainFile,
+            )
+            .into_iter()
+            .map(|unit| unit.with_meta(SourceUnitMeta::KiroGlobalStorage)),
+        );
+
         units
     }
 
@@ -60,6 +73,11 @@ impl LocalSourceAdapter for KiroAdapter {
                         invalidate_cache: false,
                     }
                 }
+                SourceUnitMeta::KiroGlobalStorage => adapter_cache::load_or_parse_unit_with(
+                    unit,
+                    ctx,
+                    sessions::kiro::parse_kiro_file,
+                ),
                 SourceUnitMeta::None
                 | SourceUnitMeta::Crush { .. }
                 | SourceUnitMeta::OpenCodeSqlite
@@ -87,6 +105,44 @@ fn kiro_db_path(home_dir: &str) -> Option<PathBuf> {
     macos_path.is_file().then_some(macos_path)
 }
 
+fn kiro_global_storage_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from(format!(
+            "{}/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/Library/Application Support/kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/.config/Kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/.config/kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/AppData/Roaming/Kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/AppData/Roaming/kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+    ];
+
+    if cfg!(target_os = "windows") && use_env_roots {
+        if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            roots.push(PathBuf::from(&app_data).join("Kiro/User/globalStorage/kiro.kiroagent"));
+            roots.push(PathBuf::from(&app_data).join("kiro/User/globalStorage/kiro.kiroagent"));
+        }
+    }
+
+    roots
+}
+
 pub(crate) static KIRO_ADAPTER: KiroAdapter = KiroAdapter;
 
 #[cfg(test)]
@@ -94,11 +150,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kiro_adapter_discovers_file_and_sqlite_sources() {
+    fn kiro_adapter_discovers_file_sqlite_and_global_storage_sources() {
         let home = tempfile::TempDir::new().unwrap();
         let file_path = home.path().join(".kiro/sessions/cli/session.json");
         let db_path = home.path().join(".local/share/kiro-cli/data.sqlite3");
-        for path in [&file_path, &db_path] {
+        let global_path = home.path().join(
+            "Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-a/execution.chat",
+        );
+        for path in [&file_path, &db_path, &global_path] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
         }
@@ -111,12 +170,15 @@ mod tests {
 
         let units = KIRO_ADAPTER.discover(&ctx);
 
-        assert_eq!(units.len(), 2);
+        assert_eq!(units.len(), 3);
         assert!(units
             .iter()
             .any(|unit| unit.path == file_path && matches!(unit.meta, SourceUnitMeta::KiroFile)));
         assert!(units
             .iter()
             .any(|unit| unit.path == db_path && matches!(unit.meta, SourceUnitMeta::KiroSqlite)));
+        assert!(units.iter().any(|unit| {
+            unit.path == global_path && matches!(unit.meta, SourceUnitMeta::KiroGlobalStorage)
+        }));
     }
 }

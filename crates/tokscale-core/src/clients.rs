@@ -83,7 +83,12 @@ mod tests {
             .collect();
         assert_eq!(
             excluded,
-            HashSet::from([ClientId::Crush, ClientId::Trae, ClientId::Warp])
+            HashSet::from([
+                ClientId::Crush,
+                ClientId::Trae,
+                ClientId::Warp,
+                ClientId::CommandCode,
+            ])
         );
     }
 

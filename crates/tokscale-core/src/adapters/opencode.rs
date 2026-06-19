@@ -88,6 +88,7 @@ impl LocalSourceAdapter for OpenCodeAdapter {
                 | SourceUnitMeta::Crush { .. }
                 | SourceUnitMeta::KiroFile
                 | SourceUnitMeta::KiroSqlite
+                | SourceUnitMeta::KiroGlobalStorage
                 | SourceUnitMeta::Codex { .. } => {
                     unreachable!("unexpected OpenCode source unit meta")
                 }

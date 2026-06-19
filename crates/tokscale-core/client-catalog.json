@@ -211,6 +211,16 @@
     "color": "#7C3AED"
   },
   {
+    "variant": "MiMoCode",
+    "id": "micode",
+    "displayName": "MiMo Code",
+    "shortName": "MiMo Code",
+    "hotkey": "f",
+    "submitDefault": true,
+    "logo": "https://github.com/XiaomiMiMo.png",
+    "color": "#FF6900"
+  },
+  {
     "variant": "Antigravity",
     "id": "antigravity",
     "displayName": "Antigravity",
@@ -219,6 +229,16 @@
     "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
     "color": "#6366F1"
+  },
+  {
+    "variant": "AntigravityCli",
+    "id": "antigravity-cli",
+    "displayName": "Antigravity CLI",
+    "shortName": "Antigravity CLI",
+    "hotkey": "p",
+    "submitDefault": true,
+    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
+    "color": "#4F46E5"
   },
   {
     "variant": "Zed",
@@ -269,6 +289,16 @@
     "submitDefault": true,
     "logo": "https://github.com/cline.png",
     "color": "#5B8DEF"
+  },
+  {
+    "variant": "CommandCode",
+    "id": "commandcode",
+    "displayName": "Command Code",
+    "shortName": "Command",
+    "hotkey": "d",
+    "submitDefault": false,
+    "logo": "https://github.com/CommandCodeAI.png",
+    "color": "#111827"
   },
   {
     "variant": "Gjc",

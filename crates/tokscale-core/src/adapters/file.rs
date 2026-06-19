@@ -260,6 +260,10 @@ pub(crate) static QWEN_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new(ClientId::Qwen, sessions::qwen::parse_qwen_file);
 pub(crate) static MUX_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new(ClientId::Mux, sessions::mux::parse_mux_file);
+pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::CommandCode,
+    sessions::commandcode::parse_commandcode_file,
+);
 pub(crate) static ANTIGRAVITY_ADAPTER: NonCachedFileAdapter = NonCachedFileAdapter::new(
     ClientId::Antigravity,
     sessions::antigravity::parse_antigravity_file,

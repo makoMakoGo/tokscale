@@ -319,6 +319,11 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 }
                 "T-*.json" => file_name.starts_with("T-") && file_name.ends_with(".json"),
                 "*.settings.json" => file_name.ends_with(".settings.json"),
+                "kiro-globalstorage" => {
+                    file_name.ends_with(".chat")
+                        || file_name.ends_with(".json")
+                        || path.extension().is_none()
+                }
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 "updates.jsonl" => file_name == "updates.jsonl",
@@ -327,6 +332,8 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "chat-messages.json" => file_name == "chat-messages.json",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
+                "*.db" => file_name.ends_with(".db"),
+                "mimocode.db" => file_name == "mimocode.db",
                 _ => false,
             }
         })
@@ -1351,6 +1358,28 @@ mod tests {
             let name = p.file_name().unwrap().to_str().unwrap();
             name.starts_with("session-") && name.ends_with(".json")
         }));
+    }
+
+    #[test]
+    fn test_scan_directory_kiro_globalstorage_pattern() {
+        let dir = TempDir::new().unwrap();
+        let root = dir
+            .path()
+            .join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent");
+        let workspace = root.join("workspace-a");
+        fs::create_dir_all(&workspace).unwrap();
+        File::create(workspace.join("execution.chat")).unwrap();
+        File::create(workspace.join("session.json")).unwrap();
+        File::create(workspace.join("execution")).unwrap();
+        File::create(workspace.join("index.sqlite")).unwrap();
+
+        let files = scan_directory(root.to_str().unwrap(), "kiro-globalstorage");
+        let names: Vec<_> = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .collect();
+
+        assert_eq!(names, vec!["execution", "execution.chat", "session.json"]);
     }
 
     #[test]

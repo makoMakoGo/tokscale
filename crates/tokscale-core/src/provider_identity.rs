@@ -20,6 +20,7 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         "google" | "gemini" => "google",
         "openai" | "openai_codex" | "openai_pro" => "openai",
         "github_copilot" => "github-copilot",
+        "commandcode" | "command_code" => "commandcode",
         s if s == "opencode" || s.starts_with("opencode_") => "opencode",
         "minimax" | "minimaxai" | "minimax_ai" => "minimax",
         "mistral" | "mistralai" => "mistralai",
@@ -183,6 +184,10 @@ pub(crate) fn provider_override_from_model_and_provider(
         return Some(provider);
     }
 
+    if canonical_provider(provider).as_deref() == Some("commandcode") {
+        return Some("commandcode");
+    }
+
     if canonical_provider(provider).as_deref() == Some("anthropic") && !is_anthropic_model(model) {
         return inferred_provider_from_model(model)
             .filter(|provider| *provider != "anthropic")
@@ -303,6 +308,8 @@ mod tests {
             ("opencode-go", vec!["opencode"]),
             ("opencode-zen", vec!["opencode"]),
             ("openai-pro", vec!["openai"]),
+            ("command-code", vec!["commandcode"]),
+            ("command_code", vec!["commandcode"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
         ];
@@ -370,6 +377,8 @@ mod tests {
             ("opencode", "opencode"),
             ("opencode-go", "opencode"),
             ("opencode-zen", "opencode"),
+            ("command-code", "commandcode"),
+            ("command_code", "commandcode"),
         ];
 
         for (raw, expected) in cases {
@@ -518,6 +527,10 @@ mod tests {
         assert_eq!(
             provider_override_from_model_and_provider("glm-5.1", "openrouter"),
             None
+        );
+        assert_eq!(
+            provider_override_from_model_and_provider("qwen3.7-max", "command-code"),
+            Some("commandcode")
         );
     }
 

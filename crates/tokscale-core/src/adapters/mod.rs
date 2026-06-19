@@ -1,3 +1,4 @@
+mod antigravity_cli;
 pub(crate) mod cache;
 mod claude;
 mod codebuff;
@@ -10,6 +11,7 @@ mod goose;
 mod hermes;
 mod kilo;
 mod kiro;
+mod micode;
 mod openclaw;
 mod opencode;
 
@@ -151,6 +153,7 @@ pub(crate) enum SourceUnitMeta {
     OpenCodeJson,
     KiroFile,
     KiroSqlite,
+    KiroGlobalStorage,
     Codex {
         is_headless: bool,
     },
@@ -187,7 +190,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 32] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -204,6 +207,7 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &file::KIMI_ADAPTER,
     &file::QWEN_ADAPTER,
     &file::MUX_ADAPTER,
+    &micode::MICODE_ADAPTER,
     &codebuff::CODEBUFF_ADAPTER,
     &openclaw::OPENCLAW_ADAPTER,
     &gjc::GJC_ADAPTER,
@@ -211,11 +215,13 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &vscode_tasks::KILOCODE_ADAPTER,
     &vscode_tasks::CLINE_ADAPTER,
     &file::ANTIGRAVITY_ADAPTER,
+    &antigravity_cli::ANTIGRAVITY_CLI_ADAPTER,
     &trae::TRAE_ADAPTER,
     &kilo::KILO_ADAPTER,
     &hermes::HERMES_ADAPTER,
     &goose::GOOSE_ADAPTER,
     &kiro::KIRO_ADAPTER,
+    &file::COMMANDCODE_ADAPTER,
     &crush::CRUSH_ADAPTER,
 ];
 

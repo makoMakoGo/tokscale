@@ -325,11 +325,34 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
     LocalClientEntry {
+        client: ClientId::MiMoCode,
+        def: LocalClientDef {
+            root: PathRoot::XdgData,
+            relative_path: "micode/mimocode.db",
+            pattern: "mimocode.db",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
         client: ClientId::Antigravity,
         def: LocalClientDef {
             root: PathRoot::Config,
             relative_path: "antigravity-cache/sessions",
             pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::AntigravityCli,
+        def: LocalClientDef {
+            root: PathRoot::EnvVar {
+                var: "GEMINI_CLI_HOME",
+                fallback_relative: ".gemini",
+            },
+            relative_path: "antigravity-cli/conversations",
+            pattern: "*.db",
             headless: false,
             parse_local: true,
         },
@@ -380,6 +403,16 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
             pattern: "ui_messages.json",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
+        client: ClientId::CommandCode,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".commandcode/projects",
+            pattern: "*.jsonl",
             headless: false,
             parse_local: true,
         },
