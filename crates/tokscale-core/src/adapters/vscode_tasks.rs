@@ -11,6 +11,8 @@ use crate::adapters::{
 use crate::clients::ClientId;
 use crate::{sessions, UnifiedMessage};
 
+const ROO_FAMILY_SIBLINGS: &[&str] = &["api_conversation_history.json"];
+
 pub(crate) struct VscodeTaskAdapter {
     client: ClientId,
     parse: fn(&Path) -> Vec<UnifiedMessage>,
@@ -46,7 +48,9 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
         adapter_discover::source_units_from_paths(
             self.client,
             adapter_discover::scan_roots(roots, def.pattern),
-            FingerprintPolicy::PlainFile,
+            FingerprintPolicy::PrimaryWithSiblings {
+                sibling_names: ROO_FAMILY_SIBLINGS,
+            },
         )
     }
 
@@ -158,6 +162,37 @@ mod tests {
 
         assert_eq!(roo_paths, vec![roo_default, roo_server]);
         assert_eq!(kilo_paths, vec![kilo_default, kilo_server]);
+    }
+
+    #[test]
+    fn roo_family_units_include_api_history_sibling_in_fingerprint() {
+        let home = tempfile::TempDir::new().unwrap();
+        let roo_path = home.path().join(
+            ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/roo/ui_messages.json",
+        );
+        write_file(&roo_path);
+
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let units = ROOCODE_ADAPTER.discover(&ctx);
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(
+            units[0].fingerprint_policy,
+            FingerprintPolicy::PrimaryWithSiblings {
+                sibling_names: ROO_FAMILY_SIBLINGS
+            }
+        );
+        assert_eq!(
+            units[0].digest_paths(),
+            vec![
+                roo_path.clone(),
+                roo_path
+                    .parent()
+                    .unwrap()
+                    .join("api_conversation_history.json")
+            ]
+        );
     }
 
     #[test]

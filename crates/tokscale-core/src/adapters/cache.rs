@@ -135,6 +135,12 @@ fn fingerprint_for_unit(unit: &SourceUnit) -> Option<message_cache::SourceFinger
                 Some(home_dir),
             )
         }
+        FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
+            message_cache::SourceFingerprint::from_path_with_siblings(
+                &unit.path,
+                sibling_names.iter().copied(),
+            )
+        }
         FingerprintPolicy::None => None,
     }
 }

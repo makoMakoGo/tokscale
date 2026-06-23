@@ -133,6 +133,18 @@ impl SourceUnit {
                 }
                 paths
             }
+            FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
+                let mut paths = vec![self.path.clone()];
+                let parent = self.path.parent();
+                for sibling_name in *sibling_names {
+                    paths.push(
+                        parent
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .join(sibling_name),
+                    );
+                }
+                paths
+            }
             FingerprintPolicy::PlainFile | FingerprintPolicy::None => vec![self.path.clone()],
         }
     }
@@ -158,6 +170,9 @@ pub(crate) enum FingerprintPolicy {
     SqliteWithWal,
     ClaudeCodeWithHome {
         home_dir: PathBuf,
+    },
+    PrimaryWithSiblings {
+        sibling_names: &'static [&'static str],
     },
     #[allow(dead_code)]
     None,

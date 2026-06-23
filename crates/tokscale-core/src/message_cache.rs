@@ -26,7 +26,10 @@ use std::time::UNIX_EPOCH;
 // migrated and is deleted on first v25 load.
 // 26: local source costs are token-derived only; cached app-reported costs and
 // cost-only rows must be rebuilt.
-const CACHE_SCHEMA_VERSION: u32 = 26;
+// 27: upstream parser correctness ports change Codex fork replay handling,
+// timestamp/provider/dedup semantics, Copilot agent/cache attributes, and
+// Roo-family sidecar fingerprints.
+const CACHE_SCHEMA_VERSION: u32 = 27;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const SHARDS_DIRNAME: &str = "shards";
@@ -145,6 +148,17 @@ impl SourceFingerprint {
         let related_paths = ["-wal"]
             .into_iter()
             .map(|suffix| (suffix.to_string(), append_path_suffix(path, suffix)));
+        Self::from_path_with_related(path, related_paths)
+    }
+
+    pub(crate) fn from_path_with_siblings<'a, I>(path: &Path, sibling_names: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let related_paths = sibling_names.into_iter().map(|name| {
+            let sibling = path.parent().unwrap_or_else(|| Path::new(".")).join(name);
+            (name.to_string(), sibling)
+        });
         Self::from_path_with_related(path, related_paths)
     }
 
@@ -930,6 +944,30 @@ mod tests {
         file.write_all(content).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn fingerprint_with_sibling_invalidates_on_sibling_only_change() {
+        let dir = TempDir::new().unwrap();
+        let primary = dir.path().join("ui_messages.json");
+        let sibling = dir.path().join("api_conversation_history.json");
+        std::fs::write(&primary, b"[]").unwrap();
+        std::fs::write(&sibling, b"<model>claude-sonnet-4</model>").unwrap();
+
+        let sibling_before =
+            SourceFingerprint::from_path_with_siblings(&primary, ["api_conversation_history.json"])
+                .unwrap();
+        let plain_before = SourceFingerprint::from_path(&primary).unwrap();
+
+        std::fs::write(&sibling, b"<model>claude-opus-4</model>").unwrap();
+
+        let sibling_after =
+            SourceFingerprint::from_path_with_siblings(&primary, ["api_conversation_history.json"])
+                .unwrap();
+        let plain_after = SourceFingerprint::from_path(&primary).unwrap();
+
+        assert_ne!(sibling_before, sibling_after);
+        assert_eq!(plain_before, plain_after);
     }
 
     #[test]

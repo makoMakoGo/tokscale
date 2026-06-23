@@ -121,6 +121,12 @@ fn source_unit_for_policy(
         FingerprintPolicy::ClaudeCodeWithHome { home_dir } => {
             SourceUnit::claude_code(client, path, home_dir.clone())
         }
+        FingerprintPolicy::PrimaryWithSiblings { sibling_names } => SourceUnit {
+            client,
+            path,
+            fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings { sibling_names },
+            meta: crate::adapters::SourceUnitMeta::None,
+        },
         FingerprintPolicy::None => SourceUnit::no_cache(client, path),
     }
 }
