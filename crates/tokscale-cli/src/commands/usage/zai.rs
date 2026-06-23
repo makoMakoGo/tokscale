@@ -40,6 +40,10 @@ struct Sub {
     next_renew_time: Option<String>,
 }
 
+fn percentage_from_limit(limit: &Limit) -> Option<f64> {
+    limit.percentage.map(|p| p.clamp(0.0, 100.0))
+}
+
 async fn fetch_quota(client: &reqwest::Client, key: &str) -> Result<QuotaResp> {
     let resp = client
         .get("https://api.z.ai/api/monitor/usage/quota/limit")
@@ -104,7 +108,9 @@ pub fn fetch() -> Result<UsageOutput> {
 
         if let Some(limits) = quota.data.as_ref().and_then(|d| d.limits.as_ref()) {
             for limit in limits.iter() {
-                let pct = limit.percentage.unwrap_or(0.0).clamp(0.0, 100.0);
+                let Some(pct) = percentage_from_limit(limit) else {
+                    continue;
+                };
 
                 match limit.limit_type.as_deref() {
                     Some("TOKENS_LIMIT") => {
@@ -169,4 +175,24 @@ pub fn fetch() -> Result<UsageOutput> {
             metrics,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_missing_percentage_instead_of_fabricating_zero_used() {
+        let limit: Limit = serde_json::from_str(r#"{"type":"TOKENS_LIMIT"}"#).unwrap();
+        assert_eq!(percentage_from_limit(&limit), None);
+    }
+
+    #[test]
+    fn clamps_present_percentage() {
+        let high: Limit = serde_json::from_str(r#"{"percentage":150}"#).unwrap();
+        let low: Limit = serde_json::from_str(r#"{"percentage":-25}"#).unwrap();
+
+        assert_eq!(percentage_from_limit(&high), Some(100.0));
+        assert_eq!(percentage_from_limit(&low), Some(0.0));
+    }
 }

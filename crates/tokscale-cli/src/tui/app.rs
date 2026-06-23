@@ -21,7 +21,7 @@ use super::interaction::{
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
-use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
+use super::ui::widgets::{get_model_color, get_provider_shade, provider_color_key};
 
 /// Configuration for TUI initialization
 pub struct TuiConfig {
@@ -383,9 +383,10 @@ pub struct App {
     pub model_shade_map: HashMap<String, Color>,
 
     pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
+    pub subscription_usage_errors: Vec<crate::commands::usage::UsageProviderError>,
 
     pub usage_fetch_attempted: bool,
-    usage_rx: Option<std::sync::mpsc::Receiver<Vec<crate::commands::usage::UsageOutput>>>,
+    usage_rx: Option<std::sync::mpsc::Receiver<crate::commands::usage::UsageFetchBatch>>,
 }
 
 impl App {
@@ -515,6 +516,7 @@ impl App {
             } else {
                 Vec::new()
             },
+            subscription_usage_errors: Vec::new(),
             usage_fetch_attempted: false,
             usage_rx: None,
         };
@@ -602,11 +604,7 @@ impl App {
     }
 
     pub fn model_color_for(&self, provider: &str, model: &str) -> Color {
-        let provider = if provider.is_empty() || provider.contains(", ") {
-            get_provider_from_model(model)
-        } else {
-            provider
-        };
+        let provider = provider_color_key(provider);
         let lookup_key = super::colors::model_shade_key(provider, model);
         let color = self
             .model_shade_map
@@ -617,7 +615,7 @@ impl App {
     }
 
     pub fn model_color(&self, model: &str) -> Color {
-        let provider = get_provider_from_model(model);
+        let provider = provider_color_key("");
         let lookup_key = super::colors::model_shade_key(provider, model);
         let color = self
             .model_shade_map
@@ -662,20 +660,35 @@ impl App {
         // Poll background usage fetch
         if let Some(ref rx) = self.usage_rx {
             match rx.try_recv() {
-                Ok(results) => {
+                Ok(batch) => {
                     self.usage_rx = None;
-                    self.subscription_usage = results;
+                    self.subscription_usage = batch.outputs;
+                    self.subscription_usage_errors = batch.errors;
                     if !self.subscription_usage.is_empty() {
                         crate::commands::usage::save_cache(&self.subscription_usage);
-                        self.status_message = Some("Usage data loaded".into());
+                        if self.subscription_usage_errors.is_empty() {
+                            self.status_message = Some("Usage data loaded".into());
+                        } else {
+                            self.status_message =
+                                Some("Usage data loaded with provider errors".into());
+                        }
                     } else {
                         crate::commands::usage::clear_cache();
-                        self.status_message = Some("No usage data available".into());
+                        if self.subscription_usage_errors.is_empty() {
+                            self.status_message = Some("No usage data available".into());
+                        } else {
+                            self.status_message = Some("Usage fetch failed".into());
+                        }
                     }
                     self.status_message_time = Some(std::time::Instant::now());
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.usage_rx = None;
+                    self.subscription_usage_errors =
+                        vec![crate::commands::usage::UsageProviderError {
+                            provider: "unknown".to_string(),
+                            message: "usage fetch worker disconnected".to_string(),
+                        }];
                     self.status_message = Some("Usage fetch failed".into());
                     self.status_message_time = Some(std::time::Instant::now());
                 }
@@ -849,8 +862,8 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.usage_rx = Some(rx);
         std::thread::spawn(move || {
-            let results = crate::commands::usage::fetch_all();
-            let _ = tx.send(results);
+            let batch = crate::commands::usage::fetch_all();
+            let _ = tx.send(batch);
         });
     }
 

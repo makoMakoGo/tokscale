@@ -165,6 +165,16 @@ fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> 
     })
 }
 
+fn metric_dedup_key(label: &str, metric: &UsageMetric) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        label,
+        metric.used_percent,
+        metric.remaining_label.as_deref().unwrap_or(""),
+        metric.resets_at.as_deref().unwrap_or("")
+    )
+}
+
 pub fn has_credentials() -> bool {
     credentials_path().exists()
 }
@@ -241,12 +251,7 @@ pub fn fetch() -> Result<UsageOutput> {
                         _ => "Weekly",
                     };
                     if let Some(metric) = parse_quota_detail(label, detail) {
-                        let key = format!(
-                            "{}:{}:{}",
-                            label,
-                            metric.used_percent,
-                            metric.remaining_label.as_deref().unwrap_or("")
-                        );
+                        let key = metric_dedup_key(label, &metric);
                         if seen.insert(key) {
                             metrics.push(metric);
                         }
@@ -258,12 +263,7 @@ pub fn fetch() -> Result<UsageOutput> {
         // Parse top-level usage as "Weekly" (deduplicate against session)
         if let Some(ref usage) = resp.usage {
             if let Some(metric) = parse_quota_detail("Weekly", usage) {
-                let key = format!(
-                    "{}:{}:{}",
-                    "Weekly",
-                    metric.used_percent,
-                    metric.remaining_label.as_deref().unwrap_or("")
-                );
+                let key = metric_dedup_key("Weekly", &metric);
                 if seen.insert(key) {
                     metrics.push(metric);
                 }
@@ -278,4 +278,29 @@ pub fn fetch() -> Result<UsageOutput> {
             metrics,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metric_dedup_key_includes_reset_window() {
+        let first = UsageMetric {
+            label: "Weekly".to_string(),
+            used_percent: 50.0,
+            remaining_percent: 50.0,
+            remaining_label: Some("5/10 left".to_string()),
+            resets_at: Some("2026-06-23T00:00:00Z".to_string()),
+        };
+        let second = UsageMetric {
+            resets_at: Some("2026-06-24T00:00:00Z".to_string()),
+            ..first.clone()
+        };
+
+        assert_ne!(
+            metric_dedup_key("Weekly", &first),
+            metric_dedup_key("Weekly", &second)
+        );
+    }
 }

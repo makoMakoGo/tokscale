@@ -1,8 +1,9 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
-use crate::commands::usage::{helpers, UsageOutput};
+use crate::commands::usage::{helpers, UsageOutput, UsageProviderError};
 use crate::tui::app::App;
+use crate::tui::themes::Theme;
 use crate::tui::ui::widgets::viewport_scrollbar_state;
 
 const BAR_WIDTH: usize = 20;
@@ -18,7 +19,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.subscription_usage.is_empty() {
+    if app.subscription_usage.is_empty() && app.subscription_usage_errors.is_empty() {
         app.set_usage_text_viewport(inner.height as usize, 0);
         if app.is_fetching_usage() {
             render_fetching(frame, app, inner);
@@ -27,7 +28,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             render_loading(frame, app, inner);
         }
-    } else if app.subscription_usage.iter().all(|o| o.metrics.is_empty()) {
+    } else if app.subscription_usage.iter().all(|o| o.metrics.is_empty())
+        && app.subscription_usage_errors.is_empty()
+    {
         app.set_usage_text_viewport(inner.height as usize, 0);
         render_empty(frame, app, inner);
     } else {
@@ -89,7 +92,11 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, center);
 }
 
-pub(crate) fn build_usage_lines(app: &App, outputs: &[UsageOutput]) -> Vec<Line<'static>> {
+pub(crate) fn build_usage_lines(
+    theme: &Theme,
+    outputs: &[UsageOutput],
+    errors: &[UsageProviderError],
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
     for (i, output) in outputs.iter().enumerate() {
@@ -100,7 +107,7 @@ pub(crate) fn build_usage_lines(app: &App, outputs: &[UsageOutput]) -> Vec<Line<
         lines.push(Line::from(Span::styled(
             format!(" {} ", output.provider),
             Style::default()
-                .fg(app.theme.foreground)
+                .fg(theme.foreground)
                 .add_modifier(Modifier::BOLD),
         )));
 
@@ -118,11 +125,11 @@ pub(crate) fn build_usage_lines(app: &App, outputs: &[UsageOutput]) -> Vec<Line<
 
             let label = Span::styled(
                 format!(" {:<14}", m.label),
-                Style::default().fg(app.theme.foreground),
+                Style::default().fg(theme.foreground),
             );
             let value = Span::styled(
                 format!("{:<11}", remaining),
-                Style::default().fg(app.theme.foreground),
+                Style::default().fg(theme.foreground),
             );
             let bar_span = Span::styled(
                 format!("{:<24}", bar),
@@ -131,10 +138,10 @@ pub(crate) fn build_usage_lines(app: &App, outputs: &[UsageOutput]) -> Vec<Line<
                 } else if m.remaining_percent < 25.0 {
                     Color::Yellow
                 } else {
-                    app.theme.accent
+                    theme.accent
                 }),
             );
-            let reset_span = Span::styled(reset, Style::default().fg(app.theme.muted));
+            let reset_span = Span::styled(reset, Style::default().fg(theme.muted));
 
             lines.push(Line::from(vec![label, value, bar_span, reset_span]));
         }
@@ -142,14 +149,33 @@ pub(crate) fn build_usage_lines(app: &App, outputs: &[UsageOutput]) -> Vec<Line<
         if let Some(ref email) = output.email {
             lines.push(Line::from(Span::styled(
                 format!(" {:<12}{email}", "Account"),
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(theme.muted),
             )));
         }
         if let Some(ref plan) = output.plan {
             lines.push(Line::from(Span::styled(
                 format!(" {:<12}{plan}", "Plan"),
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(theme.muted),
             )));
+        }
+    }
+
+    if !errors.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            " Provider errors ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        for error in errors {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {:<14}", error.provider),
+                    Style::default().fg(theme.foreground),
+                ),
+                Span::styled(error.message.clone(), Style::default().fg(theme.muted)),
+            ]));
         }
     }
 
@@ -157,7 +183,11 @@ pub(crate) fn build_usage_lines(app: &App, outputs: &[UsageOutput]) -> Vec<Line<
 }
 
 fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
-    let mut lines = build_usage_lines(app, &app.subscription_usage);
+    let mut lines = build_usage_lines(
+        &app.theme,
+        &app.subscription_usage,
+        &app.subscription_usage_errors,
+    );
     let total_lines = lines.len();
     let visible_height = area.height as usize;
     app.set_usage_text_viewport(visible_height, total_lines);
@@ -182,5 +212,34 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
             }),
             &mut scrollbar_state,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::themes::{Theme, ThemeName};
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn usage_lines_render_provider_errors_without_outputs() {
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let errors = vec![UsageProviderError {
+            provider: "MiniMax Token Plan CN".to_string(),
+            message: "session expired".to_string(),
+        }];
+
+        let lines = build_usage_lines(&theme, &[], &errors);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(text.contains("Provider errors"));
+        assert!(text.contains("MiniMax Token Plan CN"));
+        assert!(text.contains("session expired"));
     }
 }

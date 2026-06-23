@@ -6,10 +6,11 @@ mod grok;
 pub mod helpers;
 mod kimi;
 mod minimax;
+mod minimax_tokenplan;
 mod warp;
 mod zai;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 // ── Shared types ──
 
@@ -39,6 +40,27 @@ pub struct UsageAccount {
     pub label: Option<String>,
     #[serde(default)]
     pub is_active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct UsageProviderError {
+    pub provider: String,
+    pub message: String,
+}
+
+impl UsageProviderError {
+    fn new(provider: &str, error: impl std::fmt::Display) -> Self {
+        Self {
+            provider: provider.to_string(),
+            message: error.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UsageFetchBatch {
+    pub outputs: Vec<UsageOutput>,
+    pub errors: Vec<UsageProviderError>,
 }
 
 impl UsageAccount {
@@ -177,7 +199,7 @@ impl Fetch {
 
 type UsageProvider = (&'static str, fn() -> bool, Fetch);
 
-pub fn fetch_all() -> Vec<UsageOutput> {
+pub fn fetch_all() -> UsageFetchBatch {
     let providers: Vec<UsageProvider> = vec![
         (
             "Claude",
@@ -207,24 +229,60 @@ pub fn fetch_all() -> Vec<UsageOutput> {
             minimax::has_credentials,
             Fetch::Single(minimax::fetch),
         ),
+        (
+            "MiniMax Token Plan CN",
+            minimax_tokenplan::has_cn_credentials,
+            Fetch::Single(minimax_tokenplan::fetch_cn),
+        ),
+        (
+            "MiniMax Token Plan Global",
+            minimax_tokenplan::has_global_credentials,
+            Fetch::Single(minimax_tokenplan::fetch_global),
+        ),
         ("Warp/Oz", warp::has_credentials, Fetch::Single(warp::fetch)),
     ];
 
+    fetch_providers(providers)
+}
+
+fn fetch_providers(providers: Vec<UsageProvider>) -> UsageFetchBatch {
     let active: Vec<_> = providers.into_iter().filter(|(_, has, _)| has()).collect();
 
     if active.is_empty() {
-        return vec![];
+        return UsageFetchBatch::default();
     }
 
     std::thread::scope(|s| {
-        active
+        let results = active
             .into_iter()
-            .map(|(_, _, fetch)| s.spawn(move || fetch.call().ok()))
+            .map(|(provider, _, fetch)| {
+                s.spawn(move || match fetch.call() {
+                    Ok(outputs) => (outputs, None),
+                    Err(error) => (Vec::new(), Some(UsageProviderError::new(provider, error))),
+                })
+            })
             .collect::<Vec<_>>()
             .into_iter()
-            .filter_map(|h| h.join().ok().flatten())
-            .flatten()
-            .collect()
+            .map(|handle| match handle.join() {
+                Ok(result) => result,
+                Err(_) => (
+                    Vec::new(),
+                    Some(UsageProviderError::new(
+                        "unknown",
+                        "provider fetch panicked",
+                    )),
+                ),
+            })
+            .collect::<Vec<_>>();
+
+        let mut batch = UsageFetchBatch::default();
+        for (outputs, error) in results {
+            batch.outputs.extend(outputs);
+            if let Some(error) = error {
+                batch.errors.push(error);
+            }
+        }
+        batch
     })
 }
 
@@ -280,14 +338,51 @@ fn render_light(output: &UsageOutput) {
     println!("╰{}╯", "─".repeat(CARD_WIDTH));
 }
 
+fn render_light_error(error: &UsageProviderError) {
+    eprintln!("{}: {}", error.provider, error.message);
+}
+
+#[derive(serde::Serialize)]
+struct UsageProviderErrorReport<'a> {
+    kind: &'static str,
+    errors: &'a [UsageProviderError],
+}
+
+fn failed_provider_summary(errors: &[UsageProviderError]) -> String {
+    errors
+        .iter()
+        .map(|error| error.provider.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn run(json: bool, _light: bool) -> Result<()> {
-    let outputs = fetch_all();
+    let batch = fetch_all();
     if json {
-        println!("{}", serde_json::to_string_pretty(&outputs)?);
+        println!("{}", serde_json::to_string_pretty(&batch.outputs)?);
+        if !batch.errors.is_empty() {
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&UsageProviderErrorReport {
+                    kind: "usage_provider_errors",
+                    errors: &batch.errors,
+                })?
+            );
+        }
     } else {
-        for o in &outputs {
+        for o in &batch.outputs {
             render_light(o);
         }
+        for error in &batch.errors {
+            render_light_error(error);
+        }
+    }
+
+    if !batch.errors.is_empty() {
+        return Err(anyhow!(
+            "subscription usage partial failure: {}",
+            failed_provider_summary(&batch.errors)
+        ));
     }
     Ok(())
 }
@@ -361,5 +456,45 @@ mod tests {
         assert!(output.account.is_none());
         assert_eq!(output.display_name(), "Codex");
         Ok(())
+    }
+
+    fn test_has_credentials() -> bool {
+        true
+    }
+
+    fn test_fetch_ok() -> Result<UsageOutput> {
+        Ok(UsageOutput {
+            provider: "Ok".to_string(),
+            account: None,
+            plan: None,
+            email: None,
+            metrics: Vec::new(),
+        })
+    }
+
+    fn test_fetch_err() -> Result<UsageOutput> {
+        Err(anyhow!("token expired"))
+    }
+
+    #[test]
+    fn fetch_providers_preserves_outputs_and_errors() {
+        let batch = fetch_providers(vec![
+            ("Ok", test_has_credentials, Fetch::Single(test_fetch_ok)),
+            (
+                "Broken",
+                test_has_credentials,
+                Fetch::Single(test_fetch_err),
+            ),
+        ]);
+
+        assert_eq!(batch.outputs.len(), 1);
+        assert_eq!(batch.outputs[0].provider, "Ok");
+        assert_eq!(
+            batch.errors,
+            vec![UsageProviderError {
+                provider: "Broken".to_string(),
+                message: "token expired".to_string(),
+            }]
+        );
     }
 }

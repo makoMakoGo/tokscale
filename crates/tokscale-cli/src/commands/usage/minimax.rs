@@ -105,7 +105,7 @@ fn epoch_to_ms(ts: i64) -> i64 {
     if ts.abs() > 10_000_000_000 {
         ts
     } else {
-        ts * 1000
+        ts.saturating_mul(1000)
     }
 }
 
@@ -221,7 +221,11 @@ pub fn fetch() -> Result<UsageOutput> {
             // Reset time: prefer end_time, fallback to remains_time
             let resets_at = model.end_time.map(parse_end_time).or_else(|| {
                 model.remains_time.map(|rt| {
-                    let ms = if rt > 1_000_000_000 { rt } else { rt * 1000 };
+                    let ms = if rt > 1_000_000_000 {
+                        rt
+                    } else {
+                        rt.saturating_mul(1000)
+                    };
                     let dt = Utc::now() + chrono::Duration::milliseconds(ms);
                     dt.to_rfc3339()
                 })
@@ -238,6 +242,10 @@ pub fn fetch() -> Result<UsageOutput> {
             if plan.is_none() {
                 plan = infer_plan(total);
             }
+        }
+
+        if metrics.is_empty() {
+            anyhow::bail!("MiniMax returned no parseable usage (response format may have changed)");
         }
 
         Ok(UsageOutput {
