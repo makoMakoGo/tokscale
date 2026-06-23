@@ -31,7 +31,9 @@ use std::time::UNIX_EPOCH;
 // Roo-family sidecar fingerprints.
 // 28: Antigravity IDE cache and CLI SQLite rows share the antigravity client id.
 // 29: Antigravity CLI model ids come from display labels, not backend route ids.
-const CACHE_SCHEMA_VERSION: u32 = 29;
+// 30: Antigravity CLI response dedup keys changed to the shared antigravity
+// namespace, and nonzero usage with unknown display labels is preserved.
+const CACHE_SCHEMA_VERSION: u32 = 30;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const SHARDS_DIRNAME: &str = "shards";

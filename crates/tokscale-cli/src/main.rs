@@ -3612,11 +3612,11 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
 }
 
 fn antigravity_cli_conversations_path(home_dir: &str, use_env_roots: bool) -> PathBuf {
-    let root = if use_env_roots {
-        std::env::var("GEMINI_CLI_HOME").unwrap_or_else(|_| format!("{home_dir}/.gemini"))
-    } else {
-        format!("{home_dir}/.gemini")
-    };
+    let root = tokscale_core::PathRoot::EnvVar {
+        var: "GEMINI_CLI_HOME",
+        fallback_relative: ".gemini",
+    }
+    .resolve_with_env_strategy(home_dir, use_env_roots);
     PathBuf::from(root).join("antigravity-cli/conversations")
 }
 
@@ -6324,6 +6324,23 @@ mod tests {
             antigravity_cli_conversations_path("/tmp/home", false),
             PathBuf::from("/tmp/home/.gemini/antigravity-cli/conversations")
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn antigravity_cli_conversations_path_falls_back_for_blank_env() {
+        let previous = std::env::var("GEMINI_CLI_HOME").ok();
+        unsafe { std::env::set_var("GEMINI_CLI_HOME", "   ") };
+
+        assert_eq!(
+            antigravity_cli_conversations_path("/tmp/home", true),
+            PathBuf::from("/tmp/home/.gemini/antigravity-cli/conversations")
+        );
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("GEMINI_CLI_HOME", value) },
+            None => unsafe { std::env::remove_var("GEMINI_CLI_HOME") },
+        }
     }
 
     #[test]
