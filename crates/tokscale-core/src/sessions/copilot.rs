@@ -84,6 +84,7 @@ struct TraceContext {
     model: Option<String>,
     session_id: Option<String>,
     session_id_priority: SessionIdPriority,
+    agent_name: Option<String>,
 }
 
 struct CopilotUsageCandidate {
@@ -97,6 +98,7 @@ struct CopilotUsageCandidate {
     duration_ms: Option<i64>,
     tokens: TokenBreakdown,
     dedup_key: String,
+    agent: Option<String>,
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -109,7 +111,7 @@ enum SessionIdPriority {
 
 impl CopilotUsageCandidate {
     fn into_message(self) -> UnifiedMessage {
-        let mut message = UnifiedMessage::new_with_dedup(
+        let mut message = UnifiedMessage::new_with_agent(
             "copilot",
             self.model,
             self.provider_id,
@@ -117,8 +119,9 @@ impl CopilotUsageCandidate {
             self.timestamp_ms,
             self.tokens,
             0.0,
-            Some(crate::sessions::dedup_hash_str(&self.dedup_key)),
+            self.agent,
         );
+        message.dedup_key = Some(crate::sessions::dedup_hash_str(&self.dedup_key));
         message.duration_ms = self.duration_ms;
         message
     }
@@ -142,6 +145,7 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
                 model: None,
                 session_id: None,
                 session_id_priority: SessionIdPriority::Missing,
+                agent_name: None,
             });
 
         if context.model.is_none() {
@@ -152,6 +156,12 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
             if priority > context.session_id_priority {
                 context.session_id = Some(session_id.to_string());
                 context.session_id_priority = priority;
+            }
+        }
+
+        if context.agent_name.is_none() {
+            if let Some(agent_name) = first_non_empty_attr(attributes, AGENT_NAME_ATTRS) {
+                context.agent_name = Some(super::normalize_copilot_agent_name(agent_name));
             }
         }
     }
@@ -233,12 +243,20 @@ fn candidate_from_attributes(
 ) -> Option<CopilotUsageCandidate> {
     let input = attr_i64_first(attributes, &["gen_ai.usage.input_tokens"]);
     let output = attr_i64_first(attributes, &["gen_ai.usage.output_tokens"]);
-    let cache_read = attr_i64_first(attributes, &["gen_ai.usage.cache_read.input_tokens"]);
+    let cache_read = attr_i64_first(
+        attributes,
+        &[
+            "gen_ai.usage.cache_read.input_tokens",
+            "gen_ai.usage.cache_read_input_tokens",
+        ],
+    );
     let cache_write = attr_i64_first(
         attributes,
         &[
             "gen_ai.usage.cache_write.input_tokens",
             "gen_ai.usage.cache_creation.input_tokens",
+            "gen_ai.usage.cache_write_input_tokens",
+            "gen_ai.usage.cache_creation_input_tokens",
         ],
     );
     let reasoning = attr_i64_first(
@@ -297,6 +315,10 @@ fn candidate_from_attributes(
         duration_ms,
         tokens,
         dedup_key,
+        agent: first_non_empty_attr(attributes, AGENT_NAME_ATTRS)
+            .map(super::normalize_copilot_agent_name)
+            .or_else(|| trace_context.and_then(|tc| tc.agent_name.clone()))
+            .or_else(|| Some("Default".to_string())),
     })
 }
 
@@ -367,6 +389,7 @@ fn should_emit_candidate(
 }
 
 const MODEL_ATTRS: &[&str] = &["gen_ai.response.model", "gen_ai.request.model"];
+const AGENT_NAME_ATTRS: &[&str] = &["gen_ai.agent.name"];
 const SESSION_ATTRS: &[(&str, SessionIdPriority)] = &[
     ("gen_ai.conversation.id", SessionIdPriority::Session),
     ("copilot_chat.session_id", SessionIdPriority::Session),
@@ -554,7 +577,8 @@ fn normalize_input_tokens(
 fn first_non_empty_attr<'a>(attributes: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .filter_map(|key| attributes.get(*key).and_then(Value::as_str))
-        .find(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .find(|value| !value.is_empty())
 }
 
 fn best_session_attr(attributes: &Map<String, Value>) -> Option<(&str, SessionIdPriority)> {
@@ -710,6 +734,7 @@ mod tests {
             message.dedup_key,
             Some(crate::sessions::dedup_hash_str("trace-1:span-1"))
         );
+        assert_eq!(message.agent.as_deref(), Some("Default"));
     }
 
     #[test]
@@ -795,6 +820,64 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 0);
         assert_eq!(messages[0].tokens.cache_read, 50);
         assert_eq!(messages[0].tokens.cache_write, 0);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_underscore_cache_attributes() {
+        let content = r#"{"type":"span","traceId":"trace-cli","spanId":"span-cli","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.usage.input_tokens":23000,"gen_ai.usage.output_tokens":120,"gen_ai.usage.cache_read_input_tokens":21881,"gen_ai.usage.cache_creation_input_tokens":1397}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.cache_read, 21_881);
+        assert_eq!(messages[0].tokens.cache_write, 1_397);
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trace_agent_name_is_fallback() {
+        let content = r#"{"type":"span","traceId":"trace-agent","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.conversation.id":"conv-agent","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.name":"  Ask  "}}
+{"type":"span","traceId":"trace-agent","spanId":"chat-1","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-agent","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("Ask"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_record_agent_name_wins_over_trace_agent_name() {
+        let content = r#"{"type":"span","traceId":"trace-sub","spanId":"invoke-sub","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.conversation.id":"conv-sub","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.name":"Plan"}}
+{"type":"span","traceId":"trace-sub","spanId":"chat-sub","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-sub","gen_ai.agent.name":"Explore","gen_ai.usage.input_tokens":5000,"gen_ai.usage.output_tokens":100}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("Explore"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_blank_agent_name_defaults() {
+        let content = r#"{"type":"span","traceId":"trace-blank","spanId":"chat-blank","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-blank","gen_ai.agent.name":"   ","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":50}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_agent_id_is_not_displayed() {
+        let content = r#"{"type":"span","traceId":"trace-unknown-agent","spanId":"chat-unknown-agent","name":"chat claude-sonnet-4.6","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.conversation.id":"conv-unknown-agent","gen_ai.agent.id":"runtime nickname","gen_ai.usage.input_tokens":1000,"gen_ai.usage.output_tokens":50}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("Default"));
     }
 
     #[test]

@@ -127,6 +127,28 @@ pub fn normalize_opencode_agent_name(agent: &str) -> String {
     normalize_agent_name(&canonical)
 }
 
+pub fn normalize_copilot_agent_name(agent: &str) -> String {
+    let cleaned = strip_zero_width_chars(agent);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return "Default".to_string();
+    }
+
+    const GITHUB_COPILOT_PREFIX: &str = "github.copilot.";
+    if trimmed
+        .get(..GITHUB_COPILOT_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(GITHUB_COPILOT_PREFIX))
+    {
+        let remainder = trimmed[GITHUB_COPILOT_PREFIX.len()..].trim();
+        if remainder.is_empty() || remainder.eq_ignore_ascii_case("default") {
+            return "Default".to_string();
+        }
+        return titlecase_agent(&remainder.replace('.', "-"));
+    }
+
+    normalize_agent_name(trimmed)
+}
+
 fn normalize_oh_my_opencode_agent_name(agent_lower: &str) -> Option<String> {
     let normalized = match agent_lower {
         // Parenthesized format and dash format
@@ -614,6 +636,19 @@ mod tests {
             normalize_opencode_agent_name("planner-sisyphus"),
             "Planner-Sisyphus"
         );
+        assert_eq!(normalize_copilot_agent_name(""), "Default");
+        assert_eq!(normalize_copilot_agent_name("   "), "Default");
+        assert_eq!(
+            normalize_copilot_agent_name("github.copilot.default"),
+            "Default"
+        );
+        assert_eq!(normalize_copilot_agent_name("github.copilot.chat"), "Chat");
+        assert_eq!(
+            normalize_copilot_agent_name("Plugin:team:slug"),
+            "Plugin:team:slug"
+        );
+        assert_eq!(normalize_copilot_agent_name("Ask"), "Ask");
+        assert_eq!(normalize_copilot_agent_name("Plan"), "Plan");
 
         assert_eq!(
             normalize_opencode_agent_name("Hephaestus (Deep Agent)"),

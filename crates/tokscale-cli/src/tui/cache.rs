@@ -22,7 +22,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 17;
+const CACHE_SCHEMA_VERSION: u32 = 18;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -590,8 +590,11 @@ fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
 }
 
 fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
-    if clients.split(", ").any(|client| client == "opencode") {
+    let has_client = |name: &str| clients.split(", ").any(|client| client == name);
+    if has_client("opencode") {
         sessions::normalize_opencode_agent_name(agent)
+    } else if has_client("copilot") {
+        sessions::normalize_copilot_agent_name(agent)
     } else {
         sessions::normalize_agent_name(agent)
     }
@@ -850,6 +853,23 @@ mod tests {
         assert_eq!(prometheus.message_count, 1);
     }
 
+    #[test]
+    fn test_normalize_cached_agents_merges_copilot_default_variants() {
+        let agents = normalize_cached_agents(vec![
+            cached_agent("Default", "copilot", 10),
+            cached_agent("   ", "copilot", 20),
+        ]);
+
+        assert_eq!(agents.len(), 1);
+        let copilot = agents
+            .iter()
+            .find(|agent| agent.agent == "Default")
+            .unwrap();
+        assert_eq!(copilot.clients, "copilot");
+        assert_eq!(copilot.message_count, 2);
+        assert_eq!(copilot.tokens.input, 30);
+    }
+
     // ── cache_clients_match_exact ──────────────────────────────────
 
     #[test]
@@ -950,7 +970,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 17,
+  "schemaVersion": 18,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
@@ -1200,7 +1220,7 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         let mut cached: serde_json::Value = serde_json::from_str(
             r#"{
-  "schemaVersion": 17,
+  "schemaVersion": 18,
   "timestamp": 0,
   "enabledClients": ["claude", "cursor"],
   "groupBy": "model",
@@ -1643,7 +1663,7 @@ mod tests {
     /// Regression test for the TUI cache `group_by` mismatch bug.
     ///
     /// Symptom: `npx tokscale@latest` (TUI launch) silently dropped the
-    /// on-disk cache and showed an empty dashboard until the background
+    /// on-disk cache and showed an empty TUI screen until the background
     /// scan finished, even though `~/.config/tokscale/cache/tui-data-cache.json`
     /// existed and was well-formed.
     ///

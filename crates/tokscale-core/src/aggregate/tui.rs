@@ -548,6 +548,8 @@ impl TuiAcc {
         if let Some(agent) = msg.agent.as_ref() {
             let normalized_agent = if msg.client.as_ref() == "opencode" {
                 sessions::normalize_opencode_agent_name(agent)
+            } else if msg.client.as_ref() == "copilot" {
+                sessions::normalize_copilot_agent_name(agent)
             } else {
                 sessions::normalize_agent_name(agent)
             };
