@@ -31,10 +31,11 @@
 //! Boundary behavior: rows with all usage buckets equal to zero are ignored, so
 //! failed generations with no billable usage do not create usage rows. Failed
 //! generations with non-zero usage are still counted, because providers can
-//! bill failed requests. Rows without a parseable display model are ignored
-//! instead of falling back to backend route aliases such as `gemini-pro-c`. Rows
-//! without `response_id` still parse, but only the per-file adapter path can
-//! distinguish them; cross-file duplicate protection depends on `response_id`.
+//! bill failed requests. Rows without a parseable display model are preserved as
+//! unpriced `unknown` model rows instead of falling back to backend route
+//! aliases such as `gemini-pro-c`. Rows without `response_id` still parse, but
+//! only the per-file adapter path can distinguish them; cross-file duplicate
+//! protection depends on `response_id`.
 
 use super::utils::{file_modified_timestamp_ms, open_readonly_sqlite};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -42,7 +43,7 @@ use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
-use tracing::debug;
+use tracing::warn;
 
 pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
     let Some(conn) = open_readonly_sqlite(path) else {
@@ -108,18 +109,28 @@ fn parse_gen_metadata(
         .filter(|text| !text.trim().is_empty())
         .map(str::to_string);
 
-    let display_model = fields.display_model?;
-    let Some(model_id) = canonical_antigravity_display_model(display_model) else {
-        debug!(
-            display_model,
-            response_id = response_id.as_deref().unwrap_or(""),
-            session_id,
-            "Skipping Antigravity CLI usage row with unrecognized display model"
-        );
-        return None;
+    let model_id = match fields.display_model {
+        Some(display_model) => canonical_antigravity_display_model(display_model)
+            .unwrap_or_else(|| {
+                warn!(
+                    display_model,
+                    response_id = response_id.as_deref().unwrap_or(""),
+                    session_id,
+                    "Antigravity CLI usage row has an unrecognized display model; preserving tokens as unknown"
+                );
+                "unknown".to_string()
+            }),
+        None => {
+            warn!(
+                response_id = response_id.as_deref().unwrap_or(""),
+                session_id,
+                "Antigravity CLI usage row is missing a display model; preserving tokens as unknown"
+            );
+            "unknown".to_string()
+        }
     };
     let provider_id = provider_identity::inferred_provider_from_model(&model_id)
-        .unwrap_or("antigravity")
+        .unwrap_or("unknown")
         .to_string();
 
     if let Some(response_id) = &response_id {
@@ -729,15 +740,21 @@ mod tests {
     }
 
     #[test]
-    fn usage_without_parseable_display_model_is_not_emitted() {
+    fn usage_without_parseable_display_model_is_preserved_as_unknown() {
         let mut seen_without_display = HashSet::new();
         let missing_display = parse_gen_metadata(
             &gen_metadata_with_model(b"resp-missing", None, b"gemini-pro-c", None),
             "session",
             1_000,
             &mut seen_without_display,
-        );
-        assert!(missing_display.is_none());
+        )
+        .unwrap();
+        assert_eq!(missing_display.model_id.as_ref(), "unknown");
+        assert_eq!(missing_display.provider_id.as_ref(), "unknown");
+        assert_eq!(missing_display.tokens.input, 1632);
+        assert_eq!(missing_display.tokens.output, 300);
+        assert_eq!(missing_display.tokens.cache_read, 16000);
+        assert_eq!(missing_display.tokens.reasoning, 40);
 
         let mut seen_unknown_display = HashSet::new();
         let unknown_display = parse_gen_metadata(
@@ -750,8 +767,14 @@ mod tests {
             "session",
             1_000,
             &mut seen_unknown_display,
-        );
-        assert!(unknown_display.is_none());
+        )
+        .unwrap();
+        assert_eq!(unknown_display.model_id.as_ref(), "unknown");
+        assert_eq!(unknown_display.provider_id.as_ref(), "unknown");
+        assert_eq!(unknown_display.tokens.input, 1632);
+        assert_eq!(unknown_display.tokens.output, 300);
+        assert_eq!(unknown_display.tokens.cache_read, 16000);
+        assert_eq!(unknown_display.tokens.reasoning, 40);
     }
 
     #[test]

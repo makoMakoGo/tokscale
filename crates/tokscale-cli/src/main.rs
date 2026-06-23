@@ -950,7 +950,7 @@ fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<ClientId>> {
     let mut invalid = Vec::new();
 
     for raw in defaults {
-        match ClientId::from_str(raw) {
+        match parse_persisted_default_client_id(raw) {
             Some(client) => parsed.push(client),
             None => invalid.push(raw.as_str()),
         }
@@ -965,6 +965,14 @@ fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<ClientId>> {
         invalid.join(", "),
         valid_client_ids()
     );
+}
+
+fn parse_persisted_default_client_id(raw: &str) -> Option<ClientId> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized == "antigravity-cli" {
+        return Some(ClientId::Antigravity);
+    }
+    ClientId::from_str(&normalized)
 }
 
 fn client_id_set_all() -> std::collections::HashSet<ClientId> {
@@ -3278,9 +3286,18 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     }
 
     let all_clients: std::collections::HashSet<ClientId> = ClientId::iter().collect();
+    let extra_dirs_val = if use_env_roots {
+        std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default()
+    } else {
+        String::new()
+    };
     let extra_dirs: Vec<(ClientId, String)> = if use_env_roots {
-        let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
         tokscale_core::parse_extra_dirs(&extra_dirs_val, &all_clients)
+    } else {
+        Vec::new()
+    };
+    let legacy_antigravity_cli_extra_dirs = if use_env_roots {
+        parse_legacy_antigravity_cli_extra_dirs(&extra_dirs_val)
     } else {
         Vec::new()
     };
@@ -3297,7 +3314,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     .expect("client diagnostics require local scan policy")
                     .resolve_path_with_env_strategy(&home_dir_str, use_env_roots);
                 let sessions_path_exists = Path::new(&sessions_path).exists();
-                let additional_paths: Vec<AdditionalPath> = built_in_extra_paths
+                let mut additional_paths: Vec<AdditionalPath> = built_in_extra_paths
                     .iter()
                     .filter(|(c, _)| *c == client)
                     .map(|(_, path)| AdditionalPath {
@@ -3305,6 +3322,13 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                         exists: path.exists(),
                     })
                     .collect();
+                if client == ClientId::Antigravity {
+                    let path = antigravity_cli_conversations_path(&home_dir_str, use_env_roots);
+                    additional_paths.push(AdditionalPath {
+                        path: path.to_string_lossy().to_string(),
+                        exists: path.exists(),
+                    });
+                }
                 let legacy_paths = if client == ClientId::OpenClaw {
                     vec![
                         LegacyPath {
@@ -3379,6 +3403,27 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                         source: "env".to_string(),
                     },
                 ));
+                if client == ClientId::Antigravity {
+                    if let Some(paths) = scanner_settings.extra_scan_paths.get("antigravity-cli") {
+                        extra_paths.extend(
+                            paths
+                                .iter()
+                                .filter(|path| !path.as_os_str().is_empty())
+                                .map(|path| ExtraPath {
+                                    path: path.to_string_lossy().to_string(),
+                                    exists: path.exists(),
+                                    source: "settings".to_string(),
+                                }),
+                        );
+                    }
+                    extra_paths.extend(legacy_antigravity_cli_extra_dirs.iter().map(|path| {
+                        ExtraPath {
+                            path: path.clone(),
+                            exists: Path::new(path).exists(),
+                            source: "env".to_string(),
+                        }
+                    }));
+                }
 
                 let diagnostics = if client == ClientId::Claude {
                     claude_diagnostics::diagnostics_for_clients_row(&home_dir)
@@ -3564,6 +3609,33 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn antigravity_cli_conversations_path(home_dir: &str, use_env_roots: bool) -> PathBuf {
+    let root = if use_env_roots {
+        std::env::var("GEMINI_CLI_HOME").unwrap_or_else(|_| format!("{home_dir}/.gemini"))
+    } else {
+        format!("{home_dir}/.gemini")
+    };
+    PathBuf::from(root).join("antigravity-cli/conversations")
+}
+
+fn parse_legacy_antigravity_cli_extra_dirs(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let (client, path) = entry.split_once(':')?;
+            if client.trim() != "antigravity-cli" {
+                return None;
+            }
+            let path = path.trim();
+            if path.is_empty() {
+                return None;
+            }
+            Some(path.to_string())
+        })
+        .collect()
 }
 
 fn get_headless_roots(home_dir: &Path) -> Vec<PathBuf> {
@@ -5467,6 +5539,20 @@ mod tests {
     }
 
     #[test]
+    fn test_build_client_filter_maps_legacy_antigravity_cli_default() {
+        let flags = ClientFlags::default();
+        let defaults = vec![
+            "antigravity-cli".to_string(),
+            "antigravity".to_string(),
+            "codex".to_string(),
+        ];
+        assert_eq!(
+            build_client_filter_with_defaults(flags, &defaults).unwrap(),
+            Some(vec!["antigravity".to_string(), "codex".to_string()])
+        );
+    }
+
+    #[test]
     fn test_build_client_filter_cli_overrides_defaults_completely() {
         // User passes --client → defaults must be ignored entirely
         // (no merge). This is the predictable semantics: "I asked for X,
@@ -6230,6 +6316,24 @@ mod tests {
     fn clap_rejects_antigravity_cli_as_separate_client() {
         assert!(Cli::try_parse_from(["tokscale", "--client", "antigravity"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "--client", "antigravity-cli"]).is_err());
+    }
+
+    #[test]
+    fn antigravity_cli_conversations_path_uses_home_when_env_roots_disabled() {
+        assert_eq!(
+            antigravity_cli_conversations_path("/tmp/home", false),
+            PathBuf::from("/tmp/home/.gemini/antigravity-cli/conversations")
+        );
+    }
+
+    #[test]
+    fn parse_legacy_antigravity_cli_extra_dirs_accepts_only_legacy_key() {
+        assert_eq!(
+            parse_legacy_antigravity_cli_extra_dirs(
+                "antigravity-cli:/tmp/agy-cli,antigravity:/tmp/agy,broken"
+            ),
+            vec!["/tmp/agy-cli".to_string()]
+        );
     }
 
     #[test]
