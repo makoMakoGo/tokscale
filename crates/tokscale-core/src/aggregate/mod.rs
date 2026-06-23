@@ -1,6 +1,5 @@
-//! The aggregation engine (#37 / phase C1): one deep module owning every rule
-//! that turns `UnifiedMessage`s into report and view models, consumed by the
-//! TUI and CLI alike. See `docs/plans/2026-06-16-c1-aggregation-engine.md`.
+//! The aggregation engine: one module owning the rules that turn
+//! `UnifiedMessage`s into report and view models for the TUI and CLI.
 
 mod accumulators;
 mod config;
