@@ -970,7 +970,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 20,
+  "schemaVersion": 21,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
