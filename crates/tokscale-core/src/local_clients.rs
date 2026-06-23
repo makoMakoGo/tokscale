@@ -335,19 +335,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
     LocalClientEntry {
-        client: ClientId::AntigravityCli,
-        def: LocalClientDef {
-            root: PathRoot::EnvVar {
-                var: "GEMINI_CLI_HOME",
-                fallback_relative: ".gemini",
-            },
-            relative_path: "antigravity-cli/conversations",
-            pattern: "*.db",
-            headless: false,
-            parse_local: true,
-        },
-    },
-    LocalClientEntry {
         client: ClientId::Zed,
         def: LocalClientDef {
             root: PathRoot::XdgData,

@@ -77,8 +77,7 @@
 | <img width="48px" src=".github/assets/client-kilocode.png" alt="Kilo CLI" /> | [Kilo CLI](https://github.com/nicepkg/kilo) | `~/.local/share/kilo/kilo.db` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-mux.png" alt="Mux" /> | [Mux](https://github.com/coder/mux) | `~/.mux/sessions/` | ✅ Yes |
 | <img width="48px" src=".github/assets/client-goose.png" alt="Goose" /> | [Goose](https://github.com/aaif-goose/goose) | `~/.local/share/goose/sessions/sessions.db` (+ macOS Application Support, legacy Block/goose paths; override via `GOOSE_PATH_ROOT`) | ✅ Yes |
-| <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) | Cached via `tokscale antigravity sync` to `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` (live RPC against the local language server) | ✅ Yes |
-| <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity CLI" /> | [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) | `$GEMINI_CLI_HOME/antigravity-cli/conversations/*.db` (fallback: `~/.gemini/antigravity-cli/conversations/*.db`) | ✅ Yes |
+| <img width="48px" src=".github/assets/client-antigravity.png" alt="Antigravity" /> | [Google Antigravity](https://antigravity.google/) / [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) | IDE cache via `tokscale antigravity sync` at `~/.config/tokscale/antigravity-cache/sessions/*.jsonl`; CLI DB at `$GEMINI_CLI_HOME/antigravity-cli/conversations/*.db` (fallback: `~/.gemini/antigravity-cli/conversations/*.db`) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-trae.png" alt="Trae" /> | [Trae IDE](https://www.trae.ai/) / [Trae Solo](https://www.trae.ai/solo) (international) | Cached via `tokscale trae sync` to `~/.config/tokscale/trae-cache/sessions/*.json` (account-level usage from the official API) | ✅ Yes |
 | <img width="48px" src=".github/assets/client-zed.webp" alt="Zed Agent" /> | [Zed Agent](https://zed.dev/docs/ai/agent-panel) | `~/.local/share/zed/threads/threads.db` (macOS: `~/Library/Application Support/Zed/threads/threads.db`; Windows: `%LOCALAPPDATA%/Zed/threads/threads.db`; hosted Zed models only, not external ACP agents) | ✅ Yes |
 | <img width="48px" src="https://github.com/kirodotdev.png" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/*.json` (+ `*.jsonl`), `~/.local/share/kiro-cli/data.sqlite3`, and Kiro IDE `globalStorage/kiro.kiroagent` snapshots | ✅ Yes |
@@ -151,7 +150,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with 9 color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Command Code, Droid, OpenClaw, Hermes Agent, Pi, OMP, Kimi, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, and Cline
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Command Code, Droid, OpenClaw, Hermes Agent, Pi, OMP, Kimi, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Goose, Antigravity, Zed, Kiro, Trae, and Cline
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -838,7 +837,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Command Code, Droid, OpenClaw, Hermes Agent, Pi, OMP, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Goose, Antigravity, Antigravity CLI, Zed, Kiro, Trae, Cline)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Command Code, Droid, OpenClaw, Hermes Agent, Pi, OMP, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Goose, Antigravity, Zed, Kiro, Trae, Cline)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -1165,8 +1164,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Command Code | `~/.commandcode/projects/**/*.jsonl` | `%USERPROFILE%\.commandcode\projects\**\*.jsonl` | Transcript-based estimated usage; checkpoint logs are skipped |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | Uses `xdg-basedir` like OpenCode |
 | Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support, legacy Block paths) | `%USERPROFILE%\.local\share\goose\sessions\` | Configurable via `GOOSE_PATH_ROOT` env var |
-| Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync` is currently supported on macOS/Linux only |
-| Antigravity CLI | `$GEMINI_CLI_HOME/antigravity-cli/conversations/*.db` (fallback: `~/.gemini/antigravity-cli/conversations/*.db`) | `%USERPROFILE%\.gemini\antigravity-cli\conversations\*.db` | Local conversation SQLite databases |
+| Antigravity | IDE cache: `~/.config/tokscale/antigravity-cache/sessions/`; CLI DB: `$GEMINI_CLI_HOME/antigravity-cli/conversations/*.db` (fallback: `~/.gemini/antigravity-cli/conversations/*.db`) | CLI DB: `%USERPROFILE%\.gemini\antigravity-cli\conversations\*.db` | IDE sync cache and CLI databases report under the same `antigravity` source |
 | Zed Agent | `~/.local/share/zed/threads/threads.db` | `%LOCALAPPDATA%\Zed\threads\threads.db` | Hosted Zed model usage only; external ACP agents are not included |
 | Kiro | `~/.kiro/sessions/cli/`, `~/.local/share/kiro-cli/data.sqlite3`, and Kiro IDE `globalStorage/kiro.kiroagent` | `%USERPROFILE%\.kiro\sessions\cli\`, `%USERPROFILE%\.local\share\kiro-cli\data.sqlite3`, and `%APPDATA%\Kiro\User\globalStorage\kiro.kiroagent\` | Parses Kiro CLI data plus IDE globalStorage snapshots when present |
 | Trae | `~/.config/tokscale/trae-cache/sessions/` | `%APPDATA%\tokscale\trae-cache\sessions\` | Synced once via `tokscale trae sync`; credentials are auto-discovered from any installed Trae IDE or Trae Solo desktop app |
@@ -1395,15 +1393,9 @@ Cursor data is fetched from the Cursor API using your session token and cached l
 
 ### Antigravity
 
-Location: `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` (synced via local Antigravity language server RPC)
+Locations: `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` (synced via local Antigravity language server RPC) and `$GEMINI_CLI_HOME/antigravity-cli/conversations/*.db` (fallback: `~/.gemini/antigravity-cli/conversations/*.db`)
 
-Antigravity data is not fetched automatically by the root command. Run `tokscale antigravity sync` while the Antigravity-enabled editor is open to refresh the local cache, then use normal tokscale reports and filters against the cached JSONL artifacts.
-
-### Antigravity CLI
-
-Location: `$GEMINI_CLI_HOME/antigravity-cli/conversations/*.db` (fallback: `~/.gemini/antigravity-cli/conversations/*.db`)
-
-Antigravity CLI data is read directly from local conversation SQLite databases. It is separate from the Antigravity IDE RPC cache above and does not require `tokscale antigravity sync`.
+Antigravity IDE data is not fetched automatically by the root command. Run `tokscale antigravity sync` while the Antigravity-enabled editor is open to refresh the local cache. Antigravity CLI data is read directly from local conversation SQLite databases and does not require sync; both sources report under the same `antigravity` client.
 
 ### Command Code
 

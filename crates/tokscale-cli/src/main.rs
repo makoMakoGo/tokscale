@@ -6227,6 +6227,12 @@ mod tests {
     }
 
     #[test]
+    fn clap_rejects_antigravity_cli_as_separate_client() {
+        assert!(Cli::try_parse_from(["tokscale", "--client", "antigravity"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "--client", "antigravity-cli"]).is_err());
+    }
+
+    #[test]
     fn default_submit_clients_excludes_warp_aggregate_source() {
         let clients = default_submit_clients();
         assert!(!clients.contains(&"warp".to_string()));
