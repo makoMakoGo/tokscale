@@ -1,5 +1,9 @@
 **Note:** This is a locally maintained fork of the upstream tokscale repository. User requirements take precedence.
 
+**Note:** When merging or porting new commits from upstream, record them in docs/upstream/yyyy-mm-dd.md to document the content, source, scope of changes, and any significant context or decisions. Keep these logs concise but informative, focusing on user-visible impact and details relevant to maintainers.
+
+**Note:** When a user explicitly requests breaking changes that diverge from upstream or major disagreements arise, remind them to record the decision and its rationale in docs/adr/xxxx-title.md. Keep ADRs concise, focusing on the decision, the "why", and any important context or trade-offs.
+
 # Repository Guidelines
 
 ## Project Structure & Module Organization
