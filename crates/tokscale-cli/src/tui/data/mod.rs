@@ -599,7 +599,7 @@ mod tests {
             .unwrap();
         assert_eq!(clients[pi_index + 1], ClientId::Omp);
         assert_eq!(clients[pi_index + 2], ClientId::Kimi);
-        assert_eq!(clients[clients.len() - 2], ClientId::Gjc);
+        assert_eq!(clients[clients.len() - 2], ClientId::CommandCode);
         assert_eq!(clients.last(), Some(&ClientId::Grok));
     }
 
@@ -713,7 +713,6 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), Some('i'));
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), Some('y'));
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), Some('n'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gjc), Some('g'));
     }
 
     #[test]
