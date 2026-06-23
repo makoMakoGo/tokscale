@@ -7,6 +7,7 @@ pub(crate) mod discover;
 pub(crate) mod file;
 mod goose;
 mod hermes;
+mod junie;
 mod kilo;
 mod kiro;
 mod openclaw;
@@ -198,7 +199,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 28] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -226,6 +227,7 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 28] = [
     &hermes::HERMES_ADAPTER,
     &goose::GOOSE_ADAPTER,
     &kiro::KIRO_ADAPTER,
+    &junie::JUNIE_ADAPTER,
     &file::COMMANDCODE_ADAPTER,
 ];
 

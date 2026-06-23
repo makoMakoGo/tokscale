@@ -251,6 +251,16 @@
     "color": "#00A67D"
   },
   {
+    "variant": "Junie",
+    "id": "junie",
+    "displayName": "Junie",
+    "shortName": "Junie",
+    "hotkey": "j",
+    "submitDefault": true,
+    "logo": "https://github.com/JetBrains.png",
+    "color": "#7B61FF"
+  },
+  {
     "variant": "Trae",
     "id": "trae",
     "displayName": "Trae",

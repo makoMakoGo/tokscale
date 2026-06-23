@@ -368,6 +368,16 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
     LocalClientEntry {
+        client: ClientId::Junie,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".junie/sessions",
+            pattern: "events.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
         client: ClientId::Trae,
         def: LocalClientDef {
             root: PathRoot::Config,
@@ -489,6 +499,15 @@ mod tests {
         let warp = ClientId::Warp.local_def().expect("warp has scan policy");
         assert_eq!(warp.relative_path, "warp-cache");
         assert!(!ClientId::Warp.parse_local());
+    }
+
+    #[test]
+    fn junie_client_reads_session_events_jsonl() {
+        let def = ClientId::Junie.local_def().expect("junie has scan policy");
+        assert_eq!(def.relative_path, ".junie/sessions");
+        assert_eq!(def.pattern, "events.jsonl");
+        assert!(ClientId::Junie.parse_local());
+        assert!(ClientId::Junie.submit_default());
     }
 
     #[test]
