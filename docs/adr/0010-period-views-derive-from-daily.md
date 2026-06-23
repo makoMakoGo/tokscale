@@ -59,10 +59,8 @@ Why from-daily, not per-message:
 
 - Adding a new period view = a new `PeriodKind` + descriptor function, not a
   new map in the per-message main loop.
-- `build_period_usage` migrates into the `AggregationEngine` under Phase C1
-  of the architecture track
-  (`docs/plans/2026-06-13-architecture-track.md`) as a derived finalization
-  step from `daily`, not as its own per-message accumulator.
+- `build_period_usage` belongs in the aggregation engine as a derived
+  finalization step from `daily`, not as its own per-message accumulator.
 - The design depends on `daily` retaining enough detail
   (`source_breakdown` with per-model `TokenBreakdown`) for the period to be
   lossless. A period-level metric `daily` does not store cannot be derived
