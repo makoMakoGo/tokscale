@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::ScrollbarState;
-use tokscale_core::{inferred_provider_from_model, normalize_provider_for_grouping, ClientId};
+use tokscale_core::{normalize_provider_for_grouping, ClientId};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::client_ui;
@@ -160,8 +160,8 @@ pub(crate) fn truncate_model_display_name_to(model: &str, max_width: usize) -> S
     truncate_display_width(model, max_width)
 }
 
-pub fn get_model_color(model: &str) -> Color {
-    get_provider_shade(get_provider_from_model(model), 0)
+pub fn get_model_color(_model: &str) -> Color {
+    get_provider_shade("unknown", 0)
 }
 
 /// Returns the shade for a given `(provider, rank)` pair.
@@ -288,17 +288,12 @@ const UNKNOWN_SHADES: [(u8, u8, u8); 7] = [
     (244, 244, 244), // #F4F4F4
 ];
 
-pub fn get_provider_from_model(model: &str) -> &'static str {
-    if let Some(provider) = inferred_provider_from_model(model) {
-        return provider;
-    }
-
-    let model_lower = model.to_lowercase();
-    if model_lower == "auto" || model_lower.contains("cursor") {
-        "cursor"
-    } else {
-        "unknown"
-    }
+pub fn provider_color_key(provider: &str) -> &str {
+    provider
+        .split(", ")
+        .map(str::trim)
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("unknown")
 }
 
 pub fn get_client_color(client: &str) -> Color {
@@ -321,7 +316,6 @@ pub fn get_client_color(client: &str) -> Color {
         "antigravity" => Color::Rgb(99, 102, 241), // #6366F1 Antigravity indigo
         "zed" => Color::Rgb(8, 76, 207),           // #084CCF Zed blue
         "warp" => Color::Rgb(1, 155, 150),         // #019B96 Warp teal
-        "gjc" => Color::Rgb(220, 38, 38),          // #DC2626 gajae-code red-claw
         _ => Color::Rgb(136, 136, 136),            // #888888
     }
 }
@@ -621,30 +615,12 @@ mod tests {
     }
 
     #[test]
-    fn provider_from_model_preserves_core_and_tui_fallbacks() {
-        assert_eq!(get_provider_from_model("u2"), "unisound");
-        assert_eq!(get_provider_from_model("foo/u2"), "unisound");
-        assert_eq!(get_provider_from_model("foo-u2"), "unknown");
-        assert_eq!(get_provider_from_model("u20"), "unknown");
-        assert_eq!(get_provider_from_model("codex-mini-latest"), "openai");
-        assert_eq!(get_provider_from_model("text-embedding-3-small"), "openai");
-        assert_eq!(get_provider_from_model("dall-e-3"), "openai");
-        assert_eq!(get_provider_from_model("whisper-1"), "openai");
-        assert_eq!(get_provider_from_model("tts-1"), "openai");
-        assert_eq!(get_provider_from_model("auto"), "cursor");
-        assert_eq!(get_provider_from_model("cursor-small"), "cursor");
-        assert_eq!(
-            get_provider_from_model("anthropic.claude-sonnet-4"),
-            "anthropic"
-        );
-        assert_eq!(
-            get_provider_from_model("bedrock/anthropic.claude-sonnet-4"),
-            "anthropic"
-        );
-        assert_eq!(
-            get_provider_from_model("us.anthropic.claude-3-5-sonnet-20241022-v1:0"),
-            "anthropic"
-        );
+    fn provider_color_key_uses_unknown_or_first_provider() {
+        assert_eq!(provider_color_key(""), "unknown");
+        assert_eq!(provider_color_key("   "), "unknown");
+        assert_eq!(provider_color_key("openai"), "openai");
+        assert_eq!(provider_color_key("openai, anthropic"), "openai");
+        assert_eq!(provider_color_key(" , anthropic"), "anthropic");
     }
 
     #[test]

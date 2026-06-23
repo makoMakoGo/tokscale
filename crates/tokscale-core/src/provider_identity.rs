@@ -310,6 +310,7 @@ pub fn is_anthropic_model(model: &str) -> bool {
         || anthropic_model_part.starts_with("opus-")
         || anthropic_model_part.starts_with("sonnet-")
         || anthropic_model_part.starts_with("haiku-")
+        || anthropic_model_part.starts_with("fable-")
 }
 
 #[cfg(test)]
@@ -462,6 +463,11 @@ mod tests {
         assert_eq!(inferred_provider_from_model("opus-4.5"), Some("anthropic"));
         assert_eq!(inferred_provider_from_model("sonnet-4"), Some("anthropic"));
         assert_eq!(inferred_provider_from_model("haiku-3"), Some("anthropic"));
+        assert_eq!(inferred_provider_from_model("fable-5"), Some("anthropic"));
+        assert_eq!(
+            inferred_provider_from_model("anthropic.fable-5"),
+            Some("anthropic")
+        );
         assert_eq!(inferred_provider_from_model("gpt-5.2"), Some("openai"));
         assert_eq!(inferred_provider_from_model("gpt-5.5"), Some("openai"));
         assert_eq!(
@@ -657,8 +663,8 @@ mod tests {
     }
 
     #[test]
-    fn test_gjc_unknown_provider_passthrough() {
-        // gjc's common providers ARE known and canonicalize as usual.
+    fn test_unknown_provider_passthrough() {
+        // Common provider labels canonicalize as usual.
         assert_eq!(canonical_provider("anthropic"), Some("anthropic".into()));
         assert_eq!(canonical_provider("openai"), Some("openai".into()));
         assert_eq!(canonical_provider("openai-codex"), Some("openai".into()));
@@ -672,11 +678,10 @@ mod tests {
             Some("github-copilot".into())
         );
 
-        // A gjc provider value that looks like a model fragment (contains
-        // digits) or a placeholder is NOT treated as a provider: canonical_provider
-        // yields None so the aggregator keeps the raw value verbatim rather than
-        // misattributing it. This guards the unknown-provider passthrough path.
-        assert_eq!(canonical_provider("gjc-model-4o"), None);
+        // A provider value that looks like a model fragment (contains digits)
+        // or a placeholder is not treated as a provider. This guards the
+        // unknown-provider passthrough path.
+        assert_eq!(canonical_provider("tool-local-model-4o"), None);
         assert_eq!(canonical_provider("<unset>"), None);
     }
 }

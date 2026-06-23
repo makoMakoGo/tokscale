@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use ratatui::style::Color;
 
 use super::data::ModelUsage;
-use super::ui::widgets::{get_provider_from_model, get_provider_shade};
+use super::ui::widgets::{get_provider_shade, provider_color_key};
 
 pub fn model_shade_key(provider: &str, model: &str) -> String {
     format!("{provider}\0{model}")
@@ -20,7 +20,7 @@ pub fn model_shade_key(provider: &str, model: &str) -> String {
 pub fn build_model_shade_map(models: &[ModelUsage]) -> HashMap<String, Color> {
     let mut by_provider: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
     for m in models {
-        let provider = provider_color_key(&m.provider, &m.model);
+        let provider = provider_color_key(&m.provider);
         let cost = if m.cost.is_finite() { m.cost } else { 0.0 };
         *by_provider
             .entry(provider)
@@ -43,14 +43,6 @@ pub fn build_model_shade_map(models: &[ModelUsage]) -> HashMap<String, Color> {
     map
 }
 
-fn provider_color_key<'a>(provider: &'a str, model: &'a str) -> &'a str {
-    if provider.is_empty() || provider.contains(", ") {
-        get_provider_from_model(model)
-    } else {
-        provider
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,30 +63,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_provider_u2_uses_unisound_shade_key() {
+    fn empty_provider_uses_unknown_shade_key() {
         let map = build_model_shade_map(&[model_usage("", "u2")]);
 
-        assert!(map.contains_key(&model_shade_key("unisound", "u2")));
-        assert!(!map.contains_key(&model_shade_key("unknown", "u2")));
+        assert!(map.contains_key(&model_shade_key("unknown", "u2")));
+        assert!(!map.contains_key(&model_shade_key("unisound", "u2")));
     }
 
     #[test]
-    fn empty_provider_legacy_tui_aliases_keep_provider_shade_keys() {
-        let cases = [
-            ("codex-mini-latest", "openai"),
-            ("text-embedding-3-small", "openai"),
-            ("whisper-1", "openai"),
-            ("auto", "cursor"),
-            ("cursor-small", "cursor"),
-            ("bedrock/anthropic.claude-sonnet-4", "anthropic"),
-            ("us.anthropic.claude-3-5-sonnet-20241022-v1:0", "anthropic"),
-        ];
+    fn merged_provider_uses_first_provider_shade_key() {
+        let map = build_model_shade_map(&[model_usage("openai, anthropic", "shared-model")]);
 
-        for (model, provider) in cases {
-            let map = build_model_shade_map(&[model_usage("", model)]);
-
-            assert!(map.contains_key(&model_shade_key(provider, model)));
-            assert!(!map.contains_key(&model_shade_key("unknown", model)));
-        }
+        assert!(map.contains_key(&model_shade_key("openai", "shared-model")));
+        assert!(!map.contains_key(&model_shade_key("anthropic", "shared-model")));
     }
 }

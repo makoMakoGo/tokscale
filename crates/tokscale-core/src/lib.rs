@@ -1337,6 +1337,16 @@ fn apply_token_pricing(message: &mut UnifiedMessage, pricing: Option<&pricing::P
     }
 }
 
+fn canonicalize_message_provider(message: &mut UnifiedMessage) {
+    let raw_provider = message.provider_id.trim();
+    let provider = provider_identity::canonical_provider(raw_provider)
+        .or_else(|| {
+            provider_identity::inferred_provider_from_model(&message.model_id).map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    message.provider_id = sessions::intern::intern(&provider);
+}
+
 pub(crate) fn finalize_token_priced_messages(
     messages: &mut Vec<UnifiedMessage>,
     pricing: Option<&pricing::PricingService>,
@@ -1344,6 +1354,7 @@ pub(crate) fn finalize_token_priced_messages(
     messages.retain_mut(|message| {
         normalize_token_breakdown(&mut message.tokens);
         message.refresh_derived_fields();
+        canonicalize_message_provider(message);
         if !has_positive_tokens(&message.tokens) {
             return false;
         }
@@ -3440,7 +3451,7 @@ model = "gpt-5.5"
             .unwrap();
 
             assert_eq!(messages.len(), 2);
-            assert_eq!(messages[0].provider_id.as_ref(), "openai-pro");
+            assert_eq!(messages[0].provider_id.as_ref(), "openai");
             assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
             assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 30);
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 3);
@@ -3477,7 +3488,7 @@ model = "gpt-5.5"
 
             assert_eq!(parsed.counts.get(ClientId::Kimi), 2);
             assert_eq!(parsed.messages.len(), 2);
-            assert_eq!(parsed.messages[0].provider_id, "openai-pro");
+            assert_eq!(parsed.messages[0].provider_id, "openai");
             assert_eq!(parsed.messages[0].model_id, "gpt-5.5");
             assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 30);
             assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 3);
@@ -5197,6 +5208,47 @@ model = "gpt-5.5"
     }
 
     #[test]
+    fn test_finalize_token_priced_messages_canonicalizes_provider() {
+        let mut messages = vec![
+            UnifiedMessage::new(
+                "pi",
+                "gpt-5.5",
+                "",
+                "missing-provider",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: 1,
+                    output: 1,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            ),
+            UnifiedMessage::new(
+                "mux",
+                "some-model",
+                "fireworks",
+                "canonical-provider",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: 1,
+                    output: 1,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            ),
+        ];
+
+        finalize_token_priced_messages(&mut messages, None);
+
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(messages[1].provider_id.as_ref(), "fireworks_ai");
+    }
+
+    #[test]
     fn test_positive_token_total_saturates() {
         let tokens = TokenBreakdown {
             input: i64::MAX,
@@ -6126,7 +6178,7 @@ model = "gpt-5.5"
             messages[0].model_id.as_ref(),
             "hf:deepseek-ai/DeepSeek-V3-0324"
         );
-        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(messages[0].provider_id.as_ref(), "deepseek");
     }
 
     #[test]
@@ -6160,7 +6212,7 @@ model = "gpt-5.5"
             parsed.messages[0].model_id,
             "accounts/fireworks/models/deepseek-v3-0324"
         );
-        assert_eq!(parsed.messages[0].provider_id, "fireworks");
+        assert_eq!(parsed.messages[0].provider_id, "fireworks_ai");
     }
 
     #[test]
