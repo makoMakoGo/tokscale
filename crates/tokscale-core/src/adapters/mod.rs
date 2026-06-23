@@ -1,4 +1,4 @@
-mod antigravity_cli;
+mod antigravity;
 pub(crate) mod cache;
 mod claude;
 mod codebuff;
@@ -157,6 +157,8 @@ pub(crate) enum SourceUnitMeta {
     None,
     OpenCodeSqlite,
     OpenCodeJson,
+    AntigravityCacheJsonl,
+    AntigravityCliSqlite,
     KiroFile,
     KiroSqlite,
     KiroGlobalStorage,
@@ -199,7 +201,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 28] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -220,8 +222,7 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &vscode_tasks::ROOCODE_ADAPTER,
     &vscode_tasks::KILOCODE_ADAPTER,
     &vscode_tasks::CLINE_ADAPTER,
-    &file::ANTIGRAVITY_ADAPTER,
-    &antigravity_cli::ANTIGRAVITY_CLI_ADAPTER,
+    &antigravity::ANTIGRAVITY_ADAPTER,
     &trae::TRAE_ADAPTER,
     &kilo::KILO_ADAPTER,
     &hermes::HERMES_ADAPTER,
@@ -300,5 +301,14 @@ mod tests {
         assert!(adapter_for(ClientId::Crush).is_none());
         assert!(selected_adapters(&["warp".to_string()]).is_empty());
         assert!(selected_adapters(&["crush".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn antigravity_uses_one_adapter_for_all_local_sources() {
+        let adapters = selected_adapters(&["antigravity".to_string()]);
+
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters[0].client(), ClientId::Antigravity);
+        assert!(selected_adapters(&["antigravity-cli".to_string()]).is_empty());
     }
 }

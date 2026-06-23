@@ -221,16 +221,6 @@
     "color": "#6366F1"
   },
   {
-    "variant": "AntigravityCli",
-    "id": "antigravity-cli",
-    "displayName": "Antigravity CLI",
-    "shortName": "Antigravity CLI",
-    "hotkey": "p",
-    "submitDefault": true,
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
-    "color": "#4F46E5"
-  },
-  {
     "variant": "Zed",
     "id": "zed",
     "displayName": "Zed Agent",

@@ -85,6 +85,8 @@ impl LocalSourceAdapter for OpenCodeAdapter {
                     })
                 }
                 SourceUnitMeta::None
+                | SourceUnitMeta::AntigravityCacheJsonl
+                | SourceUnitMeta::AntigravityCliSqlite
                 | SourceUnitMeta::KiroFile
                 | SourceUnitMeta::KiroSqlite
                 | SourceUnitMeta::KiroGlobalStorage

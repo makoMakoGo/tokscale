@@ -3,6 +3,10 @@ use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
 
+pub(crate) fn response_dedup_key(response_id: &str) -> u64 {
+    crate::sessions::dedup_hash_str(&format!("antigravity:{response_id}"))
+}
+
 pub fn parse_antigravity_file(path: &Path) -> Vec<UnifiedMessage> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
@@ -85,7 +89,7 @@ fn parse_usage_row(value: &Value, fallback_model: Option<&str>) -> Option<Unifie
         .get("responseId")
         .and_then(Value::as_str)
         .filter(|text| !text.trim().is_empty())
-        .map(crate::sessions::dedup_hash_str);
+        .map(response_dedup_key);
 
     Some(UnifiedMessage::new_with_dedup(
         "antigravity",
@@ -151,10 +155,7 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].tokens.input, 12);
         assert_eq!(messages[0].tokens.reasoning, 1);
-        assert_eq!(
-            messages[0].dedup_key,
-            Some(crate::sessions::dedup_hash_str("resp-1"))
-        );
+        assert_eq!(messages[0].dedup_key, Some(response_dedup_key("resp-1")));
     }
 
     #[test]

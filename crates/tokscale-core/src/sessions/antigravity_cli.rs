@@ -24,23 +24,26 @@
 //!     - `#9`: output text tokens
 //!     - `#10`: reasoning tokens
 //!     - `#11`: response id used for deduplication
-//!   - `#19`: response model id, for example `gemini-3-flash-a`
+//!   - `#21`: user-visible model label, for example `Gemini 3.5 Flash (Medium)`
 //! - `trajectory_metadata_blob.data #1 #1`: workspace file URI
 //! - `trajectory_metadata_blob.data #2`: created timestamp
 //!
 //! Boundary behavior: rows with all usage buckets equal to zero are ignored, so
 //! failed generations with no billable usage do not create usage rows. Failed
 //! generations with non-zero usage are still counted, because providers can
-//! bill failed requests. Rows without `response_id` still parse, but only the
-//! per-file adapter path can distinguish them; cross-file duplicate protection
-//! depends on `response_id`.
+//! bill failed requests. Rows without a parseable display model are preserved as
+//! unpriced `unknown` model rows instead of falling back to backend route
+//! aliases such as `gemini-pro-c`. Rows without `response_id` still parse, but
+//! only the per-file adapter path can distinguish them; cross-file duplicate
+//! protection depends on `response_id`.
 
 use super::utils::{file_modified_timestamp_ms, open_readonly_sqlite};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::{pricing, provider_identity, TokenBreakdown};
+use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
+use tracing::warn;
 
 pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
     let Some(conn) = open_readonly_sqlite(path) else {
@@ -105,28 +108,43 @@ fn parse_gen_metadata(
     let response_id = string_field(usage, 11)
         .filter(|text| !text.trim().is_empty())
         .map(str::to_string);
+
+    let model_id = match fields.display_model {
+        Some(display_model) => canonical_antigravity_display_model(display_model)
+            .unwrap_or_else(|| {
+                warn!(
+                    display_model,
+                    response_id = response_id.as_deref().unwrap_or(""),
+                    session_id,
+                    "Antigravity CLI usage row has an unrecognized display model; preserving tokens as unknown"
+                );
+                "unknown".to_string()
+            }),
+        None => {
+            warn!(
+                response_id = response_id.as_deref().unwrap_or(""),
+                session_id,
+                "Antigravity CLI usage row is missing a display model; preserving tokens as unknown"
+            );
+            "unknown".to_string()
+        }
+    };
+    let provider_id = provider_identity::inferred_provider_from_model(&model_id)
+        .unwrap_or("unknown")
+        .to_string();
+
     if let Some(response_id) = &response_id {
         if !seen_response_ids.insert(response_id.clone()) {
             return None;
         }
     }
 
-    let model_raw = fields
-        .model_raw
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or("unknown");
-    let model_id = pricing::aliases::resolve_alias(model_raw)
-        .unwrap_or(model_raw)
-        .to_string();
-    let provider_id = provider_identity::inferred_provider_from_model(&model_id)
-        .unwrap_or("antigravity")
-        .to_string();
-    let dedup_key = response_id.as_deref().map(|response_id| {
-        crate::sessions::dedup_hash_str(&format!("antigravity-cli:{response_id}"))
-    });
+    let dedup_key = response_id
+        .as_deref()
+        .map(super::antigravity::response_dedup_key);
 
     Some(UnifiedMessage::new_with_dedup(
-        "antigravity-cli",
+        "antigravity",
         model_id,
         provider_id,
         session_id,
@@ -143,11 +161,121 @@ fn parse_gen_metadata(
     ))
 }
 
+fn canonical_antigravity_display_model(display_model: &str) -> Option<String> {
+    let (base, tier) = split_display_model(display_model)?;
+    let parts = base.split_whitespace().collect::<Vec<_>>();
+
+    match parts.as_slice() {
+        [brand, version, family]
+            if brand.eq_ignore_ascii_case("Gemini")
+                && valid_version(version)
+                && valid_optional_tier(tier)
+                && matches_ignore_ascii_case(family, &["Pro", "Flash"]) =>
+        {
+            Some(format!(
+                "gemini-{}-{}",
+                version,
+                family.to_ascii_lowercase()
+            ))
+        }
+        [brand, family, version]
+            if brand.eq_ignore_ascii_case("Claude")
+                && valid_version(version)
+                && valid_optional_claude_mode(tier)
+                && matches_ignore_ascii_case(family, &["Opus", "Sonnet", "Haiku", "Fable"]) =>
+        {
+            Some(format!(
+                "claude-{}-{}",
+                family.to_ascii_lowercase(),
+                version
+            ))
+        }
+        [brand, size]
+            if brand.eq_ignore_ascii_case("GPT-OSS")
+                && valid_size_b(size)
+                && tier.is_some_and(valid_tier) =>
+        {
+            Some(format!(
+                "gpt-oss-{}-{}",
+                size.to_ascii_lowercase(),
+                tier.unwrap().to_ascii_lowercase()
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn split_display_model(display_model: &str) -> Option<(&str, Option<&str>)> {
+    let trimmed = display_model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(without_close) = trimmed.strip_suffix(')') {
+        let (base, tier) = without_close.rsplit_once(" (")?;
+        let base = base.trim();
+        let tier = tier.trim();
+        if base.is_empty() || tier.is_empty() || tier.contains(['(', ')']) {
+            return None;
+        }
+        return Some((base, Some(tier)));
+    }
+
+    if trimmed.contains(['(', ')']) {
+        return None;
+    }
+    Some((trimmed, None))
+}
+
+fn valid_optional_tier(tier: Option<&str>) -> bool {
+    tier.is_none_or(valid_tier)
+}
+
+fn valid_optional_claude_mode(mode: Option<&str>) -> bool {
+    mode.is_none_or(|value| value.eq_ignore_ascii_case("Thinking"))
+}
+
+fn valid_tier(tier: &str) -> bool {
+    matches_ignore_ascii_case(tier, &["Low", "Medium", "High"])
+}
+
+fn matches_ignore_ascii_case(value: &str, options: &[&str]) -> bool {
+    options
+        .iter()
+        .any(|option| value.eq_ignore_ascii_case(option))
+}
+
+fn valid_version(version: &str) -> bool {
+    let mut saw_digit = false;
+    let mut previous_dot = false;
+    for ch in version.chars() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            previous_dot = false;
+        } else if ch == '.' {
+            if !saw_digit || previous_dot {
+                return false;
+            }
+            previous_dot = true;
+        } else {
+            return false;
+        }
+    }
+    saw_digit && !previous_dot
+}
+
+fn valid_size_b(size: &str) -> bool {
+    let Some(number) = size.strip_suffix(['B', 'b']) else {
+        return false;
+    };
+    !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
 #[derive(Default)]
 struct ChatModelFields<'a> {
     usage: Option<&'a [u8]>,
     generation: Option<&'a [u8]>,
-    model_raw: Option<&'a str>,
+    display_model: Option<&'a str>,
 }
 
 fn chat_model_fields(chat_model: &[u8]) -> ChatModelFields<'_> {
@@ -157,15 +285,15 @@ fn chat_model_fields(chat_model: &[u8]) -> ChatModelFields<'_> {
         match (field, wire) {
             (4, Wire::Len(bytes)) => fields.usage = Some(bytes),
             (9, Wire::Len(bytes)) => fields.generation = Some(bytes),
-            (19, Wire::Len(bytes)) => {
-                if let Ok(model_raw) = std::str::from_utf8(bytes) {
-                    fields.model_raw = Some(model_raw);
+            (21, Wire::Len(bytes)) => {
+                if let Ok(display_model) = std::str::from_utf8(bytes) {
+                    fields.display_model = Some(display_model);
                 }
             }
             _ => {}
         }
 
-        if fields.usage.is_some() && fields.generation.is_some() && fields.model_raw.is_some() {
+        if fields.usage.is_some() && fields.generation.is_some() && fields.display_model.is_some() {
             break;
         }
     }
@@ -395,7 +523,12 @@ mod tests {
         timestamp
     }
 
-    fn gen_metadata_with_timestamp(response_id: &[u8], timestamp: Option<(u64, u64)>) -> Vec<u8> {
+    fn gen_metadata_with_model(
+        response_id: &[u8],
+        timestamp: Option<(u64, u64)>,
+        response_model: &[u8],
+        display_model: Option<&[u8]>,
+    ) -> Vec<u8> {
         let mut usage = Vec::new();
         usage.extend(enc_varint(1, 1132));
         usage.extend(enc_varint(2, 500));
@@ -410,8 +543,20 @@ mod tests {
             let gen_time = enc_len(4, &timestamp_message(seconds, nanos));
             chat_model.extend(enc_len(9, &gen_time));
         }
-        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        chat_model.extend(enc_len(19, response_model));
+        if let Some(display_model) = display_model {
+            chat_model.extend(enc_len(21, display_model));
+        }
         enc_len(1, &chat_model)
+    }
+
+    fn gen_metadata_with_timestamp(response_id: &[u8], timestamp: Option<(u64, u64)>) -> Vec<u8> {
+        gen_metadata_with_model(
+            response_id,
+            timestamp,
+            b"gemini-3-flash-a",
+            Some(b"Gemini 3.5 Flash (Medium)"),
+        )
     }
 
     fn gen_metadata(response_id: &[u8]) -> Vec<u8> {
@@ -455,8 +600,8 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client.as_ref(), "antigravity-cli");
-        assert_eq!(message.model_id.as_ref(), "gemini-3-flash-preview");
+        assert_eq!(message.client.as_ref(), "antigravity");
+        assert_eq!(message.model_id.as_ref(), "gemini-3.5-flash");
         assert_eq!(message.provider_id.as_ref(), "google");
         assert_eq!(message.tokens.input, 1632);
         assert_eq!(message.tokens.cache_read, 16000);
@@ -524,12 +669,112 @@ mod tests {
         let mut chat_model = Vec::new();
         chat_model.extend(enc_len(4, &usage));
         chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        chat_model.extend(enc_len(21, b"Gemini 3.5 Flash (Medium)"));
         let blob = enc_len(1, &chat_model);
 
         let mut seen = HashSet::new();
         let message = parse_gen_metadata(&blob, "session", 1_000, &mut seen).unwrap();
         assert_eq!(message.tokens.input, i64::MAX);
         assert_eq!(message.tokens.output, i64::MAX);
+    }
+
+    #[test]
+    fn canonicalizes_antigravity_display_models_with_strict_grammar() {
+        let cases = [
+            ("Gemini 3.1 Pro (High)", "gemini-3.1-pro"),
+            ("Gemini 3.5 Flash (Medium)", "gemini-3.5-flash"),
+            ("Gemini 3.5 Pro (High)", "gemini-3.5-pro"),
+            ("Claude Opus 4.6 (Thinking)", "claude-opus-4.6"),
+            ("Claude Sonnet 4.6 (Thinking)", "claude-sonnet-4.6"),
+            ("Claude Fable 5", "claude-fable-5"),
+            ("GPT-OSS 120B (Medium)", "gpt-oss-120b-medium"),
+        ];
+
+        for (display, expected) in cases {
+            assert_eq!(
+                canonical_antigravity_display_model(display).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_antigravity_display_models() {
+        for display in [
+            "",
+            "auto",
+            "Gemini Pro C",
+            "Gemini 3.5 Ultra (High)",
+            "Gemini 3..5 Pro (High)",
+            "Claude Fable Five",
+            "Claude Opus 4.6 (Fast)",
+            "GPT-OSS 120B",
+        ] {
+            assert_eq!(canonical_antigravity_display_model(display), None);
+        }
+    }
+
+    #[test]
+    fn display_model_overrides_backend_response_model() {
+        let mut seen = HashSet::new();
+        let message = parse_gen_metadata(
+            &gen_metadata_with_model(
+                b"resp-display",
+                None,
+                b"gemini-pro-c",
+                Some(b"Gemini 3.1 Pro (High)"),
+            ),
+            "session",
+            1_000,
+            &mut seen,
+        )
+        .unwrap();
+
+        assert_eq!(message.model_id.as_ref(), "gemini-3.1-pro");
+        assert_eq!(
+            message.dedup_key,
+            Some(crate::sessions::antigravity::response_dedup_key(
+                "resp-display"
+            ))
+        );
+    }
+
+    #[test]
+    fn usage_without_parseable_display_model_is_preserved_as_unknown() {
+        let mut seen_without_display = HashSet::new();
+        let missing_display = parse_gen_metadata(
+            &gen_metadata_with_model(b"resp-missing", None, b"gemini-pro-c", None),
+            "session",
+            1_000,
+            &mut seen_without_display,
+        )
+        .unwrap();
+        assert_eq!(missing_display.model_id.as_ref(), "unknown");
+        assert_eq!(missing_display.provider_id.as_ref(), "unknown");
+        assert_eq!(missing_display.tokens.input, 1632);
+        assert_eq!(missing_display.tokens.output, 300);
+        assert_eq!(missing_display.tokens.cache_read, 16000);
+        assert_eq!(missing_display.tokens.reasoning, 40);
+
+        let mut seen_unknown_display = HashSet::new();
+        let unknown_display = parse_gen_metadata(
+            &gen_metadata_with_model(
+                b"resp-unknown",
+                None,
+                b"gemini-pro-c",
+                Some(b"Gemini Pro C"),
+            ),
+            "session",
+            1_000,
+            &mut seen_unknown_display,
+        )
+        .unwrap();
+        assert_eq!(unknown_display.model_id.as_ref(), "unknown");
+        assert_eq!(unknown_display.provider_id.as_ref(), "unknown");
+        assert_eq!(unknown_display.tokens.input, 1632);
+        assert_eq!(unknown_display.tokens.output, 300);
+        assert_eq!(unknown_display.tokens.cache_read, 16000);
+        assert_eq!(unknown_display.tokens.reasoning, 40);
     }
 
     #[test]

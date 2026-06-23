@@ -66,6 +66,7 @@ mod tests {
     fn synthetic_is_not_a_client_identity() {
         assert_eq!(ClientId::from_str("synthetic"), None);
         assert_eq!(ClientId::from_str("synthetic.new"), None);
+        assert_eq!(ClientId::from_str("antigravity-cli"), None);
     }
 
     #[test]
