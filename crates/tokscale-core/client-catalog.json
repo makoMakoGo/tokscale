@@ -211,16 +211,6 @@
     "color": "#7C3AED"
   },
   {
-    "variant": "MiMoCode",
-    "id": "micode",
-    "displayName": "MiMo Code",
-    "shortName": "MiMo Code",
-    "hotkey": "f",
-    "submitDefault": true,
-    "logo": "https://github.com/XiaomiMiMo.png",
-    "color": "#FF6900"
-  },
-  {
     "variant": "Antigravity",
     "id": "antigravity",
     "displayName": "Antigravity",
@@ -299,16 +289,6 @@
     "submitDefault": false,
     "logo": "https://github.com/CommandCodeAI.png",
     "color": "#111827"
-  },
-  {
-    "variant": "Gjc",
-    "id": "gjc",
-    "displayName": "Gajae Code",
-    "shortName": "Gajae-Code",
-    "hotkey": "g",
-    "submitDefault": true,
-    "logo": "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
-    "color": "#FF6B6B"
   },
   {
     "variant": "Grok",

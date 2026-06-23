@@ -5,12 +5,10 @@ mod codebuff;
 mod codex;
 pub(crate) mod discover;
 pub(crate) mod file;
-mod gjc;
 mod goose;
 mod hermes;
 mod kilo;
 mod kiro;
-mod micode;
 mod openclaw;
 mod opencode;
 
@@ -185,7 +183,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 30] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 28] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -201,10 +199,8 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 30] = [
     &file::KIMI_ADAPTER,
     &file::QWEN_ADAPTER,
     &file::MUX_ADAPTER,
-    &micode::MICODE_ADAPTER,
     &codebuff::CODEBUFF_ADAPTER,
     &openclaw::OPENCLAW_ADAPTER,
-    &gjc::GJC_ADAPTER,
     &vscode_tasks::ROOCODE_ADAPTER,
     &vscode_tasks::KILOCODE_ADAPTER,
     &vscode_tasks::CLINE_ADAPTER,

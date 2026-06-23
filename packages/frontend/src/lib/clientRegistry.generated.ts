@@ -23,7 +23,6 @@ export const BASE_CLIENT_TYPES = [
   "copilot",
   "goose",
   "codebuff",
-  "micode",
   "antigravity",
   "antigravity-cli",
   "zed",
@@ -32,7 +31,6 @@ export const BASE_CLIENT_TYPES = [
   "warp",
   "cline",
   "commandcode",
-  "gjc",
   "grok",
 ] as const;
 
@@ -209,14 +207,6 @@ export const CLIENT_REGISTRY = {
     textColor: undefined,
     submitDefault: true,
   },
-  "micode": {
-    displayName: "MiMo Code",
-    shortName: "MiMo Code",
-    logo: "https://github.com/XiaomiMiMo.png",
-    color: "#FF6900",
-    textColor: undefined,
-    submitDefault: true,
-  },
   "antigravity": {
     displayName: "Antigravity",
     shortName: "Antigravity",
@@ -280,14 +270,6 @@ export const CLIENT_REGISTRY = {
     color: "#111827",
     textColor: undefined,
     submitDefault: false,
-  },
-  "gjc": {
-    displayName: "Gajae Code",
-    shortName: "Gajae-Code",
-    logo: "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
-    color: "#FF6B6B",
-    textColor: undefined,
-    submitDefault: true,
   },
   "grok": {
     displayName: "Grok Build",

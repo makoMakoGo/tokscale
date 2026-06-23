@@ -325,16 +325,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
     LocalClientEntry {
-        client: ClientId::MiMoCode,
-        def: LocalClientDef {
-            root: PathRoot::XdgData,
-            relative_path: "micode/mimocode.db",
-            pattern: "mimocode.db",
-            headless: false,
-            parse_local: true,
-        },
-    },
-    LocalClientEntry {
         client: ClientId::Antigravity,
         def: LocalClientDef {
             root: PathRoot::Config,
@@ -412,19 +402,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         def: LocalClientDef {
             root: PathRoot::Home,
             relative_path: ".commandcode/projects",
-            pattern: "*.jsonl",
-            headless: false,
-            parse_local: true,
-        },
-    },
-    LocalClientEntry {
-        client: ClientId::Gjc,
-        def: LocalClientDef {
-            root: PathRoot::EnvVar {
-                var: "GJC_CODING_AGENT_DIR",
-                fallback_relative: ".gjc/agent",
-            },
-            relative_path: "sessions",
             pattern: "*.jsonl",
             headless: false,
             parse_local: true,
