@@ -84,6 +84,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
+    let mut message_index = 0usize;
 
     for line in reader.lines() {
         let line = match line {
@@ -136,8 +137,11 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
         // Resolve session ID: prefer JSON sessionId, fallback to path-derived
         let line_session_id =
             extract_session_id_with_fallback(path, qwen_line.session_id.as_deref());
+        let dedup_key =
+            crate::sessions::dedup_hash_str(&format!("qwen:{line_session_id}:{message_index}"));
+        message_index += 1;
 
-        let mut unified = UnifiedMessage::new(
+        let mut unified = UnifiedMessage::new_with_dedup(
             "qwen",
             model,
             DEFAULT_PROVIDER,
@@ -151,6 +155,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
                 reasoning,
             },
             0.0, // Cost calculated later by pricing resolver
+            Some(dedup_key),
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);

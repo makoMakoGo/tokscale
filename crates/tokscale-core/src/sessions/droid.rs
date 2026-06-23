@@ -2,7 +2,7 @@
 //!
 //! Parses JSON files from ~/.factory/sessions/
 
-use super::utils::read_file_or_none;
+use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -216,26 +216,13 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
     };
     let provider = get_provider_from_model_and_lock(&model, provider_lock);
 
-    // Get timestamp from providerLockTimestamp or file mtime
+    // Get timestamp from providerLockTimestamp or file mtime.
     let timestamp = settings
         .provider_lock_timestamp
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
         .map(|dt| dt.timestamp_millis())
-        .or_else(|| {
-            std::fs::metadata(path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0)
-                })
-        })
-        .unwrap_or(0);
-
-    if timestamp == 0 {
-        return Vec::new();
-    }
+        .filter(|timestamp| *timestamp != 0)
+        .unwrap_or_else(|| file_modified_timestamp_ms(path));
 
     vec![UnifiedMessage::new(
         "droid",
@@ -432,5 +419,27 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "glm-5.1");
         assert_eq!(messages[0].provider_id.as_ref(), "zai");
+    }
+
+    #[test]
+    fn test_parse_droid_file_keeps_usage_when_timestamp_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "gpt-5.5",
+                "tokenUsage": {
+                    "inputTokens": 10,
+                    "outputTokens": 5
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_droid_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].timestamp > 0);
     }
 }

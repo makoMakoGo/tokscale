@@ -4,7 +4,7 @@
 
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -319,10 +319,11 @@ fn parse_pi_format_file(
             None => continue,
         };
 
-        let provider = match message.provider {
-            Some(p) => p,
-            None => continue,
-        };
+        let provider = message.provider.unwrap_or_else(|| {
+            provider_identity::inferred_provider_from_model(&model)
+                .unwrap_or("unknown")
+                .to_string()
+        });
 
         let timestamp = entry
             .timestamp
@@ -415,6 +416,18 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/tmp"));
         assert_eq!(messages[0].workspace_label.as_deref(), Some("tmp"));
+    }
+
+    #[test]
+    fn test_parse_pi_keeps_missing_provider_with_model_inference() {
+        let content = r#"{"type":"session","id":"pi_ses_missing_provider","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","usage":{"input":10,"output":5}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_pi_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
     }
 
     #[test]

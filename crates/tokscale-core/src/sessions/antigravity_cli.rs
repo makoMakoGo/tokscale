@@ -78,17 +78,26 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
 fn parse_gen_metadata(
     blob: &[u8],
     session_id: &str,
-    timestamp: i64,
+    session_timestamp: i64,
     seen_response_ids: &mut HashSet<String>,
 ) -> Option<UnifiedMessage> {
     let chat_model = message_field(blob, 1)?;
-    let usage = message_field(chat_model, 4)?;
+    let fields = chat_model_fields(chat_model);
+    let usage = fields.usage?;
 
-    let input =
-        varint_field(usage, 1).unwrap_or(0) as i64 + varint_field(usage, 2).unwrap_or(0) as i64;
-    let cache_read = varint_field(usage, 5).unwrap_or(0) as i64;
-    let output = varint_field(usage, 9).unwrap_or(0) as i64;
-    let reasoning = varint_field(usage, 10).unwrap_or(0) as i64;
+    let timestamp = fields
+        .generation
+        .and_then(|gen| message_field(gen, 4))
+        .and_then(proto_timestamp_ms)
+        .filter(|ms| *ms > 0)
+        .unwrap_or(session_timestamp);
+
+    let to_i64 = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+    let input = to_i64(varint_field(usage, 1).unwrap_or(0))
+        .saturating_add(to_i64(varint_field(usage, 2).unwrap_or(0)));
+    let cache_read = to_i64(varint_field(usage, 5).unwrap_or(0));
+    let output = to_i64(varint_field(usage, 9).unwrap_or(0));
+    let reasoning = to_i64(varint_field(usage, 10).unwrap_or(0));
     if input == 0 && cache_read == 0 && output == 0 && reasoning == 0 {
         return None;
     }
@@ -102,7 +111,8 @@ fn parse_gen_metadata(
         }
     }
 
-    let model_raw = string_field(chat_model, 19)
+    let model_raw = fields
+        .model_raw
         .filter(|text| !text.trim().is_empty())
         .unwrap_or("unknown");
     let model_id = pricing::aliases::resolve_alias(model_raw)
@@ -131,6 +141,35 @@ fn parse_gen_metadata(
         0.0,
         dedup_key,
     ))
+}
+
+#[derive(Default)]
+struct ChatModelFields<'a> {
+    usage: Option<&'a [u8]>,
+    generation: Option<&'a [u8]>,
+    model_raw: Option<&'a str>,
+}
+
+fn chat_model_fields(chat_model: &[u8]) -> ChatModelFields<'_> {
+    let mut fields = ChatModelFields::default();
+    let mut reader = ProtoReader::new(chat_model);
+    while let Some((field, wire)) = reader.next_field() {
+        match (field, wire) {
+            (4, Wire::Len(bytes)) => fields.usage = Some(bytes),
+            (9, Wire::Len(bytes)) => fields.generation = Some(bytes),
+            (19, Wire::Len(bytes)) => {
+                if let Ok(model_raw) = std::str::from_utf8(bytes) {
+                    fields.model_raw = Some(model_raw);
+                }
+            }
+            _ => {}
+        }
+
+        if fields.usage.is_some() && fields.generation.is_some() && fields.model_raw.is_some() {
+            break;
+        }
+    }
+    fields
 }
 
 fn read_trajectory_meta(conn: &Connection, path: &Path) -> (i64, Option<String>, Option<String>) {
@@ -163,10 +202,16 @@ fn read_trajectory_meta(conn: &Connection, path: &Path) -> (i64, Option<String>,
 }
 
 fn session_created_ms(blob: &[u8]) -> Option<i64> {
-    let created = message_field(blob, 2)?;
-    let seconds = varint_field(created, 1)? as i64;
-    let nanos = varint_field(created, 2).unwrap_or(0) as i64;
-    Some(seconds * 1000 + nanos / 1_000_000)
+    proto_timestamp_ms(message_field(blob, 2)?)
+}
+
+fn proto_timestamp_ms(timestamp: &[u8]) -> Option<i64> {
+    let seconds = i64::try_from(varint_field(timestamp, 1)?).ok()?;
+    let nanos = i64::try_from(varint_field(timestamp, 2).unwrap_or(0)).ok()?;
+    if !(0..=999_999_999).contains(&nanos) {
+        return None;
+    }
+    seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
 }
 
 fn file_uri_to_path(uri: &str) -> Option<String> {
@@ -343,7 +388,14 @@ mod tests {
         out
     }
 
-    fn gen_metadata(response_id: &[u8]) -> Vec<u8> {
+    fn timestamp_message(seconds: u64, nanos: u64) -> Vec<u8> {
+        let mut timestamp = Vec::new();
+        timestamp.extend(enc_varint(1, seconds));
+        timestamp.extend(enc_varint(2, nanos));
+        timestamp
+    }
+
+    fn gen_metadata_with_timestamp(response_id: &[u8], timestamp: Option<(u64, u64)>) -> Vec<u8> {
         let mut usage = Vec::new();
         usage.extend(enc_varint(1, 1132));
         usage.extend(enc_varint(2, 500));
@@ -354,8 +406,16 @@ mod tests {
 
         let mut chat_model = Vec::new();
         chat_model.extend(enc_len(4, &usage));
+        if let Some((seconds, nanos)) = timestamp {
+            let gen_time = enc_len(4, &timestamp_message(seconds, nanos));
+            chat_model.extend(enc_len(9, &gen_time));
+        }
         chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
         enc_len(1, &chat_model)
+    }
+
+    fn gen_metadata(response_id: &[u8]) -> Vec<u8> {
+        gen_metadata_with_timestamp(response_id, None)
     }
 
     fn trajectory_meta() -> Vec<u8> {
@@ -408,6 +468,68 @@ mod tests {
             Some("C:/Users/Frank/obsidian-vault")
         );
         assert_eq!(message.workspace_label.as_deref(), Some("obsidian-vault"));
+    }
+
+    #[test]
+    fn per_generation_timestamp_overrides_session_fallback() {
+        let mut seen = HashSet::new();
+        let message = parse_gen_metadata(
+            &gen_metadata_with_timestamp(b"with-time", Some((1_781_000_000, 250_000_000))),
+            "session",
+            111_000,
+            &mut seen,
+        )
+        .unwrap();
+
+        assert_eq!(message.timestamp, 1_781_000_000_250);
+
+        let mut seen_without_time = HashSet::new();
+        let fallback_message = parse_gen_metadata(
+            &gen_metadata(b"without-time"),
+            "session",
+            111_000,
+            &mut seen_without_time,
+        )
+        .unwrap();
+        assert_eq!(fallback_message.timestamp, 111_000);
+    }
+
+    #[test]
+    fn invalid_generation_timestamp_falls_back_to_session_time() {
+        let mut seen = HashSet::new();
+        let message = parse_gen_metadata(
+            &gen_metadata_with_timestamp(b"bad-nanos", Some((1_781_000_000, 1_000_000_000))),
+            "session",
+            222_000,
+            &mut seen,
+        )
+        .unwrap();
+
+        assert_eq!(message.timestamp, 222_000);
+
+        let mut overflow = Vec::new();
+        overflow.extend(enc_varint(1, i64::MAX as u64));
+        overflow.extend(enc_varint(2, 0));
+        assert_eq!(proto_timestamp_ms(&overflow), None);
+    }
+
+    #[test]
+    fn overlarge_varint_token_counts_are_clamped_not_wrapped() {
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, u64::MAX));
+        usage.extend(enc_varint(2, 10));
+        usage.extend(enc_varint(9, u64::MAX));
+        usage.extend(enc_len(11, b"resp-overflow"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        let mut seen = HashSet::new();
+        let message = parse_gen_metadata(&blob, "session", 1_000, &mut seen).unwrap();
+        assert_eq!(message.tokens.input, i64::MAX);
+        assert_eq!(message.tokens.output, i64::MAX);
     }
 
     #[test]

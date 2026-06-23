@@ -53,6 +53,22 @@ pub(crate) fn parse_timestamp_str(value: &str) -> Option<i64> {
     None
 }
 
+pub(crate) fn parse_epoch_f64_millis(value: f64) -> Option<i64> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+
+    let millis = if value >= 1_000_000_000_000.0 {
+        value
+    } else {
+        value * 1000.0
+    };
+    if !millis.is_finite() || millis < i64::MIN as f64 || millis > i64::MAX as f64 {
+        return None;
+    }
+    Some(millis as i64)
+}
+
 pub(crate) fn file_modified_timestamp_ms(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
@@ -105,5 +121,19 @@ mod tests {
     fn parse_timestamp_str_rejects_zero_and_negative_strings() {
         assert!(parse_timestamp_str("0").is_none());
         assert!(parse_timestamp_str("-5").is_none());
+    }
+
+    #[test]
+    fn parse_epoch_f64_millis_accepts_seconds_and_milliseconds() {
+        assert_eq!(
+            parse_epoch_f64_millis(1_700_000_000.123),
+            Some(1_700_000_000_123)
+        );
+        assert_eq!(
+            parse_epoch_f64_millis(1_700_000_000_123.0),
+            Some(1_700_000_000_123)
+        );
+        assert_eq!(parse_epoch_f64_millis(f64::NAN), None);
+        assert_eq!(parse_epoch_f64_millis(f64::INFINITY), None);
     }
 }

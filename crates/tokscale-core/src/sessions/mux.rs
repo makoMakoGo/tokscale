@@ -4,7 +4,7 @@
 
 use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -70,9 +70,13 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
         None => return vec![],
     };
 
+    let mut by_model = by_model.into_iter().collect::<Vec<_>>();
+    by_model.sort_by(|left, right| left.0.cmp(&right.0));
+
     by_model
         .into_iter()
-        .filter_map(|(model_key, model_usage)| {
+        .enumerate()
+        .filter_map(|(index, (model_key, model_usage))| {
             let tokens =
                 |b: &Option<MuxTokenBucket>| b.as_ref().and_then(|b| b.tokens).unwrap_or(0).max(0);
             let input = tokens(&model_usage.input);
@@ -94,8 +98,11 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
             } else {
                 (String::new(), model_key)
             };
+            let provider = provider_identity::canonical_provider(&provider).unwrap_or(provider);
+            let dedup_key =
+                crate::sessions::dedup_hash_str(&format!("mux:{session_id}:{model_id}:{index}"));
 
-            Some(UnifiedMessage::new(
+            Some(UnifiedMessage::new_with_dedup(
                 "mux",
                 model_id,
                 provider,
@@ -109,6 +116,7 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
                     reasoning,
                 },
                 0.0,
+                Some(dedup_key),
             ))
         })
         .collect()

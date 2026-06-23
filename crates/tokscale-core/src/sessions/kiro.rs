@@ -9,12 +9,12 @@
 //! estimated from context_usage_percentage * context_window (input) and
 //! response_size / 4 (output).
 
-use super::utils::file_modified_timestamp_ms;
+use super::utils::{file_modified_timestamp_ms, parse_epoch_f64_millis};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use rusqlite::Connection;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -180,7 +180,7 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
                     let timestamp_ms = data
                         .meta
                         .and_then(|meta| meta.timestamp)
-                        .map(seconds_to_millis);
+                        .and_then(parse_epoch_f64_millis);
                     pending_prompt = Some((text_chars, timestamp_ms));
                 }
                 "AssistantMessage" => {
@@ -291,10 +291,6 @@ fn estimate_tokens(chars: usize) -> i64 {
     chars.div_ceil(4) as i64
 }
 
-fn seconds_to_millis(seconds: f64) -> i64 {
-    (seconds * 1000.0) as i64
-}
-
 fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
     let duration = end_ms?.saturating_sub(start_ms?);
     (duration > 0).then_some(duration)
@@ -302,17 +298,16 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
 
 fn parse_timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
     match value? {
-        serde_json::Value::Number(number) => number.as_f64().map(|timestamp| {
-            if timestamp.abs() < 1_000_000_000_000.0 {
-                seconds_to_millis(timestamp)
-            } else {
-                timestamp as i64
-            }
-        }),
+        serde_json::Value::Number(number) => number.as_f64().and_then(parse_epoch_f64_millis),
         serde_json::Value::String(timestamp) => chrono::DateTime::parse_from_rfc3339(timestamp)
             .ok()
             .map(|dt| dt.timestamp_millis())
-            .or_else(|| timestamp.parse::<f64>().ok().map(seconds_to_millis)),
+            .or_else(|| {
+                timestamp
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(parse_epoch_f64_millis)
+            }),
         _ => None,
     }
 }
@@ -353,6 +348,35 @@ enum KiroSnapshotRole {
     Assistant,
 }
 
+const KIRO_SNAPSHOT_ALIAS_KEY_GROUPS: &[&[&str]] = &[
+    &["prompt", "response", "content", "text", "message"],
+    &[
+        "messages",
+        "conversation",
+        "chat",
+        "transcript",
+        "entries",
+        "events",
+        "history",
+    ],
+    &["parts", "items", "nodes"],
+];
+
+fn kiro_snapshot_alias_values(map: &Map<String, Value>) -> Vec<&Value> {
+    let mut values = Vec::new();
+    for group in KIRO_SNAPSHOT_ALIAS_KEY_GROUPS {
+        for key in *group {
+            if let Some(item) = map.get(*key) {
+                if values.contains(&item) {
+                    continue;
+                }
+                values.push(item);
+            }
+        }
+    }
+    values
+}
+
 fn collect_kiro_snapshot_text(
     value: &Value,
     counts: &mut KiroSnapshotTextCounts,
@@ -372,26 +396,8 @@ fn collect_kiro_snapshot_text(
                 };
             }
 
-            for key in ["prompt", "response", "content", "text", "message"] {
-                if let Some(item) = map.get(key) {
-                    collect_kiro_snapshot_text(item, counts, role);
-                }
-            }
-            for key in [
-                "messages",
-                "conversation",
-                "chat",
-                "transcript",
-                "entries",
-                "events",
-                "history",
-                "parts",
-                "items",
-                "nodes",
-            ] {
-                if let Some(item) = map.get(key) {
-                    collect_kiro_snapshot_text(item, counts, role);
-                }
+            for item in kiro_snapshot_alias_values(map) {
+                collect_kiro_snapshot_text(item, counts, role);
             }
         }
         Value::Array(items) => {
@@ -419,8 +425,8 @@ fn find_kiro_snapshot_model_id(value: &Value) -> Option<String> {
                     }
                 }
             }
-            for value in map.values() {
-                if let Some(model) = find_kiro_snapshot_model_id(value) {
+            for item in kiro_snapshot_alias_values(map) {
+                if let Some(model) = find_kiro_snapshot_model_id(item) {
                     return Some(model);
                 }
             }
@@ -810,5 +816,124 @@ not valid json at all
         assert_eq!(messages_a.len(), 1);
         assert_eq!(messages_b.len(), 1);
         assert_ne!(messages_a[0].dedup_key, messages_b[0].dedup_key);
+    }
+
+    #[test]
+    fn collect_snapshot_text_does_not_double_count_equal_aliases() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "messages": [
+                    {"role": "assistant", "content": "abcd", "text": "abcd"}
+                ],
+                "entries": [
+                    {"role": "assistant", "content": "abcd", "text": "abcd"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut counts = KiroSnapshotTextCounts::default();
+        collect_kiro_snapshot_text(&value, &mut counts, None);
+
+        assert_eq!(counts.assistant_chars, 4);
+        assert_eq!(counts.prompt_chars, 0);
+    }
+
+    #[test]
+    fn collect_snapshot_text_does_not_double_count_equal_aliases_across_groups() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "content": [
+                    {"role": "assistant", "text": "abcd"}
+                ],
+                "messages": [
+                    {"role": "assistant", "text": "abcd"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut counts = KiroSnapshotTextCounts::default();
+        collect_kiro_snapshot_text(&value, &mut counts, None);
+
+        assert_eq!(counts.assistant_chars, 4);
+        assert_eq!(counts.prompt_chars, 0);
+    }
+
+    #[test]
+    fn collect_snapshot_text_counts_distinct_alias_subtrees() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "prompt": {"role": "user", "text": "hi there"},
+                "response": {"role": "assistant", "text": "hello back"},
+                "messages": [{"role": "user", "content": "alpha"}],
+                "history": [{"role": "user", "content": "bravo"}]
+            }"#,
+        )
+        .unwrap();
+
+        let mut counts = KiroSnapshotTextCounts::default();
+        collect_kiro_snapshot_text(&value, &mut counts, None);
+
+        assert_eq!(counts.prompt_chars, 18);
+        assert_eq!(counts.assistant_chars, 10);
+    }
+
+    #[test]
+    fn find_snapshot_model_id_descends_into_alias_subtrees() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "messages": [
+                    {"parts": [{"model_id": "claude-sonnet-4-5"}]}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_kiro_snapshot_model_id(&value).as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+    }
+
+    #[test]
+    fn find_snapshot_model_id_descends_into_every_alias_key() {
+        for key in [
+            "prompt",
+            "response",
+            "content",
+            "text",
+            "message",
+            "messages",
+            "conversation",
+            "chat",
+            "transcript",
+            "entries",
+            "events",
+            "history",
+            "parts",
+            "items",
+            "nodes",
+        ] {
+            let model = format!("model-for-{key}");
+            let value = serde_json::json!({
+                key: [{ "model_id": model }]
+            });
+
+            assert_eq!(find_kiro_snapshot_model_id(&value), Some(model));
+        }
+    }
+
+    #[test]
+    fn parse_kiro_timestamp_value_checks_f64_epoch_units() {
+        assert_eq!(
+            parse_timestamp_value(Some(&serde_json::json!(1_770_983_426.420))),
+            Some(1_770_983_426_420)
+        );
+        assert_eq!(
+            parse_timestamp_value(Some(&serde_json::json!(1_770_983_426_420_i64))),
+            Some(1_770_983_426_420)
+        );
+        assert_eq!(parse_timestamp_value(Some(&serde_json::json!(0))), None);
     }
 }

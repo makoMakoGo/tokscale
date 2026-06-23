@@ -180,7 +180,7 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
     let (tokens, message_count) = thread_usage(&thread)?;
     let timestamp = timestamp_ms(&row, &thread)?;
 
-    let mut message = UnifiedMessage::new(
+    let mut message = UnifiedMessage::new_with_dedup(
         "zed",
         model_id,
         ZED_HOSTED_PROVIDER,
@@ -188,9 +188,9 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
         timestamp,
         tokens,
         0.0,
+        Some(crate::sessions::dedup_hash_str(&format!("zed:{}", row.id))),
     );
     message.message_count = message_count;
-    message.dedup_key = Some(crate::sessions::dedup_hash_str(&format!("zed:{}", row.id)));
 
     if let Some(workspace_key) = workspace_key_from_folders(
         row.folder_paths.as_deref(),

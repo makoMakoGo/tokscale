@@ -46,7 +46,12 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
     };
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
-    let model_id = model_from_config(path)
+    let raw_model = model_from_config(path);
+    let provider_id = raw_model
+        .as_deref()
+        .and_then(provider_hint_for_model)
+        .unwrap_or(PROVIDER_ID);
+    let model_id = raw_model
         .map(|model| canonicalize_model(&model))
         .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
     let session_id_from_path = session_id_from_path(path);
@@ -55,7 +60,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let mut messages = Vec::new();
     let mut session_id: Option<String> = None;
-    let mut context_chars = 0usize;
+    let mut turn_input_chars = 0usize;
     let mut pending_turn_start = false;
     let mut assistant_index = 0usize;
 
@@ -82,9 +87,9 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
         let chars = entry.content.as_ref().map(content_chars).unwrap_or(0);
         match entry.role.as_deref() {
             Some("assistant") => {
-                let input = estimate_tokens(context_chars);
+                let input = estimate_tokens(turn_input_chars);
                 let output = estimate_tokens(chars);
-                context_chars += chars;
+                turn_input_chars = 0;
 
                 if input + output == 0 {
                     pending_turn_start = false;
@@ -105,7 +110,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 let mut message = UnifiedMessage::new_with_dedup(
                     CLIENT_ID,
                     model_id.clone(),
-                    PROVIDER_ID,
+                    provider_id,
                     resolved_session,
                     timestamp,
                     TokenBreakdown {
@@ -127,10 +132,10 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
             }
             Some("user") => {
                 pending_turn_start = true;
-                context_chars += chars;
+                turn_input_chars += chars;
             }
             _ => {
-                context_chars += chars;
+                turn_input_chars += chars;
             }
         }
     }
@@ -157,12 +162,18 @@ fn canonicalize_model(model: &str) -> String {
     let base = model.rsplit('/').next().unwrap_or(model);
     const PROMO_SUFFIX: &str = "-free";
     if base.len() > PROMO_SUFFIX.len()
-        && base[base.len() - PROMO_SUFFIX.len()..].eq_ignore_ascii_case(PROMO_SUFFIX)
+        && base
+            .get(base.len() - PROMO_SUFFIX.len()..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(PROMO_SUFFIX))
     {
         base[..base.len() - PROMO_SUFFIX.len()].to_string()
     } else {
         base.to_string()
     }
+}
+
+fn provider_hint_for_model(model: &str) -> Option<&'static str> {
+    crate::provider_identity::inferred_provider_from_model(model)
 }
 
 fn model_from_config(session_path: &Path) -> Option<String> {
@@ -233,7 +244,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
         assert_eq!(message.client.as_ref(), "commandcode");
-        assert_eq!(message.provider_id.as_ref(), "commandcode");
+        assert_eq!(message.provider_id.as_ref(), "minimax");
         assert_eq!(message.model_id.as_ref(), "MiniMax-M3");
         assert_eq!(message.session_id.as_ref(), "sess-1");
         assert_eq!(message.tokens.input, estimate_tokens(content_chars(&user)));
@@ -247,17 +258,15 @@ mod tests {
     }
 
     #[test]
-    fn cumulative_context_input_grows() {
+    fn input_is_per_turn_delta_not_cumulative() {
         let dir = tempfile::tempdir().unwrap();
         write_config(dir.path(), "model-x");
         let jsonl = concat!(
-            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"aaaa"}]}"#,
+            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#,
             "\n",
             r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"bbbb"}]}"#,
             "\n",
-            r#"{"role":"tool","sessionId":"s","content":[{"type":"tool-result","output":{"type":"text","value":"cccccccc"}}]}"#,
-            "\n",
-            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"dddd"}]}"#,
+            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"d"}]}"#,
             "\n",
             r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"e"}]}"#
         );
@@ -266,9 +275,60 @@ mod tests {
         let messages = parse_commandcode_file(&path);
 
         assert_eq!(messages.len(), 2);
-        assert!(messages[1].tokens.input > messages[0].tokens.input);
+        assert!(messages[1].tokens.input < messages[0].tokens.input);
         assert_eq!(messages[0].tokens.cache_read, 0);
         assert_eq!(messages[1].tokens.cache_read, 0);
+    }
+
+    #[test]
+    fn canonicalize_model_is_unicode_safe() {
+        assert_eq!(canonicalize_model("vendor/modèle"), "modèle");
+        assert_eq!(canonicalize_model("供应商/modèle-free"), "modèle");
+        assert_eq!(canonicalize_model("café-🚀"), "café-🚀");
+        assert_eq!(canonicalize_model("café-free"), "café");
+        assert_eq!(canonicalize_model("MiniMax-M3-FrEe"), "MiniMax-M3");
+    }
+
+    #[test]
+    fn minimax_model_resolves_nonzero_pricing() {
+        use crate::pricing::{ModelPricing, PricingService};
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "MiniMaxAI/MiniMax-M3-Free");
+        let path = write_session(
+            dir.path(),
+            "proj",
+            "s",
+            concat!(
+                r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"hello there how are you"}]}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"doing great thanks"}]}"#
+            ),
+        );
+
+        let messages = parse_commandcode_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "MiniMax-M3");
+        assert_eq!(messages[0].provider_id.as_ref(), "minimax");
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "minimax/minimax-m3".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.01),
+                output_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+        let pricing = PricingService::new(litellm, HashMap::new());
+        let cost = pricing.calculate_cost_with_provider(
+            &messages[0].model_id,
+            Some(&messages[0].provider_id),
+            &messages[0].tokens,
+        );
+
+        assert!(cost > 0.0);
     }
 
     #[test]
