@@ -9,6 +9,7 @@ use crate::adapters::{
     ParseContext, ParsedUnit, SourceUnit,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::{scanner, sessions, UnifiedMessage};
 
 pub(crate) struct ParsedFileWithCachePolicy {
@@ -18,12 +19,22 @@ pub(crate) struct ParsedFileWithCachePolicy {
 
 pub(crate) struct CachedFileAdapter {
     client: ClientId,
+    parser_version: ParserVersion,
     parse: fn(&Path) -> Vec<UnifiedMessage>,
 }
 
 impl CachedFileAdapter {
-    pub(crate) const fn new(client: ClientId, parse: fn(&Path) -> Vec<UnifiedMessage>) -> Self {
-        Self { client, parse }
+    pub(crate) const fn new(
+        client: ClientId,
+        parser_id: ParserId,
+        revision: u32,
+        parse: fn(&Path) -> Vec<UnifiedMessage>,
+    ) -> Self {
+        Self {
+            client,
+            parser_version: ParserVersion::new(parser_id, revision),
+            parse,
+        }
     }
 }
 
@@ -38,6 +49,9 @@ impl LocalSourceAdapter for CachedFileAdapter {
             ctx,
             FingerprintPolicy::PlainFile,
         )
+        .into_iter()
+        .map(|unit| unit.with_parser_version(self.parser_version))
+        .collect()
     }
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
@@ -55,15 +69,22 @@ impl LocalSourceAdapter for CachedFileAdapter {
 
 pub(crate) struct PolicyFileAdapter {
     client: ClientId,
+    parser_version: ParserVersion,
     parse: fn(&Path) -> ParsedFileWithCachePolicy,
 }
 
 impl PolicyFileAdapter {
     pub(crate) const fn new(
         client: ClientId,
+        parser_id: ParserId,
+        revision: u32,
         parse: fn(&Path) -> ParsedFileWithCachePolicy,
     ) -> Self {
-        Self { client, parse }
+        Self {
+            client,
+            parser_version: ParserVersion::new(parser_id, revision),
+            parse,
+        }
     }
 }
 
@@ -78,6 +99,9 @@ impl LocalSourceAdapter for PolicyFileAdapter {
             ctx,
             FingerprintPolicy::PlainFile,
         )
+        .into_iter()
+        .map(|unit| unit.with_parser_version(self.parser_version))
+        .collect()
     }
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
@@ -129,6 +153,9 @@ impl LocalSourceAdapter for CopilotAdapter {
             paths,
             FingerprintPolicy::PlainFile,
         )
+        .into_iter()
+        .map(|unit| unit.with_parser_version(ParserVersion::new(ParserId::Copilot, 1)))
+        .collect()
     }
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
@@ -156,30 +183,64 @@ fn parse_gemini_file_with_policy(path: &Path) -> ParsedFileWithCachePolicy {
 }
 
 pub(crate) static COPILOT_ADAPTER: CopilotAdapter = CopilotAdapter;
-pub(crate) static CURSOR_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Cursor, sessions::cursor::parse_cursor_file);
-pub(crate) static GEMINI_ADAPTER: PolicyFileAdapter =
-    PolicyFileAdapter::new(ClientId::Gemini, parse_gemini_file_with_policy);
-pub(crate) static GROK_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Grok, sessions::grok::parse_grok_updates_file);
-pub(crate) static AMP_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Amp, sessions::amp::parse_amp_file);
-pub(crate) static DROID_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Droid, sessions::droid::parse_droid_file);
-pub(crate) static KIMI_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Kimi, sessions::kimi::parse_kimi_file);
-pub(crate) static QWEN_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Qwen, sessions::qwen::parse_qwen_file);
-pub(crate) static MUX_ADAPTER: CachedFileAdapter =
-    CachedFileAdapter::new(ClientId::Mux, sessions::mux::parse_mux_file);
+pub(crate) static CURSOR_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::Cursor,
+    ParserId::Cursor,
+    1,
+    sessions::cursor::parse_cursor_file,
+);
+pub(crate) static GEMINI_ADAPTER: PolicyFileAdapter = PolicyFileAdapter::new(
+    ClientId::Gemini,
+    ParserId::Gemini,
+    1,
+    parse_gemini_file_with_policy,
+);
+pub(crate) static GROK_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::Grok,
+    ParserId::Grok,
+    1,
+    sessions::grok::parse_grok_updates_file,
+);
+pub(crate) static AMP_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::Amp,
+    ParserId::Amp,
+    1,
+    sessions::amp::parse_amp_file,
+);
+pub(crate) static DROID_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::Droid,
+    ParserId::Droid,
+    1,
+    sessions::droid::parse_droid_file,
+);
+pub(crate) static KIMI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::Kimi,
+    ParserId::Kimi,
+    1,
+    sessions::kimi::parse_kimi_file,
+);
+pub(crate) static QWEN_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::Qwen,
+    ParserId::Qwen,
+    1,
+    sessions::qwen::parse_qwen_file,
+);
+pub(crate) static MUX_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::Mux,
+    ParserId::Mux,
+    1,
+    sessions::mux::parse_mux_file,
+);
 pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::CommandCode,
+    ParserId::CommandCode,
+    1,
     sessions::commandcode::parse_commandcode_file,
 );
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::adapters::{FoldContext, ParseContext, UnitMessageSource};
@@ -275,6 +336,31 @@ mod tests {
         refresh(&mut expected);
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn source_units_carry_parser_specific_cache_versions() {
+        let path = PathBuf::from("/tmp/shared-source.jsonl");
+
+        let copilot = SourceUnit::plain_file(ClientId::Copilot, path.clone())
+            .with_parser_version(ParserVersion::new(ParserId::Copilot, 1));
+        let cursor = SourceUnit::plain_file(ClientId::Cursor, path.clone())
+            .with_parser_version(ParserVersion::new(ParserId::Cursor, 1));
+        let antigravity_jsonl = SourceUnit::plain_file(ClientId::Antigravity, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::AntigravityCacheJsonl);
+        let antigravity_cli = SourceUnit::sqlite_with_wal(ClientId::Antigravity, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::AntigravityCliSqlite);
+        let kiro_file = SourceUnit::plain_file(ClientId::Kiro, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::KiroFile);
+        let kiro_sqlite = SourceUnit::sqlite_with_wal(ClientId::Kiro, path)
+            .with_meta(crate::adapters::SourceUnitMeta::KiroSqlite);
+
+        assert_ne!(copilot.parser_version, cursor.parser_version);
+        assert_ne!(
+            antigravity_jsonl.parser_version,
+            antigravity_cli.parser_version
+        );
+        assert_ne!(kiro_file.parser_version, kiro_sqlite.parser_version);
     }
 
     #[test]

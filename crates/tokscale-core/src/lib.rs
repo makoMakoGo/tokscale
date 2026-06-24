@@ -3266,8 +3266,9 @@ model = "gpt-5.5"
             );
 
             let mut cache = message_cache::SourceMessageCache::load();
-            cache.insert(message_cache::CachedSourceEntry::new(
+            cache.insert(message_cache::CachedSourceEntry::new_with_version(
                 &path,
+                message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
                 fingerprint,
                 vec![stale_message],
                 Vec::new(),
@@ -3499,7 +3500,12 @@ model = "gpt-5.5"
             assert!(first_messages.is_empty());
 
             let cache = message_cache::SourceMessageCache::load();
-            assert!(cache.get_meta(&path, 1).is_none());
+            assert!(cache
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1)
+                )
+                .is_none());
 
             let mut readable_permissions = std::fs::metadata(&path).unwrap().permissions();
             readable_permissions.set_mode(0o644);
@@ -4282,7 +4288,10 @@ model = "gpt-5.5"
             assert_eq!(initial_messages.len(), 1);
             assert_eq!(initial_messages[0].model_id.as_ref(), "gpt-5.4");
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path, 1)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .and_then(|meta| meta.codex_incremental)
                 .is_some());
 
@@ -4453,7 +4462,10 @@ model = "gpt-5.5"
             )
             .unwrap();
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path, 1)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .is_none());
 
             std::env::set_var("HOME", fresh_cache_home.path());
@@ -4623,7 +4635,12 @@ model = "gpt-5.5"
             assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
 
             let cache = message_cache::SourceMessageCache::load();
-            assert!(cache.get_meta(&path, 1).is_none());
+            assert!(cache
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
+                .is_none());
         }
 
         match original_home {
@@ -4665,7 +4682,10 @@ model = "gpt-5.5"
             assert_eq!(initial_messages.len(), 1);
             assert_eq!(initial_messages[0].model_id.as_ref(), "unknown");
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path, 1)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .is_none());
 
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -4704,7 +4724,10 @@ model = "gpt-5.5"
 
             std::env::set_var("HOME", cache_home.path());
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path, 1)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .is_some());
         }
 
@@ -4745,7 +4768,10 @@ model = "gpt-5.5"
             .unwrap();
             assert_eq!(initial_messages.len(), 1);
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path, 1)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .is_none());
 
             std::thread::sleep(std::time::Duration::from_millis(5));

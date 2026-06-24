@@ -728,19 +728,78 @@ mod tests {
 
     fn write_large_fixture_with_usage(usage_line: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
-        let filler = format!(
-            "{{\"type\":\"metric\",\"name\":\"copilot.noise\",\"attributes\":{{\"payload\":\"{}\"}}}}\n",
-            "x".repeat(4096)
-        );
         let mut written = 0_usize;
+        let mut index = 0_usize;
         while written + usage_line.len() + 1 < LARGE_COPILOT_FIXTURE_BYTES {
+            let filler = copilot_noise_record(index);
             file.write_all(filler.as_bytes()).unwrap();
             written += filler.len();
+            index += 1;
         }
         file.write_all(usage_line.as_bytes()).unwrap();
         file.write_all(b"\n").unwrap();
         file.flush().unwrap();
         file
+    }
+
+    fn copilot_noise_record(index: usize) -> String {
+        let bucket = index % 17;
+        let session = index % 257;
+        let start_nanos = 100_000_000 + (index % 700_000_000);
+        let event_nanos = start_nanos + 1_000;
+        let end_nanos = start_nanos + 2_000;
+        let mut line = serde_json::json!({
+            "type": "span",
+            "traceId": format!("noise-trace-{index:08}"),
+            "spanId": format!("noise-span-{index:08}"),
+            "name": "telemetry noise",
+            "kind": 1,
+            "startTime": [1775934200_i64, start_nanos],
+            "endTime": [1775934200_i64, end_nanos],
+            "resource": {
+                "attributes": {
+                    "service.name": "copilot-chat",
+                    "service.version": "0.44.0",
+                    "telemetry.sdk.language": "javascript",
+                    "os.type": "linux"
+                }
+            },
+            "instrumentationScope": {
+                "name": "github.copilot.chat",
+                "version": "0.44.0"
+            },
+            "attributes": {
+                "gen_ai.operation.name": "telemetry",
+                "copilot.noise.index": index,
+                "copilot.noise.bucket": format!("b{bucket}"),
+                "vscode.session.id": format!("session-{session}"),
+                "noise.alpha": "alpha",
+                "noise.beta": "beta",
+                "noise.gamma": "gamma"
+            },
+            "events": [
+                {
+                    "name": "noise.child",
+                    "time": [1775934200_i64, event_nanos],
+                    "attributes": {
+                        "child.index": index,
+                        "child.kind": "metric",
+                        "nested.depth": "one"
+                    }
+                },
+                {
+                    "name": "noise.end",
+                    "time": [1775934200_i64, end_nanos],
+                    "attributes": {
+                        "child.result": "ignored",
+                        "child.sample": bucket
+                    }
+                }
+            ]
+        })
+        .to_string();
+        line.push('\n');
+        line
     }
 
     #[test]

@@ -11,7 +11,7 @@ pub(crate) fn try_cache_hit(
     source_cache: &message_cache::SourceMessageCache,
 ) -> Option<ParsedUnit> {
     let fingerprint = fingerprint_for_unit(&unit)?;
-    let cached = source_cache.get_meta(&unit.path, unit.parser_revision)?;
+    let cached = source_cache.get_meta(&unit.path, unit.parser_version)?;
     if cached.fingerprint != fingerprint || !cached.has_messages {
         return None;
     }
@@ -54,7 +54,7 @@ where
         };
     };
 
-    if let Some(cached) = ctx.source_cache.get_meta(&unit.path, unit.parser_revision) {
+    if let Some(cached) = ctx.source_cache.get_meta(&unit.path, unit.parser_version) {
         if cached.fingerprint == fingerprint && cached.has_messages {
             return ParsedUnit {
                 messages: UnitMessageSource::CacheHit(unit.path.clone()),
@@ -73,7 +73,7 @@ where
         Some(message_cache::CacheWrite::Borrowed(
             message_cache::CacheWritePlan::new(
                 &unit.path,
-                unit.parser_revision,
+                unit.parser_version,
                 fingerprint,
                 Vec::new(),
                 None,
