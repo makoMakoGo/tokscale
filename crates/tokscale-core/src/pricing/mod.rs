@@ -718,13 +718,11 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_matches_via_suffix_stripping() {
+    fn test_builtin_does_not_match_via_suffix_stripping() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service
+        assert!(service
             .lookup_with_source("gpt-5.3-codex-high", None)
-            .unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "gpt-5.3-codex");
+            .is_none());
     }
 
     #[test]
@@ -1088,20 +1086,16 @@ mod tests {
     }
 
     #[test]
-    fn custom_override_normalized_match_wins() {
+    fn custom_override_does_not_normalize_gateway_path() {
         let mut custom = HashMap::new();
         custom.insert("kimi-k2p6".into(), model_pricing(0.00000095, 0.000004));
         let mut litellm = HashMap::new();
         litellm.insert("gpt-4-turbo".into(), model_pricing(0.00001, 0.00003));
 
         let service = custom_service(custom, litellm, HashMap::new());
-        let result = service
+        assert!(service
             .lookup_with_source("accounts/fireworks/models/kimi-k2p6", None)
-            .unwrap();
-
-        assert_eq!(result.source, "Custom");
-        assert_eq!(result.matched_key, "kimi-k2p6");
-        assert_eq!(result.pricing.output_cost_per_token, Some(0.000004));
+            .is_none());
     }
 
     #[test]

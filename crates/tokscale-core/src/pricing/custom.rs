@@ -249,16 +249,6 @@ impl CustomPricing {
             });
         }
 
-        let normalized_key = normalize_gateway_model_path(model_id);
-        if normalized_key != raw_key {
-            if let Some(pricing) = self.models.get_key_value(&normalized_key) {
-                return Some(CustomLookupResult {
-                    matched_key: pricing.0,
-                    pricing: pricing.1,
-                });
-            }
-        }
-
         None
     }
 
@@ -305,28 +295,6 @@ impl CustomPricing {
 
         Self { models }
     }
-}
-
-fn normalize_gateway_model_path(model_id: &str) -> String {
-    let lower = model_id.to_lowercase();
-
-    if let Some(rest) = lower.strip_prefix("hf:") {
-        return rest
-            .split_once('/')
-            .map_or(rest, |(_, model)| model)
-            .to_string();
-    }
-
-    if let Some(rest) = lower.strip_prefix("accounts/") {
-        if let Some((_, model)) = rest
-            .split_once("/models/")
-            .or_else(|| rest.split_once("/routers/"))
-        {
-            return model.to_string();
-        }
-    }
-
-    lower
 }
 
 fn base_price(
@@ -461,16 +429,33 @@ mod tests {
     }
 
     #[test]
-    fn gateway_router_path_matches_base_model_key() {
+    fn gateway_router_path_does_not_match_base_model_key() {
         let mut models = HashMap::new();
         models.insert("kimi-k2p6-turbo".to_string(), pricing(2.0, 8.0));
+        let loaded = CustomPricing::from_models(models);
+
+        assert!(loaded
+            .lookup_with_key("accounts/fireworks/routers/kimi-k2p6-turbo")
+            .is_none());
+    }
+
+    #[test]
+    fn gateway_router_path_matches_identical_full_key() {
+        let mut models = HashMap::new();
+        models.insert(
+            "accounts/fireworks/routers/kimi-k2p6-turbo".to_string(),
+            pricing(2.0, 8.0),
+        );
         let loaded = CustomPricing::from_models(models);
 
         let result = loaded
             .lookup_with_key("accounts/fireworks/routers/kimi-k2p6-turbo")
             .unwrap();
 
-        assert_eq!(result.matched_key, "kimi-k2p6-turbo");
+        assert_eq!(
+            result.matched_key,
+            "accounts/fireworks/routers/kimi-k2p6-turbo"
+        );
         assert_eq!(result.pricing.input_cost_per_token, Some(2.0));
     }
 

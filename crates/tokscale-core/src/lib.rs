@@ -5517,7 +5517,7 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_apply_token_pricing_uses_market_rate_for_free_variant() {
+    fn test_apply_token_pricing_does_not_clean_free_variant() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "z-ai/glm-4.7".into(),
@@ -5547,7 +5547,7 @@ model = "gpt-5.5"
 
         apply_token_pricing(&mut msg, Some(&pricing));
 
-        assert_eq!(msg.cost, 0.02);
+        assert_eq!(msg.cost, 0.0);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::{aliases, litellm::ModelPricing};
-use crate::{provider_identity, strip_parenthesized_reasoning_tier, TokenBreakdown};
+use crate::{provider_identity, TokenBreakdown};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -60,8 +60,7 @@ const RESELLER_PROVIDER_PREFIXES: &[&str] = &[
 // Generic English words ("model", "router") are blocked for the same reason:
 // they carry no model identity, yet substring-match real priced keys
 // (`azure_ai/model_router`, `kilo/switchpoint/router`). Without this guard an
-// id whose only fuzzy-eligible remnant after suffix stripping is the word
-// `model` (e.g. `model-zero-usage-v1` -> stripped `model`) misprices at the
+// id whose only fuzzy-eligible token is the word `model` can misprice at the
 // router key's rate. See `fuzzy_match_does_not_resolve_generic_model_token`.
 const FUZZY_BLOCKLIST: &[&str] = &[
     "auto",
@@ -81,18 +80,6 @@ const TIERED_PRICING_THRESHOLD_256K_TOKENS: f64 = 256_000.0;
 const TIERED_PRICING_THRESHOLD_272K_TOKENS: f64 = 272_000.0;
 
 const MIN_FUZZY_MATCH_LEN: usize = 5;
-
-/// Minimum length for a model name candidate after prefix/suffix stripping.
-/// Prevents false positives like "pro" or "flash" being matched alone.
-const MIN_MODEL_NAME_LEN: usize = 2;
-
-/// Maximum number of leading segments that can be treated as a routing prefix.
-/// Limits how aggressively we strip (e.g., "a-b-claude-3" strips at most "a-b-").
-const MAX_PREFIX_STRIP_SEGMENTS: usize = 2;
-
-/// Maximum number of trailing segments that can be treated as a routing suffix.
-/// Handles tier suffixes (-high, -low) and variant suffixes (-thinking, -codex, -codex-max-xhigh).
-const MAX_SUFFIX_STRIP_SEGMENTS: usize = 4;
 
 #[derive(Clone)]
 struct CachedResult {
@@ -188,15 +175,12 @@ impl PricingLookup {
         for key in &models_dev_keys {
             let lower = key.to_lowercase();
             models_dev_lower.insert(lower.clone(), key.clone());
-            // Only priced entries enter the model-part index: the
+            // Only positively priced entries enter the model-part index: the
             // deterministic anthropic-first preference must choose among
             // keys that can actually price usage, otherwise an unpriced
             // `anthropic/<model>` row would shadow a priced reseller row
-            // and bill the model at zero cost. (The models.dev loader only
-            // emits entries with input+output costs — see
-            // `models_dev::cost_to_pricing` — but this constructor is
-            // public, so the index guards itself too.)
-            if !models_dev.get(key).is_some_and(has_any_usable_pricing) {
+            // and bill the model at zero cost.
+            if !models_dev.get(key).is_some_and(has_any_positive_pricing) {
                 continue;
             }
             if let Some(model_part) = lower.split('/').next_back() {
@@ -319,29 +303,7 @@ impl PricingLookup {
         let provider_id = normalize_provider_hint(provider_id);
         let canonical = aliases::resolve_alias(model_id).unwrap_or(model_id);
         let lower = canonical.to_lowercase();
-
-        // CLIProxyAPI strips `(level)` reasoning-effort suffixes before routing,
-        // so for pricing lookup we resolve to the base model regardless of tier.
-        // Mirrors the dash-suffix path (e.g. `-xhigh`), which is handled by
-        // `try_strip_unknown_suffix` below.
-        let normalized_owned = strip_parenthesized_reasoning_tier(&lower).map(str::to_owned);
-
-        // Guard against silent misresolution: if the input ends with `(...)`
-        // but the contents are not a recognized CLIProxyAPI level, refuse the
-        // lookup. Falling through to `try_strip_unknown_suffix` would split on
-        // `-` and could match a shorter, unrelated model id by peeling the
-        // parenthesized fragment off (e.g. `gpt-5.2-codex(invalid)` would
-        // strip `-codex(invalid)` and resolve to `gpt-5.2`).
-        if normalized_owned.is_none()
-            && lower
-                .strip_suffix(')')
-                .and_then(|inner| inner.rsplit_once('('))
-                .is_some()
-        {
-            return None;
-        }
-
-        let lower_ref: &str = normalized_owned.as_deref().unwrap_or(&lower);
+        let lower_ref: &str = &lower;
 
         // Helper to perform lookup with the given source constraint
         let do_lookup = |id: &str| match force_source {
@@ -376,21 +338,6 @@ impl PricingLookup {
 
         if parse_provider_scoped_model_path(lower_ref).is_some() {
             return None;
-        }
-
-        let guarded_lookup = |candidate: &str| {
-            do_lookup(candidate).filter(|result| !unsafe_claude_resolution(result))
-        };
-
-        // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
-        if let Some(result) = try_strip_unknown_suffix(lower_ref, guarded_lookup) {
-            return Some(result);
-        }
-
-        // 3. Try stripping unknown prefixes (e.g., antigravity-, myplugin-)
-        //    For each prefix candidate, also try suffix stripping
-        if let Some(result) = try_strip_unknown_prefix(lower_ref, guarded_lookup) {
-            return Some(result);
         }
 
         None
@@ -864,13 +811,20 @@ impl PricingLookup {
         model_id: &str,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
-        exact_match_with_provider_prefixes(
-            model_id,
-            provider_id,
-            &self.models_dev_key_parts,
-            &self.models_dev,
-            "Models.dev",
-        )
+        let provider_id = provider_id?;
+        let hint_tags = provider_identity::provider_tags(provider_id);
+
+        let matches: Vec<&String> = self
+            .models_dev_key_parts
+            .iter()
+            .filter(|kp| {
+                model_part_matches_exact(&kp.lower_model_part, model_id)
+                    && provider_identity::matches_provider_hint_with_tags(&kp.key, &hint_tags)
+            })
+            .map(|kp| &kp.key)
+            .collect();
+
+        select_best_positive_match(&matches, &self.models_dev, "Models.dev", Some(provider_id))
     }
 
     fn exact_match_models_dev_with_provider(
@@ -914,12 +868,12 @@ impl PricingLookup {
     fn exact_match_models_dev(&self, model_id: &str) -> Option<LookupResult> {
         if let Some(key) = self.models_dev_lower.get(model_id) {
             if let Some(pricing) = self.models_dev.get(key) {
-                return lookup_result_if_usable(pricing, "Models.dev", key);
+                return lookup_result_if_positive(pricing, "Models.dev", key);
             }
         }
         if let Some(key) = self.models_dev_model_part.get(model_id) {
             if let Some(pricing) = self.models_dev.get(key) {
-                return lookup_result_if_usable(pricing, "Models.dev", key);
+                return lookup_result_if_positive(pricing, "Models.dev", key);
             }
         }
         None
@@ -996,7 +950,7 @@ impl PricingLookup {
             let key = format!("{}{}", prefix, model_id);
             if let Some(models_dev_key) = self.models_dev_lower.get(&key) {
                 if let Some(pricing) = self.models_dev.get(models_dev_key) {
-                    return lookup_result_if_usable(pricing, "Models.dev", models_dev_key);
+                    return lookup_result_if_positive(pricing, "Models.dev", models_dev_key);
                 }
             }
         }
@@ -1591,12 +1545,46 @@ fn has_any_usable_pricing(pricing: &ModelPricing) -> bool {
     .any(|opt| opt.is_some_and(is_valid_price_value))
 }
 
+fn has_any_positive_pricing(pricing: &ModelPricing) -> bool {
+    [
+        pricing.input_cost_per_token,
+        pricing.output_cost_per_token,
+        pricing.cache_read_input_token_cost,
+        pricing.cache_creation_input_token_cost,
+        pricing.input_cost_per_token_above_128k_tokens,
+        pricing.input_cost_per_token_above_200k_tokens,
+        pricing.input_cost_per_token_above_256k_tokens,
+        pricing.input_cost_per_token_above_272k_tokens,
+        pricing.output_cost_per_token_above_128k_tokens,
+        pricing.output_cost_per_token_above_200k_tokens,
+        pricing.output_cost_per_token_above_256k_tokens,
+        pricing.output_cost_per_token_above_272k_tokens,
+        pricing.cache_read_input_token_cost_above_200k_tokens,
+        pricing.cache_read_input_token_cost_above_272k_tokens,
+        pricing.cache_creation_input_token_cost_above_200k_tokens,
+    ]
+    .into_iter()
+    .any(|opt| opt.is_some_and(|value| value.is_finite() && value > 0.0))
+}
+
 fn lookup_result_if_usable(
     pricing: &ModelPricing,
     source: &str,
     matched_key: &str,
 ) -> Option<LookupResult> {
     has_any_usable_pricing(pricing).then(|| LookupResult {
+        pricing: pricing.clone(),
+        source: source.into(),
+        matched_key: matched_key.into(),
+    })
+}
+
+fn lookup_result_if_positive(
+    pricing: &ModelPricing,
+    source: &str,
+    matched_key: &str,
+) -> Option<LookupResult> {
+    has_any_positive_pricing(pricing).then(|| LookupResult {
         pricing: pricing.clone(),
         source: source.into(),
         matched_key: matched_key.into(),
@@ -1714,128 +1702,6 @@ fn is_fuzzy_eligible(model_id: &str) -> bool {
     !FUZZY_BLOCKLIST.contains(&model_id)
 }
 
-/// Attempts to find a model by progressively stripping trailing segments.
-/// Handles arbitrary suffixes (e.g., "claude-sonnet-4-5-thinking" → "claude-sonnet-4-5").
-/// This replaces the hardcoded TIER_SUFFIXES and FALLBACK_SUFFIXES approach.
-fn try_strip_unknown_suffix<F>(model_id: &str, do_lookup: F) -> Option<LookupResult>
-where
-    F: Fn(&str) -> Option<LookupResult>,
-{
-    if has_unrecognized_claude_four_minor(model_id) {
-        return None;
-    }
-
-    let parts: Vec<&str> = model_id.split('-').collect();
-
-    if parts.len() < 2 {
-        return None;
-    }
-
-    let max_strip = std::cmp::min(parts.len() - 1, MAX_SUFFIX_STRIP_SEGMENTS);
-
-    for strip in 1..=max_strip {
-        let candidate: String = parts[..parts.len() - strip].join("-");
-
-        if candidate.len() >= MIN_MODEL_NAME_LEN {
-            if strips_claude_numeric_minor(&candidate, parts[parts.len() - strip]) {
-                continue;
-            }
-
-            if let Some(result) = do_lookup(&candidate) {
-                return Some(result);
-            }
-        }
-    }
-
-    None
-}
-
-fn strips_claude_numeric_minor(candidate: &str, first_stripped_segment: &str) -> bool {
-    if !is_version_segment(first_stripped_segment) {
-        return false;
-    }
-    let claude_branded = candidate.contains("claude")
-        || candidate.contains("opus")
-        || candidate.contains("sonnet")
-        || candidate.contains("haiku");
-    if !claude_branded {
-        return false;
-    }
-    // Refuse to strip a version segment when it would either peel a minor off
-    // a still-versioned claude-4 candidate (claude-sonnet-4-5 -> claude-sonnet-4)
-    // or erode the id's only version, leaving a bare brand token
-    // (claude-2.1 -> claude). Both candidates would resolve to a different
-    // model's price. Dated forms (claude-3-5-sonnet-20241022) keep stripping:
-    // their candidate retains a version, so neither arm fires.
-    contains_delimited_fragment(candidate, "4") || !candidate.bytes().any(|b| b.is_ascii_digit())
-}
-
-/// True for a bare version segment produced by splitting an id on `-`:
-/// digits with at most one interior dot (`4`, `6`, `2.1`, `20241022`).
-fn is_version_segment(segment: &str) -> bool {
-    let bytes = segment.as_bytes();
-    if bytes.is_empty() || !bytes[0].is_ascii_digit() || !bytes[bytes.len() - 1].is_ascii_digit() {
-        return false;
-    }
-    let mut seen_dot = false;
-    for &byte in bytes {
-        match byte {
-            b'0'..=b'9' => {}
-            b'.' if !seen_dot => seen_dot = true,
-            _ => return false,
-        }
-    }
-    true
-}
-
-fn has_unrecognized_claude_four_minor(model_id: &str) -> bool {
-    (model_id.contains("claude")
-        || model_id.contains("opus")
-        || model_id.contains("sonnet")
-        || model_id.contains("haiku"))
-        && contains_delimited_major_minor(model_id, '4')
-        && !contains_delimited_fragment(model_id, "4.5")
-        && !contains_delimited_fragment(model_id, "4-5")
-        && !contains_delimited_fragment(model_id, "4.6")
-        && !contains_delimited_fragment(model_id, "4-6")
-        && !contains_delimited_fragment(model_id, "4.7")
-        && !contains_delimited_fragment(model_id, "4-7")
-}
-
-/// Attempts to find a model by progressively stripping leading segments.
-/// Handles arbitrary routing prefixes (e.g., "myplugin-claude-3.5-sonnet" → "claude-3.5-sonnet").
-/// This replaces the hardcoded STRIPPED_PREFIXES approach.
-fn try_strip_unknown_prefix<F>(model_id: &str, do_lookup: F) -> Option<LookupResult>
-where
-    F: Fn(&str) -> Option<LookupResult>,
-{
-    let parts: Vec<&str> = model_id.split('-').collect();
-
-    if parts.len() < 2 {
-        return None;
-    }
-
-    let max_skip = std::cmp::min(parts.len() - 1, MAX_PREFIX_STRIP_SEGMENTS);
-
-    for skip in 1..=max_skip {
-        let candidate: String = parts[skip..].join("-");
-
-        if candidate.len() >= MIN_MODEL_NAME_LEN {
-            // Try candidate directly
-            if let Some(result) = do_lookup(&candidate) {
-                return Some(result);
-            }
-
-            // Try candidate with suffix stripping
-            if let Some(result) = try_strip_unknown_suffix(&candidate, &do_lookup) {
-                return Some(result);
-            }
-        }
-    }
-
-    None
-}
-
 /// Deterministic provider choice when multiple models.dev providers share a
 /// model part: the canonical `anthropic/` namespace wins outright; otherwise
 /// the shorter key is preferred (the historical winner of the insertion-order
@@ -1876,6 +1742,37 @@ fn select_best_match(
     source: &str,
     provider_id: Option<&str>,
 ) -> Option<LookupResult> {
+    select_best_match_with_pricing_filter(
+        matches,
+        dataset,
+        source,
+        provider_id,
+        has_any_usable_pricing,
+    )
+}
+
+fn select_best_positive_match(
+    matches: &[&String],
+    dataset: &HashMap<String, ModelPricing>,
+    source: &str,
+    provider_id: Option<&str>,
+) -> Option<LookupResult> {
+    select_best_match_with_pricing_filter(
+        matches,
+        dataset,
+        source,
+        provider_id,
+        has_any_positive_pricing,
+    )
+}
+
+fn select_best_match_with_pricing_filter(
+    matches: &[&String],
+    dataset: &HashMap<String, ModelPricing>,
+    source: &str,
+    provider_id: Option<&str>,
+    has_pricing: fn(&ModelPricing) -> bool,
+) -> Option<LookupResult> {
     if matches.is_empty() {
         return None;
     }
@@ -1904,14 +1801,14 @@ fn select_best_match(
     let preferred_with_pricing: Vec<&String> = preferred_matches
         .iter()
         .copied()
-        .filter(|k| dataset.get(k.as_str()).is_some_and(has_any_usable_pricing))
+        .filter(|k| dataset.get(k.as_str()).is_some_and(has_pricing))
         .collect();
     let effective_matches: Vec<&String> =
         if preferred_with_pricing.is_empty() && !provider_matches.is_empty() {
             matches
                 .iter()
                 .copied()
-                .filter(|k| dataset.get(k.as_str()).is_some_and(has_any_usable_pricing))
+                .filter(|k| dataset.get(k.as_str()).is_some_and(has_pricing))
                 .collect()
         } else {
             preferred_with_pricing
@@ -2294,6 +2191,26 @@ mod tests {
 
         // === OpenCode Zen: Gemini family (LiteLLM entries) ===
         m.insert(
+            "gemini-3-flash".into(),
+            ModelPricing {
+                input_cost_per_token: Some(5e-7),
+                output_cost_per_token: Some(0.000003),
+                cache_read_input_token_cost: Some(5e-8),
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "gemini-3-flash-preview".into(),
+            ModelPricing {
+                input_cost_per_token: Some(5e-7),
+                output_cost_per_token: Some(0.000003),
+                cache_read_input_token_cost: Some(5e-8),
+                cache_creation_input_token_cost: None,
+                ..Default::default()
+            },
+        );
+        m.insert(
             "openrouter/google/gemini-3-pro-preview".into(),
             ModelPricing {
                 input_cost_per_token: Some(0.000002),
@@ -2628,9 +2545,7 @@ mod tests {
     #[test]
     fn test_opencode_zen_glm_4_7_free() {
         let lookup = create_lookup();
-        let result = lookup.lookup("glm-4.7-free").unwrap();
-        assert_eq!(result.matched_key, "z-ai/glm-4.7");
-        assert_eq!(result.source, "OpenRouter");
+        assert!(lookup.lookup("glm-4.7-free").is_none());
     }
 
     #[test]
@@ -2681,7 +2596,15 @@ mod tests {
     fn test_opencode_zen_gemini_3_flash() {
         let lookup = create_lookup();
         let result = lookup.lookup("gemini-3-flash").unwrap();
-        assert_eq!(result.matched_key, "vertex_ai/gemini-3-flash-preview");
+        assert_eq!(result.matched_key, "gemini-3-flash");
+        assert_eq!(result.source, "LiteLLM");
+    }
+
+    #[test]
+    fn test_opencode_zen_gemini_3_flash_preview() {
+        let lookup = create_lookup();
+        let result = lookup.lookup("gemini-3-flash-preview").unwrap();
+        assert_eq!(result.matched_key, "gemini-3-flash-preview");
         assert_eq!(result.source, "LiteLLM");
     }
 
@@ -2716,9 +2639,7 @@ mod tests {
     #[test]
     fn test_opencode_zen_kimi_k2_5_free() {
         let lookup = create_lookup();
-        let result = lookup.lookup("kimi-k2.5-free").unwrap();
-        assert_eq!(result.matched_key, "moonshotai/kimi-k2.5");
-        assert_eq!(result.source, "OpenRouter");
+        assert!(lookup.lookup("kimi-k2.5-free").is_none());
     }
 
     #[test]
@@ -3083,128 +3004,124 @@ mod tests {
     }
 
     #[test]
-    fn test_tier_suffix_low() {
+    fn does_not_strip_low_suffix_to_base() {
         let lookup = create_lookup();
-        let result = lookup.lookup("gpt-5.1-codex-low").unwrap();
-        assert_eq!(result.matched_key, "gpt-5.1-codex");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("gpt-5.1-codex-low").is_none());
     }
 
     #[test]
-    fn test_tier_suffix_high() {
+    fn does_not_strip_high_suffix_to_base() {
         let lookup = create_lookup();
-        let result = lookup.lookup("gpt-4o-high").unwrap();
-        assert_eq!(result.matched_key, "gpt-4o");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("gpt-4o-high").is_none());
     }
 
     #[test]
-    fn test_tier_suffix_free() {
+    fn does_not_strip_free_suffix_to_base() {
         let lookup = create_lookup();
-        let result = lookup.lookup("glm-4.7-free").unwrap();
-        assert_eq!(result.matched_key, "z-ai/glm-4.7");
-        assert_eq!(result.source, "OpenRouter");
+        assert!(lookup.lookup("glm-4.7-free").is_none());
     }
 
     #[test]
-    fn test_tier_suffix_xhigh() {
+    fn does_not_strip_xhigh_suffix_to_base() {
         let lookup = create_lookup();
-        let result = lookup.lookup("gpt-5.2-xhigh").unwrap();
-        assert_eq!(result.matched_key, "gpt-5.2");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("gpt-5.2-xhigh").is_none());
     }
 
     #[test]
-    fn test_tier_suffix_xhigh_gpt_5_5() {
+    fn does_not_strip_xhigh_suffix_from_gpt_5_5_to_base() {
         let lookup = create_lookup();
-        let result = lookup.lookup("gpt-5.5-xhigh").unwrap();
-        assert_eq!(result.matched_key, "gpt-5.5");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("gpt-5.5-xhigh").is_none());
     }
 
     #[test]
-    fn test_tier_suffix_xhigh_codex_max() {
+    fn does_not_strip_xhigh_suffix_from_codex_max_to_base() {
         let lookup = create_lookup();
-        let result = lookup.lookup("gpt-5.1-codex-max-xhigh").unwrap();
-        assert_eq!(result.matched_key, "gpt-5.1-codex-max");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("gpt-5.1-codex-max-xhigh").is_none());
     }
 
     #[test]
-    fn test_parenthesized_reasoning_tier_gpt_levels() {
+    fn exact_decorated_catalog_key_still_wins() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.2".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.00000175),
+                output_cost_per_token: Some(0.000014),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "gpt-5.2(xhigh)".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000003),
+                output_cost_per_token: Some(0.00002),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup.lookup("gpt-5.2(xhigh)").unwrap();
+        assert_eq!(result.matched_key, "gpt-5.2(xhigh)");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.000003));
+    }
+
+    #[test]
+    fn does_not_strip_parenthesized_reasoning_tier_to_base() {
         let lookup = create_lookup();
 
         for tier in ["minimal", "low", "medium", "high", "xhigh", "auto", "none"] {
             let id = format!("gpt-5.2({tier})");
-            let result = lookup.lookup(&id).unwrap_or_else(|| panic!("{id} miss"));
-            assert_eq!(result.matched_key, "gpt-5.2", "{id}");
-            assert_eq!(result.source, "LiteLLM", "{id}");
+            assert!(lookup.lookup(&id).is_none(), "{id}");
         }
     }
 
     #[test]
-    fn test_parenthesized_reasoning_tier_claude_and_gemini() {
+    fn does_not_strip_parenthesized_reasoning_tier_for_gpt_and_gemini() {
+        let lookup = create_lookup();
+
+        assert!(lookup.lookup("gpt-5.2(high)").is_none());
+        assert!(lookup.lookup("gemini-3-pro(auto)").is_none());
+    }
+
+    #[test]
+    fn claude_direct_normalization_can_match_parenthesized_tier() {
         let lookup = create_lookup();
 
         let claude = lookup.lookup("claude-sonnet-4-5(high)").unwrap();
         assert_eq!(claude.matched_key, "claude-sonnet-4-5");
-        assert_eq!(claude.source, "LiteLLM");
 
-        // Dot-form claude id (cliproxyapi accepts either) routes through
-        // version-separator normalization to the dashed catalog entry.
         let claude_dot = lookup.lookup("claude-sonnet-4.5(none)").unwrap();
         assert_eq!(claude_dot.matched_key, "claude-sonnet-4-5");
-
-        let gemini = lookup.lookup("gemini-3-pro(auto)").unwrap();
-        assert_eq!(gemini.matched_key, "openrouter/google/gemini-3-pro-preview");
     }
 
     #[test]
-    fn test_parenthesized_reasoning_tier_with_routing_prefix() {
+    fn does_not_strip_parenthesized_reasoning_tier_with_routing_prefix() {
         let lookup = create_lookup();
 
-        let prefixed = lookup.lookup("myproxy-gpt-5.2(xhigh)").unwrap();
-        assert_eq!(prefixed.matched_key, "gpt-5.2");
-
-        let antigravity = lookup
-            .lookup("antigravity-claude-sonnet-4-5(high)")
-            .unwrap();
-        assert_eq!(antigravity.matched_key, "claude-sonnet-4-5");
+        assert!(lookup.lookup("myproxy-gpt-5.2(xhigh)").is_none());
+        assert!(lookup.lookup("antigravity-gemini-3.1-pro(high)").is_none());
     }
 
     #[test]
-    fn test_parenthesized_reasoning_tier_unknown_value_does_not_strip() {
+    fn parenthesized_unknown_value_does_not_strip_to_base() {
         let lookup = create_lookup();
 
-        // Values outside the cliproxyapi level set must not silently
-        // misresolve via `try_strip_unknown_suffix`: without an early
-        // return, splitting on `-` would peel the parenthesized fragment
-        // off and match a shorter, unrelated model id (e.g.
-        // `gpt-5.2-codex(invalid)` collapsing to `gpt-5.2`).
         assert!(lookup.lookup("gpt-5.2(weirdgarbage)").is_none());
         assert!(lookup.lookup("gpt-5.2(1024)").is_none());
         assert!(lookup.lookup("gpt-5.2()").is_none());
         assert!(lookup.lookup("gpt-5.2-codex(invalid)").is_none());
         assert!(lookup.lookup("myproxy-gpt-5.2(invalid)").is_none());
-
-        // The same guard must hold across model families so that the
-        // generalized stripper never misresolves a non-GPT id by peeling
-        // a parenthesized fragment off through the dash-suffix path.
-        assert!(lookup
-            .lookup("antigravity-claude-sonnet-4-5(invalid)")
-            .is_none());
-        assert!(lookup.lookup("claude-sonnet-4-5(garbage)").is_none());
+        let claude = lookup.lookup("claude-sonnet-4-5(garbage)").unwrap();
+        assert_eq!(claude.matched_key, "claude-sonnet-4-5");
         assert!(lookup.lookup("gemini-3-pro(weird)").is_none());
     }
 
     #[test]
-    fn test_parenthesized_reasoning_tier_cost_matches_base_model() {
+    fn parenthesized_reasoning_tier_cost_is_zero_without_exact_pricing() {
         let lookup = create_lookup();
-        let base = lookup.calculate_cost("gpt-5.2", 1_000_000, 500_000, 0, 0, 0);
         let tiered = lookup.calculate_cost("gpt-5.2(xhigh)", 1_000_000, 500_000, 0, 0, 0);
 
-        assert!((tiered - base).abs() < f64::EPSILON);
-        assert!((tiered - 8.75).abs() < 0.001);
+        assert_eq!(tiered, 0.0);
     }
 
     #[test]
@@ -3761,8 +3678,8 @@ mod tests {
 
     /// Regression (post-#634 catalog audit, bug 1): retired `claude-2.x` ids
     /// (present in historical usage logs, absent from every pricing dataset)
-    /// must resolve to None, not to a modern model's price. Previously
-    /// `try_strip_unknown_suffix` eroded `claude-2.1` to bare `claude`
+    /// must resolve to None, not to a modern model's price. Earlier
+    /// suffix-eroding logic reduced `claude-2.1` to bare `claude`
     /// (the "2.1" segment failed the all-digits version check), which then
     /// fuzzy-matched `anthropic/claude-opus-4.7-fast` at $30/$150. The #634
     /// family veto was bypassed because `claude-2.1` carries no
@@ -3987,6 +3904,29 @@ mod tests {
         assert_eq!(result.pricing.input_cost_per_token, Some(36e-6));
     }
 
+    #[test]
+    fn zero_priced_models_dev_key_is_not_a_catalog_result() {
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "opencode/glm-4.7-free".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                cache_read_input_token_cost: Some(0.0),
+                ..Default::default()
+            },
+        );
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        assert!(lookup.lookup("glm-4.7-free").is_none());
+        assert!(lookup.lookup("opencode/glm-4.7-free").is_none());
+    }
+
     /// After the lookup_auto reorder, models.dev must remain the long-tail
     /// fallback for ids no canonical source knows.
     #[test]
@@ -4105,8 +4045,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_suffix_lookup() {
-        // Create a lookup with only the base model (no -codex variant)
+    fn does_not_strip_codex_suffix_to_base() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gpt-5".into(),
@@ -4118,24 +4057,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Note: gpt-5-codex is NOT in the pricing data
 
         let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
-        // Looking up gpt-5-codex should fall back to gpt-5
-        let result = lookup.lookup("gpt-5-codex").unwrap();
-        assert_eq!(result.matched_key, "gpt-5");
-        assert_eq!(result.source, "LiteLLM");
-
-        // Looking up gpt-5-codex-max should also fall back to gpt-5
-        let result = lookup.lookup("gpt-5-codex-max").unwrap();
-        assert_eq!(result.matched_key, "gpt-5");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("gpt-5-codex").is_none());
+        assert!(lookup.lookup("gpt-5-codex-max").is_none());
     }
 
     #[test]
-    fn test_fallback_suffix_with_tier_suffix() {
-        // Test that tier suffix + fallback suffix both work together
+    fn does_not_strip_stacked_suffixes_to_base() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gpt-5".into(),
@@ -4150,15 +4080,8 @@ mod tests {
 
         let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
-        // gpt-5-codex-high should strip -high first, then fall back from gpt-5-codex to gpt-5
-        let result = lookup.lookup("gpt-5-codex-high").unwrap();
-        assert_eq!(result.matched_key, "gpt-5");
-        assert_eq!(result.source, "LiteLLM");
-
-        // gpt-5-codex-max-xhigh should strip -xhigh first, then fall back from gpt-5-codex-max to gpt-5
-        let result = lookup.lookup("gpt-5-codex-max-xhigh").unwrap();
-        assert_eq!(result.matched_key, "gpt-5");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("gpt-5-codex-high").is_none());
+        assert!(lookup.lookup("gpt-5-codex-max-xhigh").is_none());
     }
 
     #[test]
@@ -4943,7 +4866,7 @@ mod tests {
     }
 
     #[test]
-    fn test_none_pricing_provider_match_falls_back_to_priced_fuzzy_candidate() {
+    fn none_pricing_provider_match_does_not_strip_latest_suffix_to_priced_candidate() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "claude-opus-4-6-20250301".into(),
@@ -4961,11 +4884,7 @@ mod tests {
         let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
 
         let result = lookup.lookup_with_provider("claude-opus-4-6-latest", Some("anthropic"));
-        assert!(result.is_some(), "lookup should succeed via fuzzy fallback");
-        let result = result.unwrap();
-        assert_eq!(result.matched_key, "claude-opus-4-6-20250301");
-        assert_eq!(result.source, "LiteLLM");
-        assert!(result.pricing.input_cost_per_token.is_some());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -5086,28 +5005,23 @@ mod tests {
     #[test]
     fn test_antigravity_prefix_gemini_3_flash() {
         let lookup = create_lookup();
-        let result = lookup.lookup("antigravity-gemini-3-flash").unwrap();
-        assert_eq!(result.matched_key, "vertex_ai/gemini-3-flash-preview");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("antigravity-gemini-3-flash").is_none());
     }
 
     #[test]
     fn test_antigravity_prefix_gemini_3_pro() {
         let lookup = create_lookup();
-        let result = lookup.lookup("antigravity-gemini-3-pro").unwrap();
-        assert_eq!(result.matched_key, "openrouter/google/gemini-3-pro-preview");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("antigravity-gemini-3-pro").is_none());
     }
 
     #[test]
     fn test_antigravity_prefix_with_tier_suffix() {
         let lookup = create_lookup();
-        let result = lookup.lookup("antigravity-gemini-3-pro-high").unwrap();
-        assert_eq!(result.matched_key, "openrouter/google/gemini-3-pro-preview");
+        assert!(lookup.lookup("antigravity-gemini-3-pro-high").is_none());
     }
 
     #[test]
-    fn test_antigravity_prefix_claude() {
+    fn claude_direct_normalization_can_match_inside_prefixed_string() {
         let lookup = create_lookup();
         let result = lookup.lookup("antigravity-claude-sonnet-4-5").unwrap();
         assert_eq!(result.matched_key, "claude-sonnet-4-5");
@@ -5117,16 +5031,13 @@ mod tests {
     #[test]
     fn test_antigravity_prefix_gpt() {
         let lookup = create_lookup();
-        let result = lookup.lookup("antigravity-gpt-4o").unwrap();
-        assert_eq!(result.matched_key, "gpt-4o");
-        assert_eq!(result.source, "LiteLLM");
+        assert!(lookup.lookup("antigravity-gpt-4o").is_none());
     }
 
     #[test]
     fn test_antigravity_prefix_case_insensitive() {
         let lookup = create_lookup();
-        let result = lookup.lookup("Antigravity-gpt-4o").unwrap();
-        assert_eq!(result.matched_key, "gpt-4o");
+        assert!(lookup.lookup("Antigravity-gpt-4o").is_none());
     }
 
     #[test]
@@ -5134,9 +5045,7 @@ mod tests {
         let lookup = create_lookup();
         let cost_with_prefix =
             lookup.calculate_cost("antigravity-gpt-5.2", 1_000_000, 500_000, 0, 0, 0);
-        let cost_without_prefix = lookup.calculate_cost("gpt-5.2", 1_000_000, 500_000, 0, 0, 0);
-        assert!((cost_with_prefix - cost_without_prefix).abs() < 0.001);
-        assert!(cost_with_prefix > 0.0);
+        assert_eq!(cost_with_prefix, 0.0);
     }
 
     // New tests for intelligent detection
@@ -5144,33 +5053,32 @@ mod tests {
     #[test]
     fn test_unknown_prefix_generic() {
         let lookup = create_lookup();
-        let result = lookup.lookup("myplugin-gpt-4o").unwrap();
-        assert_eq!(result.matched_key, "gpt-4o");
+        assert!(lookup.lookup("myplugin-gpt-4o").is_none());
     }
 
     #[test]
-    fn test_unknown_prefix_two_segments() {
+    fn claude_direct_normalization_can_match_inside_two_segment_prefix() {
         let lookup = create_lookup();
         let result = lookup.lookup("router-v2-claude-sonnet-4-5").unwrap();
         assert_eq!(result.matched_key, "claude-sonnet-4-5");
     }
 
     #[test]
-    fn test_unknown_suffix_thinking() {
+    fn claude_direct_normalization_can_match_thinking_suffix() {
         let lookup = create_lookup();
         let result = lookup.lookup("claude-sonnet-4-5-thinking").unwrap();
         assert_eq!(result.matched_key, "claude-sonnet-4-5");
     }
 
     #[test]
-    fn test_unknown_suffix_two_segments() {
+    fn claude_direct_normalization_can_match_stacked_suffixes() {
         let lookup = create_lookup();
         let result = lookup.lookup("claude-opus-4-5-thinking-pro").unwrap();
         assert_eq!(result.matched_key, "claude-opus-4-5");
     }
 
     #[test]
-    fn test_prefix_and_suffix_combined() {
+    fn claude_direct_normalization_can_match_prefixed_thinking_suffix() {
         let lookup = create_lookup();
         let result = lookup
             .lookup("antigravity-claude-opus-4-5-thinking")
@@ -5179,7 +5087,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prefix_and_suffix_with_tier() {
+    fn claude_direct_normalization_can_match_prefixed_stacked_suffixes() {
         let lookup = create_lookup();
         let result = lookup
             .lookup("antigravity-claude-opus-4-5-thinking-high")
@@ -5196,31 +5104,29 @@ mod tests {
     }
 
     #[test]
-    fn test_suffix_strip_high() {
+    fn claude_direct_normalization_can_match_high_suffix() {
         let lookup = create_lookup();
         let result = lookup.lookup("claude-sonnet-4-5-high").unwrap();
         assert_eq!(result.matched_key, "claude-sonnet-4-5");
     }
 
     #[test]
-    fn test_suffix_strip_xhigh() {
+    fn claude_direct_normalization_can_match_xhigh_suffix() {
         let lookup = create_lookup();
         let result = lookup.lookup("claude-sonnet-4-5-xhigh").unwrap();
         assert_eq!(result.matched_key, "claude-sonnet-4-5");
     }
 
     #[test]
-    fn test_suffix_strip_low() {
+    fn does_not_strip_low_suffix_from_gpt_model() {
         let lookup = create_lookup();
-        let result = lookup.lookup("gpt-4o-low").unwrap();
-        assert_eq!(result.matched_key, "gpt-4o");
+        assert!(lookup.lookup("gpt-4o-low").is_none());
     }
 
     #[test]
-    fn test_suffix_strip_codex() {
+    fn does_not_strip_codex_suffix_from_gpt_model() {
         let lookup = create_lookup();
-        let result = lookup.lookup("gpt-5.2-codex").unwrap();
-        assert_eq!(result.matched_key, "gpt-5.2");
+        assert!(lookup.lookup("gpt-5.2-codex").is_none());
     }
 
     #[test]

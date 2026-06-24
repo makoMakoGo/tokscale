@@ -408,11 +408,12 @@ The pricing lookup uses a multi-step resolution strategy:
 1. **Custom Pricing Overrides** - Exact user-defined entries from `~/.config/tokscale/custom-pricing.json`
 2. **Exact Match** - Direct lookup in LiteLLM/OpenRouter databases
 3. **Alias Resolution** - Resolves friendly names (e.g., `big-pickle` → `glm-4.7`)
-4. **Tier Suffix Stripping** - Removes quality tiers (`gpt-5.2-xhigh` → `gpt-5.2`)
-5. **Version Normalization** - Handles version formats (`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`)
-6. **Provider Prefix Matching** - Tries common prefixes (`anthropic/`, `openai/`, etc.)
-7. **Cursor Model Pricing** - Hardcoded pricing for models not yet in LiteLLM/OpenRouter (e.g., `gpt-5.3-codex`)
-8. **Fuzzy Matching** - Word-boundary matching for partial model names
+4. **Version Normalization** - Handles version formats (`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`)
+5. **Provider Prefix Matching** - Tries common prefixes (`anthropic/`, `openai/`, etc.)
+6. **Cursor Model Pricing** - Hardcoded pricing for models not yet in LiteLLM/OpenRouter (e.g., `gpt-5.3-codex`)
+7. **Fuzzy Matching** - Word-boundary matching for partial model names
+
+Standalone pricing lookup does not infer arbitrary route prefixes, source prefixes, or reasoning-tier suffixes. Source-specific model decoding belongs in the parser that produced the usage row; `tokscale pricing <model>` is a catalog query.
 
 ### Custom Pricing Overrides
 
@@ -444,7 +445,7 @@ Create `custom-pricing.json` in Tokscale's config directory (`~/.config/tokscale
 
 Override prices are entered in dollars per million tokens, matching how most API providers publish pricing; Tokscale converts them to per-token rates internally. At least one of `input_cost_per_million_tokens` or `output_cost_per_million_tokens` must be present and positive, and cache-read/cache-creation fields are optional. LiteLLM-style per-token field names such as `input_cost_per_token`, `output_cost_per_token`, and `cache_read_input_token_cost` are also accepted for copy/paste compatibility, but the per-million names are the recommended user-facing form. To omit a tier or cache price, leave the field out; negative or non-finite values are treated as invalid and the whole model entry is skipped so typos do not silently alter accounting. Optional `source` and `notes` fields are ignored by Tokscale and can be used for your own bookkeeping.
 
-Overrides are exact-only and case-insensitive. Tokscale checks the raw model ID first, then gateway `/models/` path normalization, then falls through to LiteLLM, OpenRouter, Cursor pricing, and fuzzy matching if no override matches. Raw exact matches beat normalized exact matches, so `accounts/fireworks/routers/kimi-k2p6-turbo` can override one gateway-specific model while `kimi-k2p6-turbo` can cover normalized `/models/` paths. Overrides are loaded once at startup; restart the command after editing the file. This is the recommended local fix for wrong-model pricing bugs while waiting on upstream LiteLLM pricing updates.
+Overrides are exact-only and case-insensitive. Tokscale checks the full model ID exactly as written, then falls through to LiteLLM, OpenRouter, Cursor pricing, and fuzzy matching if no override matches. Gateway paths such as `accounts/fireworks/models/kimi-k2p6` or `accounts/fireworks/routers/kimi-k2p6-turbo` must be written as full keys when you want to price that exact route. Overrides are loaded once at startup; restart the command after editing the file. This is the recommended local fix for wrong-model pricing bugs while waiting on upstream LiteLLM pricing updates.
 
 **Provider Preference:**
 
@@ -605,7 +606,7 @@ tokscale trae logout --variant solo
 
 **How it works**: tokscale either decrypts the desktop client's `iCubeAuthInfo://*` blob (`globalStorage/storage.json`) to recover a JWT, or accepts one pasted via `--manual`. It then calls `POST /trae/api/v1/pay/query_user_usage_group_by_session` paginated and stores the raw JSON. Run sync before reports if you want the freshest Trae data.
 
-> **Note on pricing**: Trae cost figures are **vendor-reported** — tokscale surfaces the `dollar_float` value returned by Trae's own API rather than recomputing cost from token counts through tokscale's pricing engine. Numbers will match what you see on `trae.ai/account-setting#usage`, not what tokscale would otherwise calculate for the same usage.
+> **Note on pricing**: Trae API rows include token buckets and may include `dollar_float`, but local reports ignore vendor cost fields. Tokscale derives report cost from tokens through the unified pricing service.
 
 > **China variants**: The China editions (`trae.com.cn`) are intentionally **not** supported. The CN backend does not expose a session-level usage query API. Trae CN / Trae Solo CN support will be added once an official endpoint becomes available upstream.
 
@@ -1407,7 +1408,7 @@ Command Code transcripts do not persist authoritative local token usage. Tokscal
 
 Location: `~/.config/tokscale/trae-cache/sessions/*.json` (synced via official usage API)
 
-Trae data is not fetched automatically by the root command. Run `tokscale trae login` once, then `tokscale trae sync` before reports. Tokscale parses the synced API dumps as session-level records and preserves the cost totals reported by Trae.
+Trae data is not fetched automatically by the root command. Run `tokscale trae login` once, then `tokscale trae sync` before reports. Tokscale parses synced API dumps with token buckets as session-level records. If Trae includes `dollar_float`, local reports ignore it and derive cost from tokens through the unified pricing service.
 
 ### Warp/Oz
 
@@ -1439,7 +1440,7 @@ Session JSONL format with model_change events and assistant messages:
 
 Location: `$HERMES_HOME/state.db` (fallback: `~/.hermes/state.db`)
 
-Hermes stores session-level usage in a SQLite `sessions` table. Tokscale imports rows where `model` is present and token or cost totals are non-zero, uses `started_at` as the timestamp, preserves `message_count`, and prefers `actual_cost_usd` over `estimated_cost_usd`.
+Hermes stores session-level usage in a SQLite `sessions` table. Tokscale imports rows where `model` is present and token usage is positive, uses `started_at` as the timestamp, preserves `message_count`, ignores `actual_cost_usd` and `estimated_cost_usd`, and derives report cost from tokens through the unified pricing service.
 
 ### Pi
 

@@ -44,9 +44,6 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-3.1-pro-low", "gemini-3.1-pro");
     m.insert("gemini-3-pro-high", "gemini-3-pro");
     m.insert("gemini-3-pro-low", "gemini-3-pro");
-    m.insert("gemini-3-flash", "gemini-3-flash-preview");
-    m.insert("gemini-3-flash-a", "gemini-3-flash-preview");
-    m.insert("gemini-3-flash-c", "gemini-3-flash-preview");
     m.insert("grok-composer-2.5", "composer-2.5");
     m.insert("grok-composer-2.5-fast", "composer-2.5-fast");
 
@@ -80,14 +77,10 @@ mod tests {
             resolve_alias("MODEL_OPENAI_GPT_OSS_120B_MEDIUM"),
             Some("gpt-oss-120b-medium")
         );
-        assert_eq!(
-            resolve_alias("gemini-3-flash-c"),
-            Some("gemini-3-flash-preview")
-        );
-        assert_eq!(
-            resolve_alias("gemini-3-flash-a"),
-            Some("gemini-3-flash-preview")
-        );
+        assert_eq!(resolve_alias("gemini-3-flash"), None);
+        assert_eq!(resolve_alias("gemini-3-flash-a"), None);
+        assert_eq!(resolve_alias("gemini-3-flash-b"), None);
+        assert_eq!(resolve_alias("gemini-3-flash-c"), None);
         assert_eq!(
             resolve_alias("claude-opus-4.6-thinking"),
             Some("claude-opus-4-6")
