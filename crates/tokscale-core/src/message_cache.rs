@@ -35,7 +35,7 @@ use std::time::UNIX_EPOCH;
 // namespace, and nonzero usage with unknown display labels is preserved.
 // 31: OpenCode/Qwen and shared source model canonicalization moved raw
 // decorated model ids out of report grouping and pricing cleanup.
-const CACHE_SCHEMA_VERSION: u32 = 31;
+const CACHE_SCHEMA_VERSION: u32 = 32;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const SHARDS_DIRNAME: &str = "shards";
