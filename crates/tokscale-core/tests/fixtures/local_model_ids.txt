@@ -103,7 +103,7 @@ kimi-k2-thinking | opencode | kimi | - | 0.4 | 2.5
 kimi-k2.5 | opencode | kimi | - | 0.6 | 3.0
 
 # --- GLM / zai family ---
-big-pickle | opencode | glm | 4.7 | 0.6 | 2.2
+big-pickle | opencode | * | - | 0.0 | 0.0
 glm-5 | opencode | glm | 5 | 1.0 | 3.2
 
 # --- Grok family ---

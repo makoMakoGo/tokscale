@@ -151,7 +151,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - Real-time filtering and sorting
   - Zero flicker rendering
 - **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Command Code, Droid, OpenClaw, Hermes Agent, Pi, OMP, Kimi, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Goose, Antigravity, Zed, Kiro, Trae, and Cline
-- **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
+- **Real-time pricing** - Fetches current pricing from LiteLLM, OpenRouter, and models.dev with 1-hour disk cache
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
 - **Web visualization** - Interactive contribution graph with 2D and 3D views
@@ -407,11 +407,9 @@ The pricing lookup uses a multi-step resolution strategy:
 
 1. **Custom Pricing Overrides** - Exact user-defined entries from `~/.config/tokscale/custom-pricing.json`
 2. **Exact Match** - Direct lookup in LiteLLM/OpenRouter databases
-3. **Alias Resolution** - Resolves friendly names (e.g., `big-pickle` → `glm-4.7`)
-4. **Version Normalization** - Handles version formats (`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`)
-5. **Provider Prefix Matching** - Tries common prefixes (`anthropic/`, `openai/`, etc.)
-6. **Cursor Model Pricing** - Hardcoded pricing for models not yet in LiteLLM/OpenRouter (e.g., `gpt-5.3-codex`)
-7. **Fuzzy Matching** - Word-boundary matching for partial model names
+3. **Version Normalization** - Handles deterministic catalog version formats (`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`)
+4. **Provider Prefix Matching** - Tries catalog provider prefixes (`anthropic/`, `openai/`, etc.)
+5. **Fuzzy Matching** - Word-boundary matching for partial model names
 
 Standalone pricing lookup does not infer arbitrary route prefixes, source prefixes, or reasoning-tier suffixes. Source-specific model decoding belongs in the parser that produced the usage row; `tokscale pricing <model>` is a catalog query.
 
@@ -445,7 +443,7 @@ Create `custom-pricing.json` in Tokscale's config directory (`~/.config/tokscale
 
 Override prices are entered in dollars per million tokens, matching how most API providers publish pricing; Tokscale converts them to per-token rates internally. At least one of `input_cost_per_million_tokens` or `output_cost_per_million_tokens` must be present and positive, and cache-read/cache-creation fields are optional. LiteLLM-style per-token field names such as `input_cost_per_token`, `output_cost_per_token`, and `cache_read_input_token_cost` are also accepted for copy/paste compatibility, but the per-million names are the recommended user-facing form. To omit a tier or cache price, leave the field out; negative or non-finite values are treated as invalid and the whole model entry is skipped so typos do not silently alter accounting. Optional `source` and `notes` fields are ignored by Tokscale and can be used for your own bookkeeping.
 
-Overrides are exact-only and case-insensitive. Tokscale checks the full model ID exactly as written, then falls through to LiteLLM, OpenRouter, Cursor pricing, and fuzzy matching if no override matches. Gateway paths such as `accounts/fireworks/models/kimi-k2p6` or `accounts/fireworks/routers/kimi-k2p6-turbo` must be written as full keys when you want to price that exact route. Overrides are loaded once at startup; restart the command after editing the file. This is the recommended local fix for wrong-model pricing bugs while waiting on upstream LiteLLM pricing updates.
+Overrides are exact-only and case-insensitive. For local reports, exact overrides match the canonical model ID emitted by the source parser; standalone `tokscale pricing <model>` queries match the command argument literally. Tokscale then falls through to LiteLLM, OpenRouter, models.dev, and direct catalog matching if no override matches. Gateway paths such as `accounts/fireworks/models/kimi-k2p6` or `accounts/fireworks/routers/kimi-k2p6-turbo` must be written as full keys when you want to price that exact route. Overrides are loaded once at startup; restart the command after editing the file. This is the recommended local fix for wrong-model pricing bugs while waiting on upstream pricing updates.
 
 **Provider Preference:**
 
@@ -1556,15 +1554,14 @@ Codebuff (formerly Manicode) writes per-chat JSON files. Tokscale parses token u
 
 ## Pricing
 
-Tokscale fetches real-time pricing from [LiteLLM's pricing database](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
+Tokscale fetches real-time pricing from [LiteLLM's pricing database](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json), OpenRouter, and models.dev.
 
-**Dynamic Fallback**: For models not yet available in LiteLLM (e.g., recently released models), Tokscale automatically fetches pricing from [OpenRouter's endpoints API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints). This ensures you get accurate pricing from the model's author provider (e.g., Z.AI for glm-4.7) without waiting for LiteLLM updates.
-
-**Cursor Model Pricing**: For very recently released models not yet in either LiteLLM or OpenRouter (e.g., `gpt-5.3-codex`), Tokscale includes hardcoded pricing sourced from [Cursor's model docs](https://cursor.com/en-US/docs/models). These overrides are checked after all upstream sources but before fuzzy matching, so they automatically yield once real upstream pricing becomes available.
+If a model does not match custom pricing or an upstream pricing source, Tokscale leaves its derived cost at `$0.00` rather than using built-in prices.
 
 **Caching**: Pricing data is cached to disk with 1-hour TTL for fast startup:
 - LiteLLM cache: `~/.config/tokscale/cache/pricing-litellm.json`
 - OpenRouter cache: `~/.config/tokscale/cache/pricing-openrouter.json` (caches author pricing for models from supported providers)
+- models.dev cache: `~/.config/tokscale/cache/pricing-models-dev.json`
 
 Pricing includes:
 - Input tokens

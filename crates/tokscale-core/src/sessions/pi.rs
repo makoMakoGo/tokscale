@@ -451,6 +451,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_omp_jsonl_canonicalizes_openai_reasoning_tier_model() {
+        let content = r#"{"type":"session","id":"omp_ses_tier","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"openai/gpt-5.5(xhigh)","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}
+{"type":"message","id":"msg_002","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.3-codex-xhigh","provider":"openai","usage":{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_omp_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[1].model_id.as_ref(), "gpt-5.3-codex");
+    }
+
+    #[test]
     fn test_parse_omp_child_session_recovers_task_agent_label() {
         let session_content = r#"{"type":"session","version":3,"id":"root-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"root_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_001","name":"task","arguments":{"agent":"reviewer","tasks":[{"id":"ReviewFindings","description":"Review findings","assignment":"Check the diff"}]}}],"model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}"#;

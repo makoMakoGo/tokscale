@@ -1,4 +1,3 @@
-pub mod aliases;
 pub mod cache;
 pub mod custom;
 pub mod litellm;
@@ -72,7 +71,6 @@ impl PricingService {
             lookup: PricingLookup::new_with_models_dev(
                 litellm_data,
                 openrouter_data,
-                Self::build_builtin_overrides(),
                 models_dev_data,
             ),
         }
@@ -92,73 +90,6 @@ impl PricingService {
                 .any(|prefix| lower.starts_with(prefix))
         });
         data
-    }
-
-    // @keep: Built-in pricing for models not yet in LiteLLM/OpenRouter.
-    // Most entries are checked after exact/prefix matches but before fuzzy matching,
-    // so real upstream entries (including provider-prefixed like openai/gpt-5.3-codex)
-    // win. The two DeepSeek beta aliases are exact historical names, so lookup
-    // checks them before upstream data to preserve their launch pricing.
-    // Source citations are required for audit trail.
-    fn build_builtin_overrides() -> HashMap<String, ModelPricing> {
-        let entries: &[(&str, f64, f64, Option<f64>)] = &[
-            // DeepSeek V4 launch pricing for private beta aliases.
-            // model1 = DeepSeek V4 Pro: $1.74 input, $3.48 output, $0.145 cache hit per 1M
-            // model2 = DeepSeek V4 Flash: $0.14 input, $0.28 output, $0.028 cache hit per 1M
-            // Source: DeepSeek API changelog/pricing (2026-04-24 V4 launch), Apidog launch table.
-            (
-                crate::model_aliases::DEEPSEEK_V4_PRO_BETA_ALIAS,
-                0.00000174,
-                0.00000348,
-                Some(0.000000145),
-            ),
-            (
-                crate::model_aliases::DEEPSEEK_V4_FLASH_BETA_ALIAS,
-                0.00000014,
-                0.00000028,
-                Some(0.000000028),
-            ),
-            // GPT-5.3 family: $1.75/$14.00 per 1M tokens, $0.175 cache read
-            // Source: Cursor docs (cursor.com/en-US/docs/models), llm-stats.com
-            ("gpt-5.3", 0.00000175, 0.000014, Some(1.75e-7)),
-            ("gpt-5.3-codex", 0.00000175, 0.000014, Some(1.75e-7)),
-            ("gpt-5.3-codex-spark", 0.00000175, 0.000014, Some(1.75e-7)),
-            // Composer 1: $1.25/$10.00 per 1M tokens, $0.125 cache read
-            // Source: Cursor docs (cursor.com/docs/models#model-pricing)
-            ("composer 1", 0.00000125, 0.00001, Some(1.25e-7)),
-            ("composer-1", 0.00000125, 0.00001, Some(1.25e-7)),
-            // Composer 1.5: $3.50/$17.50 per 1M tokens, $0.35 cache read
-            // Source: Cursor docs (cursor.com/docs/models#model-pricing), issue #276
-            ("composer 1.5", 0.0000035, 0.0000175, Some(3.5e-7)),
-            ("composer-1.5", 0.0000035, 0.0000175, Some(3.5e-7)),
-            // Composer 2: $0.50/$2.50 per 1M input/output, $0.20/M cache read; cache creation free
-            // Composer 2 Fast: $1.50/$7.50 per 1M, $0.35/M cache read; cache creation free
-            // Source: Cursor docs (cursor.com/docs/models#model-pricing)
-            ("composer 2", 5e-7, 2.5e-6, Some(2e-7)),
-            ("composer-2", 5e-7, 2.5e-6, Some(2e-7)),
-            ("composer 2 fast", 1.5e-6, 7.5e-6, Some(3.5e-7)),
-            ("composer-2-fast", 1.5e-6, 7.5e-6, Some(3.5e-7)),
-            // Composer 2: $0.50/$2.50 per 1M input/output, $0.20/M cache read; cache creation free
-            // Composer 2 Fast: $1.50/$7.50 per 1M, $0.35/M cache read; cache creation free
-            // Source: Cursor docs (cursor.com/docs/models#model-pricing)
-            ("composer-2.5", 5e-7, 2.5e-6, Some(2e-7)),
-            ("composer-2.5-fast", 1.5e-6, 7.5e-6, Some(3.5e-7)),
-        ];
-
-        let mut overrides = HashMap::with_capacity(entries.len());
-        for (model_id, input, output, cache_read) in entries {
-            overrides.insert(
-                model_id.to_string(),
-                ModelPricing {
-                    input_cost_per_token: Some(*input),
-                    output_cost_per_token: Some(*output),
-                    cache_read_input_token_cost: *cache_read,
-                    cache_creation_input_token_cost: None,
-                    ..Default::default()
-                },
-            );
-        }
-        overrides
     }
 
     async fn fetch_inner() -> Result<Self, String> {
@@ -545,6 +476,49 @@ mod tests {
     }
 
     #[test]
+    fn custom_exact_key_overrides_zero_priced_catalog_model() {
+        let mut models_dev = HashMap::new();
+        models_dev.insert(
+            "opencode/big-pickle".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                cache_read_input_token_cost: Some(0.0),
+                ..Default::default()
+            },
+        );
+
+        let without_custom = custom_service_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev.clone(),
+        );
+        let zero_result = without_custom
+            .lookup_with_source_and_provider("big-pickle", None, Some("opencode"))
+            .unwrap();
+        assert_eq!(zero_result.source, "Models.dev");
+        assert_eq!(zero_result.matched_key, "opencode/big-pickle");
+        assert_eq!(zero_result.pricing.input_cost_per_token, Some(0.0));
+        assert_eq!(
+            without_custom.calculate_cost("big-pickle", 1_000_000, 1_000_000, 0, 0, 0),
+            0.0
+        );
+
+        let mut custom = HashMap::new();
+        custom.insert("big-pickle".into(), model_pricing(0.0000006, 0.0000022));
+        let with_custom =
+            custom_service_with_models_dev(custom, HashMap::new(), HashMap::new(), models_dev);
+
+        let result = with_custom.lookup_with_source("big-pickle", None).unwrap();
+        assert_eq!(result.source, "Custom");
+        assert_eq!(result.matched_key, "big-pickle");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.0000006));
+        let custom_cost = with_custom.calculate_cost("big-pickle", 1_000_000, 1_000_000, 0, 0, 0);
+        assert!((custom_cost - 2.8).abs() < 1e-12);
+    }
+
+    #[test]
     fn test_filter_excludes_github_copilot() {
         let mut data = HashMap::new();
         data.insert(
@@ -569,73 +543,21 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_returns_pricing_when_not_in_upstream() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("gpt-5.3-codex", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.pricing.input_cost_per_token, Some(0.00000175));
-        assert_eq!(result.pricing.output_cost_per_token, Some(0.000014));
-        assert_eq!(result.pricing.cache_read_input_token_cost, Some(1.75e-7));
-    }
-
-    #[test]
-    fn test_builtin_returns_deepseek_beta_alias_launch_pricing() {
+    fn test_unmatched_models_cost_zero_without_builtin_prices() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
 
-        let model1 = service.lookup_with_source("model1", None).unwrap();
-        assert_eq!(model1.source, "Builtin");
-        assert_eq!(model1.matched_key, "model1");
-        assert_eq!(model1.pricing.input_cost_per_token, Some(0.00000174));
-        assert_eq!(model1.pricing.output_cost_per_token, Some(0.00000348));
+        assert!(service.lookup_with_source("model1", None).is_none());
+        assert!(service.lookup_with_source("model2", None).is_none());
+        assert!(service.lookup_with_source("big-pickle", None).is_none());
+        assert!(service.lookup_with_source("composer-2", None).is_none());
         assert_eq!(
-            model1.pricing.cache_read_input_token_cost,
-            Some(0.000000145)
-        );
-
-        let model2 = service.lookup_with_source("deepseek/model2", None).unwrap();
-        assert_eq!(model2.source, "Builtin");
-        assert_eq!(model2.matched_key, "model2");
-        assert_eq!(model2.pricing.input_cost_per_token, Some(0.00000014));
-        assert_eq!(model2.pricing.output_cost_per_token, Some(0.00000028));
-        assert_eq!(
-            model2.pricing.cache_read_input_token_cost,
-            Some(0.000000028)
+            service.calculate_cost("model1", 1_000_000, 1_000_000, 1_000_000, 0, 0),
+            0.0
         );
     }
 
     #[test]
-    fn test_builtin_calculates_deepseek_beta_alias_launch_cost() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-
-        let model1_cost = service.calculate_cost("model1", 1_000_000, 1_000_000, 1_000_000, 0, 0);
-        assert!((model1_cost - 5.365).abs() < 1e-10);
-
-        let model2_cost = service.calculate_cost("model2", 1_000_000, 1_000_000, 1_000_000, 0, 0);
-        assert!((model2_cost - 0.448).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_deepseek_beta_alias_launch_pricing_wins_over_upstream() {
-        let mut litellm = HashMap::new();
-        litellm.insert(
-            "model1".into(),
-            ModelPricing {
-                input_cost_per_token: Some(0.01),
-                output_cost_per_token: Some(0.02),
-                cache_read_input_token_cost: Some(0.03),
-                ..Default::default()
-            },
-        );
-
-        let service = PricingService::new(litellm, HashMap::new());
-        let result = service.lookup_with_source("model1", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "model1");
-        assert_eq!(result.pricing.input_cost_per_token, Some(0.00000174));
-    }
-
-    #[test]
-    fn test_builtin_yields_to_litellm_exact() {
+    fn test_litellm_exact_lookup_resolves_catalog_price() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gpt-5.3-codex".into(),
@@ -652,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_yields_to_openrouter_prefix() {
+    fn test_openrouter_model_part_lookup_resolves_catalog_price() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "openai/gpt-5.3-codex".into(),
@@ -669,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_skipped_when_force_source_set() {
+    fn test_forced_source_without_catalog_match_returns_none() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
         assert!(service
             .lookup_with_source("gpt-5.3-codex", Some("litellm"))
@@ -680,26 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_matches_after_version_normalization() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("gpt-5-3-codex", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "gpt-5.3-codex");
-        assert_eq!(result.pricing.input_cost_per_token, Some(0.00000175));
-    }
-
-    #[test]
-    fn test_builtin_matches_provider_prefixed_input() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service
-            .lookup_with_source("openai/gpt-5.3-codex", None)
-            .unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "gpt-5.3-codex");
-    }
-
-    #[test]
-    fn test_builtin_provider_prefix_yields_to_upstream() {
+    fn test_provider_prefixed_input_uses_catalog_full_key() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "openai/gpt-5.3-codex".into(),
@@ -718,227 +621,11 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_does_not_match_via_suffix_stripping() {
+    fn test_catalog_lookup_does_not_match_via_suffix_stripping() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
         assert!(service
             .lookup_with_source("gpt-5.3-codex-high", None)
             .is_none());
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let cost = service.calculate_cost("gpt-5.3-codex", 1_000_000, 100_000, 0, 0, 0);
-        let expected = 1_000_000.0 * 0.00000175 + 100_000.0 * 0.000014;
-        assert!((cost - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_composer_1() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("Composer 1", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer 1");
-        assert_eq!(result.pricing.input_cost_per_token, Some(0.00000125));
-        assert_eq!(result.pricing.output_cost_per_token, Some(0.00001));
-        assert_eq!(result.pricing.cache_read_input_token_cost, Some(1.25e-7));
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_for_composer_1() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let cost = service.calculate_cost("Composer 1", 1_000_000, 100_000, 50_000, 0, 0);
-        let expected = 1_000_000.0 * 0.00000125 + 100_000.0 * 0.00001 + 50_000.0 * 1.25e-7;
-        assert!((cost - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_hyphenated_composer_1() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("composer-1", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer-1");
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_composer_1_5() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("Composer 1.5", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer 1.5");
-        assert_eq!(result.pricing.input_cost_per_token, Some(0.0000035));
-        assert_eq!(result.pricing.output_cost_per_token, Some(0.0000175));
-        assert_eq!(result.pricing.cache_read_input_token_cost, Some(3.5e-7));
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_for_composer_1_5() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let cost = service.calculate_cost("Composer 1.5", 1_000_000, 100_000, 50_000, 0, 0);
-        let expected = 1_000_000.0 * 0.0000035 + 100_000.0 * 0.0000175 + 50_000.0 * 3.5e-7;
-        assert!((cost - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_hyphenated_composer_1_5() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("composer-1.5", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer-1.5");
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_composer_2() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("composer-2", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer-2");
-        assert_eq!(result.pricing.input_cost_per_token, Some(5e-7));
-        assert_eq!(result.pricing.output_cost_per_token, Some(2.5e-6));
-        assert_eq!(result.pricing.cache_read_input_token_cost, Some(2e-7));
-        assert_eq!(result.pricing.cache_creation_input_token_cost, None);
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_composer_2_spaced() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("Composer 2", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer 2");
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_composer_2_fast() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("composer-2-fast", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer-2-fast");
-        assert_eq!(result.pricing.input_cost_per_token, Some(1.5e-6));
-        assert_eq!(result.pricing.output_cost_per_token, Some(7.5e-6));
-        assert_eq!(result.pricing.cache_read_input_token_cost, Some(3.5e-7));
-        assert_eq!(result.pricing.cache_creation_input_token_cost, None);
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_composer_2_fast_spaced() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("Composer 2 Fast", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer 2 fast");
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_for_composer_2() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let cost = service.calculate_cost("composer-2", 1_000_000, 100_000, 50_000, 0, 0);
-        let expected = 1_000_000.0 * 5e-7 + 100_000.0 * 2.5e-6 + 50_000.0 * 2e-7;
-        assert!((cost - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_composer_2_cache_write_free() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let with_write = service.calculate_cost("composer-2", 0, 0, 0, 500_000, 0);
-        let without_write = service.calculate_cost("composer-2", 0, 0, 0, 0, 0);
-        assert!((with_write - without_write).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_for_composer_2_fast() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let cost = service.calculate_cost("composer-2-fast", 1_000_000, 100_000, 50_000, 0, 0);
-        let expected = 1_000_000.0 * 1.5e-6 + 100_000.0 * 7.5e-6 + 50_000.0 * 3.5e-7;
-        assert!((cost - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_composer_2_fast_cache_write_free() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let with_write = service.calculate_cost("composer-2-fast", 0, 0, 0, 500_000, 0);
-        let without_write = service.calculate_cost("composer-2-fast", 0, 0, 0, 0, 0);
-        assert!(
-            (with_write - without_write).abs() < 1e-10,
-            "Cache creation should be free for Composer 2 Fast"
-        );
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_composer_2_5() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service.lookup_with_source("composer-2.5", None).unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer-2.5");
-        assert_eq!(result.pricing.input_cost_per_token, Some(5e-7));
-        assert_eq!(result.pricing.output_cost_per_token, Some(2.5e-6));
-        assert_eq!(result.pricing.cache_read_input_token_cost, Some(2e-7));
-        assert_eq!(result.pricing.cache_creation_input_token_cost, None);
-    }
-
-    #[test]
-    fn test_builtin_returns_pricing_for_composer_2_5_fast() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let result = service
-            .lookup_with_source("composer-2.5-fast", None)
-            .unwrap();
-        assert_eq!(result.source, "Builtin");
-        assert_eq!(result.matched_key, "composer-2.5-fast");
-        assert_eq!(result.pricing.input_cost_per_token, Some(1.5e-6));
-        assert_eq!(result.pricing.output_cost_per_token, Some(7.5e-6));
-        assert_eq!(result.pricing.cache_read_input_token_cost, Some(3.5e-7));
-        assert_eq!(result.pricing.cache_creation_input_token_cost, None);
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_for_composer_2_5() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let cost = service.calculate_cost("composer-2.5", 1_000_000, 100_000, 50_000, 0, 0);
-        let expected = 1_000_000.0 * 5e-7 + 100_000.0 * 2.5e-6 + 50_000.0 * 2e-7;
-        assert!((cost - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_composer_2_5_cache_write_free() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let with_write = service.calculate_cost("composer-2.5", 0, 0, 0, 500_000, 0);
-        let without_write = service.calculate_cost("composer-2.5", 0, 0, 0, 0, 0);
-        assert!((with_write - without_write).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_for_composer_2_5_fast() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let cost = service.calculate_cost("composer-2.5-fast", 1_000_000, 100_000, 50_000, 0, 0);
-        let expected = 1_000_000.0 * 1.5e-6 + 100_000.0 * 7.5e-6 + 50_000.0 * 3.5e-7;
-        assert!((cost - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_builtin_calculate_cost_composer_2_5_fast_cache_write_free() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        let with_write = service.calculate_cost("composer-2.5-fast", 0, 0, 0, 500_000, 0);
-        let without_write = service.calculate_cost("composer-2.5-fast", 0, 0, 0, 0, 0);
-        assert!(
-            (with_write - without_write).abs() < 1e-10,
-            "Cache creation should be free for Composer 2.5 Fast"
-        );
-    }
-
-    #[test]
-    fn test_builtin_composer_lookup_case_insensitive() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-
-        let lower = service.lookup_with_source("composer 1", None);
-        let upper = service.lookup_with_source("COMPOSER 1", None);
-        let mixed = service.lookup_with_source("Composer 1", None);
-
-        assert!(lower.is_some(), "lowercase should resolve");
-        assert!(upper.is_some(), "UPPERCASE should resolve");
-        assert!(mixed.is_some(), "Mixed Case should resolve");
-
-        assert_eq!(
-            lower.unwrap().pricing.input_cost_per_token,
-            upper.unwrap().pricing.input_cost_per_token
-        );
     }
 
     #[test]

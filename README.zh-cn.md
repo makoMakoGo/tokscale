@@ -376,13 +376,11 @@ tokscale pricing "claude-3-5-sonnet" --provider litellm
 
 1. **自定义价格覆盖** - `~/.config/tokscale/custom-pricing.json` 中大小写不敏感的完整 key 精确匹配
 2. **精确匹配** - 在 LiteLLM/OpenRouter 数据库中直接查找
-3. **别名解析** - 解析可信显式别名（例如：`big-pickle` → `glm-4.7`）
-4. **版本标准化** - 处理版本格式（`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`）
-5. **提供商前缀匹配** - 尝试常见前缀（`anthropic/`、`openai/` 等）
-6. **Cursor 模型定价** - LiteLLM/OpenRouter 中尚未收录的模型的硬编码定价（例如：`gpt-5.3-codex`）
-7. **模糊匹配** - 部分模型名称的词边界匹配
+3. **版本标准化** - 处理确定性的目录版本格式（`claude-3-5-sonnet` ↔ `claude-3.5-sonnet`）
+4. **提供商前缀匹配** - 尝试目录中的提供商前缀（`anthropic/`、`openai/` 等）
+5. **模糊匹配** - 部分模型名称的词边界匹配
 
-独立价格查询不会推断任意 route 前缀、source 前缀或 reasoning-tier 后缀。来源特定的模型解码应在对应 parser 中完成；`tokscale pricing <model>` 是目录查询，不是原始 route 清洗工具。自定义价格覆盖也只匹配完整 key；如果要为 `accounts/fireworks/models/...` 这类 gateway 路径定价，需要在 custom pricing 文件中写入完整路径。
+独立价格查询不会推断任意 route 前缀、source 前缀或 reasoning-tier 后缀。来源特定的模型解码应在对应 parser 中完成；`tokscale pricing <model>` 是目录查询，不是原始 route 清洗工具。对本地报告而言，自定义价格覆盖匹配的是 parser 输出的 canonical model ID；独立价格查询则按命令参数本身匹配。如果要为 `accounts/fireworks/models/...` 这类 gateway 路径定价，需要在 custom pricing 文件中写入完整路径。
 
 **提供商优先级：**
 
@@ -1324,15 +1322,14 @@ Codebuff（前身 Manicode）按聊天写入 JSON 文件。Tokscale 从 `metadat
 
 ## 定价
 
-Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)获取实时价格。
+Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)、OpenRouter 和 models.dev 获取实时价格。
 
-**动态回退**：对于 LiteLLM 中尚未收录的模型（例如最近发布的模型），Tokscale 会自动从 [OpenRouter 的端点 API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints) 获取定价。
-
-**Cursor 模型定价**：对于 LiteLLM 和 OpenRouter 中都尚未收录的最新模型（例如 `gpt-5.3-codex`），Tokscale 使用从 [Cursor 模型文档](https://cursor.com/en-US/docs/models)获取的硬编码定价。这些覆盖在所有上游来源之后、模糊匹配之前检查，因此当真正的上游定价可用时会自动让步。
+如果模型没有命中自定义价格或上游价格来源，Tokscale 会保留 `$0.00` 派生成本，不再使用内置价格。
 
 **缓存**：价格数据以 1 小时 TTL 缓存到磁盘，确保快速启动：
 - LiteLLM 缓存：`~/.config/tokscale/cache/pricing-litellm.json`
 - OpenRouter 缓存：`~/.config/tokscale/cache/pricing-openrouter.json`（缓存支持提供商的模型作者定价信息）
+- models.dev 缓存：`~/.config/tokscale/cache/pricing-models-dev.json`
 
 定价包括：
 - 输入 Token

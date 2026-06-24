@@ -2,6 +2,8 @@ pub(crate) const DEEPSEEK_V4_PRO_BETA_ALIAS: &str = "model1";
 pub(crate) const DEEPSEEK_V4_FLASH_BETA_ALIAS: &str = "model2";
 
 const CLAUDE_FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable"];
+const OPENAI_REASONING_TIERS: &[&str] =
+    &["minimal", "low", "medium", "high", "xhigh", "auto", "none"];
 
 pub(crate) fn is_deepseek_v4_beta_alias(model: &str) -> bool {
     let lower = model.trim().to_lowercase();
@@ -24,7 +26,7 @@ pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
     }
 
     canonicalize_modern_claude_source_model(&lower)
-        .or_else(|| canonicalize_openai_source_model(&lower).map(str::to_string))
+        .or_else(|| canonicalize_openai_source_model(&lower))
         .or_else(|| canonicalize_glm_source_model(&lower).map(str::to_string))
         .or_else(|| canonicalize_qwen_source_model(&lower))
         .or_else(|| canonicalize_kimi_source_model(&lower).map(str::to_string))
@@ -40,11 +42,69 @@ fn canonical_model_segment(model: &str) -> &str {
         .unwrap_or(model)
 }
 
-fn canonicalize_openai_source_model(model: &str) -> Option<&'static str> {
-    match canonical_model_segment(model) {
-        "gpt-5.5-fast" => Some("gpt-5.5"),
-        _ => None,
+fn canonicalize_openai_source_model(model: &str) -> Option<String> {
+    let model = canonical_model_segment(model);
+
+    if let Some(base) = strip_parenthesized_openai_reasoning_tier(model) {
+        return Some(base.to_string());
     }
+
+    if let Some((base, tier)) = model.rsplit_once('-') {
+        if (tier == "fast" || OPENAI_REASONING_TIERS.contains(&tier))
+            && is_openai_gpt_source_base_model(base)
+        {
+            return Some(base.to_string());
+        }
+    }
+
+    None
+}
+
+fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
+    let (base, tier) = model.rsplit_once('(')?;
+    let tier = tier.strip_suffix(')')?;
+    let base =
+        base.trim_end_matches(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '-' | '_'));
+    if OPENAI_REASONING_TIERS.contains(&tier) && is_openai_gpt_source_base_model(base) {
+        Some(base)
+    } else {
+        None
+    }
+}
+
+fn is_openai_gpt_source_base_model(model: &str) -> bool {
+    let rest = match model.strip_prefix("gpt-") {
+        Some(rest) => rest,
+        None => return false,
+    };
+
+    let (version, suffix) = match rest.split_once('-') {
+        Some((version, suffix)) => (version, Some(suffix)),
+        None => (rest, None),
+    };
+    if !is_openai_gpt_version(version) {
+        return false;
+    }
+
+    match suffix {
+        None => true,
+        Some("nano" | "mini" | "pro" | "codex" | "codex-max" | "codex-spark") => true,
+        Some(_) => false,
+    }
+}
+
+fn is_openai_gpt_version(value: &str) -> bool {
+    if value == "5" {
+        return true;
+    }
+
+    matches!(
+        value.split_once('.'),
+        Some((major, minor))
+            if major == "5"
+                && !minor.is_empty()
+                && minor.bytes().all(|byte| byte.is_ascii_digit())
+    )
 }
 
 fn canonicalize_glm_source_model(model: &str) -> Option<&'static str> {
@@ -253,6 +313,21 @@ mod tests {
         let cases = [
             ("gpt-5.5-fast", "gpt-5.5"),
             ("openai/gpt-5.5-fast", "gpt-5.5"),
+            ("gpt-5.5(high)", "gpt-5.5"),
+            ("gpt-5.5 (high)", "gpt-5.5"),
+            ("gpt-5.5-(high)", "gpt-5.5"),
+            ("gpt-5.5_(high)", "gpt-5.5"),
+            ("openai/gpt-5.5(xhigh)", "gpt-5.5"),
+            ("openai/gpt-5.5 (xhigh)", "gpt-5.5"),
+            ("gpt-5.5-high", "gpt-5.5"),
+            ("gpt-5.5-xhigh", "gpt-5.5"),
+            ("gpt-5.4-mini-xhigh", "gpt-5.4-mini"),
+            ("gpt-5.4-mini(high)", "gpt-5.4-mini"),
+            ("gpt-5.4-nano-xhigh", "gpt-5.4-nano"),
+            ("gpt-5.4-pro(high)", "gpt-5.4-pro"),
+            ("gpt-5.3-codex-xhigh", "gpt-5.3-codex"),
+            ("gpt-5.3-codex-spark-high", "gpt-5.3-codex-spark"),
+            ("gpt-5.1-codex-max-xhigh", "gpt-5.1-codex-max"),
             ("glm-4.7-free", "glm-4.7"),
             ("glm-4.7:free-fast", "glm-4.7"),
             ("glm-4.7 (free)-medium", "glm-4.7"),
@@ -267,8 +342,10 @@ mod tests {
 
         assert_eq!(canonicalize_source_model_id("qwen3.7-max-2605"), None);
         assert_eq!(canonicalize_source_model_id("qwen3.7-max-05-20"), None);
+        assert_eq!(canonicalize_source_model_id("gpt-5.3-codex-spark"), None);
+        assert_eq!(canonicalize_source_model_id("gpt-4o-high"), None);
         assert_eq!(
-            canonicalize_source_model_id("gpt-5.1-codex-max-xhigh"),
+            canonicalize_source_model_id("gpt-5.3-codex-spark-lite"),
             None
         );
     }

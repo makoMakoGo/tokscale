@@ -93,11 +93,7 @@ fn normalize_model_name(model: &str) -> String {
         collapsed
     };
 
-    if provider_identity::is_anthropic_model(&claude_prefixed) {
-        model_aliases::canonicalize_source_model_id(&claude_prefixed).unwrap_or(claude_prefixed)
-    } else {
-        claude_prefixed
-    }
+    model_aliases::canonicalize_source_model_id(&claude_prefixed).unwrap_or(claude_prefixed)
 }
 
 fn get_provider_from_model_and_lock(model: &str, provider_lock: Option<&str>) -> String {
@@ -266,6 +262,9 @@ mod tests {
             normalize_model_name("custom:Claude-Opus-4.6-Thinking-[Anthropic]-0"),
             "claude-opus-4.6"
         );
+        assert_eq!(normalize_model_name("custom:gpt-5.5-xhigh"), "gpt-5.5");
+        assert_eq!(normalize_model_name("gpt-5.4-medium"), "gpt-5.4");
+        assert_eq!(normalize_model_name("custom:gpt-5.5 (high)"), "gpt-5.5");
         assert_eq!(
             normalize_model_name("custom:Claude-Opus-4-7-Thinking-[Anthropic]-0"),
             "claude-opus-4.7"
@@ -422,6 +421,56 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "glm-5.1");
         assert_eq!(messages[0].provider_id.as_ref(), "zai");
+    }
+
+    #[test]
+    fn test_parse_droid_file_canonicalizes_openai_reasoning_tier_model() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "custom:gpt-5.5-xhigh",
+                "providerLock": "openai",
+                "providerLockTimestamp": "2024-12-26T12:00:00Z",
+                "tokenUsage": {
+                    "inputTokens": 1234,
+                    "outputTokens": 567
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_droid_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+    }
+
+    #[test]
+    fn test_parse_droid_file_canonicalizes_space_before_parenthesized_tier() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "custom:gpt-5.5 (high)",
+                "providerLock": "openai",
+                "providerLockTimestamp": "2024-12-26T12:00:00Z",
+                "tokenUsage": {
+                    "inputTokens": 1234,
+                    "outputTokens": 567
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_droid_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
     }
 
     #[test]
