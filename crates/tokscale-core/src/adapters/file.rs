@@ -298,7 +298,7 @@ mod tests {
 
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].invalidate_cache);
-        assert!(parsed[0].cache_entry.is_none());
+        assert!(parsed[0].cache_write.is_none());
         assert!(matches!(parsed[0].messages, UnitMessageSource::Fresh(_)));
     }
 }

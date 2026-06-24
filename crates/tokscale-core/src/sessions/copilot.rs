@@ -717,9 +717,28 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    const LARGE_COPILOT_FIXTURE_BYTES: usize = 50 * 1024 * 1024;
+
     fn create_test_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    fn write_large_fixture_with_usage(usage_line: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        let filler = format!(
+            "{{\"type\":\"metric\",\"name\":\"copilot.noise\",\"attributes\":{{\"payload\":\"{}\"}}}}\n",
+            "x".repeat(4096)
+        );
+        let mut written = 0_usize;
+        while written + usage_line.len() + 1 < LARGE_COPILOT_FIXTURE_BYTES {
+            file.write_all(filler.as_bytes()).unwrap();
+            written += filler.len();
+        }
+        file.write_all(usage_line.as_bytes()).unwrap();
+        file.write_all(b"\n").unwrap();
         file.flush().unwrap();
         file
     }
@@ -749,6 +768,20 @@ mod tests {
             Some(crate::sessions::dedup_hash_str("trace-1:span-1"))
         );
         assert_eq!(message.agent.as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_large_jsonl_matches_small_fixture() {
+        let usage_line = r#"{"type":"span","traceId":"trace-large","spanId":"span-large","name":"chat claude-sonnet-4","startTime":[1775934260,133000000],"endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4","gen_ai.response.model":"claude-sonnet-4","gen_ai.conversation.id":"conv-large","gen_ai.usage.input_tokens":19452,"gen_ai.usage.output_tokens":281,"gen_ai.usage.cache_read.input_tokens":123,"gen_ai.usage.reasoning.output_tokens":128,"github.copilot.interaction_id":"interaction-large"}}"#;
+        let small = create_test_file(usage_line);
+        let large = write_large_fixture_with_usage(usage_line);
+
+        let small_messages = parse_copilot_file(small.path());
+        let large_messages = parse_copilot_file(large.path());
+
+        assert!(large.as_file().metadata().unwrap().len() as usize >= LARGE_COPILOT_FIXTURE_BYTES);
+        assert_eq!(large_messages, small_messages);
+        assert_eq!(large_messages.len(), 1);
     }
 
     #[test]

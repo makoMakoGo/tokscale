@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
@@ -16,6 +17,7 @@ pub(crate) struct CodexAdapter;
 #[derive(Debug)]
 pub(crate) struct CodexAppendSource {
     path: PathBuf,
+    parser_revision: message_cache::ParserRevision,
     is_headless: bool,
     fallback_timestamp: i64,
     tail_messages: Vec<UnifiedMessage>,
@@ -76,16 +78,17 @@ impl LocalSourceAdapter for CodexAdapter {
         let mut seen = HashSet::new();
         for parsed in parsed {
             let path = parsed.unit.path.clone();
-            let (messages, extra_entry) = resolve_codex_messages(parsed.messages, ctx);
+            let (messages, extra_write) = resolve_codex_messages(parsed.messages, ctx);
+            let cache_write = parsed.cache_write.or(extra_write);
+            let has_cache_write = cache_write.is_some();
+            adapter_cache::write_cache(cache_write, ctx, &messages);
             sink.extend_messages(
                 messages
                     .into_iter()
                     .filter(|message| crate::should_keep_deduped_message(&mut seen, message))
                     .collect(),
             );
-            if let Some(entry) = parsed.cache_entry.or(extra_entry) {
-                ctx.source_cache.insert(entry);
-            } else if parsed.invalidate_cache {
+            if !has_cache_write && parsed.invalidate_cache {
                 ctx.source_cache.remove(&path);
             }
         }
@@ -135,13 +138,14 @@ fn parse_full_log_source(
         return ParsedUnit {
             unit,
             messages: UnitMessageSource::Fresh(messages),
-            cache_entry: None,
+            cache_write: None,
             invalidate_cache: false,
         };
     }
 
-    let cache_entry = build_codex_cache_entry(
+    let cache_write = build_codex_cache_write(
         &path,
+        unit.parser_revision,
         parsed.messages,
         parsed.consumed_offset,
         parsed.state,
@@ -151,7 +155,7 @@ fn parse_full_log_source(
     ParsedUnit {
         unit,
         messages: UnitMessageSource::Fresh(messages),
-        cache_entry,
+        cache_write,
         invalidate_cache: false,
     }
 }
@@ -175,13 +179,14 @@ fn finalize_codex_messages(
     messages
 }
 
-fn build_codex_cache_entry(
+fn build_codex_cache_write(
     path: &Path,
+    parser_revision: message_cache::ParserRevision,
     raw_messages: Vec<UnifiedMessage>,
     consumed_offset: u64,
     state: sessions::codex::CodexParseState,
     fallback_timestamp_indices: Vec<usize>,
-) -> Option<message_cache::CachedSourceEntry> {
+) -> Option<message_cache::CacheWrite> {
     let fingerprint = message_cache::SourceFingerprint::from_path(path)?;
     if fingerprint.size != consumed_offset {
         return None;
@@ -190,12 +195,15 @@ fn build_codex_cache_entry(
     let codex_incremental =
         message_cache::build_codex_incremental_cache(path, consumed_offset, state)?;
 
-    Some(message_cache::CachedSourceEntry::new(
-        path,
-        fingerprint,
-        raw_messages,
-        fallback_timestamp_indices,
-        Some(codex_incremental),
+    Some(message_cache::CacheWrite::Owned(
+        message_cache::CachedSourceEntry::new_with_revision(
+            path,
+            parser_revision,
+            fingerprint,
+            raw_messages,
+            fallback_timestamp_indices,
+            Some(codex_incremental),
+        ),
     ))
 }
 
@@ -211,10 +219,10 @@ fn load_or_parse_codex_unit(
     };
     let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
 
-    if let Some(cached) = source_cache.get_meta(&path) {
+    if let Some(cached) = source_cache.get_meta(&path, unit.parser_revision) {
         let reparse_from_start = |invalidate_cache: bool| {
             let mut parsed = parse_full_log_source(unit.clone(), pricing, is_headless);
-            parsed.invalidate_cache = invalidate_cache && parsed.cache_entry.is_none();
+            parsed.invalidate_cache = invalidate_cache && parsed.cache_write.is_none();
             parsed
         };
 
@@ -227,7 +235,7 @@ fn load_or_parse_codex_unit(
                         is_headless,
                         fallback_timestamp,
                     },
-                    cache_entry: None,
+                    cache_write: None,
                     invalidate_cache: false,
                 };
             }
@@ -261,10 +269,12 @@ fn load_or_parse_codex_unit(
                     if let (Some(entry_fingerprint), Some(codex_incremental_cache)) =
                         (entry_fingerprint, codex_incremental_cache)
                     {
+                        let parser_revision = unit.parser_revision;
                         return ParsedUnit {
                             unit,
                             messages: UnitMessageSource::CodexAppend(Box::new(CodexAppendSource {
                                 path,
+                                parser_revision,
                                 is_headless,
                                 fallback_timestamp,
                                 tail_messages: parsed.messages,
@@ -272,7 +282,7 @@ fn load_or_parse_codex_unit(
                                 fingerprint: entry_fingerprint,
                                 codex_incremental: codex_incremental_cache,
                             })),
-                            cache_entry: None,
+                            cache_write: None,
                             invalidate_cache: false,
                         };
                     }
@@ -289,10 +299,7 @@ fn load_or_parse_codex_unit(
 fn resolve_codex_messages(
     source: UnitMessageSource,
     ctx: &mut FoldContext<'_>,
-) -> (
-    Vec<UnifiedMessage>,
-    Option<message_cache::CachedSourceEntry>,
-) {
+) -> (Vec<UnifiedMessage>, Option<message_cache::CacheWrite>) {
     match source {
         UnitMessageSource::Fresh(messages) => (messages, None),
         UnitMessageSource::CodexCacheHit {
@@ -318,6 +325,7 @@ fn resolve_codex_messages(
         UnitMessageSource::CodexAppend(append) => {
             let CodexAppendSource {
                 path,
+                parser_revision,
                 is_headless,
                 fallback_timestamp,
                 tail_messages,
@@ -336,12 +344,15 @@ fn resolve_codex_messages(
                     .map(|index| existing_len + index),
             );
             raw_messages.extend(tail_messages);
-            let cache_entry = message_cache::CachedSourceEntry::new(
-                &path,
-                fingerprint,
-                raw_messages.clone(),
-                fallback_timestamp_indices.clone(),
-                Some(codex_incremental),
+            let cache_write = message_cache::CacheWrite::Owned(
+                message_cache::CachedSourceEntry::new_with_revision(
+                    &path,
+                    parser_revision,
+                    fingerprint,
+                    raw_messages.clone(),
+                    fallback_timestamp_indices.clone(),
+                    Some(codex_incremental),
+                ),
             );
             let messages = finalize_codex_messages(
                 raw_messages,
@@ -350,7 +361,7 @@ fn resolve_codex_messages(
                 &fallback_timestamp_indices,
                 fallback_timestamp,
             );
-            (messages, Some(cache_entry))
+            (messages, Some(cache_write))
         }
         UnitMessageSource::CacheHit(_) => unreachable!("codex does not use generic cache hits"),
     }
@@ -539,7 +550,7 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert!(cache
-            .get_meta(&path)
+            .get_meta(&path, 1)
             .and_then(|meta| meta.codex_incremental)
             .is_some());
     }

@@ -126,6 +126,7 @@ fn source_unit_for_policy(
             path,
             fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings { sibling_names },
             meta: crate::adapters::SourceUnitMeta::None,
+            parser_revision: 1,
         },
         FingerprintPolicy::None => SourceUnit::no_cache(client, path),
     }

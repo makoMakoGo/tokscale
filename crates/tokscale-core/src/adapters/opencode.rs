@@ -125,11 +125,13 @@ fn fold_opencode_unit(
     let ParsedUnit {
         unit,
         messages,
-        cache_entry,
+        cache_write,
         invalidate_cache,
     } = parsed;
     let path = unit.path.clone();
+    let has_cache_write = cache_write.is_some();
     let messages = adapter_cache::resolve_messages(messages, ctx);
+    adapter_cache::write_cache(cache_write, ctx, &messages);
     sink.extend_messages(
         messages
             .into_iter()
@@ -137,9 +139,7 @@ fn fold_opencode_unit(
             .collect(),
     );
 
-    if let Some(entry) = cache_entry {
-        ctx.source_cache.insert(entry);
-    } else if invalidate_cache {
+    if !has_cache_write && invalidate_cache {
         ctx.source_cache.remove(&path);
     }
 }
@@ -234,14 +234,14 @@ mod tests {
                 unit: SourceUnit::plain_file(ClientId::OpenCode, json_path)
                     .with_meta(SourceUnitMeta::OpenCodeJson),
                 messages: UnitMessageSource::Fresh(vec![json_message]),
-                cache_entry: None,
+                cache_write: None,
                 invalidate_cache: false,
             },
             ParsedUnit {
                 unit: SourceUnit::sqlite_with_wal(ClientId::OpenCode, sqlite_path)
                     .with_meta(SourceUnitMeta::OpenCodeSqlite),
                 messages: UnitMessageSource::Fresh(vec![sqlite_message]),
-                cache_entry: None,
+                cache_write: None,
                 invalidate_cache: false,
             },
         ];

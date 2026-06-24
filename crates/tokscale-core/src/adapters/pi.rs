@@ -45,6 +45,7 @@ impl LocalSourceAdapter for PiAdapter {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
     use super::*;
@@ -68,6 +69,15 @@ mod tests {
     fn write_file(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+    }
+
+    fn restore_env_var(key: &str, value: Option<OsString>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     fn refresh(messages: &mut [crate::UnifiedMessage]) {
@@ -145,12 +155,17 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn adapter_cache_hit_matches_fresh_parse() {
         let dir = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let previous_config_dir = std::env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe { std::env::set_var("TOKSCALE_CONFIG_DIR", cache_home.path()) };
+
         let path = dir.path().join("pi.jsonl");
         write_file(&path, PI_CONTENT);
         let units = vec![SourceUnit::plain_file(ClientId::Pi, path.clone())];
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::SourceMessageCache::load();
 
         let first = fold_with_adapter(&PI_ADAPTER, units.clone(), &mut cache);
         let parsed = PI_ADAPTER.parse(
@@ -176,6 +191,7 @@ mod tests {
         );
 
         assert_eq!(second, first);
+        restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }
 
     #[test]

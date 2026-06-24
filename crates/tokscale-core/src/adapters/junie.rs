@@ -48,6 +48,7 @@ mod tests {
     use crate::pricing::{litellm::ModelPricing, PricingService};
     use crate::scanner::ScannerSettings;
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
     const JUNIE_CONTENT: &str = r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"gpt-5","inputTokens":10,"outputTokens":5}]}}}"#;
@@ -70,6 +71,15 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, JUNIE_CONTENT).unwrap();
         path
+    }
+
+    fn restore_env_var(key: &str, value: Option<OsString>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     fn fold_with_adapter(
@@ -142,10 +152,15 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn adapter_cache_hit_matches_fresh_parse() {
         let home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let previous_config_dir = std::env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe { std::env::set_var("TOKSCALE_CONFIG_DIR", cache_home.path()) };
+
         let path = write_session(home.path());
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::SourceMessageCache::load();
         let units = vec![SourceUnit::plain_file(ClientId::Junie, path.clone())];
 
         let fresh = fold_with_adapter(units.clone(), &mut cache, None);
@@ -173,6 +188,7 @@ mod tests {
         );
 
         assert_eq!(cached, fresh);
+        restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }
 
     #[test]

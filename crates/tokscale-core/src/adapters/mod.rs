@@ -73,6 +73,7 @@ pub(crate) struct SourceUnit {
     pub path: PathBuf,
     pub fingerprint_policy: FingerprintPolicy,
     pub meta: SourceUnitMeta,
+    pub parser_revision: message_cache::ParserRevision,
 }
 
 impl SourceUnit {
@@ -82,6 +83,7 @@ impl SourceUnit {
             path,
             fingerprint_policy: FingerprintPolicy::PlainFile,
             meta: SourceUnitMeta::None,
+            parser_revision: SourceUnitMeta::None.parser_revision(),
         }
     }
 
@@ -91,6 +93,7 @@ impl SourceUnit {
             path,
             fingerprint_policy: FingerprintPolicy::SqliteWithWal,
             meta: SourceUnitMeta::None,
+            parser_revision: SourceUnitMeta::None.parser_revision(),
         }
     }
 
@@ -100,6 +103,7 @@ impl SourceUnit {
             path,
             fingerprint_policy: FingerprintPolicy::None,
             meta: SourceUnitMeta::None,
+            parser_revision: SourceUnitMeta::None.parser_revision(),
         }
     }
 
@@ -109,10 +113,12 @@ impl SourceUnit {
             path,
             fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome { home_dir },
             meta: SourceUnitMeta::None,
+            parser_revision: SourceUnitMeta::None.parser_revision(),
         }
     }
 
     pub(crate) fn with_meta(mut self, meta: SourceUnitMeta) -> Self {
+        self.parser_revision = meta.parser_revision();
         self.meta = meta;
         self
     }
@@ -167,6 +173,22 @@ pub(crate) enum SourceUnitMeta {
     },
 }
 
+impl SourceUnitMeta {
+    fn parser_revision(&self) -> message_cache::ParserRevision {
+        match self {
+            Self::None => 1,
+            Self::OpenCodeSqlite => 1,
+            Self::OpenCodeJson => 1,
+            Self::AntigravityCacheJsonl => 1,
+            Self::AntigravityCliSqlite => 1,
+            Self::KiroFile => 1,
+            Self::KiroSqlite => 1,
+            Self::KiroGlobalStorage => 1,
+            Self::Codex { .. } => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FingerprintPolicy {
     PlainFile,
@@ -197,7 +219,7 @@ pub(crate) enum UnitMessageSource {
 pub(crate) struct ParsedUnit {
     pub unit: SourceUnit,
     pub messages: UnitMessageSource,
-    pub cache_entry: Option<message_cache::CachedSourceEntry>,
+    pub cache_write: Option<message_cache::CacheWrite>,
     pub invalidate_cache: bool,
 }
 
