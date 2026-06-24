@@ -14,37 +14,22 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
+    let fallback_timestamp = file_modified_timestamp_ms(path);
+
+    let Some(trace_contexts) = collect_trace_contexts(path) else {
+        return Vec::new();
     };
 
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-    let mut records = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if let Ok(record) = serde_json::from_str::<Value>(trimmed) {
-            records.push(record);
-        }
-    }
-
-    let trace_contexts = collect_trace_contexts(&records);
-    let candidates: Vec<CopilotUsageCandidate> = records
-        .iter()
-        .enumerate()
-        .filter_map(|(index, record)| {
+    let mut candidates = Vec::new();
+    if !for_each_json_record(path, |index, record| {
+        if let Some(candidate) =
             usage_candidate_from_record(record, index, fallback_timestamp, &trace_contexts)
-        })
-        .collect();
+        {
+            candidates.push(candidate);
+        }
+    }) {
+        return Vec::new();
+    }
 
     let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::ChatSpan);
     let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::InferenceLog);
@@ -70,6 +55,33 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
         })
         .map(CopilotUsageCandidate::into_message)
         .collect()
+}
+
+fn for_each_json_record(path: &Path, mut handle: impl FnMut(usize, &Value)) -> bool {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+
+    let mut record_index = 0;
+    for line in BufReader::new(file).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => continue,
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Ok(record) = serde_json::from_str::<Value>(trimmed) {
+            handle(record_index, &record);
+            record_index += 1;
+        }
+    }
+
+    true
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -127,16 +139,16 @@ impl CopilotUsageCandidate {
     }
 }
 
-fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
+fn collect_trace_contexts(path: &Path) -> Option<HashMap<String, TraceContext>> {
     let mut contexts = HashMap::new();
 
-    for record in records {
+    if !for_each_json_record(path, |_, record| {
         let Some(trace_id) = trace_id_from_record(record) else {
-            continue;
+            return;
         };
 
         let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
-            continue;
+            return;
         };
 
         let context = contexts
@@ -164,9 +176,11 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
                 context.agent_name = Some(super::normalize_copilot_agent_name(agent_name));
             }
         }
+    }) {
+        return None;
     }
 
-    contexts
+    Some(contexts)
 }
 
 fn usage_candidate_from_record(
