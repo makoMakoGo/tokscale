@@ -5,6 +5,7 @@
 
 use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::model_aliases;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -132,7 +133,10 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
         }
 
         // Use model from line or fallback to "unknown"
-        let model = qwen_line.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let model = qwen_line
+            .model
+            .map(|model| model_aliases::canonicalize_source_model_id(&model).unwrap_or(model))
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         // Resolve session ID: prefer JSON sessionId, fallback to path-derived
         let line_session_id =
@@ -347,11 +351,23 @@ not valid json at all
         let messages = parse_qwen_file(file.path());
 
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "qwen3-max");
         assert_eq!(messages[0].tokens.input, 1508);
         assert_eq!(messages[0].tokens.output, 205);
         assert_eq!(messages[0].tokens.reasoning, 50);
         assert_eq!(messages[0].tokens.cache_read, 4864);
         assert_eq!(messages[0].tokens.cache_write, 0);
+    }
+
+    #[test]
+    fn test_parse_qwen_canonicalizes_compact_date_snapshot_model() {
+        let content = r#"{"type": "assistant", "model": "qwen/qwen3.7-max-20260520", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_qwen_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "qwen3.7-max");
     }
 
     #[test]

@@ -7,7 +7,7 @@ use super::utils::{
     read_file_or_none,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::{pricing, provider_identity, TokenBreakdown};
+use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -568,11 +568,13 @@ pub fn parse_claude_file_with_cache_and_home(
                         let hash =
                             crate::sessions::dedup_hash_str(&format!("{}:{}", msg_id, req_id));
                         if let Some(&existing_idx) = processed_hashes.get(&hash) {
+                            let duplicate_model = message
+                                .model
+                                .as_deref()
+                                .map(canonicalize_claude_model)
+                                .unwrap_or_else(|| messages[existing_idx].model_id.to_string());
                             let duplicate_provider_choice = claude_provider_choice_from_parts(
-                                message
-                                    .model
-                                    .as_deref()
-                                    .or(Some(messages[existing_idx].model_id.as_ref())),
+                                Some(&duplicate_model),
                                 provider_hint.as_deref(),
                             );
                             merge_claude_duplicate(
@@ -632,9 +634,10 @@ pub fn parse_claude_file_with_cache_and_home(
                     Some(m) => m,
                     None => continue,
                 };
-                let provider_choice = claude_provider_choice(&raw_model, provider_hint.as_deref());
-                let provider_confidence = provider_choice.confidence;
                 let model = canonicalize_claude_model(&raw_model);
+                let provider_choice =
+                    claude_provider_choice_for_models(&raw_model, &model, provider_hint.as_deref());
+                let provider_confidence = provider_choice.confidence;
 
                 let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
                 let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
@@ -984,8 +987,9 @@ fn extract_claude_tool_result_message(
         .or_else(|| context.last_provider_hint.map(str::to_string))
         .or_else(|| context.default_provider_hint.map(str::to_string));
 
-    let provider_choice = claude_provider_choice(&raw_model, provider_hint.as_deref());
     let model = canonicalize_claude_model(&raw_model);
+    let provider_choice =
+        claude_provider_choice_for_models(&raw_model, &model, provider_hint.as_deref());
     let timestamp = parse_claude_entry_timestamp(context.entry.timestamp.as_deref())
         .or_else(|| extract_claude_timestamp(&value))
         .unwrap_or(context.fallback_timestamp);
@@ -1198,9 +1202,7 @@ fn is_claude_synthetic_placeholder_model(model: &str) -> bool {
 }
 
 fn canonicalize_claude_model(model: &str) -> String {
-    pricing::aliases::resolve_alias(model)
-        .unwrap_or(model)
-        .to_string()
+    model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
 }
 
 #[derive(Default)]
@@ -1340,11 +1342,12 @@ fn extract_claude_headless_message(
         return None;
     }
     let provider_hint = extract_claude_provider(value);
-    let provider_id = claude_provider_id(
+    let model = canonicalize_claude_model(&raw_model);
+    let provider_id = claude_provider_id_for_models(
         &raw_model,
+        &model,
         provider_hint.as_deref().or(default_provider_hint),
     );
-    let model = canonicalize_claude_model(&raw_model);
     let timestamp = extract_claude_timestamp(value).unwrap_or(fallback_timestamp);
 
     Some(UnifiedMessage::new(
@@ -1446,8 +1449,25 @@ const CLAUDE_PROVIDER_INFERRED_CONFIDENCE: u8 = 2;
 const CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE: u8 = 3;
 const CLAUDE_PROVIDER_MODEL_OVERRIDE_CONFIDENCE: u8 = 4;
 
-fn claude_provider_id(model: &str, provider_hint: Option<&str>) -> String {
-    claude_provider_choice(model, provider_hint).id
+fn claude_provider_id_for_models(
+    raw_model: &str,
+    canonical_model: &str,
+    provider_hint: Option<&str>,
+) -> String {
+    claude_provider_choice_for_models(raw_model, canonical_model, provider_hint).id
+}
+
+fn claude_provider_choice_for_models(
+    raw_model: &str,
+    canonical_model: &str,
+    provider_hint: Option<&str>,
+) -> ClaudeProviderChoice {
+    let raw_choice = claude_provider_choice(raw_model, provider_hint);
+    if raw_choice.confidence > 0 {
+        raw_choice
+    } else {
+        claude_provider_choice(canonical_model, provider_hint)
+    }
 }
 
 fn claude_provider_choice_from_parts(
@@ -1585,11 +1605,12 @@ fn finalize_headless_state(
         *state = ClaudeHeadlessState::default();
         return None;
     }
-    let provider_id = claude_provider_id(
+    let model = canonicalize_claude_model(&raw_model);
+    let provider_id = claude_provider_id_for_models(
         &raw_model,
+        &model,
         state.provider_id.as_deref().or(default_provider_hint),
     );
-    let model = canonicalize_claude_model(&raw_model);
     let timestamp = state.timestamp_ms.unwrap_or(fallback_timestamp);
     if state.input == 0 && state.output == 0 && state.cache_read == 0 && state.cache_write == 0 {
         *state = ClaudeHeadlessState::default();
@@ -1708,9 +1729,9 @@ mod tests {
 
     #[test]
     fn test_deduplication_skips_duplicate_entries() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":100}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1726,7 +1747,7 @@ mod tests {
 
     #[test]
     fn test_parse_cc_mirror_claude_variant_attributes_client_provider_and_workspace() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
 
         let (_temp_dir, path) = create_cc_mirror_project_file(
             content,
@@ -1741,7 +1762,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
         assert_eq!(messages[0].provider_id.as_ref(), "zai");
-        assert_eq!(messages[0].model_id.as_ref(), "claude-3-5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 10);
@@ -1770,9 +1791,9 @@ mod tests {
         // The first entry has a partial output_tokens count; the last has the
         // final (largest) count. We must keep the entry with the highest
         // output_tokens, not the first-seen entry.
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":31}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":31}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:00.200Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":300}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":31}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":31}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.200Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":300}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1792,8 +1813,8 @@ mod tests {
     #[test]
     fn test_deduplication_per_field_max_not_just_output() {
         // Later entry has same output but higher input - should still update input
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":5}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":50,"output_tokens":100,"cache_read_input_tokens":20}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":5}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":50,"output_tokens":100,"cache_read_input_tokens":20}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1813,8 +1834,8 @@ mod tests {
     #[test]
     fn test_deduplication_higher_first_lower_later() {
         // First entry has higher output than later - should keep first's higher values
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":500}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":500}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1832,8 +1853,8 @@ mod tests {
 
     #[test]
     fn test_deduplication_promotes_provider_hint_from_later_duplicate() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":75}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":75}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1846,7 +1867,7 @@ mod tests {
 
     #[test]
     fn test_deduplication_promotes_provider_hint_without_later_model() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"assistant","provider":"openrouter/anthropic","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":120,"output_tokens":75}}}"#;
 
         let file = create_test_file(content);
@@ -1860,8 +1881,8 @@ mod tests {
 
     #[test]
     fn test_deduplication_preserves_explicit_provider_against_later_inference() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":75}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":75}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1877,7 +1898,7 @@ mod tests {
         // First entry has id+requestId+usage but model=null → skipped, no push.
         // Second entry is a valid duplicate. Must not panic on stale index.
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":10,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":100}}}"#;
+{"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1892,8 +1913,8 @@ mod tests {
 
     #[test]
     fn test_deduplication_allows_same_message_different_request() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_002","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":150,"output_tokens":75}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_002","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":150,"output_tokens":75}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1908,8 +1929,8 @@ mod tests {
     #[test]
     fn test_deduplication_uses_message_id_without_request_id_and_keeps_final_duration() {
         let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"id":"msg_stream","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":25}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:03.500Z","message":{"id":"msg_stream","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":250}}}"#;
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"id":"msg_stream","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":25}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:03.500Z","message":{"id":"msg_stream","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":250}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1932,8 +1953,8 @@ mod tests {
         // with no intervening user entry would then reuse the stale start
         // timestamp and report a wildly inflated duration.
         let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:01:30.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:01:30.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1953,8 +1974,8 @@ mod tests {
 
     #[test]
     fn test_entries_without_dedup_fields_still_processed() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":100}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1969,7 +1990,7 @@ mod tests {
     #[test]
     fn test_user_messages_ignored() {
         let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -1984,11 +2005,11 @@ mod tests {
         //         → real user asks again → assistant responds
         // Expected: 2 turns (tool_result should NOT count as a turn)
         let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"user","timestamp":"2024-12-01T10:00:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_001","content":"file contents here"}]}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}
 {"type":"user","timestamp":"2024-12-01T10:00:04.000Z","message":{"content":"Thanks, now do X"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:05.000Z","requestId":"req_003","message":{"id":"msg_003","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":120}}}"#;
+{"type":"assistant","timestamp":"2024-12-01T10:00:05.000Z","requestId":"req_003","message":{"id":"msg_003","model":"claude-sonnet-4.6","usage":{"input_tokens":300,"output_tokens":120}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2032,9 +2053,9 @@ mod tests {
     fn test_turn_start_ignores_system_messages() {
         // XML-tagged content like <local-command-stdout> should not count as turns
         let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Do something"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"user","timestamp":"2024-12-01T10:00:02.000Z","message":{"content":"<local-command-stdout>ok</local-command-stdout>"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+{"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2056,8 +2077,8 @@ mod tests {
     #[test]
     fn test_turn_start_without_user_message() {
         // No user message → no turn starts (e.g. headless or partial log)
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":100}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2069,7 +2090,7 @@ mod tests {
 
     #[test]
     fn test_token_breakdown_parsing() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200,"cache_creation_input_tokens":100}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200,"cache_creation_input_tokens":100}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2090,7 +2111,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-7");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.7");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 321);
         assert_eq!(messages[0].tokens.output, 654);
@@ -2106,7 +2127,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 4);
         assert_eq!(messages[0].tokens.output, 0);
@@ -2150,7 +2171,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].tokens.input, 8);
         assert_eq!(messages[0].timestamp, 1_779_876_000_100);
     }
@@ -2168,7 +2189,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_prefers_input_token_metadata_over_char_estimate() {
-        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"claude-sonnet-4-6","content":[{"type":"tool_result","tool_use_id":"toolu_metadata","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd","input_tokens":3}}]}}"#;
+        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","content":[{"type":"tool_result","tool_use_id":"toolu_metadata","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd","input_tokens":3}}]}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2179,7 +2200,7 @@ mod tests {
 
     #[test]
     fn test_assistant_usage_with_tool_use_is_not_estimated_from_prompt_text() {
-        let content = r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"id":"msg_tool_use","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/tmp/large.txt"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"id":"msg_tool_use","model":"claude-sonnet-4.6","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/tmp/large.txt"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2197,7 +2218,7 @@ mod tests {
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
@@ -2214,7 +2235,7 @@ mod tests {
 
     #[test]
     fn test_multi_provider_models_infer_provider_from_model() {
-        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":10}}}
+        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"model":"claude-opus-4.6","usage":{"input_tokens":100,"output_tokens":10}}}
 {"type":"assistant","timestamp":"2026-02-18T10:00:01.000Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":200,"output_tokens":20}}}
 {"type":"assistant","timestamp":"2026-02-18T10:00:02.000Z","message":{"model":"gemini-3-flash-preview","usage":{"input_tokens":300,"output_tokens":30}}}
 {"type":"assistant","timestamp":"2026-02-18T10:00:03.000Z","message":{"model":"MiniMax-M2.1","usage":{"input_tokens":400,"output_tokens":40}}}
@@ -2316,26 +2337,26 @@ mod tests {
 
     #[test]
     fn test_multi_provider_models_preserve_reseller_provider_hint() {
-        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"provider":"openrouter/anthropic","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":10}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"provider":"openrouter/anthropic","model":"claude-opus-4.6","usage":{"input_tokens":100,"output_tokens":10}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
     }
 
     #[test]
     fn test_headless_json_output() {
-        let content = r#"{"type":"message","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let content = r#"{"type":"message","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
         let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
         std::fs::write(file.path(), content).unwrap();
 
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-3-5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 60);
         assert_eq!(messages[0].tokens.cache_read, 10);
@@ -2356,7 +2377,7 @@ mod tests {
 
     #[test]
     fn test_headless_json_output_keeps_workspace_metadata() {
-        let content = r#"{"type":"message","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let content = r#"{"type":"message","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
         let (_dir, path) = create_project_file(content, "myproject", "session.json");
 
         let messages = parse_claude_file(&path);
@@ -2368,14 +2389,14 @@ mod tests {
 
     #[test]
     fn test_headless_stream_output() {
-        let content = r#"{"type":"message_start","timestamp":"2025-01-01T00:00:00Z","message":{"id":"msg_1","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}
+        let content = r#"{"type":"message_start","timestamp":"2025-01-01T00:00:00Z","message":{"id":"msg_1","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}
 {"type":"message_delta","usage":{"output_tokens":80}}
 {"type":"message_stop"}"#;
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-3-5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 80);
         assert_eq!(messages[0].tokens.cache_read, 20);
@@ -2399,7 +2420,7 @@ mod tests {
 
     #[test]
     fn test_workspace_metadata_from_claude_project_path() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let (_dir, path) = create_project_file(content, "myproject", "session.jsonl");
 
         let messages = parse_claude_file(&path);
@@ -2411,7 +2432,7 @@ mod tests {
 
     #[test]
     fn test_workspace_metadata_prefers_entry_cwd_over_claude_project_path() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/home/travis/01-workspace/tokscale","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/home/travis/01-workspace/tokscale","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let (_dir, path) = create_project_file(
             content,
             "-home-travis-01-workspace-tokscale",
@@ -2438,8 +2459,8 @@ mod tests {
 
     #[test]
     fn test_workspace_metadata_prefers_later_entry_cwd_on_dedupe() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_late_cwd","message":{"id":"msg_late_cwd","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_late_cwd","cwd":"/home/travis/01-workspace/tokscale","message":{"id":"msg_late_cwd","model":"claude-3-5-sonnet","usage":{"input_tokens":120,"output_tokens":70}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_late_cwd","message":{"id":"msg_late_cwd","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_late_cwd","cwd":"/home/travis/01-workspace/tokscale","message":{"id":"msg_late_cwd","model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":70}}}"#;
         let (_dir, path) = create_project_file(
             content,
             "-home-travis-01-workspace-tokscale",
@@ -2460,7 +2481,7 @@ mod tests {
 
     #[test]
     fn test_workspace_metadata_normalizes_entry_windows_cwd() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"C:\\Users\\Travis\\Desktop","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"C:\\Users\\Travis\\Desktop","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let (_dir, path) = create_project_file(content, "C--Users-Travis-Desktop", "session.jsonl");
 
         let messages = parse_claude_file(&path);
@@ -2544,7 +2565,7 @@ mod tests {
     #[test]
     fn test_sidechain_nested_with_meta_sidecar() {
         let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"parent-uuid-001","agentId":"abc123","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Find files"}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-uuid-001","agentId":"abc123","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_s01","message":{"id":"msg_s01","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":50}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"parent-uuid-001","agentId":"abc123","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_s01","message":{"id":"msg_s01","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":50}}}"#;
         let meta = r#"{"agentType":"explore","description":"Find session creation UI"}"#;
 
         let (_dir, path) = create_sidechain_files(
@@ -2575,7 +2596,7 @@ mod tests {
     #[test]
     fn test_sidechain_temporary_meta_agent_type_is_generic() {
         let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"parent-temp-001","agentId":"temp1","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Scan auth"}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-temp-001","agentId":"temp1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_temp","message":{"id":"msg_temp","model":"claude-3-5-sonnet","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"parent-temp-001","agentId":"temp1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_temp","message":{"id":"msg_temp","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
         let meta = r#"{"agentType":"auth-scanner"}"#;
 
         let (_dir, path) = create_sidechain_files(
@@ -2594,7 +2615,7 @@ mod tests {
     #[test]
     fn test_sidechain_nested_without_meta_falls_back() {
         let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"parent-uuid-002","agentId":"def456","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Do something"}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-uuid-002","agentId":"def456","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_s02","message":{"id":"msg_s02","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":40}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"parent-uuid-002","agentId":"def456","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_s02","message":{"id":"msg_s02","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":40}}}"#;
 
         let (_dir, path) =
             create_sidechain_files("myproject", "parent-uuid-002", "agent-def456", jsonl, None);
@@ -2613,7 +2634,7 @@ mod tests {
     fn test_sidechain_flat_legacy_layout() {
         // Flat layout: agent file lives directly under the project dir, no meta sidecar
         let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"legacy-session-001","agentId":"ac0c74c","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Warmup"}}
-{"type":"assistant","isSidechain":true,"sessionId":"legacy-session-001","agentId":"ac0c74c","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_l01","message":{"id":"msg_l01","model":"claude-3-5-sonnet","usage":{"input_tokens":150,"output_tokens":60}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"legacy-session-001","agentId":"ac0c74c","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_l01","message":{"id":"msg_l01","model":"claude-sonnet-4.6","usage":{"input_tokens":150,"output_tokens":60}}}"#;
 
         let (_dir, path) = create_project_file(jsonl, "myproject", "agent-ac0c74c.jsonl");
         let messages = parse_claude_file(&path);
@@ -2637,7 +2658,7 @@ mod tests {
         let make_jsonl = |agent_id: &str, req: &str, msg: &str| {
             format!(
                 r#"{{"type":"user","isSidechain":true,"sessionId":"shared-parent-uuid","agentId":"{agent_id}","timestamp":"2024-12-01T10:00:00.000Z","message":{{"content":"task"}}}}
-{{"type":"assistant","isSidechain":true,"sessionId":"shared-parent-uuid","agentId":"{agent_id}","timestamp":"2024-12-01T10:00:01.000Z","requestId":"{req}","message":{{"id":"{msg}","model":"claude-3-5-sonnet","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+{{"type":"assistant","isSidechain":true,"sessionId":"shared-parent-uuid","agentId":"{agent_id}","timestamp":"2024-12-01T10:00:01.000Z","requestId":"{req}","message":{{"id":"{msg}","model":"claude-sonnet-4.6","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
             )
         };
 
@@ -2682,8 +2703,8 @@ mod tests {
     fn test_sidechain_token_totals_preserved() {
         // Verify that sidechain parsing doesn't change token accounting
         let sidechain_jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"parent-001","agentId":"xyz","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-001","agentId":"xyz","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_t1","message":{"id":"msg_t1","model":"claude-3-5-sonnet","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200,"cache_creation_input_tokens":100}}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-001","agentId":"xyz","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_t2","message":{"id":"msg_t2","model":"claude-3-5-sonnet","usage":{"input_tokens":800,"output_tokens":300,"cache_read_input_tokens":150,"cache_creation_input_tokens":50}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"parent-001","agentId":"xyz","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_t1","message":{"id":"msg_t1","model":"claude-sonnet-4.6","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200,"cache_creation_input_tokens":100}}}
+{"type":"assistant","isSidechain":true,"sessionId":"parent-001","agentId":"xyz","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_t2","message":{"id":"msg_t2","model":"claude-sonnet-4.6","usage":{"input_tokens":800,"output_tokens":300,"cache_read_input_tokens":150,"cache_creation_input_tokens":50}}}"#;
 
         let (_dir, path) = create_sidechain_files(
             "myproject",
@@ -2715,8 +2736,8 @@ mod tests {
     fn test_main_session_no_agent_regression() {
         // Non-sidechain (main session) files must produce agent: None
         let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_m01","message":{"id":"msg_m01","model":"claude-3-5-sonnet","usage":{"input_tokens":500,"output_tokens":200}}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_m02","message":{"id":"msg_m02","model":"claude-3-5-sonnet","usage":{"input_tokens":600,"output_tokens":250}}}"#;
+{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_m01","message":{"id":"msg_m01","model":"claude-sonnet-4.6","usage":{"input_tokens":500,"output_tokens":200}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_m02","message":{"id":"msg_m02","model":"claude-sonnet-4.6","usage":{"input_tokens":600,"output_tokens":250}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2732,7 +2753,7 @@ mod tests {
     #[test]
     fn test_main_session_with_is_sidechain_false() {
         // Explicit isSidechain: false should be treated as main session
-        let content = r#"{"type":"assistant","isSidechain":false,"timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let content = r#"{"type":"assistant","isSidechain":false,"timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(content);
         let messages = parse_claude_file(file.path());
@@ -2748,8 +2769,8 @@ mod tests {
     fn test_sidechain_dedup_preserves_agent() {
         // Streaming duplicates within a sidechain file should still carry the agent
         let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"parent-dedup","agentId":"dd1","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-dedup","agentId":"dd1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_d1","message":{"id":"msg_d1","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":30}}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-dedup","agentId":"dd1","timestamp":"2024-12-01T10:00:01.100Z","requestId":"req_d1","message":{"id":"msg_d1","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":300}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"parent-dedup","agentId":"dd1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_d1","message":{"id":"msg_d1","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":30}}}
+{"type":"assistant","isSidechain":true,"sessionId":"parent-dedup","agentId":"dd1","timestamp":"2024-12-01T10:00:01.100Z","requestId":"req_d1","message":{"id":"msg_d1","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":300}}}"#;
 
         let (_dir, path) = create_sidechain_files(
             "myproject",
@@ -2781,7 +2802,7 @@ mod tests {
     fn test_sidechain_meta_with_omc_prefix_agent() {
         // Meta file might contain oh-my-claudecode: prefixed stable agent types.
         let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"parent-omc","agentId":"omc1","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-omc","agentId":"omc1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_omc","message":{"id":"msg_omc","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"parent-omc","agentId":"omc1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_omc","message":{"id":"msg_omc","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let (_dir, path) = create_sidechain_files(
             "myproject",
@@ -2804,7 +2825,7 @@ mod tests {
     fn test_sidechain_without_session_id_uses_filename() {
         // Edge case: sidechain entry without sessionId should fall back to filename stem
         let jsonl = r#"{"type":"user","isSidechain":true,"agentId":"noid","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"agentId":"noid","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_no","message":{"id":"msg_no","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+{"type":"assistant","isSidechain":true,"agentId":"noid","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_no","message":{"id":"msg_no","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(jsonl);
         let messages = parse_claude_file(file.path());
@@ -2841,7 +2862,7 @@ mod tests {
 
         // Create parent session file with tool_use (Agent) and tool_result (agentId)
         let parent_session_id = "parent-tier2-uuid";
-        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_p1","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Agent","input":{"subagent_type":"document-specialist","prompt":"Research something"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_p1","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Agent","input":{"subagent_type":"document-specialist","prompt":"Research something"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_abc","type":"tool_result","content":[{"type":"text","text":"Found the docs"},{"type":"text","text":"agentId: t2agent1 (use SendMessage with to: 't2agent1' to continue this agent)\n<usage>total_tokens: 5000</usage>"}]}]}}"#;
         let parent_path = project_dir.join(format!("{}.jsonl", parent_session_id));
         std::fs::write(&parent_path, parent_content).unwrap();
@@ -2850,7 +2871,7 @@ mod tests {
         let subagents_dir = project_dir.join(parent_session_id).join("subagents");
         std::fs::create_dir_all(&subagents_dir).unwrap();
         let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"parent-tier2-uuid","agentId":"t2agent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"Research something"}}
-{"type":"assistant","isSidechain":true,"sessionId":"parent-tier2-uuid","agentId":"t2agent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_t2","message":{"id":"msg_t2","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":120}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"parent-tier2-uuid","agentId":"t2agent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_t2","message":{"id":"msg_t2","model":"claude-sonnet-4.6","usage":{"input_tokens":300,"output_tokens":120}}}"#;
         let sidechain_path = subagents_dir.join("agent-t2agent1.jsonl");
         std::fs::write(&sidechain_path, sidechain_content).unwrap();
 
@@ -2877,7 +2898,7 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
 
         let parent_session_id = "flat-parent-uuid";
-        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_fp","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_flat","name":"Agent","input":{"subagent_type":"explore","prompt":"Find files"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_fp","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"tool_use","id":"toolu_flat","name":"Agent","input":{"subagent_type":"explore","prompt":"Find files"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
 {"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_flat","type":"tool_result","content":[{"type":"text","text":"agentId: flatagent1 (use SendMessage)"}]}]}}"#;
         std::fs::write(
             project_dir.join(format!("{}.jsonl", parent_session_id)),
@@ -2886,7 +2907,7 @@ mod tests {
         .unwrap();
 
         let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"flat-parent-uuid","agentId":"flatagent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"sessionId":"flat-parent-uuid","agentId":"flatagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_flat","message":{"id":"msg_flat","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"flat-parent-uuid","agentId":"flatagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_flat","message":{"id":"msg_flat","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         std::fs::write(
             project_dir.join("agent-flatagent1.jsonl"),
             sidechain_content,
@@ -2915,7 +2936,7 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
 
         let parent_session_id = "precedence-parent";
-        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_prec","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_prec","name":"Agent","input":{"subagent_type":"explore","prompt":"task"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_prec","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"tool_use","id":"toolu_prec","name":"Agent","input":{"subagent_type":"explore","prompt":"task"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
 {"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_prec","type":"tool_result","content":[{"type":"text","text":"agentId: precagent1 done"}]}]}}"#;
         std::fs::write(
             project_dir.join(format!("{}.jsonl", parent_session_id)),
@@ -2927,7 +2948,7 @@ mod tests {
         std::fs::create_dir_all(&subagents_dir).unwrap();
 
         let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"precedence-parent","agentId":"precagent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"sessionId":"precedence-parent","agentId":"precagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_prec","message":{"id":"msg_prec2","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"precedence-parent","agentId":"precagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_prec","message":{"id":"msg_prec2","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         std::fs::write(
             subagents_dir.join("agent-precagent1.jsonl"),
             sidechain_content,
@@ -2992,7 +3013,7 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
 
         let parent_session_id = "aside-parent-uuid";
-        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_aside_parent","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_aside","name":"Agent","input":{"subagent_type":"plan","prompt":"Summarize findings"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_aside_parent","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"tool_use","id":"toolu_aside","name":"Agent","input":{"subagent_type":"plan","prompt":"Summarize findings"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
 {"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_aside","type":"tool_result","content":[{"type":"text","text":"agentId: 0320a3d71bc1d01e (use SendMessage)"}]}]}}"#;
         std::fs::write(
             project_dir.join(format!("{}.jsonl", parent_session_id)),
@@ -3003,7 +3024,7 @@ mod tests {
         let subagents_dir = project_dir.join(parent_session_id).join("subagents");
         std::fs::create_dir_all(&subagents_dir).unwrap();
         let sidechain_content = r#"{"type":"user","isSidechain":true,"sessionId":"aside-parent-uuid","agentId":"0320a3d71bc1d01e","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"sessionId":"aside-parent-uuid","agentId":"0320a3d71bc1d01e","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_aside","message":{"id":"msg_aside","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"aside-parent-uuid","agentId":"0320a3d71bc1d01e","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_aside","message":{"id":"msg_aside","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let sidechain_path = subagents_dir.join("agent-aside_question-0320a3d71bc1d01e.jsonl");
         std::fs::write(&sidechain_path, sidechain_content).unwrap();
 
@@ -3051,9 +3072,9 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
 
         let parent_session_id = "multi-agent-parent";
-        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_ma1","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_m1","name":"Agent","input":{"subagent_type":"explore","prompt":"find files"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
+        let parent_content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_ma1","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"tool_use","id":"toolu_m1","name":"Agent","input":{"subagent_type":"explore","prompt":"find files"}}],"usage":{"input_tokens":50,"output_tokens":30}}}
 {"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_m1","type":"tool_result","content":[{"type":"text","text":"agentId: multiA1 done"}]}]}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","message":{"id":"msg_ma2","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_m2","name":"Agent","input":{"subagent_type":"plan","prompt":"implement feature"}}],"usage":{"input_tokens":60,"output_tokens":40}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","message":{"id":"msg_ma2","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"tool_use","id":"toolu_m2","name":"Agent","input":{"subagent_type":"plan","prompt":"implement feature"}}],"usage":{"input_tokens":60,"output_tokens":40}}}
 {"type":"user","timestamp":"2024-12-01T10:00:03.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_m2","type":"tool_result","content":[{"type":"text","text":"agentId: multiB2 done"}]}]}}"#;
         std::fs::write(
             project_dir.join(format!("{}.jsonl", parent_session_id)),
@@ -3067,7 +3088,7 @@ mod tests {
         let make_sidechain = |agent_id: &str| {
             format!(
                 r#"{{"type":"user","isSidechain":true,"sessionId":"{parent_session_id}","agentId":"{agent_id}","timestamp":"2024-12-01T10:00:00.500Z","message":{{"content":"task"}}}}
-{{"type":"assistant","isSidechain":true,"sessionId":"{parent_session_id}","agentId":"{agent_id}","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_{agent_id}","message":{{"id":"msg_{agent_id}","model":"claude-3-5-sonnet","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+{{"type":"assistant","isSidechain":true,"sessionId":"{parent_session_id}","agentId":"{agent_id}","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_{agent_id}","message":{{"id":"msg_{agent_id}","model":"claude-sonnet-4.6","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
             )
         };
 

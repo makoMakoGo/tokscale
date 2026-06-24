@@ -38,112 +38,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Strip a CLIProxyAPI-style `(level)` reasoning-effort suffix from a model id.
-///
-/// Mirrors <https://help.router-for.me/configuration/thinking>: the proxy
-/// strips the parentheses before routing, so for pricing lookups we treat the
-/// suffix as cosmetic and resolve to the base model. Accepts the level set the
-/// proxy documents (case-insensitive — callers pass the lowercased id):
-/// `minimal`, `low`, `medium`, `high`, `xhigh`, `auto`, `none`. Numeric
-/// thinking budgets are intentionally not handled here.
-pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str> {
-    let without_closing_paren = model_id.strip_suffix(')')?;
-    let (base_model, tier) = without_closing_paren.rsplit_once('(')?;
-
-    if base_model.is_empty() || base_model.trim() != base_model {
-        return None;
-    }
-
-    if !matches!(
-        tier,
-        "minimal" | "low" | "medium" | "high" | "xhigh" | "auto" | "none"
-    ) {
-        return None;
-    }
-
-    Some(base_model)
-}
-
-const GROUPING_NOISE_SUFFIXES: &[&str] = &[
-    "-sub2api-pro",
-    "-minimal",
-    "-low",
-    "-medium",
-    "-high",
-    "-xhigh",
-    "-auto",
-    "-none",
-    "-fast",
-    "-free",
-    "-0",
-];
-
-const CLAUDE_GROUPING_NOISE_SUFFIXES: &[&str] = &[
-    "-sub2api-pro",
-    "-thinking",
-    "-minimal",
-    "-low",
-    "-medium",
-    "-high",
-    "-xhigh",
-    "-auto",
-    "-none",
-    "-fast",
-    "-free",
-    "-0",
-];
-
-const FREE_MARKER_TRAILING_SUFFIXES: &[&str] = &[
-    "-thinking",
-    "-sub2api-pro",
-    "-minimal",
-    "-low",
-    "-medium",
-    "-high",
-    "-xhigh",
-    "-auto",
-    "-none",
-    "-fast",
-    "-0",
-];
-
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
     let lowercased = model_id.trim().to_lowercase();
-    let anthropic_canonical = normalize_anthropic_prefixed_claude_model(&lowercased);
-    let mut name = anthropic_canonical
-        .as_deref()
-        .unwrap_or_else(|| strip_custom_model_prefix(&lowercased));
+    let mut name = strip_custom_model_prefix(&lowercased);
 
-    if anthropic_canonical.is_none() {
-        if let Some(segment) = last_non_empty_path_segment(name) {
-            name = strip_custom_model_prefix(segment);
-        }
-    }
-
-    name = strip_trailing_free_marker(name);
-
-    if let Some(base_model) = strip_parenthesized_reasoning_tier(name) {
-        name = base_model;
-    }
-
-    name = strip_trailing_free_marker(name);
-    name = strip_trailing_date_suffix(name);
-    name = strip_trailing_free_marker(name);
-
-    if let Some(normalized) = normalize_kimi_coding_plan_alias_for_grouping(name) {
-        return normalized.into();
-    }
-
-    if let Some(normalized) = normalize_longcat_model_for_grouping(name) {
-        return normalized.into();
-    }
-
-    if let Some(normalized) = normalize_gpt_model_for_grouping(name) {
-        return normalized;
-    }
-
-    if let Some(normalized) = normalize_claude_model_for_grouping(name) {
-        return normalized;
+    if let Some(segment) = last_non_empty_path_segment(name) {
+        name = strip_custom_model_prefix(segment);
     }
 
     name.to_string()
@@ -159,221 +59,6 @@ fn last_non_empty_path_segment(value: &str) -> Option<&str> {
         None
     } else {
         Some(segment)
-    }
-}
-
-fn strip_trailing_date_suffix(name: &str) -> &str {
-    if name.len() > 11 {
-        let potential_date = &name[name.len() - 10..];
-        let bytes = potential_date.as_bytes();
-        if bytes[4] == b'-'
-            && bytes[7] == b'-'
-            && potential_date
-                .bytes()
-                .enumerate()
-                .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
-            && name.as_bytes()[name.len() - 11] == b'-'
-        {
-            return &name[..name.len() - 11];
-        }
-    }
-
-    if name.len() > 9 {
-        let potential_date = &name[name.len() - 8..];
-        if potential_date.chars().all(|c| c.is_ascii_digit())
-            && name.as_bytes()[name.len() - 9] == b'-'
-        {
-            return &name[..name.len() - 9];
-        }
-    }
-
-    name
-}
-
-fn strip_trailing_free_marker(mut name: &str) -> &str {
-    loop {
-        // Repeat until stable so stacked markers like `model-free-high` collapse fully.
-        let trimmed = name.trim_end();
-        if trimmed.len() != name.len() {
-            name = trimmed;
-            continue;
-        }
-
-        // Strip direct free markers while guarding against returning an empty model name.
-        if let Some(value) = strip_direct_free_marker(name) {
-            if !value.is_empty() {
-                name = value.trim_end();
-                continue;
-            }
-        }
-
-        // Peel trailing noise suffixes to expose hidden free markers.
-        let mut probe = name;
-        let mut exposed_free = None;
-        while let Some(stripped_probe) = strip_suffix_once(probe, FREE_MARKER_TRAILING_SUFFIXES) {
-            probe = stripped_probe.trim_end();
-            if let Some(value) = strip_direct_free_marker(probe) {
-                exposed_free = Some(value.trim_end());
-                break;
-            }
-        }
-
-        match exposed_free {
-            Some(value) if !value.is_empty() => name = value,
-            _ => return name,
-        }
-    }
-}
-
-fn strip_direct_free_marker(name: &str) -> Option<&str> {
-    name.strip_suffix("-free")
-        .or_else(|| name.strip_suffix(":free"))
-        .or_else(|| name.strip_suffix(" (free)"))
-        .or_else(|| name.strip_suffix("(free)"))
-}
-
-fn strip_suffix_once<'a>(value: &'a str, suffixes: &[&str]) -> Option<&'a str> {
-    for suffix in suffixes {
-        if let Some(stripped) = value.strip_suffix(suffix) {
-            return Some(stripped);
-        }
-    }
-
-    None
-}
-
-fn normalize_kimi_coding_plan_alias_for_grouping(name: &str) -> Option<&'static str> {
-    match name {
-        "k2p5" | "k2-p5" => Some("kimi-k2.5"),
-        "k2p6" | "k2-p6" => Some("kimi-k2.6"),
-        _ => None,
-    }
-}
-
-pub(crate) fn normalize_longcat_model_for_grouping(name: &str) -> Option<&'static str> {
-    if name == "longcat-flash-3b" {
-        return Some("longcat-flash-3b");
-    }
-
-    name.strip_prefix("longcat-flash-3b-all-quant-")
-        .filter(|suffix| !suffix.is_empty())
-        .map(|_| "longcat-flash-3b")
-}
-
-fn normalize_gpt_model_for_grouping(name: &str) -> Option<String> {
-    let rest = name.strip_prefix("gpt-")?;
-    let (major, after_major) = split_leading_ascii_digits(rest)?;
-    let after_separator = after_major
-        .strip_prefix('.')
-        .or_else(|| after_major.strip_prefix('-'))?;
-    let (minor, tail) = split_leading_ascii_digits(after_separator)?;
-
-    if minor.len() > 2 {
-        return None;
-    }
-
-    let stripped_tail = strip_grouping_noise_tail(tail);
-    if stripped_tail.is_empty() {
-        return Some(format!("gpt-{major}.{minor}"));
-    }
-
-    Some(format!("gpt-{major}.{minor}{stripped_tail}"))
-}
-
-fn split_leading_ascii_digits(value: &str) -> Option<(&str, &str)> {
-    let digit_len = value
-        .bytes()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digit_len == 0 {
-        return None;
-    }
-
-    Some(value.split_at(digit_len))
-}
-
-fn strip_grouping_noise_tail(mut tail: &str) -> &str {
-    loop {
-        let mut changed = false;
-        if let Some(stripped) = strip_suffix_once(tail, GROUPING_NOISE_SUFFIXES) {
-            tail = stripped;
-            changed = true;
-        }
-
-        if !changed {
-            return tail;
-        }
-    }
-}
-
-fn normalize_claude_model_for_grouping(name: &str) -> Option<String> {
-    let stripped_name = normalize_claude_grouping_tail(name);
-    let rest = stripped_name.strip_prefix("claude-")?;
-    let (family, version) = rest.split_once('-')?;
-    if !matches!(family, "opus" | "sonnet" | "haiku") {
-        return None;
-    }
-
-    let (major, after_major) = split_leading_ascii_digits(version)?;
-    if after_major.is_empty() {
-        return Some(format!("claude-{family}-{major}"));
-    }
-
-    let after_separator = after_major
-        .strip_prefix('.')
-        .or_else(|| after_major.strip_prefix('-'))?;
-    let (minor, tail) = split_leading_ascii_digits(after_separator)?;
-    if !tail.is_empty() {
-        return None;
-    }
-
-    Some(format!("claude-{family}-{major}.{minor}"))
-}
-
-fn normalize_anthropic_prefixed_claude_model(model_id: &str) -> Option<String> {
-    let rest = model_id.strip_prefix("anthropic/claude-")?;
-    let mut parts = rest.split('-');
-    let major = parts.next()?;
-    let minor = parts.next()?;
-    let family = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-
-    if !matches!(family, "opus" | "sonnet" | "haiku") {
-        return None;
-    }
-
-    Some(format!("claude-{family}-{major}-{minor}"))
-}
-
-fn normalize_claude_grouping_tail(mut name: &str) -> &str {
-    loop {
-        let previous = name;
-        name = strip_trailing_free_marker(name);
-        if let Some(base_model) = strip_parenthesized_reasoning_tier(name) {
-            name = base_model;
-        }
-        name = strip_trailing_date_suffix(name);
-        name = strip_claude_grouping_noise_tail(name);
-
-        if name == previous {
-            return name;
-        }
-    }
-}
-
-fn strip_claude_grouping_noise_tail(mut tail: &str) -> &str {
-    loop {
-        let mut changed = false;
-        if let Some(stripped) = strip_suffix_once(tail, CLAUDE_GROUPING_NOISE_SUFFIXES) {
-            tail = stripped;
-            changed = true;
-        }
-
-        if !changed {
-            return tail;
-        }
     }
 }
 
@@ -2343,7 +2028,7 @@ mod tests {
         std::fs::write(
             path,
             r#"{"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}"#,
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4.6","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}"#,
         )
         .unwrap();
     }
@@ -2379,23 +2064,23 @@ mod tests {
     fn test_normalize_model_for_grouping() {
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-20251101"),
-            "claude-opus-4.5"
+            "claude-opus-4-5-20251101"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-20250929"),
-            "claude-sonnet-4.5"
+            "claude-sonnet-4-5-20250929"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-20250514"),
-            "claude-sonnet-4"
+            "claude-sonnet-4-20250514"
         );
         assert_eq!(
             normalize_model_for_grouping("qwen3.7-max-2026-05-20"),
-            "qwen3.7-max"
+            "qwen3.7-max-2026-05-20"
         );
         assert_eq!(
             normalize_model_for_grouping("qwen/qwen3.7-max-20260520"),
-            "qwen3.7-max"
+            "qwen3.7-max-20260520"
         );
         assert_eq!(
             normalize_model_for_grouping("qwen3.7-max-2605"),
@@ -2420,46 +2105,61 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-6"),
-            "claude-opus-4.6"
+            "claude-opus-4-6"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-7"),
-            "claude-opus-4.7"
+            "claude-opus-4-7"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-6"),
-            "claude-sonnet-4.6"
+            "claude-sonnet-4-6"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-6-sonnet"),
-            "claude-sonnet-4.6"
+            "claude-4-6-sonnet"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-5-haiku"),
-            "claude-haiku-4.5"
+            "claude-4-5-haiku"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-6-opus"),
-            "claude-opus-4.6"
+            "claude-4-6-opus"
         );
 
         assert_eq!(normalize_model_for_grouping("gpt-5.2"), "gpt-5.2");
-        assert_eq!(normalize_model_for_grouping("gpt-5.4(xhigh)"), "gpt-5.4");
-        assert_eq!(normalize_model_for_grouping("gpt-5.4(high)"), "gpt-5.4");
-        assert_eq!(normalize_model_for_grouping("gpt-5.4(minimal)"), "gpt-5.4");
-        assert_eq!(normalize_model_for_grouping("gpt-5.4(auto)"), "gpt-5.4");
-        assert_eq!(normalize_model_for_grouping("gpt-5.4(none)"), "gpt-5.4");
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.4(xhigh)"),
+            "gpt-5.4(xhigh)"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.4(high)"),
+            "gpt-5.4(high)"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.4(minimal)"),
+            "gpt-5.4(minimal)"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.4(auto)"),
+            "gpt-5.4(auto)"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.4(none)"),
+            "gpt-5.4(none)"
+        );
         assert_eq!(
             normalize_model_for_grouping("gpt-5.4(weirdgarbage)"),
             "gpt-5.4(weirdgarbage)"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4.5(high)"),
-            "claude-sonnet-4.5"
+            "claude-sonnet-4.5(high)"
         );
         assert_eq!(
             normalize_model_for_grouping("gemini-3-pro(auto)"),
-            "gemini-3-pro"
+            "gemini-3-pro(auto)"
         );
         assert_eq!(
             normalize_model_for_grouping("gemini-2.5-pro"),
@@ -2467,36 +2167,36 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("longcat-flash-3b-all-quant-0203-eagle3"),
-            "longcat-flash-3b"
+            "longcat-flash-3b-all-quant-0203-eagle3"
         );
         assert_eq!(
             normalize_model_for_grouping("LongCat-Flash-3B-All-Quant-0203-Eagle3"),
-            "longcat-flash-3b"
+            "longcat-flash-3b-all-quant-0203-eagle3"
         );
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-high"),
-            "claude-opus-4.5"
+            "claude-opus-4-5-high"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-thinking-high"),
-            "claude-opus-4.5"
+            "claude-opus-4-5-thinking-high"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-sub2api-pro"),
-            "claude-opus-4.5"
+            "claude-opus-4-5-sub2api-pro"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-20251101-sub2api-pro"),
-            "claude-opus-4.5"
+            "claude-opus-4-5-20251101-sub2api-pro"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-20250929-thinking"),
-            "claude-sonnet-4.5"
+            "claude-sonnet-4-5-20250929-thinking"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-high"),
-            "claude-sonnet-4.5"
+            "claude-sonnet-4-5-high"
         );
 
         assert_eq!(
@@ -2513,61 +2213,73 @@ mod tests {
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.5-20251101"),
-            "claude-opus-4.5"
+            "claude-opus-4.5-20251101"
         );
 
-        assert_eq!(normalize_model_for_grouping("glm-4.7-free"), "glm-4.7");
-        assert_eq!(normalize_model_for_grouping("glm-4.7 (free)"), "glm-4.7");
-        assert_eq!(normalize_model_for_grouping("glm-4.7:free"), "glm-4.7");
-        assert_eq!(normalize_model_for_grouping("glm-4.7-free-high"), "glm-4.7");
+        assert_eq!(normalize_model_for_grouping("glm-4.7-free"), "glm-4.7-free");
+        assert_eq!(
+            normalize_model_for_grouping("glm-4.7 (free)"),
+            "glm-4.7 (free)"
+        );
+        assert_eq!(normalize_model_for_grouping("glm-4.7:free"), "glm-4.7:free");
+        assert_eq!(
+            normalize_model_for_grouping("glm-4.7-free-high"),
+            "glm-4.7-free-high"
+        );
         assert_eq!(
             normalize_model_for_grouping("glm-4.7-free-sub2api-pro"),
-            "glm-4.7"
+            "glm-4.7-free-sub2api-pro"
         );
-        assert_eq!(normalize_model_for_grouping("glm-4.7:free-fast"), "glm-4.7");
+        assert_eq!(
+            normalize_model_for_grouping("glm-4.7:free-fast"),
+            "glm-4.7:free-fast"
+        );
         assert_eq!(
             normalize_model_for_grouping("glm-4.7 (free)-medium"),
-            "glm-4.7"
+            "glm-4.7 (free)-medium"
         );
         assert_eq!(normalize_model_for_grouping("glm-5.1"), "glm-5.1");
         assert_eq!(
             normalize_model_for_grouping("gemini-2.5-pro-free"),
-            "gemini-2.5-pro"
+            "gemini-2.5-pro-free"
         );
         assert_eq!(
             normalize_model_for_grouping("gemini-2.5-pro-free-xhigh"),
-            "gemini-2.5-pro"
+            "gemini-2.5-pro-free-xhigh"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-free-thinking"),
-            "claude-sonnet-4"
+            "claude-sonnet-4-free-thinking"
         );
         assert_eq!(
             normalize_model_for_grouping("deepseek-v4 (free)"),
-            "deepseek-v4"
-        );
-        assert_eq!(normalize_model_for_grouping("kimi-k2.5:free"), "kimi-k2.5");
-        assert_eq!(normalize_model_for_grouping("k2p5"), "kimi-k2.5");
-        assert_eq!(normalize_model_for_grouping("k2-p5"), "kimi-k2.5");
-        assert_eq!(normalize_model_for_grouping("k2p6"), "kimi-k2.6");
-        assert_eq!(normalize_model_for_grouping("k2-p6"), "kimi-k2.6");
-        assert_eq!(
-            normalize_model_for_grouping("kimi-for-coding/k2p5"),
-            "kimi-k2.5"
+            "deepseek-v4 (free)"
         );
         assert_eq!(
-            normalize_model_for_grouping("kimi-for-coding/k2p6"),
-            "kimi-k2.6"
+            normalize_model_for_grouping("kimi-k2.5:free"),
+            "kimi-k2.5:free"
         );
+        assert_eq!(normalize_model_for_grouping("k2p5"), "k2p5");
+        assert_eq!(normalize_model_for_grouping("k2-p5"), "k2-p5");
+        assert_eq!(normalize_model_for_grouping("k2p6"), "k2p6");
+        assert_eq!(normalize_model_for_grouping("k2-p6"), "k2-p6");
+        assert_eq!(normalize_model_for_grouping("kimi-for-coding/k2p5"), "k2p5");
+        assert_eq!(normalize_model_for_grouping("kimi-for-coding/k2p6"), "k2p6");
 
         assert_eq!(
             normalize_model_for_grouping("custom:gpt-5.5-xhigh-sub2api-pro"),
-            "gpt-5.5"
+            "gpt-5.5-xhigh-sub2api-pro"
         );
-        assert_eq!(normalize_model_for_grouping("gpt-5.5-xhigh"), "gpt-5.5");
-        assert_eq!(normalize_model_for_grouping("gpt-5.5-fast"), "gpt-5.5");
-        assert_eq!(normalize_model_for_grouping("gpt-5-5-0"), "gpt-5.5");
-        assert_eq!(normalize_model_for_grouping("gpt-5.4-medium"), "gpt-5.4");
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.5-xhigh"),
+            "gpt-5.5-xhigh"
+        );
+        assert_eq!(normalize_model_for_grouping("gpt-5.5-fast"), "gpt-5.5-fast");
+        assert_eq!(normalize_model_for_grouping("gpt-5-5-0"), "gpt-5-5-0");
+        assert_eq!(
+            normalize_model_for_grouping("gpt-5.4-medium"),
+            "gpt-5.4-medium"
+        );
         assert_eq!(
             normalize_model_for_grouping("deepseek/deepseek-v4-pro"),
             "deepseek-v4-pro"
@@ -2590,11 +2302,11 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("gpt-5.5-codex-fast"),
-            "gpt-5.5-codex"
+            "gpt-5.5-codex-fast"
         );
         assert_eq!(
             normalize_model_for_grouping("gpt-5.1-codex-max-xhigh"),
-            "gpt-5.1-codex-max"
+            "gpt-5.1-codex-max-xhigh"
         );
     }
 
@@ -2765,7 +2477,7 @@ mod tests {
             vec![
                 make_workspace_message(
                     "claude",
-                    "claude-sonnet-4-5-20250929",
+                    "claude-sonnet-4.5",
                     "anthropic",
                     "session-1",
                     1.25,
@@ -2774,7 +2486,7 @@ mod tests {
                 ),
                 make_workspace_message(
                     "qwen",
-                    "claude-sonnet-4-5-20250929",
+                    "claude-sonnet-4.5",
                     "anthropic",
                     "session-2",
                     2.75,
@@ -2795,7 +2507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_model_grouping_merges_fast_variant_cost_without_repricing() {
+    fn test_model_grouping_does_not_clean_fast_variant() {
         let entries = aggregate_model_usage_entries(
             vec![
                 make_workspace_message(
@@ -2812,14 +2524,17 @@ mod tests {
             &GroupBy::Model,
         );
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].model, "gpt-5.5");
-        assert_eq!(entries[0].cost, 5.0);
-        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .any(|entry| entry.model == "gpt-5.5-fast" && entry.cost == 3.0));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.model == "gpt-5.5" && entry.cost == 2.0));
     }
 
     #[test]
-    fn test_model_grouping_merges_hyphenated_date_snapshot() {
+    fn test_model_grouping_does_not_clean_hyphenated_date_snapshot() {
         let entries = aggregate_model_usage_entries(
             vec![
                 make_workspace_message(
@@ -2844,14 +2559,17 @@ mod tests {
             &GroupBy::ClientModel,
         );
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].model, "qwen3.7-max");
-        assert_eq!(entries[0].cost, 4.0);
-        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .any(|entry| entry.model == "qwen3.7-max-2026-05-20" && entry.cost == 1.25));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.model == "qwen3.7-max" && entry.cost == 2.75));
     }
 
     #[test]
-    fn test_model_grouping_merges_anthropic_prefixed_claude_variant_with_canonical_model() {
+    fn test_model_grouping_does_not_clean_anthropic_prefixed_claude_variant() {
         let entries = aggregate_model_usage_entries(
             vec![
                 make_workspace_message(
@@ -2865,7 +2583,7 @@ mod tests {
                 ),
                 make_workspace_message(
                     "claude",
-                    "claude-sonnet-4-6",
+                    "claude-sonnet-4.6",
                     "anthropic",
                     "session-2",
                     2.75,
@@ -2876,12 +2594,13 @@ mod tests {
             &GroupBy::ClientModel,
         );
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].model, "claude-sonnet-4.6");
-        assert_eq!(entries[0].input, 20);
-        assert_eq!(entries[0].output, 10);
-        assert_eq!(entries[0].cost, 4.0);
-        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .any(|entry| entry.model == "claude-4-6-sonnet" && entry.cost == 1.25));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.model == "claude-sonnet-4.6" && entry.cost == 2.75));
     }
 
     #[test]
@@ -3222,7 +2941,7 @@ mod tests {
             vec![
                 make_workspace_message(
                     "claude",
-                    "claude-sonnet-4-5-20250929",
+                    "claude-sonnet-4.5",
                     "anthropic",
                     "session-shared",
                     1.25,
@@ -3231,7 +2950,7 @@ mod tests {
                 ),
                 make_workspace_message(
                     "amp",
-                    "claude-sonnet-4-5-20250929",
+                    "claude-sonnet-4.5",
                     "anthropic",
                     "session-shared",
                     2.75,
@@ -5296,7 +5015,7 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_apply_token_pricing_resolves_longcat_quant_variant() {
+    fn test_apply_token_pricing_resolves_canonical_longcat_model() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "longcat-flash-3b".into(),
@@ -5310,7 +5029,7 @@ model = "gpt-5.5"
 
         let mut msg = UnifiedMessage::new(
             "claudecode",
-            "longcat-flash-3b-all-quant-0203-eagle3",
+            "longcat-flash-3b",
             "meituan",
             "session-1",
             1_733_011_200_000,
@@ -5964,7 +5683,7 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_apply_token_pricing_prices_kimi_k2p6_alias() {
+    fn test_apply_token_pricing_prices_canonical_kimi_k2_6() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "moonshotai/kimi-k2.6".into(),
@@ -5978,8 +5697,8 @@ model = "gpt-5.5"
 
         let mut msg = UnifiedMessage::new(
             "kimi",
-            "k2p6",
-            "kimi-for-coding",
+            "kimi-k2.6",
+            "moonshotai",
             "session-1",
             1_776_000_000_000,
             TokenBreakdown {
@@ -6839,7 +6558,7 @@ model = "gpt-5.5"
         std::fs::create_dir_all(&claude_dir).unwrap();
         std::fs::write(
             claude_dir.join("conversation.jsonl"),
-            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 "#,
         )
         .unwrap();

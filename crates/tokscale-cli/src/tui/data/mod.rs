@@ -1013,7 +1013,7 @@ mod tests {
                 vec![
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
                         1.25,
@@ -1022,7 +1022,7 @@ mod tests {
                     ),
                     make_workspace_message(
                         "qwen",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
                         2.75,
@@ -1051,7 +1051,7 @@ mod tests {
                 vec![
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
                         1.0,
@@ -1060,7 +1060,7 @@ mod tests {
                     ),
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
                         2.0,
@@ -1090,7 +1090,7 @@ mod tests {
                 vec![
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
                         1.0,
@@ -1099,7 +1099,7 @@ mod tests {
                     ),
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
                         2.0,
@@ -1132,7 +1132,7 @@ mod tests {
                 vec![
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
                         1.0,
@@ -1141,7 +1141,7 @@ mod tests {
                     ),
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
                         2.0,
@@ -1180,7 +1180,7 @@ mod tests {
                 vec![
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
                         1.0,
@@ -1189,7 +1189,7 @@ mod tests {
                     ),
                     make_workspace_message(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
                         2.0,
@@ -1277,7 +1277,7 @@ mod tests {
                 vec![
                     UnifiedMessage::new(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
                         1_735_689_600_000,
@@ -1292,7 +1292,7 @@ mod tests {
                     ),
                     UnifiedMessage::new(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "github-copilot",
                         "session-2",
                         1_735_689_600_000,
@@ -1337,7 +1337,7 @@ mod tests {
                 vec![
                     UnifiedMessage::new(
                         "claude",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
                         1_735_689_600_000,
@@ -1352,7 +1352,7 @@ mod tests {
                     ),
                     UnifiedMessage::new(
                         "cursor",
-                        "claude-sonnet-4-5-20250929",
+                        "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
                         1_735_689_600_000,
@@ -1394,7 +1394,7 @@ mod tests {
         let messages = vec![
             UnifiedMessage::new_with_agent(
                 "opencode",
-                "claude-opus-4-6",
+                "claude-opus-4.6",
                 "anthropic",
                 "session-1",
                 1_735_689_600_000,
@@ -1410,7 +1410,7 @@ mod tests {
             ),
             UnifiedMessage::new_with_agent(
                 "opencode",
-                "claude-opus-4-6",
+                "claude-opus-4.6",
                 "anthropic",
                 "session-2",
                 1_735_689_700_000,
@@ -1444,7 +1444,7 @@ mod tests {
         let messages = vec![
             UnifiedMessage::new_with_agent(
                 "opencode",
-                "claude-opus-4-6",
+                "claude-opus-4.6",
                 "anthropic",
                 "session-1",
                 1_735_689_600_000,
@@ -1460,7 +1460,7 @@ mod tests {
             ),
             UnifiedMessage::new_with_agent(
                 "opencode",
-                "claude-opus-4-6",
+                "claude-opus-4.6",
                 "anthropic",
                 "session-2",
                 1_735_689_700_000,
@@ -1493,7 +1493,7 @@ mod tests {
         let messages = vec![
             UnifiedMessage::new_with_agent(
                 "claude",
-                "claude-opus-4-6",
+                "claude-opus-4.6",
                 "anthropic",
                 "session-1",
                 1_735_689_600_000,
@@ -1509,7 +1509,7 @@ mod tests {
             ),
             UnifiedMessage::new_with_agent(
                 "claude",
-                "claude-opus-4-6",
+                "claude-opus-4.6",
                 "anthropic",
                 "session-2",
                 1_735_689_700_000,

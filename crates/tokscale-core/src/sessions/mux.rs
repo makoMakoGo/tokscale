@@ -4,7 +4,7 @@
 
 use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -89,7 +89,7 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
                 return None;
             }
 
-            // Strip "provider:" prefix for model ID (e.g., "anthropic:claude-opus-4-6" -> "claude-opus-4-6")
+            // Strip "provider:" prefix for model ID.
             let (provider, model_id) = if model_key.contains(':') {
                 let mut parts = model_key.splitn(2, ':');
                 let p = parts.next().unwrap_or("").to_string();
@@ -98,6 +98,8 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
             } else {
                 (String::new(), model_key)
             };
+            let model_id = model_aliases::canonicalize_source_model_id(&model_id)
+                .unwrap_or_else(|| model_id.trim().to_string());
             let provider = provider_identity::canonical_provider(&provider).unwrap_or(provider);
             let dedup_key =
                 crate::sessions::dedup_hash_str(&format!("mux:{session_id}:{model_id}:{index}"));
@@ -140,7 +142,7 @@ mod tests {
         let json = r#"{
             "version": 1,
             "byModel": {
-                "anthropic:claude-opus-4-6": {
+                "anthropic:claude-opus-4.6": {
                     "input": { "tokens": 100, "cost_usd": 0.01 },
                     "cached": { "tokens": 5000, "cost_usd": 0.05 },
                     "cacheCreate": { "tokens": 200, "cost_usd": 0.02 },
@@ -156,7 +158,7 @@ mod tests {
                 }
             },
             "lastRequest": {
-                "model": "anthropic:claude-opus-4-6",
+                "model": "anthropic:claude-opus-4.6",
                 "timestamp": 1700000000000
             }
         }"#;
@@ -167,7 +169,7 @@ mod tests {
         // Find the claude message
         let claude = msgs
             .iter()
-            .find(|m| m.model_id.as_ref() == "claude-opus-4-6")
+            .find(|m| m.model_id.as_ref() == "claude-opus-4.6")
             .unwrap();
         assert_eq!(claude.client.as_ref(), "mux");
         assert_eq!(claude.provider_id.as_ref(), "anthropic");
@@ -208,7 +210,7 @@ mod tests {
         let json = r#"{
             "version": 1,
             "byModel": {
-                "anthropic:claude-opus-4-6": {
+                "anthropic:claude-opus-4.6": {
                     "input": { "tokens": 0, "cost_usd": 0 },
                     "cached": { "tokens": 0, "cost_usd": 0 },
                     "cacheCreate": { "tokens": 0, "cost_usd": 0 },
@@ -216,7 +218,7 @@ mod tests {
                     "reasoning": { "tokens": 0, "cost_usd": 0 }
                 }
             },
-            "lastRequest": { "model": "anthropic:claude-opus-4-6", "timestamp": 1700000000000 }
+            "lastRequest": { "model": "anthropic:claude-opus-4.6", "timestamp": 1700000000000 }
         }"#;
         let f = write_temp_json(json);
         let msgs = parse_mux_file(f.path());
@@ -228,7 +230,7 @@ mod tests {
         let json = r#"{
             "version": 1,
             "byModel": {
-                "claude-opus-4-6": {
+                "claude-opus-4.6": {
                     "input": { "tokens": 100 },
                     "output": { "tokens": 200 }
                 }
@@ -238,7 +240,7 @@ mod tests {
         let f = write_temp_json(json);
         let msgs = parse_mux_file(f.path());
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(msgs[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(msgs[0].provider_id.as_ref(), "");
     }
 
@@ -260,7 +262,7 @@ mod tests {
         let json = r#"{
             "version": 1,
             "byModel": {
-                "anthropic:claude-opus-4-6": {
+                "anthropic:claude-opus-4.6": {
                     "input": { "tokens": -50, "cost_usd": 0.01 },
                     "output": { "tokens": 100, "cost_usd": 0.02 }
                 }
@@ -279,7 +281,7 @@ mod tests {
         let json = r#"{
             "version": 1,
             "byModel": {
-                "anthropic:claude-opus-4-6": {
+                "anthropic:claude-opus-4.6": {
                     "input": { "tokens": 100, "cost_usd": 0.01 },
                     "cached": { "tokens": 200, "cost_usd": 0.02 },
                     "cacheCreate": { "tokens": 50, "cost_usd": 0.005 },

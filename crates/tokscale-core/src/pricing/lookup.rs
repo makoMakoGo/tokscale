@@ -430,6 +430,10 @@ impl PricingLookup {
             return Some(result);
         }
 
+        if is_legacy_claude_three_id(model_id) {
+            return None;
+        }
+
         // A provider hint pins the lookup to that provider's catalog: the
         // provider-scoped models.dev pass must run before BOTH the unscoped
         // OpenRouter model-part fallback here and the separator-normalized
@@ -1304,29 +1308,18 @@ fn normalize_model_name(model_id: &str) -> Option<String> {
         "sonnet" => {
             if contains_delimited_fragment(&lower, "4") {
                 Some("claude-sonnet-4".into())
-            } else if contains_delimited_fragment(&lower, "3.7")
-                || contains_delimited_fragment(&lower, "3-7")
-            {
-                Some("claude-3-7-sonnet".into())
-            } else if contains_delimited_fragment(&lower, "3.5")
-                || contains_delimited_fragment(&lower, "3-5")
-            {
-                Some("claude-3.5-sonnet".into())
             } else {
                 None
             }
         }
-        "haiku" => {
-            if contains_delimited_fragment(&lower, "3.5")
-                || contains_delimited_fragment(&lower, "3-5")
-            {
-                Some("claude-3.5-haiku".into())
-            } else {
-                None
-            }
-        }
+        "haiku" => None,
         _ => None,
     }
+}
+
+fn is_legacy_claude_three_id(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    lower.contains("claude-3-") || lower.contains("claude-3.")
 }
 
 /// Family tokens of the modern Claude model line.
@@ -1471,6 +1464,11 @@ fn is_single_digit_minor(value: &str) -> bool {
 }
 
 fn normalize_version_separator(model_id: &str) -> Option<String> {
+    let lower = model_id.to_lowercase();
+    if lower.starts_with("claude-3-") || lower.starts_with("claude-3.") {
+        return None;
+    }
+
     let mut result = String::with_capacity(model_id.len());
     let chars: Vec<char> = model_id.chars().collect();
     let mut changed = false;
@@ -2509,17 +2507,13 @@ mod tests {
     #[test]
     fn test_opencode_zen_claude_3_5_haiku() {
         let lookup = create_lookup();
-        let result = lookup.lookup("claude-3-5-haiku").unwrap();
-        assert_eq!(result.matched_key, "anthropic/claude-3.5-haiku");
-        assert_eq!(result.source, "OpenRouter");
+        assert!(lookup.lookup("claude-3-5-haiku").is_none());
     }
 
     #[test]
     fn test_opencode_zen_claude_3_5_haiku_with_dot() {
         let lookup = create_lookup();
-        let result = lookup.lookup("claude-3.5-haiku").unwrap();
-        assert_eq!(result.matched_key, "anthropic/claude-3.5-haiku");
-        assert_eq!(result.source, "OpenRouter");
+        assert!(lookup.lookup("claude-3.5-haiku").is_none());
     }
 
     #[test]
@@ -2646,28 +2640,27 @@ mod tests {
     fn test_opencode_zen_kimi_coding_plan_short_aliases() {
         let lookup = create_lookup();
 
-        let cases = [
-            ("k2p5", "moonshotai/kimi-k2.5"),
-            ("k2-p5", "moonshotai/kimi-k2.5"),
-            ("kimi-for-coding/k2p5", "moonshotai/kimi-k2.5"),
-            ("k2p6", "moonshotai/kimi-k2.6"),
-            ("k2-p6", "moonshotai/kimi-k2.6"),
-            ("kimi-k2p6", "moonshotai/kimi-k2.6"),
-            ("Kimi-K2.6", "moonshotai/kimi-k2.6"),
-            ("kimi-for-coding/k2p6", "moonshotai/kimi-k2.6"),
-        ];
-
-        for (alias, expected_key) in cases {
-            let result = lookup.lookup(alias).unwrap();
-            assert_eq!(result.matched_key, expected_key, "alias {alias}");
-            assert_eq!(result.source, "OpenRouter", "alias {alias}");
+        for alias in [
+            "k2p5",
+            "k2-p5",
+            "kimi-for-coding/k2p5",
+            "k2p6",
+            "k2-p6",
+            "kimi-k2p6",
+            "kimi-for-coding/k2p6",
+        ] {
+            assert!(lookup.lookup(alias).is_none(), "alias {alias}");
         }
+
+        let canonical = lookup.lookup("Kimi-K2.6").unwrap();
+        assert_eq!(canonical.matched_key, "moonshotai/kimi-k2.6");
+        assert_eq!(canonical.source, "OpenRouter");
     }
 
     #[test]
     fn test_opencode_zen_kimi_k2_6_alias_pricing() {
         let lookup = create_lookup();
-        let result = lookup.lookup("kimi-k2p6").unwrap();
+        let result = lookup.lookup("kimi-k2.6").unwrap();
         assert_eq!(result.matched_key, "moonshotai/kimi-k2.6");
         assert_eq!(result.source, "OpenRouter");
         assert_eq!(result.pricing.input_cost_per_token, Some(9.5e-7));
@@ -2677,19 +2670,16 @@ mod tests {
     #[test]
     fn test_opencode_zen_kimi_k2_6_provider_hint_from_kimi_for_coding() {
         let lookup = create_lookup();
-        let result = lookup
+        assert!(lookup
             .lookup_with_provider("k2p6", Some("kimi-for-coding"))
-            .unwrap();
-        assert_eq!(result.matched_key, "moonshotai/kimi-k2.6");
-        assert_eq!(result.source, "OpenRouter");
+            .is_none());
     }
 
     #[test]
     fn test_opencode_zen_kimi_k2_5_aliases_follow_coding_plan() {
         let lookup = create_lookup();
 
-        let raw_k2p5 = lookup.lookup("k2p5").unwrap();
-        assert_eq!(raw_k2p5.matched_key, "moonshotai/kimi-k2.5");
+        assert!(lookup.lookup("k2p5").is_none());
 
         let dotted = lookup.lookup("kimi-k2.5").unwrap();
         assert_eq!(dotted.matched_key, "moonshotai/kimi-k2.5");
@@ -3501,22 +3491,12 @@ mod tests {
         assert_eq!(normalize_model_name("claude-opus-4-20250514"), None);
     }
 
-    /// Legacy 3.x ids keep their irregular canonical keys; the reversed-order
-    /// and bare-major parsing must not hijack the digit pairs in them.
+    /// Legacy 3.x ids are not normalized by the modern Claude parser.
     #[test]
     fn test_normalize_legacy_line_not_hijacked_by_modern_parser() {
-        assert_eq!(
-            normalize_model_name("claude-3-5-sonnet"),
-            Some("claude-3.5-sonnet".into())
-        );
-        assert_eq!(
-            normalize_model_name("claude-3-7-sonnet-20250219"),
-            Some("claude-3-7-sonnet".into())
-        );
-        assert_eq!(
-            normalize_model_name("claude-3-5-haiku-20241022"),
-            Some("claude-3.5-haiku".into())
-        );
+        assert_eq!(normalize_model_name("claude-3-5-sonnet"), None);
+        assert_eq!(normalize_model_name("claude-3-7-sonnet-20250219"), None);
+        assert_eq!(normalize_model_name("claude-3-5-haiku-20241022"), None);
     }
 
     /// Regression (B1): a bedrock-style sonnet id must never be billed at an
@@ -3632,7 +3612,7 @@ mod tests {
             ("aws.claude-opus-4-8", "claude-opus-4-8"),
             ("claude-opus-4-8-thinking", "claude-opus-4-8"),
             ("claude-sonnet-4-6", "claude-sonnet-4-6"),
-            ("claude-sonnet-4.6", "claude-sonnet-4-6"),
+            ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6"),
             ("sonnet-4-6", "claude-sonnet-4-6"),
             ("sonnet-4.6", "claude-sonnet-4-6"),
             ("aws.claude-sonnet-4-6-v1", "claude-sonnet-4-6"),
@@ -3955,9 +3935,8 @@ mod tests {
     /// Regression (post-#634 catalog audit, bug 2b): when multiple models.dev
     /// providers share a model part, the winner must be deterministic and
     /// prefer the canonical `anthropic/` namespace. Previously the winner
-    /// depended on HashMap iteration order (with real data `302ai/` beat
-    /// `anthropic/` for claude-3-5-haiku-20241022 because shorter keys were
-    /// inserted last).
+    /// depended on HashMap iteration order (with real data a reseller key beat
+    /// the canonical Anthropic key because shorter keys were inserted last).
     #[test]
     fn models_dev_provider_choice_is_deterministic_and_prefers_anthropic() {
         let price = ModelPricing {
@@ -3967,11 +3946,8 @@ mod tests {
         };
         // Adversarial insertion order: the non-canonical provider first.
         let mut models_dev = HashMap::new();
-        models_dev.insert("302ai/claude-3-5-haiku-20241022".to_string(), price.clone());
-        models_dev.insert(
-            "anthropic/claude-3-5-haiku-20241022".to_string(),
-            price.clone(),
-        );
+        models_dev.insert("302ai/claude-sonnet-4.6".to_string(), price.clone());
+        models_dev.insert("anthropic/claude-sonnet-4.6".to_string(), price.clone());
         let lookup = PricingLookup::new_with_models_dev(
             HashMap::new(),
             HashMap::new(),
@@ -3979,8 +3955,8 @@ mod tests {
             models_dev,
         );
 
-        let result = lookup.lookup("claude-3-5-haiku-20241022").unwrap();
-        assert_eq!(result.matched_key, "anthropic/claude-3-5-haiku-20241022");
+        let result = lookup.lookup("claude-sonnet-4.6").unwrap();
+        assert_eq!(result.matched_key, "anthropic/claude-sonnet-4.6");
         assert_eq!(result.pricing.input_cost_per_token, Some(0.8e-6));
     }
 
@@ -4034,8 +4010,7 @@ mod tests {
     #[test]
     fn test_tier_suffix_with_fuzzy() {
         let lookup = create_lookup();
-        let result = lookup.lookup("gemini-3-pro-high").unwrap();
-        assert_eq!(result.matched_key, "openrouter/google/gemini-3-pro-preview");
+        assert!(lookup.lookup("gemini-3-pro-high").is_none());
     }
 
     #[test]
@@ -4127,10 +4102,7 @@ mod tests {
             normalize_version_separator("glm-4-6"),
             Some("glm-4.6".into())
         );
-        assert_eq!(
-            normalize_version_separator("claude-3-5-haiku"),
-            Some("claude-3.5-haiku".into())
-        );
+        assert_eq!(normalize_version_separator("claude-3-5-haiku"), None);
         assert_eq!(
             normalize_version_separator("gpt-5-1-codex"),
             Some("gpt-5.1-codex".into())
@@ -4146,7 +4118,7 @@ mod tests {
         assert_eq!(normalize_version_separator("model-2024-11-20"), None);
         assert_eq!(
             normalize_version_separator("claude-3-5-sonnet-20241022"),
-            Some("claude-3.5-sonnet-20241022".into())
+            None
         );
         assert_eq!(normalize_version_separator("sonnet-20241022"), None);
         assert_eq!(normalize_version_separator("model-20241022-v1"), None);

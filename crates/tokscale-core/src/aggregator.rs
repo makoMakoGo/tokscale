@@ -810,7 +810,7 @@ mod tests {
             "2024-01-01",
             1000,
             0.05,
-            "claude-3-5-sonnet",
+            "claude-sonnet-4.6",
             "opencode",
         )];
 
@@ -863,9 +863,9 @@ mod tests {
     #[test]
     fn test_aggregate_by_date_multiple_dates() {
         let messages = vec![
-            mock_unified_message("2024-01-01", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
-            mock_unified_message("2024-01-03", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-03", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
         ];
 
         let result = aggregate_by_date(messages);
@@ -885,9 +885,9 @@ mod tests {
     #[test]
     fn test_aggregate_by_date_same_date_aggregation() {
         let messages = vec![
-            mock_unified_message("2024-01-01", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2024-01-01", 2000, 0.10, "gpt-4", "claude"),
-            mock_unified_message("2024-01-01", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-01", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
         ];
 
         let result = aggregate_by_date(messages);
@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn test_aggregate_by_date_token_breakdown() {
         let mut msg =
-            mock_unified_message("2024-01-01", 1000, 0.05, "claude-3-5-sonnet", "opencode");
+            mock_unified_message("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode");
         msg.tokens = TokenBreakdown {
             input: 600,
             output: 300,
@@ -938,7 +938,7 @@ mod tests {
             "2024-01-01",
             1000,
             0.05,
-            "claude-3-5-sonnet",
+            "claude-sonnet-4.6",
             "opencode",
         )];
         let contributions = aggregate_by_date(messages);
@@ -955,9 +955,9 @@ mod tests {
     #[test]
     fn test_calculate_summary_multiple_days() {
         let messages = vec![
-            mock_unified_message("2024-01-01", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
-            mock_unified_message("2024-01-03", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-03", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
         ];
         let contributions = aggregate_by_date(messages);
         let summary = calculate_summary(&contributions);
@@ -1062,9 +1062,9 @@ mod tests {
     #[test]
     fn test_calculate_years_single_year() {
         let messages = vec![
-            mock_unified_message("2024-01-01", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2024-06-15", 2000, 0.10, "gpt-4", "claude"),
-            mock_unified_message("2024-12-31", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-12-31", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
         ];
         let contributions = aggregate_by_date(messages);
         let years = calculate_years(&contributions);
@@ -1080,9 +1080,9 @@ mod tests {
     #[test]
     fn test_calculate_years_multiple_years() {
         let messages = vec![
-            mock_unified_message("2023-12-31", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2023-12-31", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2024-01-01", 2000, 0.10, "gpt-4", "claude"),
-            mock_unified_message("2024-06-15", 1500, 0.08, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-06-15", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2025-01-01", 3000, 0.15, "gpt-4", "claude"),
         ];
         let contributions = aggregate_by_date(messages);
@@ -1105,7 +1105,7 @@ mod tests {
     #[test]
     fn test_calculate_years_year_boundary() {
         let messages = vec![
-            mock_unified_message("2024-12-31", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-12-31", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2025-01-01", 2000, 0.10, "gpt-4", "claude"),
         ];
         let contributions = aggregate_by_date(messages);
@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn test_generate_graph_result_with_data() {
         let messages = vec![
-            mock_unified_message("2024-01-01", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
         ];
         let contributions = aggregate_by_date(messages);
@@ -1347,7 +1347,7 @@ mod tests {
     #[test]
     fn test_aggregate_by_date_preserves_sources() {
         let messages = vec![
-            mock_unified_message("2024-01-01", 1000, 0.05, "claude-3-5-sonnet", "opencode"),
+            mock_unified_message("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2024-01-01", 2000, 0.10, "gpt-4", "claude"),
         ];
 
@@ -1376,7 +1376,7 @@ mod tests {
                     &date,
                     1000,
                     0.05,
-                    "claude-3-5-sonnet",
+                    "claude-sonnet-4.6",
                     "opencode",
                 ));
             }

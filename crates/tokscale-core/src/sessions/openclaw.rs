@@ -5,7 +5,7 @@
 
 use super::utils::read_file_or_none;
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{model_aliases, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -169,7 +169,7 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
         match entry.entry_type.as_str() {
             "model_change" => {
                 if let Some(model) = entry.model_id {
-                    current_model = Some(model);
+                    current_model = Some(canonicalize_openclaw_model(&model));
                 }
                 if let Some(provider) = entry.provider {
                     current_provider = Some(provider);
@@ -182,7 +182,7 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
 
                 if let Some(data) = entry.data {
                     if let Some(model) = data.model_id {
-                        current_model = Some(model);
+                        current_model = Some(canonicalize_openclaw_model(&model));
                     }
                     if let Some(provider) = data.provider {
                         current_provider = Some(provider);
@@ -204,6 +204,7 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                         .model
                         .clone()
                         .filter(|m| !m.is_empty())
+                        .map(|model| canonicalize_openclaw_model(&model))
                         .or_else(|| current_model.clone().filter(|m| !m.is_empty()));
                     let provider = msg
                         .provider
@@ -243,6 +244,10 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
     messages
 }
 
+fn canonicalize_openclaw_model(model: &str) -> String {
+    model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,7 +283,7 @@ mod tests {
     #[test]
     fn test_parse_openclaw_session_user_messages_ignored() {
         let dir = TempDir::new().unwrap();
-        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-3.5-sonnet"}
+        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4.6"}
 {"type":"message","id":"msg1","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
 {"type":"message","id":"msg2","message":{"role":"assistant","content":[],"usage":{"input":50,"output":25},"timestamp":1700000000000}}"#;
 
@@ -338,7 +343,7 @@ mod tests {
     #[test]
     fn test_parse_openclaw_transcript_derives_session_id_from_reset_filename() {
         let dir = TempDir::new().unwrap();
-        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4-6"}
+        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4.6"}
 {"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(
@@ -350,21 +355,21 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id.as_ref(), "my-session-123");
-        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
     #[test]
     fn test_parse_openclaw_session_model_snapshot_updates_current_model() {
         let dir = TempDir::new().unwrap();
-        let content = r#"{"type":"custom","customType":"model-snapshot","data":{"provider":"anthropic","modelId":"claude-opus-4-6"}}
+        let content = r#"{"type":"custom","customType":"model-snapshot","data":{"provider":"anthropic","modelId":"claude-opus-4.6"}}
 {"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":25,"cacheWrite":10},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(&dir, "session.jsonl", content);
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
@@ -375,13 +380,13 @@ mod tests {
     #[test]
     fn test_parse_openclaw_session_embedded_model_provider_without_model_change() {
         let dir = TempDir::new().unwrap();
-        let content = r#"{"type":"message","id":"msg1","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-6","content":[],"usage":{"input":100,"output":50,"cacheRead":20,"cacheWrite":5},"timestamp":1700000000000}}"#;
+        let content = r#"{"type":"message","id":"msg1","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4.6","content":[],"usage":{"input":100,"output":50,"cacheRead":20,"cacheWrite":5},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(&dir, "session.jsonl", content);
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
@@ -392,28 +397,28 @@ mod tests {
     #[test]
     fn test_parse_openclaw_session_preserves_unknown_provider_fallback() {
         let dir = TempDir::new().unwrap();
-        let content = r#"{"type":"model_change","modelId":"claude-sonnet-4-6"}
+        let content = r#"{"type":"model_change","modelId":"claude-sonnet-4.6"}
 {"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(&dir, "session.jsonl", content);
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "unknown");
     }
 
     #[test]
     fn test_parse_openclaw_session_empty_embedded_values_fall_back_to_current_model_state() {
         let dir = TempDir::new().unwrap();
-        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4-6"}
+        let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4.6"}
 {"type":"message","id":"msg1","message":{"role":"assistant","provider":"","model":"","content":[],"usage":{"input":10,"output":5},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(&dir, "session.jsonl", content);
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
@@ -428,7 +433,7 @@ mod tests {
     fn test_parse_openclaw_index_absolute_session_file() {
         let dir = TempDir::new().unwrap();
 
-        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-3.5-sonnet"}
+        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4.6"}
 {"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
         let session_path = create_test_session(&dir, "session-abc.jsonl", session_content);
 
@@ -445,7 +450,7 @@ mod tests {
 
         let messages = parse_openclaw_index(&index_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-3.5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].session_id.as_ref(), "abc-123");
     }
 
@@ -453,7 +458,7 @@ mod tests {
     fn test_parse_openclaw_index_relative_session_file() {
         let dir = TempDir::new().unwrap();
 
-        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-3.5-sonnet"}
+        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4.6"}
 {"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
         create_test_session(&dir, "session-relative.jsonl", session_content);
 
@@ -467,7 +472,7 @@ mod tests {
 
         let messages = parse_openclaw_index(&index_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-3.5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].session_id.as_ref(), "relative-123");
     }
 
@@ -475,7 +480,7 @@ mod tests {
     fn test_parse_openclaw_index_missing_session_file_fallback() {
         let dir = TempDir::new().unwrap();
 
-        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-3.5-sonnet"}
+        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4.6"}
 {"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
         create_test_session(&dir, "fallback-123.jsonl", session_content);
 
@@ -488,7 +493,7 @@ mod tests {
 
         let messages = parse_openclaw_index(&index_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-3.5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].session_id.as_ref(), "fallback-123");
     }
 }

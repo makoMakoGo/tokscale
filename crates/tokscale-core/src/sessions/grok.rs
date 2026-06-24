@@ -11,7 +11,7 @@ use super::utils::{
     read_file_or_none,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::TokenBreakdown;
+use crate::{model_aliases, TokenBreakdown};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -264,7 +264,8 @@ fn read_summary_metadata(path: &Path, metadata: &mut GrokMetadata) {
 
     if metadata.model_id.is_none() {
         metadata.model_id = extract_string(value.get("current_model_id"))
-            .or_else(|| extract_string(value.get("model_id")));
+            .or_else(|| extract_string(value.get("model_id")))
+            .map(|model| canonicalize_grok_model(&model));
     }
 
     if let Some(timestamp) = value
@@ -287,7 +288,8 @@ fn read_events_metadata(path: &Path, metadata: &mut GrokMetadata) {
         };
 
         if metadata.model_id.is_none() {
-            metadata.model_id = extract_string(value.get("model_id"));
+            metadata.model_id =
+                extract_string(value.get("model_id")).map(|model| canonicalize_grok_model(&model));
         }
         if metadata.session_id == "unknown" {
             if let Some(session_id) = extract_string(value.get("session_id")) {
@@ -320,11 +322,15 @@ fn extract_model_id(value: &Value) -> Option<String> {
         if let Some(model_id) = get_path(value, path).and_then(|value| extract_string(Some(value)))
         {
             if !model_id.trim().is_empty() {
-                return Some(model_id);
+                return Some(canonicalize_grok_model(&model_id));
             }
         }
     }
     None
+}
+
+fn canonicalize_grok_model(model: &str) -> String {
+    model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
 }
 
 fn extract_total_tokens(value: &Value) -> Option<i64> {
@@ -439,7 +445,7 @@ mod tests {
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].client.as_ref(), "grok");
-        assert_eq!(messages[0].model_id.as_ref(), "grok-composer-2.5-fast");
+        assert_eq!(messages[0].model_id.as_ref(), "composer-2.5-fast");
         assert_eq!(messages[0].provider_id.as_ref(), "xai");
         assert_eq!(messages[0].session_id.as_ref(), "session-1");
         assert_eq!(messages[0].tokens.input, 200);
@@ -463,7 +469,7 @@ mod tests {
 
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "grok-composer-2.5-fast");
+        assert_eq!(messages[0].model_id.as_ref(), "composer-2.5-fast");
         assert_eq!(messages[0].tokens.input, 220);
     }
 

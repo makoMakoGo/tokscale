@@ -1533,7 +1533,7 @@ Location:
 
 Mux stores cumulative per-session token usage in `session-usage.json` files. Each file contains a `byModel` map with per-model token breakdowns:
 - `input`, `cached` (cache reads), `cacheCreate` (cache writes), `output`, `reasoning`
-- Model names use `provider:model` format (e.g., `anthropic:claude-opus-4-6`) — tokscale strips the provider prefix for model identification
+- Model names use `provider:model` format (e.g., `anthropic:claude-opus-4.6`) — tokscale strips the provider prefix for model identification
 - Sub-agent usage is automatically rolled up into parent sessions by Mux, so there is no double-counting
 
 ### Kilo CLI

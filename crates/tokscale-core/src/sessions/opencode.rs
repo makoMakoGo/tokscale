@@ -9,6 +9,7 @@ use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
 };
+use crate::model_aliases;
 use crate::TokenBreakdown;
 #[cfg(test)]
 use rusqlite::Connection;
@@ -136,6 +137,10 @@ fn opencode_duration_ms(time: &OpenCodeTime) -> Option<i64> {
     }
 }
 
+fn canonicalize_opencode_model_id(model_id: String) -> String {
+    model_aliases::canonicalize_source_model_id(&model_id).unwrap_or(model_id)
+}
+
 pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
     let data = read_file_or_none(path)?;
     let mut bytes = data;
@@ -152,7 +157,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
         .and_then(|path| path.root.as_deref())
         .map(str::to_string);
     let tokens = msg.tokens?;
-    let model_id = msg.model_id?;
+    let model_id = canonicalize_opencode_model_id(msg.model_id?);
     let agent_or_mode = msg.mode.or(msg.agent);
     let agent = agent_or_mode.map(|a| normalize_opencode_agent_name(&a));
 
@@ -269,6 +274,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             Some(m) => m,
             None => continue,
         };
+        let model_id = canonicalize_opencode_model_id(model_id);
 
         let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
         let agent_or_mode = msg.mode.or(msg.agent);
@@ -648,6 +654,32 @@ mod tests {
         assert_eq!(msg.duration_ms, Some(1234));
     }
 
+    #[test]
+    fn test_parse_opencode_file_canonicalizes_source_model_variant() {
+        use std::io::Write;
+
+        let json = r#"{
+            "id": "msg_fast",
+            "sessionID": "ses_001",
+            "role": "assistant",
+            "modelID": "gpt-5.5-fast",
+            "providerID": "openai",
+            "tokens": {
+                "input": 100,
+                "output": 50,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        let mut temp_file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        temp_file.write_all(json.as_bytes()).unwrap();
+
+        let msg = parse_opencode_file(temp_file.path()).expect("Should parse");
+        assert_eq!(msg.model_id.as_ref(), "gpt-5.5");
+    }
+
     /// JSON dedup_key falls back to file stem when msg.id is absent
     #[test]
     fn test_dedup_key_falls_back_to_file_stem() {
@@ -742,6 +774,37 @@ mod tests {
         );
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4");
         assert_eq!(messages[0].tokens.input, 1000);
+    }
+
+    #[test]
+    fn test_parse_opencode_sqlite_canonicalizes_source_model_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_opencode.db");
+        let conn = create_opencode_sqlite_db(&db_path);
+
+        let data_json = r#"{
+            "role": "assistant",
+            "modelID": "gpt-5.5-fast",
+            "providerID": "openai",
+            "tokens": {
+                "input": 1000,
+                "output": 500,
+                "reasoning": 0,
+                "cache": { "read": 200, "write": 50 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg_sqlite_fast", "ses_001", data_json],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
     }
 
     #[test]

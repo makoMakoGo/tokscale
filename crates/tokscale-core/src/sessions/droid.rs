@@ -4,7 +4,7 @@
 
 use super::utils::{file_modified_timestamp_ms, read_file_or_none};
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -94,7 +94,7 @@ fn normalize_model_name(model: &str) -> String {
     };
 
     if provider_identity::is_anthropic_model(&claude_prefixed) {
-        crate::normalize_model_for_grouping(&claude_prefixed)
+        model_aliases::canonicalize_source_model_id(&claude_prefixed).unwrap_or(claude_prefixed)
     } else {
         claude_prefixed
     }
@@ -277,7 +277,10 @@ mod tests {
         assert_eq!(normalize_model_name("opus-4.5"), "claude-opus-4.5");
         assert_eq!(normalize_model_name("custom:sonnet-4"), "claude-sonnet-4");
         assert_eq!(normalize_model_name("haiku-3"), "claude-haiku-3");
-        assert_eq!(normalize_model_name("haiku-3-20250514"), "claude-haiku-3");
+        assert_eq!(
+            normalize_model_name("haiku-3-20250514"),
+            "claude-haiku-3-20250514"
+        );
     }
 
     #[test]

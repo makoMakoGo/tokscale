@@ -498,7 +498,7 @@ mod tests {
 
         let msg = UnifiedMessage::new(
             "opencode",
-            "claude-3-5-sonnet",
+            "claude-sonnet-4.6",
             "anthropic",
             "test-session-id",
             1733011200000,
@@ -507,7 +507,7 @@ mod tests {
         );
 
         assert_eq!(msg.client.as_ref(), "opencode");
-        assert_eq!(msg.model_id.as_ref(), "claude-3-5-sonnet");
+        assert_eq!(msg.model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(msg.session_id.as_ref(), "test-session-id");
         assert_eq!(msg.date_string(), timestamp_to_date(1733011200000));
         assert_eq!(msg.cost, 0.05);

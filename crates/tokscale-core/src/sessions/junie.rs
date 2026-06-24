@@ -4,7 +4,7 @@
 
 use super::utils::file_modified_timestamp_ms;
 use super::{dedup_hash_str, UnifiedMessage};
-use crate::{pricing, provider_identity, TokenBreakdown};
+use crate::{model_aliases, provider_identity, TokenBreakdown};
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -74,9 +74,8 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
             let Some(model_raw) = string_field(usage, "model") else {
                 continue;
             };
-            let model_id = pricing::aliases::resolve_alias(model_raw)
-                .unwrap_or(model_raw)
-                .to_string();
+            let model_id = model_aliases::canonicalize_source_model_id(model_raw)
+                .unwrap_or_else(|| model_raw.trim().to_string());
             let provider_id = provider_from_usage(usage, &model_id);
             let tokens = tokens_from_usage(usage);
             if tokens.total() == 0 {

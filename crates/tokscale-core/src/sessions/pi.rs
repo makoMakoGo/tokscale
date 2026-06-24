@@ -4,7 +4,7 @@
 
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::{provider_identity, TokenBreakdown};
+use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -315,7 +315,8 @@ fn parse_pi_format_file(
         };
 
         let model = match message.model {
-            Some(m) => m,
+            Some(m) => model_aliases::canonicalize_source_model_id(&m)
+                .unwrap_or_else(|| m.trim().to_string()),
             None => continue,
         };
 
@@ -398,7 +399,7 @@ mod tests {
     fn test_parse_pi_jsonl_valid_assistant_message() {
         // given
         let content = r#"{"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}"#;
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4.6","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}"#;
         let file = create_test_file(content);
 
         // when
@@ -408,7 +409,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "pi");
         assert_eq!(messages[0].session_id.as_ref(), "pi_ses_001");
-        assert_eq!(messages[0].model_id.as_ref(), "claude-3-5-sonnet");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
@@ -530,7 +531,7 @@ mod tests {
     fn test_parse_pi_skips_non_assistant_messages() {
         // given
         let content = r#"{"type":"session","id":"pi_ses_002","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}"#;
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","model":"claude-sonnet-4.6","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}"#;
         let file = create_test_file(content);
 
         // when
@@ -544,7 +545,7 @@ mod tests {
     fn test_parse_pi_skips_missing_usage() {
         // given
         let content = r#"{"type":"session","id":"pi_ses_003","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic"}}"#;
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4.6","provider":"anthropic"}}"#;
         let file = create_test_file(content);
 
         // when
