@@ -24,6 +24,8 @@ reports look precise while measuring different things.
 - `UnifiedMessage.cost` in local reports is derived only by applying
   Tokscale pricing to token buckets. If no pricing match exists, cost is
   `0.0`.
+- Pricing source authority, catalog matching, and the ban on built-in private
+  model prices are defined by ADR 0013.
 - The pricing step clears any parser-provided cost before calculating. This
   prevents old cached messages or future parser mistakes from preserving
   app-reported cost.
@@ -41,7 +43,8 @@ reports look precise while measuring different things.
 - Reports use one cost meaning across local clients: "what these tokens cost
   under Tokscale pricing", not "what this app said it charged".
 - App invoice totals may differ from Tokscale totals when the app applies
-  subscriptions, credits, bundled pricing, reseller markup, or rounding.
+  subscriptions, credits, bundled pricing, reseller markup, rounding,
+  service-tier pricing, or route-specific pricing.
 - Clients that only expose spend cannot be added as normal usage sources until
   a token-level source is found.
 - First run after this change rebuilds the source-message cache.
