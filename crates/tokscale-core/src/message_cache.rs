@@ -363,9 +363,12 @@ impl CacheReadPlan {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn path(&self) -> PathBuf {
         self.key.to_path_buf()
+    }
+
+    pub(crate) fn parser_version(&self) -> ParserVersion {
+        self.key.parser_version
     }
 }
 
@@ -606,7 +609,7 @@ impl SourceMessageCache {
     /// re-read the same path's messages within one parse run.
     pub(crate) fn take_messages(&mut self, plan: &CacheReadPlan) -> Option<Vec<UnifiedMessage>> {
         let key = plan.key.clone();
-        if self.deleted_paths.contains(&key) || !self.taken_paths.insert(key.clone()) {
+        if self.deleted_paths.contains(&key) || self.taken_paths.contains(&key) {
             return None;
         }
 
@@ -614,11 +617,14 @@ impl SourceMessageCache {
             if entry.fingerprint != plan.fingerprint {
                 return None;
             }
-            return Some(std::mem::take(&mut entry.messages));
+            let messages = std::mem::take(&mut entry.messages);
+            self.taken_paths.insert(key);
+            return Some(messages);
         }
 
-        read_shard_entry_with_plan(&self.shard_path_for_source_key(&key)?, plan)
-            .map(|entry| entry.messages)
+        let entry = read_shard_entry_with_plan(&self.shard_path_for_source_key(&key)?, plan)?;
+        self.taken_paths.insert(key);
+        Some(entry.messages)
     }
 
     /// Codex variant of [`Self::take_messages`]: also moves out the
@@ -628,7 +634,7 @@ impl SourceMessageCache {
         plan: &CacheReadPlan,
     ) -> Option<(Vec<UnifiedMessage>, Vec<usize>)> {
         let key = plan.key.clone();
-        if self.deleted_paths.contains(&key) || !self.taken_paths.insert(key.clone()) {
+        if self.deleted_paths.contains(&key) || self.taken_paths.contains(&key) {
             return None;
         }
 
@@ -636,14 +642,15 @@ impl SourceMessageCache {
             if entry.fingerprint != plan.fingerprint {
                 return None;
             }
-            return Some((
-                std::mem::take(&mut entry.messages),
-                std::mem::take(&mut entry.fallback_timestamp_indices),
-            ));
+            let messages = std::mem::take(&mut entry.messages);
+            let fallback_timestamp_indices = std::mem::take(&mut entry.fallback_timestamp_indices);
+            self.taken_paths.insert(key);
+            return Some((messages, fallback_timestamp_indices));
         }
 
-        read_shard_entry_with_plan(&self.shard_path_for_source_key(&key)?, plan)
-            .map(|entry| (entry.messages, entry.fallback_timestamp_indices))
+        let entry = read_shard_entry_with_plan(&self.shard_path_for_source_key(&key)?, plan)?;
+        self.taken_paths.insert(key);
+        Some((entry.messages, entry.fallback_timestamp_indices))
     }
 
     pub(crate) fn remove(&mut self, path: &Path, parser_version: ParserVersion) {
@@ -2010,6 +2017,17 @@ mod tests {
         assert!(
             reader.take_messages(&read_plan).is_none(),
             "stale read plan must not return messages from a rewritten shard"
+        );
+        let replacement_messages = reader
+            .take_messages(&CacheReadPlan::new(
+                source.path(),
+                parser_version,
+                SourceFingerprint::from_path(source.path()).unwrap(),
+            ))
+            .expect("failed stale read plan must not poison the source key");
+        assert_eq!(
+            replacement_messages[0].session_id.as_ref(),
+            "replacement-session"
         );
 
         restore_cache_env(prev_env);

@@ -319,20 +319,25 @@ fn resolve_codex_messages(
             is_headless,
             fallback_timestamp,
         } => {
-            let (messages, indices) = ctx
-                .source_cache
-                .take_messages_with_fallback(&read_plan)
-                .unwrap_or_default();
-            (
-                finalize_codex_messages(
-                    messages,
+            let Some((messages, indices)) =
+                ctx.source_cache.take_messages_with_fallback(&read_plan)
+            else {
+                return reparse_full_codex_messages(
+                    &read_plan.path(),
+                    read_plan.parser_version(),
                     ctx.pricing,
                     is_headless,
-                    &indices,
                     fallback_timestamp,
-                ),
-                None,
-            )
+                );
+            };
+            let messages = finalize_codex_messages(
+                messages,
+                ctx.pricing,
+                is_headless,
+                &indices,
+                fallback_timestamp,
+            );
+            (messages, None)
         }
         UnitMessageSource::CodexAppend(append) => {
             let CodexAppendSource {
@@ -346,10 +351,33 @@ fn resolve_codex_messages(
                 fingerprint,
                 codex_incremental,
             } = *append;
-            let (mut raw_messages, mut fallback_timestamp_indices) = ctx
-                .source_cache
-                .take_messages_with_fallback(&read_plan)
-                .unwrap_or_default();
+            let Some((mut raw_messages, mut fallback_timestamp_indices)) =
+                ctx.source_cache.take_messages_with_fallback(&read_plan)
+            else {
+                let replacement_plan =
+                    message_cache::CacheReadPlan::new(&path, parser_version, fingerprint);
+                if let Some((messages, indices)) = ctx
+                    .source_cache
+                    .take_messages_with_fallback(&replacement_plan)
+                {
+                    let messages = finalize_codex_messages(
+                        messages,
+                        ctx.pricing,
+                        is_headless,
+                        &indices,
+                        fallback_timestamp,
+                    );
+                    return (messages, None);
+                }
+
+                return reparse_full_codex_messages(
+                    &path,
+                    parser_version,
+                    ctx.pricing,
+                    is_headless,
+                    fallback_timestamp,
+                );
+            };
             let existing_len = raw_messages.len();
             fallback_timestamp_indices.extend(
                 tail_fallback_indices
@@ -380,11 +408,47 @@ fn resolve_codex_messages(
     }
 }
 
+fn reparse_full_codex_messages(
+    path: &Path,
+    parser_version: message_cache::ParserVersion,
+    pricing: Option<&pricing::PricingService>,
+    is_headless: bool,
+    fallback_timestamp: i64,
+) -> (Vec<UnifiedMessage>, Option<message_cache::CacheWrite>) {
+    let parsed = sessions::codex::parse_codex_file_incremental(
+        path,
+        0,
+        sessions::codex::CodexParseState::default(),
+    );
+    let messages = finalize_codex_messages(
+        parsed.messages.clone(),
+        pricing,
+        is_headless,
+        &parsed.fallback_timestamp_indices,
+        fallback_timestamp,
+    );
+    let cache_write = if parsed.parse_succeeded && !parsed.unresolved_model_events {
+        build_codex_cache_write(
+            path,
+            parser_version,
+            parsed.messages,
+            parsed.consumed_offset,
+            parsed.state,
+            parsed.fallback_timestamp_indices,
+        )
+    } else {
+        None
+    };
+
+    (messages, cache_write)
+}
+
 pub(crate) static CODEX_ADAPTER: CodexAdapter = CodexAdapter;
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::io::Write;
     use std::path::Path;
 
@@ -411,6 +475,15 @@ mod tests {
         let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
+    }
+
+    fn restore_env_var(key: &str, value: Option<OsString>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     fn scan_context<'a>(
@@ -625,6 +698,116 @@ mod tests {
         let actual = fold_parsed(parsed, &mut cache);
         let expected = parser_messages(&path);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_adapter_append_race_does_not_write_tail_only_cache() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let previous_config_dir = std::env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe { std::env::set_var("TOKSCALE_CONFIG_DIR", cache_home.path()) };
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+
+        let mut seed_cache = message_cache::SourceMessageCache::load();
+        let initial = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        assert_eq!(initial.len(), 1);
+        seed_cache.save_if_dirty();
+
+        append_file(&path, APPENDED_CODEX_ENTRY);
+        let expected = parser_messages(&path);
+
+        let mut cache_a = message_cache::SourceMessageCache::load();
+        let parsed_a = CODEX_ADAPTER.parse(
+            vec![codex_unit(&path, false)],
+            &ParseContext {
+                source_cache: &cache_a,
+                pricing: None,
+            },
+        );
+        assert!(matches!(
+            parsed_a[0].messages,
+            UnitMessageSource::CodexAppend(_)
+        ));
+
+        let mut cache_b = message_cache::SourceMessageCache::load();
+        let parsed_b = CODEX_ADAPTER.parse(
+            vec![codex_unit(&path, false)],
+            &ParseContext {
+                source_cache: &cache_b,
+                pricing: None,
+            },
+        );
+        assert!(matches!(
+            parsed_b[0].messages,
+            UnitMessageSource::CodexAppend(_)
+        ));
+
+        let messages_b = fold_parsed(parsed_b, &mut cache_b);
+        assert_eq!(messages_b, expected);
+        cache_b.save_if_dirty();
+
+        let messages_a = fold_parsed(parsed_a, &mut cache_a);
+        assert_eq!(messages_a, expected);
+        cache_a.save_if_dirty();
+
+        let mut warm_cache = message_cache::SourceMessageCache::load();
+        let warm_messages = parse_and_fold(vec![codex_unit(&path, false)], &mut warm_cache);
+        assert_eq!(warm_messages, expected);
+
+        restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_adapter_append_reparses_when_base_cache_disappears() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let previous_config_dir = std::env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe { std::env::set_var("TOKSCALE_CONFIG_DIR", cache_home.path()) };
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+
+        let mut seed_cache = message_cache::SourceMessageCache::load();
+        let initial = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        assert_eq!(initial.len(), 1);
+        seed_cache.save_if_dirty();
+
+        append_file(&path, APPENDED_CODEX_ENTRY);
+        let expected = parser_messages(&path);
+
+        let mut cache = message_cache::SourceMessageCache::load();
+        let parsed = CODEX_ADAPTER.parse(
+            vec![codex_unit(&path, false)],
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+        );
+        assert!(matches!(
+            parsed[0].messages,
+            UnitMessageSource::CodexAppend(_)
+        ));
+
+        let mut remover = message_cache::SourceMessageCache::load();
+        remover.remove(
+            &path,
+            message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1),
+        );
+        remover.save_if_dirty();
+
+        let messages = fold_parsed(parsed, &mut cache);
+        assert_eq!(messages, expected);
+        cache.save_if_dirty();
+
+        let mut warm_cache = message_cache::SourceMessageCache::load();
+        let warm_messages = parse_and_fold(vec![codex_unit(&path, false)], &mut warm_cache);
+        assert_eq!(warm_messages, expected);
+
+        restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }
 
     #[test]
