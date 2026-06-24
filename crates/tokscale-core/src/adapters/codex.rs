@@ -477,11 +477,26 @@ mod tests {
         file.flush().unwrap();
     }
 
-    fn restore_env_var(key: &str, value: Option<OsString>) {
-        unsafe {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
             }
         }
     }
@@ -704,8 +719,7 @@ mod tests {
     #[serial_test::serial]
     fn codex_adapter_append_race_does_not_write_tail_only_cache() {
         let cache_home = tempfile::TempDir::new().unwrap();
-        let previous_config_dir = std::env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe { std::env::set_var("TOKSCALE_CONFIG_DIR", cache_home.path()) };
+        let _config_guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", cache_home.path());
 
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
@@ -756,16 +770,13 @@ mod tests {
         let mut warm_cache = message_cache::SourceMessageCache::load();
         let warm_messages = parse_and_fold(vec![codex_unit(&path, false)], &mut warm_cache);
         assert_eq!(warm_messages, expected);
-
-        restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn codex_adapter_append_reparses_when_base_cache_disappears() {
         let cache_home = tempfile::TempDir::new().unwrap();
-        let previous_config_dir = std::env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe { std::env::set_var("TOKSCALE_CONFIG_DIR", cache_home.path()) };
+        let _config_guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", cache_home.path());
 
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
@@ -806,8 +817,6 @@ mod tests {
         let mut warm_cache = message_cache::SourceMessageCache::load();
         let warm_messages = parse_and_fold(vec![codex_unit(&path, false)], &mut warm_cache);
         assert_eq!(warm_messages, expected);
-
-        restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }
 
     #[test]
