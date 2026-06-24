@@ -1068,10 +1068,6 @@ mod tests {
         }
     }
 
-    fn restore_current_dir(previous: &Path) {
-        std::env::set_current_dir(previous).unwrap();
-    }
-
     fn setup_mock_copilot_dir(home: &Path) {
         let sessions_dir = home.join(".copilot/otel");
         fs::create_dir_all(&sessions_dir).unwrap();

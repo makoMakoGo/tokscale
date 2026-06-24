@@ -37,7 +37,7 @@ fn normalize_models(c: &mut Criterion) {
         b.iter(|| {
             let mut total_len = 0usize;
             for (_, model) in black_box(MODEL_CASES) {
-                total_len += normalize_model_for_grouping(*model).len();
+                total_len += normalize_model_for_grouping(model).len();
             }
             black_box(total_len)
         });
@@ -59,7 +59,7 @@ fn normalize_providers(c: &mut Criterion) {
         b.iter(|| {
             let mut total_len = 0usize;
             for (_, provider) in black_box(PROVIDER_CASES) {
-                total_len += normalize_provider_for_grouping(*provider).len();
+                total_len += normalize_provider_for_grouping(provider).len();
             }
             black_box(total_len)
         });
