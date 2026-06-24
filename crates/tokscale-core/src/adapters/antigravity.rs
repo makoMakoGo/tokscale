@@ -111,7 +111,7 @@ impl LocalSourceAdapter for AntigravityAdapter {
             );
 
             if !has_cache_write && invalidate_cache {
-                ctx.source_cache.remove(&path);
+                ctx.source_cache.remove(&path, unit.parser_version);
             }
         }
     }

@@ -17,6 +17,7 @@ pub(crate) struct CodexAdapter;
 #[derive(Debug)]
 pub(crate) struct CodexAppendSource {
     path: PathBuf,
+    read_plan: message_cache::CacheReadPlan,
     parser_version: message_cache::ParserVersion,
     is_headless: bool,
     fallback_timestamp: i64,
@@ -89,7 +90,7 @@ impl LocalSourceAdapter for CodexAdapter {
                     .collect(),
             );
             if !has_cache_write && parsed.invalidate_cache {
-                ctx.source_cache.remove(&path);
+                ctx.source_cache.remove(&path, parsed.unit.parser_version);
             }
         }
     }
@@ -228,10 +229,15 @@ fn load_or_parse_codex_unit(
 
         if cached.fingerprint == fingerprint {
             if message_cache::codex_cache_meta_matches_fingerprint(&cached, &fingerprint) {
+                let read_plan = message_cache::CacheReadPlan::new(
+                    &path,
+                    unit.parser_version,
+                    cached.fingerprint,
+                );
                 return ParsedUnit {
                     unit,
                     messages: UnitMessageSource::CodexCacheHit {
-                        path,
+                        read_plan,
                         is_headless,
                         fallback_timestamp,
                     },
@@ -270,10 +276,16 @@ fn load_or_parse_codex_unit(
                         (entry_fingerprint, codex_incremental_cache)
                     {
                         let parser_version = unit.parser_version;
+                        let read_plan = message_cache::CacheReadPlan::new(
+                            &path,
+                            parser_version,
+                            cached.fingerprint.clone(),
+                        );
                         return ParsedUnit {
                             unit,
                             messages: UnitMessageSource::CodexAppend(Box::new(CodexAppendSource {
                                 path,
+                                read_plan,
                                 parser_version,
                                 is_headless,
                                 fallback_timestamp,
@@ -303,13 +315,13 @@ fn resolve_codex_messages(
     match source {
         UnitMessageSource::Fresh(messages) => (messages, None),
         UnitMessageSource::CodexCacheHit {
-            path,
+            read_plan,
             is_headless,
             fallback_timestamp,
         } => {
             let (messages, indices) = ctx
                 .source_cache
-                .take_messages_with_fallback(&path)
+                .take_messages_with_fallback(&read_plan)
                 .unwrap_or_default();
             (
                 finalize_codex_messages(
@@ -325,6 +337,7 @@ fn resolve_codex_messages(
         UnitMessageSource::CodexAppend(append) => {
             let CodexAppendSource {
                 path,
+                read_plan,
                 parser_version,
                 is_headless,
                 fallback_timestamp,
@@ -335,7 +348,7 @@ fn resolve_codex_messages(
             } = *append;
             let (mut raw_messages, mut fallback_timestamp_indices) = ctx
                 .source_cache
-                .take_messages_with_fallback(&path)
+                .take_messages_with_fallback(&read_plan)
                 .unwrap_or_default();
             let existing_len = raw_messages.len();
             fallback_timestamp_indices.extend(

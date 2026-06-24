@@ -17,7 +17,11 @@ pub(crate) fn try_cache_hit(
     }
 
     Some(ParsedUnit {
-        messages: UnitMessageSource::CacheHit(unit.path.clone()),
+        messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
+            &unit.path,
+            unit.parser_version,
+            cached.fingerprint,
+        )),
         unit,
         cache_write: None,
         invalidate_cache: false,
@@ -57,7 +61,11 @@ where
     if let Some(cached) = ctx.source_cache.get_meta(&unit.path, unit.parser_version) {
         if cached.fingerprint == fingerprint && cached.has_messages {
             return ParsedUnit {
-                messages: UnitMessageSource::CacheHit(unit.path.clone()),
+                messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
+                    &unit.path,
+                    unit.parser_version,
+                    cached.fingerprint,
+                )),
                 unit,
                 cache_write: None,
                 invalidate_cache: false,
@@ -104,7 +112,7 @@ pub(crate) fn fold_units(
         sink.extend_messages(messages);
 
         if !has_cache_write && unit.invalidate_cache {
-            ctx.source_cache.remove(&path);
+            ctx.source_cache.remove(&path, unit.unit.parser_version);
         }
     }
 }
@@ -131,8 +139,8 @@ pub(crate) fn resolve_messages(
 ) -> Vec<UnifiedMessage> {
     match source {
         UnitMessageSource::Fresh(messages) => messages,
-        UnitMessageSource::CacheHit(path) => {
-            let mut messages = ctx.source_cache.take_messages(&path).unwrap_or_default();
+        UnitMessageSource::CacheHit(plan) => {
+            let mut messages = ctx.source_cache.take_messages(&plan).unwrap_or_default();
             crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
             messages
         }

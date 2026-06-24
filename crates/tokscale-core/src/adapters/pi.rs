@@ -177,7 +177,7 @@ mod tests {
         );
         assert!(matches!(
             parsed[0].messages,
-            UnitMessageSource::CacheHit(ref hit_path) if hit_path == &path
+            UnitMessageSource::CacheHit(ref plan) if plan.path() == path
         ));
 
         let mut second = Vec::new();

@@ -3447,13 +3447,24 @@ model = "gpt-5.5"
             assert_eq!(warm_first, warm_second);
 
             let mut cache = message_cache::SourceMessageCache::load();
+            let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             assert_eq!(
-                cache.take_messages(&path).map(|messages| messages.len()),
+                cache
+                    .take_messages(&message_cache::CacheReadPlan::new(
+                        &path,
+                        message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                        fingerprint.clone(),
+                    ))
+                    .map(|messages| messages.len()),
                 Some(1),
                 "warm parses must leave the cached entry intact on disk"
             );
             assert_eq!(
-                cache.take_messages(std::path::Path::new("/nonexistent/source.json")),
+                cache.take_messages(&message_cache::CacheReadPlan::new(
+                    std::path::Path::new("/nonexistent/source.json"),
+                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                    fingerprint,
+                )),
                 None
             );
         }
@@ -3548,8 +3559,9 @@ model = "gpt-5.5"
 
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             let mut cache = message_cache::SourceMessageCache::load();
-            cache.insert(message_cache::CachedSourceEntry::new(
+            cache.insert(message_cache::CachedSourceEntry::new_with_version(
                 &path,
+                message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
                 fingerprint,
                 Vec::new(),
                 Vec::new(),
@@ -3566,7 +3578,14 @@ model = "gpt-5.5"
             assert_eq!(messages.len(), 1);
 
             let mut loaded = message_cache::SourceMessageCache::load();
-            let repaired_messages = loaded.take_messages(&path).unwrap();
+            let repaired_fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+            let repaired_messages = loaded
+                .take_messages(&message_cache::CacheReadPlan::new(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                    repaired_fingerprint,
+                ))
+                .unwrap();
             assert_eq!(repaired_messages.len(), 1);
         }
 

@@ -248,9 +248,9 @@ pub(crate) enum FingerprintPolicy {
 #[derive(Debug)]
 pub(crate) enum UnitMessageSource {
     Fresh(Vec<UnifiedMessage>),
-    CacheHit(PathBuf),
+    CacheHit(message_cache::CacheReadPlan),
     CodexCacheHit {
-        path: PathBuf,
+        read_plan: message_cache::CacheReadPlan,
         is_headless: bool,
         fallback_timestamp: i64,
     },
