@@ -3104,7 +3104,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_parse_path_reprices_zero_cost_composer_1_5_rows() {
+    fn test_cursor_parse_path_keeps_zero_cost_for_unpriced_composer_rows() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
         std::fs::create_dir_all(&cursor_cache_dir).unwrap();
@@ -3124,7 +3124,11 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "cursor");
         assert_eq!(messages[0].model_id.as_ref(), "Composer 1.5");
-        assert!(messages[0].cost > 0.0);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 2000);
+        assert_eq!(messages[0].tokens.cache_read, 5000);
+        assert_eq!(messages[0].tokens.cache_write, 200);
+        assert_eq!(messages[0].cost, 0.0);
     }
 
     fn write_kimi_code_usage_fixture(source_home: &std::path::Path) {
@@ -5624,7 +5628,17 @@ model = "gpt-5.5"
 
     #[test]
     fn test_apply_token_pricing_prices_claude_code_gpt_5_3_codex() {
-        let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.3-codex".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.00000175),
+                output_cost_per_token: Some(0.000014),
+                cache_read_input_token_cost: Some(0.000000175),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
         let mut msg = UnifiedMessage::new(
             "claude",
