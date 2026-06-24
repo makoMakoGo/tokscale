@@ -3266,8 +3266,9 @@ model = "gpt-5.5"
             );
 
             let mut cache = message_cache::SourceMessageCache::load();
-            cache.insert(message_cache::CachedSourceEntry::new(
+            cache.insert(message_cache::CachedSourceEntry::new_with_version(
                 &path,
+                message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
                 fingerprint,
                 vec![stale_message],
                 Vec::new(),
@@ -3446,13 +3447,24 @@ model = "gpt-5.5"
             assert_eq!(warm_first, warm_second);
 
             let mut cache = message_cache::SourceMessageCache::load();
+            let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             assert_eq!(
-                cache.take_messages(&path).map(|messages| messages.len()),
+                cache
+                    .take_messages(&message_cache::CacheReadPlan::new(
+                        &path,
+                        message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                        fingerprint.clone(),
+                    ))
+                    .map(|messages| messages.len()),
                 Some(1),
                 "warm parses must leave the cached entry intact on disk"
             );
             assert_eq!(
-                cache.take_messages(std::path::Path::new("/nonexistent/source.json")),
+                cache.take_messages(&message_cache::CacheReadPlan::new(
+                    std::path::Path::new("/nonexistent/source.json"),
+                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                    fingerprint,
+                )),
                 None
             );
         }
@@ -3499,7 +3511,12 @@ model = "gpt-5.5"
             assert!(first_messages.is_empty());
 
             let cache = message_cache::SourceMessageCache::load();
-            assert!(cache.get_meta(&path).is_none());
+            assert!(cache
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1)
+                )
+                .is_none());
 
             let mut readable_permissions = std::fs::metadata(&path).unwrap().permissions();
             readable_permissions.set_mode(0o644);
@@ -3542,8 +3559,9 @@ model = "gpt-5.5"
 
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             let mut cache = message_cache::SourceMessageCache::load();
-            cache.insert(message_cache::CachedSourceEntry::new(
+            cache.insert(message_cache::CachedSourceEntry::new_with_version(
                 &path,
+                message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
                 fingerprint,
                 Vec::new(),
                 Vec::new(),
@@ -3560,7 +3578,14 @@ model = "gpt-5.5"
             assert_eq!(messages.len(), 1);
 
             let mut loaded = message_cache::SourceMessageCache::load();
-            let repaired_messages = loaded.take_messages(&path).unwrap();
+            let repaired_fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+            let repaired_messages = loaded
+                .take_messages(&message_cache::CacheReadPlan::new(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                    repaired_fingerprint,
+                ))
+                .unwrap();
             assert_eq!(repaired_messages.len(), 1);
         }
 
@@ -4282,7 +4307,10 @@ model = "gpt-5.5"
             assert_eq!(initial_messages.len(), 1);
             assert_eq!(initial_messages[0].model_id.as_ref(), "gpt-5.4");
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .and_then(|meta| meta.codex_incremental)
                 .is_some());
 
@@ -4453,7 +4481,10 @@ model = "gpt-5.5"
             )
             .unwrap();
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .is_none());
 
             std::env::set_var("HOME", fresh_cache_home.path());
@@ -4623,7 +4654,12 @@ model = "gpt-5.5"
             assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
 
             let cache = message_cache::SourceMessageCache::load();
-            assert!(cache.get_meta(&path).is_none());
+            assert!(cache
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
+                .is_none());
         }
 
         match original_home {
@@ -4665,7 +4701,10 @@ model = "gpt-5.5"
             assert_eq!(initial_messages.len(), 1);
             assert_eq!(initial_messages[0].model_id.as_ref(), "unknown");
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .is_none());
 
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -4704,7 +4743,10 @@ model = "gpt-5.5"
 
             std::env::set_var("HOME", cache_home.path());
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .is_some());
         }
 
@@ -4745,7 +4787,10 @@ model = "gpt-5.5"
             .unwrap();
             assert_eq!(initial_messages.len(), 1);
             assert!(message_cache::SourceMessageCache::load()
-                .get_meta(&path)
+                .get_meta(
+                    &path,
+                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                )
                 .is_none());
 
             std::thread::sleep(std::time::Duration::from_millis(5));

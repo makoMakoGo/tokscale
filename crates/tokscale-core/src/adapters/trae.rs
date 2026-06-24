@@ -32,7 +32,7 @@ impl LocalSourceAdapter for TraeAdapter {
                 ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
-                    cache_entry: None,
+                    cache_write: None,
                     invalidate_cache: false,
                 }
             })

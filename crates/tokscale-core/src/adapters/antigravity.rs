@@ -96,11 +96,13 @@ impl LocalSourceAdapter for AntigravityAdapter {
             let ParsedUnit {
                 unit,
                 messages,
-                cache_entry,
+                cache_write,
                 invalidate_cache,
             } = unit;
             let path = unit.path.clone();
+            let has_cache_write = cache_write.is_some();
             let messages = adapter_cache::resolve_messages(messages, ctx);
+            adapter_cache::write_cache(cache_write, ctx, &messages);
             sink.extend_messages(
                 messages
                     .into_iter()
@@ -108,10 +110,8 @@ impl LocalSourceAdapter for AntigravityAdapter {
                     .collect(),
             );
 
-            if let Some(entry) = cache_entry {
-                ctx.source_cache.insert(entry);
-            } else if invalidate_cache {
-                ctx.source_cache.remove(&path);
+            if !has_cache_write && invalidate_cache {
+                ctx.source_cache.remove(&path, unit.parser_version);
             }
         }
     }
@@ -285,7 +285,7 @@ mod tests {
         ParsedUnit {
             unit: SourceUnit::plain_file(ClientId::Antigravity, path.to_path_buf()).with_meta(meta),
             messages: UnitMessageSource::Fresh(vec![message]),
-            cache_entry: None,
+            cache_write: None,
             invalidate_cache: false,
         }
     }

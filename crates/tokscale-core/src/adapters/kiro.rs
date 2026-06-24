@@ -66,7 +66,7 @@ impl LocalSourceAdapter for KiroAdapter {
                     ParsedUnit {
                         unit,
                         messages: UnitMessageSource::Fresh(messages),
-                        cache_entry: None,
+                        cache_write: None,
                         invalidate_cache: false,
                     }
                 }

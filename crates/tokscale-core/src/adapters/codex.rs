@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
@@ -16,6 +17,8 @@ pub(crate) struct CodexAdapter;
 #[derive(Debug)]
 pub(crate) struct CodexAppendSource {
     path: PathBuf,
+    read_plan: message_cache::CacheReadPlan,
+    parser_version: message_cache::ParserVersion,
     is_headless: bool,
     fallback_timestamp: i64,
     tail_messages: Vec<UnifiedMessage>,
@@ -76,17 +79,18 @@ impl LocalSourceAdapter for CodexAdapter {
         let mut seen = HashSet::new();
         for parsed in parsed {
             let path = parsed.unit.path.clone();
-            let (messages, extra_entry) = resolve_codex_messages(parsed.messages, ctx);
+            let (messages, extra_write) = resolve_codex_messages(parsed.messages, ctx);
+            let cache_write = parsed.cache_write.or(extra_write);
+            let has_cache_write = cache_write.is_some();
+            adapter_cache::write_cache(cache_write, ctx, &messages);
             sink.extend_messages(
                 messages
                     .into_iter()
                     .filter(|message| crate::should_keep_deduped_message(&mut seen, message))
                     .collect(),
             );
-            if let Some(entry) = parsed.cache_entry.or(extra_entry) {
-                ctx.source_cache.insert(entry);
-            } else if parsed.invalidate_cache {
-                ctx.source_cache.remove(&path);
+            if !has_cache_write && parsed.invalidate_cache {
+                ctx.source_cache.remove(&path, parsed.unit.parser_version);
             }
         }
     }
@@ -135,13 +139,14 @@ fn parse_full_log_source(
         return ParsedUnit {
             unit,
             messages: UnitMessageSource::Fresh(messages),
-            cache_entry: None,
+            cache_write: None,
             invalidate_cache: false,
         };
     }
 
-    let cache_entry = build_codex_cache_entry(
+    let cache_write = build_codex_cache_write(
         &path,
+        unit.parser_version,
         parsed.messages,
         parsed.consumed_offset,
         parsed.state,
@@ -151,7 +156,7 @@ fn parse_full_log_source(
     ParsedUnit {
         unit,
         messages: UnitMessageSource::Fresh(messages),
-        cache_entry,
+        cache_write,
         invalidate_cache: false,
     }
 }
@@ -175,13 +180,14 @@ fn finalize_codex_messages(
     messages
 }
 
-fn build_codex_cache_entry(
+fn build_codex_cache_write(
     path: &Path,
+    parser_version: message_cache::ParserVersion,
     raw_messages: Vec<UnifiedMessage>,
     consumed_offset: u64,
     state: sessions::codex::CodexParseState,
     fallback_timestamp_indices: Vec<usize>,
-) -> Option<message_cache::CachedSourceEntry> {
+) -> Option<message_cache::CacheWrite> {
     let fingerprint = message_cache::SourceFingerprint::from_path(path)?;
     if fingerprint.size != consumed_offset {
         return None;
@@ -190,12 +196,15 @@ fn build_codex_cache_entry(
     let codex_incremental =
         message_cache::build_codex_incremental_cache(path, consumed_offset, state)?;
 
-    Some(message_cache::CachedSourceEntry::new(
-        path,
-        fingerprint,
-        raw_messages,
-        fallback_timestamp_indices,
-        Some(codex_incremental),
+    Some(message_cache::CacheWrite::Owned(
+        message_cache::CachedSourceEntry::new_with_version(
+            path,
+            parser_version,
+            fingerprint,
+            raw_messages,
+            fallback_timestamp_indices,
+            Some(codex_incremental),
+        ),
     ))
 }
 
@@ -211,23 +220,28 @@ fn load_or_parse_codex_unit(
     };
     let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
 
-    if let Some(cached) = source_cache.get_meta(&path) {
+    if let Some(cached) = source_cache.get_meta(&path, unit.parser_version) {
         let reparse_from_start = |invalidate_cache: bool| {
             let mut parsed = parse_full_log_source(unit.clone(), pricing, is_headless);
-            parsed.invalidate_cache = invalidate_cache && parsed.cache_entry.is_none();
+            parsed.invalidate_cache = invalidate_cache && parsed.cache_write.is_none();
             parsed
         };
 
         if cached.fingerprint == fingerprint {
             if message_cache::codex_cache_meta_matches_fingerprint(&cached, &fingerprint) {
+                let read_plan = message_cache::CacheReadPlan::new(
+                    &path,
+                    unit.parser_version,
+                    cached.fingerprint,
+                );
                 return ParsedUnit {
                     unit,
                     messages: UnitMessageSource::CodexCacheHit {
-                        path,
+                        read_plan,
                         is_headless,
                         fallback_timestamp,
                     },
-                    cache_entry: None,
+                    cache_write: None,
                     invalidate_cache: false,
                 };
             }
@@ -261,10 +275,18 @@ fn load_or_parse_codex_unit(
                     if let (Some(entry_fingerprint), Some(codex_incremental_cache)) =
                         (entry_fingerprint, codex_incremental_cache)
                     {
+                        let parser_version = unit.parser_version;
+                        let read_plan = message_cache::CacheReadPlan::new(
+                            &path,
+                            parser_version,
+                            cached.fingerprint.clone(),
+                        );
                         return ParsedUnit {
                             unit,
                             messages: UnitMessageSource::CodexAppend(Box::new(CodexAppendSource {
                                 path,
+                                read_plan,
+                                parser_version,
                                 is_headless,
                                 fallback_timestamp,
                                 tail_messages: parsed.messages,
@@ -272,7 +294,7 @@ fn load_or_parse_codex_unit(
                                 fingerprint: entry_fingerprint,
                                 codex_incremental: codex_incremental_cache,
                             })),
-                            cache_entry: None,
+                            cache_write: None,
                             invalidate_cache: false,
                         };
                     }
@@ -289,35 +311,39 @@ fn load_or_parse_codex_unit(
 fn resolve_codex_messages(
     source: UnitMessageSource,
     ctx: &mut FoldContext<'_>,
-) -> (
-    Vec<UnifiedMessage>,
-    Option<message_cache::CachedSourceEntry>,
-) {
+) -> (Vec<UnifiedMessage>, Option<message_cache::CacheWrite>) {
     match source {
         UnitMessageSource::Fresh(messages) => (messages, None),
         UnitMessageSource::CodexCacheHit {
-            path,
+            read_plan,
             is_headless,
             fallback_timestamp,
         } => {
-            let (messages, indices) = ctx
-                .source_cache
-                .take_messages_with_fallback(&path)
-                .unwrap_or_default();
-            (
-                finalize_codex_messages(
-                    messages,
+            let Some((messages, indices)) =
+                ctx.source_cache.take_messages_with_fallback(&read_plan)
+            else {
+                return reparse_full_codex_messages(
+                    &read_plan.path(),
+                    read_plan.parser_version(),
                     ctx.pricing,
                     is_headless,
-                    &indices,
                     fallback_timestamp,
-                ),
-                None,
-            )
+                );
+            };
+            let messages = finalize_codex_messages(
+                messages,
+                ctx.pricing,
+                is_headless,
+                &indices,
+                fallback_timestamp,
+            );
+            (messages, None)
         }
         UnitMessageSource::CodexAppend(append) => {
             let CodexAppendSource {
                 path,
+                read_plan,
+                parser_version,
                 is_headless,
                 fallback_timestamp,
                 tail_messages,
@@ -325,10 +351,33 @@ fn resolve_codex_messages(
                 fingerprint,
                 codex_incremental,
             } = *append;
-            let (mut raw_messages, mut fallback_timestamp_indices) = ctx
-                .source_cache
-                .take_messages_with_fallback(&path)
-                .unwrap_or_default();
+            let Some((mut raw_messages, mut fallback_timestamp_indices)) =
+                ctx.source_cache.take_messages_with_fallback(&read_plan)
+            else {
+                let replacement_plan =
+                    message_cache::CacheReadPlan::new(&path, parser_version, fingerprint);
+                if let Some((messages, indices)) = ctx
+                    .source_cache
+                    .take_messages_with_fallback(&replacement_plan)
+                {
+                    let messages = finalize_codex_messages(
+                        messages,
+                        ctx.pricing,
+                        is_headless,
+                        &indices,
+                        fallback_timestamp,
+                    );
+                    return (messages, None);
+                }
+
+                return reparse_full_codex_messages(
+                    &path,
+                    parser_version,
+                    ctx.pricing,
+                    is_headless,
+                    fallback_timestamp,
+                );
+            };
             let existing_len = raw_messages.len();
             fallback_timestamp_indices.extend(
                 tail_fallback_indices
@@ -336,12 +385,15 @@ fn resolve_codex_messages(
                     .map(|index| existing_len + index),
             );
             raw_messages.extend(tail_messages);
-            let cache_entry = message_cache::CachedSourceEntry::new(
-                &path,
-                fingerprint,
-                raw_messages.clone(),
-                fallback_timestamp_indices.clone(),
-                Some(codex_incremental),
+            let cache_write = message_cache::CacheWrite::Owned(
+                message_cache::CachedSourceEntry::new_with_version(
+                    &path,
+                    parser_version,
+                    fingerprint,
+                    raw_messages.clone(),
+                    fallback_timestamp_indices.clone(),
+                    Some(codex_incremental),
+                ),
             );
             let messages = finalize_codex_messages(
                 raw_messages,
@@ -350,10 +402,45 @@ fn resolve_codex_messages(
                 &fallback_timestamp_indices,
                 fallback_timestamp,
             );
-            (messages, Some(cache_entry))
+            (messages, Some(cache_write))
         }
         UnitMessageSource::CacheHit(_) => unreachable!("codex does not use generic cache hits"),
     }
+}
+
+fn reparse_full_codex_messages(
+    path: &Path,
+    parser_version: message_cache::ParserVersion,
+    pricing: Option<&pricing::PricingService>,
+    is_headless: bool,
+    fallback_timestamp: i64,
+) -> (Vec<UnifiedMessage>, Option<message_cache::CacheWrite>) {
+    let parsed = sessions::codex::parse_codex_file_incremental(
+        path,
+        0,
+        sessions::codex::CodexParseState::default(),
+    );
+    let messages = finalize_codex_messages(
+        parsed.messages.clone(),
+        pricing,
+        is_headless,
+        &parsed.fallback_timestamp_indices,
+        fallback_timestamp,
+    );
+    let cache_write = if parsed.parse_succeeded && !parsed.unresolved_model_events {
+        build_codex_cache_write(
+            path,
+            parser_version,
+            parsed.messages,
+            parsed.consumed_offset,
+            parsed.state,
+            parsed.fallback_timestamp_indices,
+        )
+    } else {
+        None
+    };
+
+    (messages, cache_write)
 }
 
 pub(crate) static CODEX_ADAPTER: CodexAdapter = CodexAdapter;
@@ -361,6 +448,7 @@ pub(crate) static CODEX_ADAPTER: CodexAdapter = CodexAdapter;
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::io::Write;
     use std::path::Path;
 
@@ -387,6 +475,30 @@ mod tests {
         let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 
     fn scan_context<'a>(
@@ -539,7 +651,10 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert!(cache
-            .get_meta(&path)
+            .get_meta(
+                &path,
+                message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1),
+            )
             .and_then(|meta| meta.codex_incremental)
             .is_some());
     }
@@ -598,6 +713,110 @@ mod tests {
         let actual = fold_parsed(parsed, &mut cache);
         let expected = parser_messages(&path);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_adapter_append_race_does_not_write_tail_only_cache() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _config_guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", cache_home.path());
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+
+        let mut seed_cache = message_cache::SourceMessageCache::load();
+        let initial = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        assert_eq!(initial.len(), 1);
+        seed_cache.save_if_dirty();
+
+        append_file(&path, APPENDED_CODEX_ENTRY);
+        let expected = parser_messages(&path);
+
+        let mut cache_a = message_cache::SourceMessageCache::load();
+        let parsed_a = CODEX_ADAPTER.parse(
+            vec![codex_unit(&path, false)],
+            &ParseContext {
+                source_cache: &cache_a,
+                pricing: None,
+            },
+        );
+        assert!(matches!(
+            parsed_a[0].messages,
+            UnitMessageSource::CodexAppend(_)
+        ));
+
+        let mut cache_b = message_cache::SourceMessageCache::load();
+        let parsed_b = CODEX_ADAPTER.parse(
+            vec![codex_unit(&path, false)],
+            &ParseContext {
+                source_cache: &cache_b,
+                pricing: None,
+            },
+        );
+        assert!(matches!(
+            parsed_b[0].messages,
+            UnitMessageSource::CodexAppend(_)
+        ));
+
+        let messages_b = fold_parsed(parsed_b, &mut cache_b);
+        assert_eq!(messages_b, expected);
+        cache_b.save_if_dirty();
+
+        let messages_a = fold_parsed(parsed_a, &mut cache_a);
+        assert_eq!(messages_a, expected);
+        cache_a.save_if_dirty();
+
+        let mut warm_cache = message_cache::SourceMessageCache::load();
+        let warm_messages = parse_and_fold(vec![codex_unit(&path, false)], &mut warm_cache);
+        assert_eq!(warm_messages, expected);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_adapter_append_reparses_when_base_cache_disappears() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _config_guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", cache_home.path());
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+
+        let mut seed_cache = message_cache::SourceMessageCache::load();
+        let initial = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        assert_eq!(initial.len(), 1);
+        seed_cache.save_if_dirty();
+
+        append_file(&path, APPENDED_CODEX_ENTRY);
+        let expected = parser_messages(&path);
+
+        let mut cache = message_cache::SourceMessageCache::load();
+        let parsed = CODEX_ADAPTER.parse(
+            vec![codex_unit(&path, false)],
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+        );
+        assert!(matches!(
+            parsed[0].messages,
+            UnitMessageSource::CodexAppend(_)
+        ));
+
+        let mut remover = message_cache::SourceMessageCache::load();
+        remover.remove(
+            &path,
+            message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1),
+        );
+        remover.save_if_dirty();
+
+        let messages = fold_parsed(parsed, &mut cache);
+        assert_eq!(messages, expected);
+        cache.save_if_dirty();
+
+        let mut warm_cache = message_cache::SourceMessageCache::load();
+        let warm_messages = parse_and_fold(vec![codex_unit(&path, false)], &mut warm_cache);
+        assert_eq!(warm_messages, expected);
     }
 
     #[test]

@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::{message_cache, pricing, scanner, UnifiedMessage};
 
 pub(crate) trait LocalSourceAdapter: Sync {
@@ -73,6 +74,7 @@ pub(crate) struct SourceUnit {
     pub path: PathBuf,
     pub fingerprint_policy: FingerprintPolicy,
     pub meta: SourceUnitMeta,
+    pub parser_version: ParserVersion,
 }
 
 impl SourceUnit {
@@ -82,6 +84,7 @@ impl SourceUnit {
             path,
             fingerprint_policy: FingerprintPolicy::PlainFile,
             meta: SourceUnitMeta::None,
+            parser_version: SourceUnitMeta::None.parser_version(client),
         }
     }
 
@@ -91,6 +94,7 @@ impl SourceUnit {
             path,
             fingerprint_policy: FingerprintPolicy::SqliteWithWal,
             meta: SourceUnitMeta::None,
+            parser_version: SourceUnitMeta::None.parser_version(client),
         }
     }
 
@@ -100,6 +104,7 @@ impl SourceUnit {
             path,
             fingerprint_policy: FingerprintPolicy::None,
             meta: SourceUnitMeta::None,
+            parser_version: SourceUnitMeta::None.parser_version(client),
         }
     }
 
@@ -109,11 +114,18 @@ impl SourceUnit {
             path,
             fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome { home_dir },
             meta: SourceUnitMeta::None,
+            parser_version: SourceUnitMeta::None.parser_version(client),
         }
     }
 
     pub(crate) fn with_meta(mut self, meta: SourceUnitMeta) -> Self {
+        self.parser_version = meta.parser_version(self.client);
         self.meta = meta;
+        self
+    }
+
+    pub(crate) fn with_parser_version(mut self, parser_version: ParserVersion) -> Self {
+        self.parser_version = parser_version;
         self
     }
 
@@ -167,6 +179,58 @@ pub(crate) enum SourceUnitMeta {
     },
 }
 
+impl SourceUnitMeta {
+    fn parser_version(&self, client: ClientId) -> ParserVersion {
+        match self {
+            Self::None => ParserVersion::new(default_parser_id(client), 1),
+            Self::OpenCodeSqlite => ParserVersion::new(ParserId::OpenCodeSqlite, 1),
+            Self::OpenCodeJson => ParserVersion::new(ParserId::OpenCodeJson, 1),
+            Self::AntigravityCacheJsonl => ParserVersion::new(ParserId::AntigravityCacheJsonl, 1),
+            Self::AntigravityCliSqlite => ParserVersion::new(ParserId::AntigravityCliSqlite, 1),
+            Self::KiroFile => ParserVersion::new(ParserId::KiroFile, 1),
+            Self::KiroSqlite => ParserVersion::new(ParserId::KiroSqlite, 1),
+            Self::KiroGlobalStorage => ParserVersion::new(ParserId::KiroGlobalStorage, 1),
+            Self::Codex { .. } => ParserVersion::new(ParserId::Codex, 1),
+        }
+    }
+}
+
+fn default_parser_id(client: ClientId) -> ParserId {
+    match client {
+        ClientId::OpenCode => ParserId::OpenCode,
+        ClientId::Claude => ParserId::Claude,
+        ClientId::Codex => ParserId::Codex,
+        ClientId::Cursor => ParserId::Cursor,
+        ClientId::Gemini => ParserId::Gemini,
+        ClientId::Amp => ParserId::Amp,
+        ClientId::Droid => ParserId::Droid,
+        ClientId::OpenClaw => ParserId::OpenClaw,
+        ClientId::Pi => ParserId::Pi,
+        ClientId::Omp => ParserId::Omp,
+        ClientId::Kimi => ParserId::Kimi,
+        ClientId::Qwen => ParserId::Qwen,
+        ClientId::RooCode => ParserId::RooCode,
+        ClientId::KiloCode => ParserId::KiloCode,
+        ClientId::Mux => ParserId::Mux,
+        ClientId::Kilo => ParserId::Kilo,
+        ClientId::Hermes => ParserId::Hermes,
+        ClientId::Copilot => ParserId::Copilot,
+        ClientId::Goose => ParserId::Goose,
+        ClientId::Codebuff => ParserId::Codebuff,
+        ClientId::Antigravity => ParserId::Antigravity,
+        ClientId::Zed => ParserId::Zed,
+        ClientId::Kiro => ParserId::Kiro,
+        ClientId::Junie => ParserId::Junie,
+        ClientId::Trae => ParserId::Trae,
+        ClientId::Cline => ParserId::Cline,
+        ClientId::CommandCode => ParserId::CommandCode,
+        ClientId::Grok => ParserId::Grok,
+        ClientId::Crush | ClientId::Warp => {
+            unreachable!("excluded clients do not create local source units")
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FingerprintPolicy {
     PlainFile,
@@ -184,9 +248,9 @@ pub(crate) enum FingerprintPolicy {
 #[derive(Debug)]
 pub(crate) enum UnitMessageSource {
     Fresh(Vec<UnifiedMessage>),
-    CacheHit(PathBuf),
+    CacheHit(message_cache::CacheReadPlan),
     CodexCacheHit {
-        path: PathBuf,
+        read_plan: message_cache::CacheReadPlan,
         is_headless: bool,
         fallback_timestamp: i64,
     },
@@ -197,7 +261,7 @@ pub(crate) enum UnitMessageSource {
 pub(crate) struct ParsedUnit {
     pub unit: SourceUnit,
     pub messages: UnitMessageSource,
-    pub cache_entry: Option<message_cache::CachedSourceEntry>,
+    pub cache_write: Option<message_cache::CacheWrite>,
     pub invalidate_cache: bool,
 }
 
