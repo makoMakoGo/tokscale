@@ -7,6 +7,10 @@ use crate::tui::themes::Theme;
 use crate::tui::ui::widgets::viewport_scrollbar_state;
 
 const BAR_WIDTH: usize = 20;
+const FETCH_PROMPT: &str = "Press 'u' to fetch subscription usage";
+const NO_PROVIDERS_PROMPT: &str =
+    "No remote subscription providers enabled; configure usageProviders";
+const CACHE_DISPLAY_NOTICE: &str = "Showing cached subscription usage; no remote providers enabled";
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -65,11 +69,7 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area)[1];
 
-    let msg = if app.data.loading {
-        "Loading subscription data..."
-    } else {
-        "Press 'u' to fetch subscription usage"
-    };
+    let msg = loading_message(app);
     let paragraph = Paragraph::new(msg)
         .style(Style::default().fg(app.theme.muted))
         .alignment(Alignment::Center);
@@ -86,10 +86,36 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area)[1];
 
-    let paragraph = Paragraph::new("No subscription data available")
+    let paragraph = Paragraph::new(empty_message(app))
         .style(Style::default().fg(app.theme.muted))
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, center);
+}
+
+fn loading_message(app: &App) -> &'static str {
+    if app.data.loading {
+        "Loading subscription data..."
+    } else if app.has_enabled_subscription_providers() {
+        FETCH_PROMPT
+    } else {
+        NO_PROVIDERS_PROMPT
+    }
+}
+
+fn empty_message(app: &App) -> &'static str {
+    if app.has_enabled_subscription_providers() {
+        "No subscription data available"
+    } else {
+        NO_PROVIDERS_PROMPT
+    }
+}
+
+fn cache_display_notice(app: &App) -> Option<&'static str> {
+    if app.subscription_usage.is_empty() || app.has_enabled_subscription_providers() {
+        None
+    } else {
+        Some(CACHE_DISPLAY_NOTICE)
+    }
 }
 
 pub(crate) fn build_usage_lines(
@@ -188,6 +214,13 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
         &app.subscription_usage,
         &app.subscription_usage_errors,
     );
+    if let Some(notice) = cache_display_notice(app) {
+        lines.insert(
+            0,
+            Line::from(Span::styled(notice, Style::default().fg(app.theme.muted))),
+        );
+        lines.insert(1, Line::from(""));
+    }
     let total_lines = lines.len();
     let visible_height = area.height as usize;
     app.set_usage_text_viewport(visible_height, total_lines);
@@ -218,7 +251,27 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::usage::{UsageMetric, UsageProviderId};
+    use crate::tui::app::{Tab, TuiConfig};
+    use crate::tui::data::UsageData;
     use crate::tui::themes::{Theme, ThemeName};
+
+    fn make_usage_app() -> App {
+        let config = TuiConfig {
+            theme: "blue".to_string(),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Usage),
+        };
+        let mut app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+        app
+    }
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans
@@ -241,5 +294,51 @@ mod tests {
         assert!(text.contains("Provider errors"));
         assert!(text.contains("MiniMax Token Plan CN"));
         assert!(text.contains("session expired"));
+    }
+
+    #[test]
+    fn loading_prompt_requires_enabled_provider() {
+        let mut app = make_usage_app();
+
+        assert_eq!(loading_message(&app), NO_PROVIDERS_PROMPT);
+
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+
+        assert_eq!(loading_message(&app), FETCH_PROMPT);
+    }
+
+    #[test]
+    fn empty_prompt_requires_enabled_provider() {
+        let mut app = make_usage_app();
+
+        assert_eq!(empty_message(&app), NO_PROVIDERS_PROMPT);
+
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+
+        assert_eq!(empty_message(&app), "No subscription data available");
+    }
+
+    #[test]
+    fn cached_usage_notice_only_shows_without_enabled_provider() {
+        let mut app = make_usage_app();
+        app.subscription_usage.push(UsageOutput {
+            provider: "Codex".to_string(),
+            account: None,
+            plan: None,
+            email: None,
+            metrics: vec![UsageMetric {
+                label: "Weekly".to_string(),
+                used_percent: 10.0,
+                remaining_percent: 90.0,
+                remaining_label: None,
+                resets_at: None,
+            }],
+        });
+
+        assert_eq!(cache_display_notice(&app), Some(CACHE_DISPLAY_NOTICE));
+
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+
+        assert_eq!(cache_display_notice(&app), None);
     }
 }

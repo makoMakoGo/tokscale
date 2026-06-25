@@ -192,9 +192,12 @@ fn help_row_line(app: &App) -> Line<'static> {
         };
 
         let spans = if is_very_narrow {
-            vec![
-                Span::styled("[u]", Style::default().fg(Color::Yellow)),
-                Span::styled("·", Style::default().fg(app.theme.muted)),
+            let mut spans = Vec::new();
+            if app.has_enabled_subscription_providers() {
+                spans.push(Span::styled("[u]", Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            }
+            spans.extend([
                 Span::styled("[r:local]", Style::default().fg(Color::Yellow)),
                 Span::styled("·", Style::default().fg(app.theme.muted)),
                 Span::styled(
@@ -206,14 +209,18 @@ fn help_row_line(app: &App) -> Line<'static> {
                     }),
                 ),
                 Span::styled("·q", Style::default().fg(app.theme.muted)),
-            ]
+            ]);
+            spans
         } else {
-            vec![
-                Span::styled(
+            let mut spans = Vec::new();
+            if app.has_enabled_subscription_providers() {
+                spans.push(Span::styled(
                     "[u:refresh subscription]",
                     Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(" • ", Style::default().fg(app.theme.muted)),
+                ));
+                spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+            }
+            spans.extend([
                 Span::styled(
                     "[r:refresh local reports]",
                     Style::default().fg(Color::Yellow),
@@ -228,7 +235,8 @@ fn help_row_line(app: &App) -> Line<'static> {
                     }),
                 ),
                 Span::styled(" • q", Style::default().fg(app.theme.muted)),
-            ]
+            ]);
+            spans
         };
 
         return Line::from(spans);
@@ -444,7 +452,13 @@ fn usage_status_row_line(app: &App) -> Line<'static> {
             elapsed_label(updated_at.elapsed())
         )
     } else if !app.subscription_usage.is_empty() {
-        "Subscription usage loaded from cache".to_string()
+        if app.has_enabled_subscription_providers() {
+            "Subscription usage loaded from cache".to_string()
+        } else {
+            "Showing cached subscription usage; no remote providers enabled".to_string()
+        }
+    } else if !app.has_enabled_subscription_providers() {
+        "No remote subscription providers enabled; configure usageProviders".to_string()
     } else {
         "Press u to refresh subscription usage".to_string()
     };
@@ -486,6 +500,7 @@ fn elapsed_label(elapsed: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::usage::{UsageMetric, UsageOutput, UsageProviderId};
     use crate::tui::app::TuiConfig;
     use crate::tui::data::UsageData;
 
@@ -534,6 +549,7 @@ mod tests {
     fn usage_help_row_shows_subscription_and_local_refresh_keys() {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
 
         let text = line_text(help_row_line(&app));
 
@@ -541,6 +557,33 @@ mod tests {
         assert!(text.contains("[r:refresh local reports]"));
         assert!(text.contains("[R:local auto"));
         assert!(!text.contains("[r:refresh]"));
+    }
+
+    #[test]
+    fn usage_help_row_hides_subscription_refresh_without_enabled_providers() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+
+        let text = line_text(help_row_line(&app));
+
+        assert!(!text.contains("[u:refresh subscription]"));
+        assert!(text.contains("[r:refresh local reports]"));
+        assert!(text.contains("[R:local auto"));
+    }
+
+    #[test]
+    fn narrow_usage_help_row_hides_u_without_enabled_providers() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.terminal_width = 50;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+
+        let text = line_text(help_row_line(&app));
+
+        assert!(!text.contains("[u]"));
+        assert!(text.contains("[r:local]"));
+        assert!(text.contains("[R:local]"));
     }
 
     #[test]
@@ -562,10 +605,52 @@ mod tests {
     fn usage_status_row_does_not_reuse_local_cache_status() {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
         app.status_message = Some("Loaded from cache".to_string());
 
         let text = line_text(status_row_line(&app));
 
         assert_eq!(text, "Press u to refresh subscription usage");
+    }
+
+    #[test]
+    fn usage_status_row_reports_cache_display_mode_without_providers() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+        app.subscription_usage.push(UsageOutput {
+            provider: "Codex".to_string(),
+            account: None,
+            plan: None,
+            email: None,
+            metrics: vec![UsageMetric {
+                label: "Weekly".to_string(),
+                used_percent: 10.0,
+                remaining_percent: 90.0,
+                remaining_label: None,
+                resets_at: None,
+            }],
+        });
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(
+            text,
+            "Showing cached subscription usage; no remote providers enabled"
+        );
+    }
+
+    #[test]
+    fn usage_status_row_reports_missing_provider_configuration() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(
+            text,
+            "No remote subscription providers enabled; configure usageProviders"
+        );
     }
 }

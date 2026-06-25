@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use super::helpers::capitalize;
 use super::{UsageMetric, UsageOutput};
@@ -28,24 +29,58 @@ struct UsageResponse {
     user: Option<UserInfo>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum IntLike {
+    Integer(i64),
+    Float(f64),
+    String(String),
+}
+
+impl IntLike {
+    fn to_i64(&self) -> Option<i64> {
+        match self {
+            Self::Integer(value) => Some(*value),
+            Self::Float(value) if value.is_finite() => Some(value.trunc() as i64),
+            Self::Float(_) => None,
+            Self::String(value) => value
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .map(|value| value.trunc() as i64),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct QuotaDetail {
-    limit: Option<String>,
-    remaining: Option<String>,
-    #[serde(rename = "resetTime")]
-    reset_time: Option<String>,
+    limit: Option<IntLike>,
+    used: Option<IntLike>,
+    remaining: Option<IntLike>,
+    name: Option<String>,
+    title: Option<String>,
+    scope: Option<String>,
+    duration: Option<IntLike>,
+    #[serde(alias = "timeUnit")]
+    time_unit: Option<String>,
+    #[serde(alias = "resetAt", alias = "resetTime", alias = "reset_time")]
+    reset_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct LimitEntry {
     window: Option<LimitWindow>,
     detail: Option<QuotaDetail>,
+    scope: Option<String>,
+    #[serde(default, flatten)]
+    fallback_detail: QuotaDetail,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct LimitWindow {
-    duration: Option<i64>,
+    duration: Option<IntLike>,
+    #[serde(alias = "timeUnit")]
     time_unit: Option<String>,
 }
 
@@ -112,6 +147,34 @@ fn save_credentials(access_token: &str, refresh_token: &str, expires_in: i64) {
     }
 }
 
+fn kimi_oauth_device_headers() -> Vec<(&'static str, String)> {
+    let device_name = hostname::get()
+        .ok()
+        .and_then(|name| name.into_string().ok())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let device_model = std::env::consts::ARCH.to_string();
+    let os_version = std::env::consts::OS.to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(device_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(device_model.as_bytes());
+    hasher.update(b":");
+    hasher.update(os_version.as_bytes());
+    hasher.update(b":");
+    hasher.update(kimi_code_home().to_string_lossy().as_bytes());
+    let device_id = format!("{:x}", hasher.finalize());
+
+    vec![
+        ("X-Msh-Platform", "kimi_code_cli".to_string()),
+        ("X-Msh-Version", env!("CARGO_PKG_VERSION").to_string()),
+        ("X-Msh-Device-Name", device_name),
+        ("X-Msh-Device-Model", device_model),
+        ("X-Msh-Os-Version", os_version),
+        ("X-Msh-Device-Id", device_id),
+    ]
+}
+
 fn needs_refresh(expires_at: Option<f64>) -> bool {
     if let Some(expires_at) = expires_at {
         let now = chrono::Utc::now().timestamp() as f64;
@@ -122,8 +185,11 @@ fn needs_refresh(expires_at: Option<f64>) -> bool {
 }
 
 async fn refresh_token(client: &reqwest::Client, rt: &str) -> Result<RefreshResponse> {
-    let resp = client
-        .post("https://auth.kimi.com/api/oauth/token")
+    let mut request = client.post("https://auth.kimi.com/api/oauth/token");
+    for (name, value) in kimi_oauth_device_headers() {
+        request = request.header(name, value);
+    }
+    let resp = request
         .form(&[
             ("client_id", CLIENT_ID),
             ("grant_type", "refresh_token"),
@@ -145,7 +211,6 @@ async fn fetch_usage_result(
         .get("https://api.kimi.com/coding/v1/usages")
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/json")
-        .header("User-Agent", "tokscale")
         .send()
         .await?;
     let status = resp.status();
@@ -166,20 +231,86 @@ async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageRespo
 }
 
 fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> {
-    let limit: i64 = detail.limit.as_ref()?.parse().ok()?;
-    let remaining: i64 = detail.remaining.as_ref()?.parse().ok()?;
+    let limit = detail.limit.as_ref()?.to_i64()?;
     if limit <= 0 {
         return None;
     }
-    let used = (limit - remaining).max(0);
+    let used = if let Some(used) = detail.used.as_ref().and_then(IntLike::to_i64) {
+        used
+    } else {
+        let remaining = detail.remaining.as_ref()?.to_i64()?;
+        limit - remaining
+    }
+    .clamp(0, limit);
+    let remaining = limit - used;
     let used_pct = (used as f64 / limit as f64 * 100.0).clamp(0.0, 100.0);
     Some(UsageMetric {
-        label: label.into(),
+        label: detail_label(detail).unwrap_or(label).into(),
         used_percent: used_pct,
         remaining_percent: 100.0 - used_pct,
         remaining_label: Some(format!("{remaining}/{limit} left")),
-        resets_at: detail.reset_time.clone(),
+        resets_at: detail.reset_at.clone(),
     })
+}
+
+fn non_empty(value: Option<&String>) -> Option<&str> {
+    value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn detail_label(detail: &QuotaDetail) -> Option<&str> {
+    non_empty(detail.name.as_ref())
+        .or_else(|| non_empty(detail.title.as_ref()))
+        .or_else(|| non_empty(detail.scope.as_ref()))
+}
+
+fn duration_label(duration: Option<&IntLike>, time_unit: Option<&String>) -> Option<String> {
+    let duration = duration.and_then(IntLike::to_i64)?;
+    if duration <= 0 {
+        return None;
+    }
+
+    let unit = time_unit
+        .map(|unit| unit.trim().to_ascii_uppercase())
+        .unwrap_or_else(|| "SECOND".to_string());
+    match unit.as_str() {
+        "MINUTE" => {
+            if duration >= 60 && duration % 60 == 0 {
+                Some(format!("{}h limit", duration / 60))
+            } else {
+                Some(format!("{duration}m limit"))
+            }
+        }
+        "HOUR" => Some(format!("{duration}h limit")),
+        "DAY" => Some(format!("{duration}d limit")),
+        _ => Some(format!("{duration}s limit")),
+    }
+}
+
+fn limit_label(entry: &LimitEntry, index: usize) -> String {
+    non_empty(entry.fallback_detail.name.as_ref())
+        .or_else(|| non_empty(entry.fallback_detail.title.as_ref()))
+        .or_else(|| non_empty(entry.scope.as_ref()))
+        .or_else(|| entry.detail.as_ref().and_then(detail_label))
+        .map(str::to_string)
+        .or_else(|| {
+            entry.window.as_ref().and_then(|window| {
+                duration_label(window.duration.as_ref(), window.time_unit.as_ref())
+            })
+        })
+        .or_else(|| {
+            duration_label(
+                entry.fallback_detail.duration.as_ref(),
+                entry.fallback_detail.time_unit.as_ref(),
+            )
+        })
+        .or_else(|| {
+            entry.detail.as_ref().and_then(|detail| {
+                duration_label(detail.duration.as_ref(), detail.time_unit.as_ref())
+            })
+        })
+        .unwrap_or_else(|| format!("Limit {}", index + 1))
 }
 
 fn metric_dedup_key(label: &str, metric: &UsageMetric) -> String {
@@ -207,19 +338,15 @@ fn usage_output_from_response(resp: UsageResponse) -> UsageOutput {
     let mut metrics = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Parse limits[] - use window duration to determine label.
+    // Parse limits[] using the same detail/window shape as current Kimi Code.
     if let Some(ref limits) = resp.limits {
-        for entry in limits.iter() {
-            if let Some(ref detail) = entry.detail {
-                let label = match entry.window.as_ref().and_then(|w| w.duration) {
-                    Some(d) if d <= 3600 => "Session",
-                    _ => "Weekly",
-                };
-                if let Some(metric) = parse_quota_detail(label, detail) {
-                    let key = metric_dedup_key(label, &metric);
-                    if seen.insert(key) {
-                        metrics.push(metric);
-                    }
+        for (index, entry) in limits.iter().enumerate() {
+            let label = limit_label(entry, index);
+            let detail = entry.detail.as_ref().unwrap_or(&entry.fallback_detail);
+            if let Some(metric) = parse_quota_detail(&label, detail) {
+                let key = metric_dedup_key(&metric.label, &metric);
+                if seen.insert(key) {
+                    metrics.push(metric);
                 }
             }
         }
@@ -228,7 +355,7 @@ fn usage_output_from_response(resp: UsageResponse) -> UsageOutput {
     // Parse top-level usage as "Weekly" and deduplicate against limits[].
     if let Some(ref usage) = resp.usage {
         if let Some(metric) = parse_quota_detail("Weekly", usage) {
-            let key = metric_dedup_key("Weekly", &metric);
+            let key = metric_dedup_key(&metric.label, &metric);
             if seen.insert(key) {
                 metrics.push(metric);
             }
@@ -309,6 +436,33 @@ pub fn fetch() -> Result<UsageOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+
+    struct EnvGuard {
+        vars: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&'static str]) -> Self {
+            let vars = keys
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            Self { vars }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.vars {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn metric_dedup_key_includes_reset_window() {
@@ -334,9 +488,10 @@ mod tests {
     fn usage_output_labels_provider_as_kimi_code() {
         let output = usage_output_from_response(UsageResponse {
             usage: Some(QuotaDetail {
-                limit: Some("100".to_string()),
-                remaining: Some("80".to_string()),
-                reset_time: Some("2026-06-26T00:00:00Z".to_string()),
+                limit: Some(IntLike::String("100".to_string())),
+                remaining: Some(IntLike::String("80".to_string())),
+                reset_at: Some("2026-06-26T00:00:00Z".to_string()),
+                ..QuotaDetail::default()
             }),
             limits: None,
             user: Some(UserInfo {
@@ -350,5 +505,165 @@ mod tests {
         assert_eq!(output.plan.as_deref(), Some("ALLEGRETTO"));
         assert_eq!(output.metrics.len(), 1);
         assert_eq!(output.metrics[0].label, "Weekly");
+    }
+
+    #[test]
+    fn usage_output_parses_current_kimi_code_usage_shape() -> Result<()> {
+        let resp: UsageResponse = serde_json::from_str(
+            r#"{
+                "usage": {
+                    "used": 40,
+                    "limit": 1000,
+                    "name": "Weekly limit",
+                    "resetAt": "2026-06-30T00:00:00Z"
+                },
+                "limits": [
+                    {
+                        "detail": {
+                            "used": 1,
+                            "limit": 100
+                        },
+                        "window": {
+                            "duration": 300,
+                            "timeUnit": "MINUTE"
+                        }
+                    }
+                ]
+            }"#,
+        )?;
+
+        let output = usage_output_from_response(resp);
+
+        assert_eq!(output.metrics.len(), 2);
+        assert_eq!(output.metrics[0].label, "5h limit");
+        assert_eq!(
+            output.metrics[0].remaining_label.as_deref(),
+            Some("99/100 left")
+        );
+        assert!((output.metrics[0].used_percent - 1.0).abs() < f64::EPSILON);
+        assert_eq!(output.metrics[1].label, "Weekly limit");
+        assert_eq!(
+            output.metrics[1].remaining_label.as_deref(),
+            Some("960/1000 left")
+        );
+        assert!((output.metrics[1].used_percent - 4.0).abs() < f64::EPSILON);
+        assert_eq!(
+            output.metrics[1].resets_at.as_deref(),
+            Some("2026-06-30T00:00:00Z")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn usage_output_falls_back_to_remaining_and_respects_time_unit() -> Result<()> {
+        let resp: UsageResponse = serde_json::from_str(
+            r#"{
+                "limits": [
+                    {
+                        "detail": {
+                            "remaining": "200",
+                            "limit": "1000"
+                        },
+                        "window": {
+                            "duration": 24,
+                            "timeUnit": "HOUR"
+                        }
+                    }
+                ]
+            }"#,
+        )?;
+
+        let output = usage_output_from_response(resp);
+
+        assert_eq!(output.metrics.len(), 1);
+        assert_eq!(output.metrics[0].label, "24h limit");
+        assert_eq!(
+            output.metrics[0].remaining_label.as_deref(),
+            Some("200/1000 left")
+        );
+        assert!((output.metrics[0].used_percent - 80.0).abs() < f64::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn usage_output_clamps_malformed_used_counts() -> Result<()> {
+        let resp: UsageResponse = serde_json::from_str(
+            r#"{
+                "usage": {
+                    "used": 120,
+                    "limit": 100,
+                    "title": "Weekly cap"
+                }
+            }"#,
+        )?;
+
+        let output = usage_output_from_response(resp);
+
+        assert_eq!(output.metrics.len(), 1);
+        assert_eq!(output.metrics[0].label, "Weekly cap");
+        assert_eq!(
+            output.metrics[0].remaining_label.as_deref(),
+            Some("0/100 left")
+        );
+        assert!((output.metrics[0].used_percent - 100.0).abs() < f64::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn kimi_oauth_refresh_uses_device_headers() {
+        let headers = kimi_oauth_device_headers();
+        let keys = headers.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(key, _)| *key == "X-Msh-Platform")
+                .map(|(_, value)| value.as_str()),
+            Some("kimi_code_cli")
+        );
+        for key in [
+            "X-Msh-Version",
+            "X-Msh-Device-Name",
+            "X-Msh-Device-Model",
+            "X-Msh-Os-Version",
+            "X-Msh-Device-Id",
+        ] {
+            assert!(keys.contains(&key), "missing {key}");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn credentials_path_uses_kimi_code_home() {
+        let _guard = EnvGuard::new(&["KIMI_CODE_HOME"]);
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("KIMI_CODE_HOME", temp.path());
+
+        assert_eq!(
+            credentials_path(),
+            temp.path().join("credentials").join("kimi-code.json")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn api_key_credentials_require_tokscale_specific_env() {
+        let _guard = EnvGuard::new(&[
+            "KIMI_CODE_HOME",
+            "KIMI_API_KEY",
+            "TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY",
+        ]);
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("KIMI_CODE_HOME", temp.path());
+        std::env::remove_var("TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY");
+        std::env::set_var("KIMI_API_KEY", "generic-key");
+
+        assert!(!has_credentials());
+        assert!(read_api_key().is_none());
+
+        std::env::set_var("TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY", "coding-plan-key");
+
+        assert!(has_credentials());
+        assert_eq!(read_api_key().as_deref(), Some("coding-plan-key"));
     }
 }

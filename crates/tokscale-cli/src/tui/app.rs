@@ -548,6 +548,10 @@ impl App {
         self.blocking_loading = true;
     }
 
+    pub fn has_enabled_subscription_providers(&self) -> bool {
+        !self.subscription_provider_ids.is_empty()
+    }
+
     /// Marks an auto-refresh probe that found no source changes: resets the
     /// refresh clock without touching the data.
     pub fn mark_refresh_checked(&mut self) {
@@ -914,6 +918,11 @@ impl App {
         }
         self.usage_initial_fetch_started = true;
         self.fetch_subscription_usage();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_subscription_provider_ids_for_test(&mut self, ids: Vec<UsageProviderId>) {
+        self.subscription_provider_ids = ids;
     }
 
     #[cfg(test)]
