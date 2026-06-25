@@ -887,9 +887,6 @@ impl App {
 
     fn fetch_subscription_usage_with_status(&mut self, preserve_status: bool) {
         if self.usage_rx.is_some() {
-            if preserve_status {
-                self.usage_fetch_preserve_status = true;
-            }
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3597,14 +3594,36 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_refresh_on_usage_while_fetching_preserves_status() {
+    fn test_auto_refresh_on_usage_while_manual_fetching_keeps_result_status() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.begin_subscription_usage_fetch(rx, false);
+        tx.send(crate::commands::usage::UsageFetchBatch::default())
+            .unwrap();
+
+        app.on_tick();
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No usage data available")
+        );
+        assert!(!app.usage_fetch_preserve_status);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_while_auto_fetching_preserves_status() {
         let mut app = make_app();
         app.current_tab = Tab::Usage;
         app.auto_refresh = true;
         app.auto_refresh_interval = Duration::from_millis(1);
         app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.usage_rx = Some(rx);
+        app.begin_subscription_usage_fetch(rx, true);
         app.status_message = Some("Existing status".into());
 
         app.on_tick();

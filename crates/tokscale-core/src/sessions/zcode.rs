@@ -13,7 +13,7 @@ use std::path::Path;
 
 const CLIENT_ID: &str = "zcode";
 const PROVIDER_ID: &str = "zai";
-const UNKNOWN_MODEL: &str = "glm-5.2";
+const UNKNOWN_MODEL: &str = "unknown";
 
 #[derive(Debug, Deserialize)]
 struct ZcodeEntry {
@@ -287,7 +287,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
-        assert_eq!(msg.model_id.as_ref(), "glm-5.2");
+        assert_eq!(msg.model_id.as_ref(), "unknown");
         assert!(msg.tokens.input > 0);
         assert!(msg.tokens.output > 0);
         assert_eq!(msg.tokens.cache_read, 0);
@@ -403,6 +403,45 @@ mod tests {
         assert_eq!(messages[1].model_id.as_ref(), "glm-5-turbo");
         assert_ne!(messages[0].model_id, messages[1].model_id);
         assert_eq!(messages[2].model_id.as_ref(), "glm-5-turbo");
+    }
+
+    #[test]
+    fn requested_model_applies_until_assistant_reports_model() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}\n{}\n{}",
+            json!({
+                "role": "user",
+                "sessionId": "s",
+                "model": "GLM-5.2",
+                "content": "first request"
+            }),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "content": "first response",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+            json!({
+                "role": "user",
+                "sessionId": "s",
+                "model": "glm-5.2",
+                "content": "second request"
+            }),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "model": "glm-5-turbo",
+                "content": "second response",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+        );
+        let path = write_session(&dir, "proj", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id.as_ref(), "glm-5.2");
+        assert_eq!(messages[1].model_id.as_ref(), "glm-5-turbo");
     }
 
     #[test]
