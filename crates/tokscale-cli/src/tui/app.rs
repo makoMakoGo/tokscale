@@ -887,6 +887,7 @@ impl App {
 
     fn fetch_subscription_usage_with_status(&mut self, preserve_status: bool) {
         if self.usage_rx.is_some() {
+            self.usage_fetch_preserve_status &= preserve_status;
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3631,6 +3632,26 @@ mod tests {
         assert_eq!(app.status_message.as_deref(), Some("Existing status"));
         assert!(!app.needs_reload);
         assert!(app.usage_fetch_preserve_status);
+    }
+
+    #[test]
+    fn test_manual_fetch_while_auto_fetching_shows_result_status() {
+        let mut app = make_app();
+        app.status_message = Some("Existing status".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.begin_subscription_usage_fetch(rx, true);
+
+        app.fetch_subscription_usage();
+        tx.send(crate::commands::usage::UsageFetchBatch::default())
+            .unwrap();
+        app.on_tick();
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No usage data available")
+        );
+        assert!(!app.usage_fetch_preserve_status);
+        assert!(!app.is_fetching_usage());
     }
 
     #[test]

@@ -103,8 +103,13 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
             }
         }
 
-        if let Some(model) = entry.model.as_deref().filter(|model| !model.is_empty()) {
-            model_id = Some(canonicalize_model(model));
+        if let Some(model) = entry
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            model_id = Some(model.to_string());
         }
 
         let resolved_model = model_id.as_deref().unwrap_or(UNKNOWN_MODEL).to_string();
@@ -183,19 +188,23 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
     messages
 }
 
-fn canonicalize_model(model: &str) -> String {
-    model.to_lowercase()
-}
-
 fn content_chars(content: &serde_json::Value) -> usize {
     match content {
-        serde_json::Value::Null => 0,
-        serde_json::Value::String(value) if value.is_empty() => 0,
-        serde_json::Value::Array(items) if items.is_empty() => 0,
-        serde_json::Value::Object(map) if map.is_empty() => 0,
-        _ => serde_json::to_string(content)
-            .map(|serialized| serialized.chars().count())
-            .unwrap_or(0),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
+        serde_json::Value::String(value) => value.chars().count(),
+        serde_json::Value::Array(items) => items.iter().map(content_chars).sum(),
+        serde_json::Value::Object(map) => {
+            if let Some(text) = map.get("text") {
+                return content_chars(text);
+            }
+            if let Some(content) = map.get("content") {
+                return content_chars(content);
+            }
+            map.iter()
+                .filter(|(key, _)| key.as_str() != "type")
+                .map(|(_, value)| content_chars(value))
+                .sum()
+        }
     }
 }
 
@@ -288,25 +297,26 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.model_id.as_ref(), "unknown");
-        assert!(msg.tokens.input > 0);
-        assert!(msg.tokens.output > 0);
+        assert_eq!(msg.tokens.input, 2);
+        assert_eq!(msg.tokens.output, 1);
         assert_eq!(msg.tokens.cache_read, 0);
     }
 
     #[test]
-    fn canonicalize_model_lowercases_glm_names() {
-        assert_eq!(canonicalize_model("GLM-5.2"), "glm-5.2");
-        assert_eq!(canonicalize_model("GLM-5-Turbo"), "glm-5-turbo");
-        assert_eq!(canonicalize_model("glm-5.2"), "glm-5.2");
-    }
-
-    #[test]
-    fn content_chars_treats_empty_values_as_empty() {
+    fn content_chars_counts_text_values() {
         assert_eq!(content_chars(&json!("")), 0);
         assert_eq!(content_chars(&serde_json::Value::Null), 0);
         assert_eq!(content_chars(&json!([])), 0);
         assert_eq!(content_chars(&json!({})), 0);
-        assert!(content_chars(&json!("abcd")) > 0);
+        assert_eq!(content_chars(&json!("abcd")), 4);
+        assert_eq!(content_chars(&json!([{"type": "text", "text": "abcd"}])), 4);
+        assert_eq!(content_chars(&json!({"type": "text", "text": "abcd"})), 4);
+        assert_eq!(
+            content_chars(
+                &json!({"type": "message", "content": [{"type": "text", "text": "abcd"}]})
+            ),
+            4
+        );
     }
 
     #[test]
@@ -399,7 +409,7 @@ mod tests {
         let messages = parse_zcode_file(&path);
 
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].model_id.as_ref(), "glm-5.2");
+        assert_eq!(messages[0].model_id.as_ref(), "GLM-5.2");
         assert_eq!(messages[1].model_id.as_ref(), "glm-5-turbo");
         assert_ne!(messages[0].model_id, messages[1].model_id);
         assert_eq!(messages[2].model_id.as_ref(), "glm-5-turbo");
@@ -440,7 +450,7 @@ mod tests {
         let messages = parse_zcode_file(&path);
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].model_id.as_ref(), "glm-5.2");
+        assert_eq!(messages[0].model_id.as_ref(), "GLM-5.2");
         assert_eq!(messages[1].model_id.as_ref(), "glm-5-turbo");
     }
 
