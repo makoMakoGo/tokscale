@@ -61,13 +61,19 @@ impl ZcodeUsage {
             .and_then(|details| details.cached_tokens)
             .unwrap_or(0)
             .max(0);
+        let raw_cache_read = self.cache_read.unwrap_or(0).max(0).max(nested_cache_read);
+        let effective_cache_read = if let Some(prompt_tokens) = self.prompt_tokens {
+            raw_cache_read.min(prompt_tokens.max(0))
+        } else {
+            raw_cache_read
+        };
         let input = if let Some(prompt_tokens) = self.prompt_tokens {
-            prompt_tokens.max(0).saturating_sub(nested_cache_read)
+            prompt_tokens.max(0).saturating_sub(effective_cache_read)
         } else {
             self.input.unwrap_or(0).max(0)
         };
         let output = self.output.unwrap_or(0).max(0);
-        let cache_read = self.cache_read.unwrap_or(0).max(0).max(nested_cache_read);
+        let cache_read = effective_cache_read;
         let cache_write = self.cache_write.unwrap_or(0).max(0);
         let reasoning = self.reasoning.unwrap_or(0).max(0);
 
@@ -423,6 +429,58 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 120);
         assert_eq!(messages[0].tokens.output, 100);
         assert_eq!(messages[0].tokens.cache_read, 80);
+    }
+
+    #[test]
+    fn flat_cache_read_is_subtracted_from_prompt_tokens() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "content": "bye",
+                "usage": {
+                    "prompt_tokens": 200,
+                    "completion_tokens": 100,
+                    "input_cache_read": 80
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(messages[0].tokens.cache_read, 80);
+    }
+
+    #[test]
+    fn cache_read_is_clamped_to_prompt_tokens() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "content": "bye",
+                "usage": {
+                    "prompt_tokens": 50,
+                    "completion_tokens": 25,
+                    "input_cache_read": 80
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 0);
+        assert_eq!(messages[0].tokens.output, 25);
+        assert_eq!(messages[0].tokens.cache_read, 50);
     }
 
     #[test]
