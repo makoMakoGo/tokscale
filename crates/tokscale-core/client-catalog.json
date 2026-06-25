@@ -231,6 +231,17 @@
     "color": "#084CCF"
   },
   {
+    "variant": "Zcode",
+    "id": "zcode",
+    "displayName": "ZCode",
+    "shortName": "ZCode",
+    "hotkey": "q",
+    "submitDefault": true,
+    "logo": "https://github.com/zai-org.png",
+    "color": "#111827",
+    "textColor": "#FFFFFF"
+  },
+  {
     "variant": "Kiro",
     "id": "kiro",
     "displayName": "Kiro",

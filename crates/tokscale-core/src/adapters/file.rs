@@ -237,6 +237,12 @@ pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::ne
     1,
     sessions::commandcode::parse_commandcode_file,
 );
+pub(crate) static ZCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+    ClientId::Zcode,
+    ParserId::Zcode,
+    1,
+    sessions::zcode::parse_zcode_file,
+);
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -247,6 +253,8 @@ mod tests {
     use crate::message_cache;
 
     const AMP_CONTENT: &str = r#"{"version":1,"threadID":"T-test","requestID":"req-1","timestamp":"2026-01-01T00:00:00Z","model":"claude-sonnet-4-5","inputTokens":10,"outputTokens":5,"cacheReadTokens":2,"cacheWriteTokens":1,"credits":0.05}"#;
+    const ZCODE_CONTENT: &str = r#"{"role":"user","sessionId":"s","content":"hello"}
+{"role":"assistant","sessionId":"s","model":"GLM-5.2","content":"hi","usage":{"input_tokens":10,"output_tokens":5}}"#;
 
     fn scan_context<'a>(
         home_dir: &'a Path,
@@ -361,6 +369,39 @@ mod tests {
             antigravity_cli.parser_version
         );
         assert_ne!(kiro_file.parser_version, kiro_sqlite.parser_version);
+    }
+
+    #[test]
+    fn zcode_adapter_discovers_default_project_transcripts() {
+        let home = tempfile::TempDir::new().unwrap();
+        let default_path = home.path().join(".zcode/projects/project-a/session.jsonl");
+        write_file(&default_path, ZCODE_CONTENT);
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+
+        let units = ZCODE_ADAPTER.discover(&ctx);
+        let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
+
+        assert_eq!(paths, vec![default_path]);
+        assert!(units
+            .iter()
+            .all(|unit| unit.parser_version == ParserVersion::new(ParserId::Zcode, 1)));
+    }
+
+    #[test]
+    fn zcode_adapter_output_matches_parser() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, ZCODE_CONTENT);
+        let units = vec![SourceUnit::plain_file(ClientId::Zcode, path.clone())
+            .with_parser_version(ParserVersion::new(ParserId::Zcode, 1))];
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let actual = fold_with_adapter(&ZCODE_ADAPTER, units, &mut cache);
+        let mut expected = sessions::zcode::parse_zcode_file(&path);
+        refresh(&mut expected);
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

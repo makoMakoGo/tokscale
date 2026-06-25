@@ -219,6 +219,7 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::Codebuff => ParserId::Codebuff,
         ClientId::Antigravity => ParserId::Antigravity,
         ClientId::Zed => ParserId::Zed,
+        ClientId::Zcode => ParserId::Zcode,
         ClientId::Kiro => ParserId::Kiro,
         ClientId::Junie => ParserId::Junie,
         ClientId::Trae => ParserId::Trae,
@@ -265,7 +266,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 28] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -291,6 +292,7 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 28] = [
     &kilo::KILO_ADAPTER,
     &hermes::HERMES_ADAPTER,
     &goose::GOOSE_ADAPTER,
+    &file::ZCODE_ADAPTER,
     &kiro::KIRO_ADAPTER,
     &junie::JUNIE_ADAPTER,
     &file::COMMANDCODE_ADAPTER,
