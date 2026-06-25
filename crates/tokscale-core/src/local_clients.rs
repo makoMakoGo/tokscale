@@ -345,6 +345,16 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
     LocalClientEntry {
+        client: ClientId::Zcode,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".zcode/projects",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
         client: ClientId::Kiro,
         def: LocalClientDef {
             root: PathRoot::Home,
@@ -495,6 +505,17 @@ mod tests {
         assert_eq!(def.pattern, "events.jsonl");
         assert!(ClientId::Junie.parse_local());
         assert!(ClientId::Junie.submit_default());
+    }
+
+    #[test]
+    fn zcode_client_reads_project_jsonl_transcripts() {
+        let def = ClientId::Zcode
+            .local_def()
+            .expect("zcode has local scan policy");
+        assert_eq!(def.relative_path, ".zcode/projects");
+        assert_eq!(def.pattern, "*.jsonl");
+        assert!(ClientId::Zcode.parse_local());
+        assert!(ClientId::Zcode.submit_default());
     }
 
     #[test]

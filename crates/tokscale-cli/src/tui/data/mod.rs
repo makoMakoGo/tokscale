@@ -599,6 +599,12 @@ mod tests {
             .unwrap();
         assert_eq!(clients[pi_index + 1], ClientId::Omp);
         assert_eq!(clients[pi_index + 2], ClientId::Kimi);
+        let zed_index = clients
+            .iter()
+            .position(|client| *client == ClientId::Zed)
+            .unwrap();
+        assert_eq!(clients[zed_index + 1], ClientId::Zcode);
+        assert_eq!(clients[zed_index + 2], ClientId::Kiro);
         assert_eq!(clients[clients.len() - 2], ClientId::CommandCode);
         assert_eq!(clients.last(), Some(&ClientId::Grok));
     }
@@ -675,6 +681,10 @@ mod tests {
             crate::tui::client_ui::display_name(ClientId::Zed),
             "Zed Agent"
         );
+        assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::Zcode),
+            "ZCode"
+        );
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Kiro), "Kiro");
         assert_eq!(crate::tui::client_ui::display_name(ClientId::Trae), "Trae");
         assert_eq!(
@@ -710,6 +720,7 @@ mod tests {
             Some('a')
         );
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zed), Some('z'));
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zcode), Some('q'));
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), Some('i'));
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), Some('y'));
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), Some('n'));
@@ -790,6 +801,10 @@ mod tests {
             Some(ClientId::Antigravity)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('z'), Some(ClientId::Zed));
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('q'),
+            Some(ClientId::Zcode)
+        );
         assert_eq!(
             crate::tui::client_ui::from_hotkey('i'),
             Some(ClientId::Kiro)

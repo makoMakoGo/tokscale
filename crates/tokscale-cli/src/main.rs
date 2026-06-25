@@ -5428,6 +5428,7 @@ mod tests {
         assert_eq!(parse_client_id_arg("opencode").unwrap(), ClientId::OpenCode);
         assert_eq!(parse_client_id_arg("OPENCODE").unwrap(), ClientId::OpenCode);
         assert_eq!(parse_client_id_arg("grok").unwrap(), ClientId::Grok);
+        assert_eq!(parse_client_id_arg("zcode").unwrap(), ClientId::Zcode);
     }
 
     #[test]

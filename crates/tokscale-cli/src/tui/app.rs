@@ -349,6 +349,7 @@ pub struct App {
     pub auto_refresh: bool,
     pub auto_refresh_interval: Duration,
     pub last_refresh: Instant,
+    pub last_usage_refresh: Instant,
 
     pub status_message: Option<String>,
     pub status_message_time: Option<Instant>,
@@ -387,6 +388,7 @@ pub struct App {
 
     pub usage_fetch_attempted: bool,
     usage_rx: Option<std::sync::mpsc::Receiver<crate::commands::usage::UsageFetchBatch>>,
+    usage_fetch_preserve_status: bool,
 }
 
 impl App {
@@ -485,6 +487,7 @@ impl App {
             auto_refresh,
             auto_refresh_interval,
             last_refresh: Instant::now(),
+            last_usage_refresh: Instant::now(),
             status_message: if has_data {
                 Some("Loaded from cache".to_string())
             } else {
@@ -519,6 +522,7 @@ impl App {
             subscription_usage_errors: Vec::new(),
             usage_fetch_attempted: false,
             usage_rx: None,
+            usage_fetch_preserve_status: false,
         };
         app.build_model_shade_map();
         Ok(app)
@@ -541,7 +545,8 @@ impl App {
     /// Marks an auto-refresh probe that found no source changes: resets the
     /// refresh clock without touching the data.
     pub fn mark_refresh_checked(&mut self) {
-        self.last_refresh = Instant::now();
+        let now = Instant::now();
+        self.last_refresh = now;
     }
 
     pub fn is_blocking_loading(&self) -> bool {
@@ -567,7 +572,8 @@ impl App {
 
     pub fn update_data(&mut self, data: UsageData) {
         self.data = data;
-        self.last_refresh = Instant::now();
+        let now = Instant::now();
+        self.last_refresh = now;
         self.build_model_shade_map();
 
         // Exit Daily-detail mode if the refresh dropped the day we were
@@ -638,6 +644,25 @@ impl App {
         self.data.error = error;
     }
 
+    fn refresh_current_tab_if_overdue(&mut self) {
+        if !self.auto_refresh {
+            return;
+        }
+
+        let now = Instant::now();
+        if self.current_tab == Tab::Usage {
+            if self.last_usage_refresh.elapsed() >= self.auto_refresh_interval {
+                self.last_usage_refresh = now;
+                self.fetch_subscription_usage_preserving_status();
+            }
+        } else if self.last_refresh.elapsed() >= self.auto_refresh_interval
+            && !self.background_loading
+        {
+            self.last_refresh = now;
+            self.needs_reload = true;
+        }
+    }
+
     pub fn on_tick(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % 20;
 
@@ -648,12 +673,7 @@ impl App {
             }
         }
 
-        if self.auto_refresh
-            && !self.background_loading
-            && self.last_refresh.elapsed() >= self.auto_refresh_interval
-        {
-            self.needs_reload = true;
-        }
+        self.refresh_current_tab_if_overdue();
 
         self.consume_dialog_reload_if_ready();
 
@@ -661,36 +681,48 @@ impl App {
         if let Some(ref rx) = self.usage_rx {
             match rx.try_recv() {
                 Ok(batch) => {
+                    let preserve_status = self.usage_fetch_preserve_status;
+                    self.usage_fetch_preserve_status = false;
                     self.usage_rx = None;
                     self.subscription_usage = batch.outputs;
                     self.subscription_usage_errors = batch.errors;
                     if !self.subscription_usage.is_empty() {
                         crate::commands::usage::save_cache(&self.subscription_usage);
-                        if self.subscription_usage_errors.is_empty() {
-                            self.status_message = Some("Usage data loaded".into());
-                        } else {
-                            self.status_message =
-                                Some("Usage data loaded with provider errors".into());
+                        if !preserve_status {
+                            if self.subscription_usage_errors.is_empty() {
+                                self.status_message = Some("Usage data loaded".into());
+                            } else {
+                                self.status_message =
+                                    Some("Usage data loaded with provider errors".into());
+                            }
                         }
                     } else {
                         crate::commands::usage::clear_cache();
-                        if self.subscription_usage_errors.is_empty() {
-                            self.status_message = Some("No usage data available".into());
-                        } else {
-                            self.status_message = Some("Usage fetch failed".into());
+                        if !preserve_status {
+                            if self.subscription_usage_errors.is_empty() {
+                                self.status_message = Some("No usage data available".into());
+                            } else {
+                                self.status_message = Some("Usage fetch failed".into());
+                            }
                         }
                     }
-                    self.status_message_time = Some(std::time::Instant::now());
+                    if !preserve_status {
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let preserve_status = self.usage_fetch_preserve_status;
+                    self.usage_fetch_preserve_status = false;
                     self.usage_rx = None;
                     self.subscription_usage_errors =
                         vec![crate::commands::usage::UsageProviderError {
                             provider: "unknown".to_string(),
                             message: "usage fetch worker disconnected".to_string(),
                         }];
-                    self.status_message = Some("Usage fetch failed".into());
-                    self.status_message_time = Some(std::time::Instant::now());
+                    if !preserve_status {
+                        self.status_message = Some("Usage fetch failed".into());
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -774,6 +806,9 @@ impl App {
                 self.cycle_theme();
             }
             KeyCode::Char('r') => {
+                let now = Instant::now();
+                self.last_refresh = now;
+                self.last_usage_refresh = now;
                 if self.background_loading {
                     self.set_status("Refresh already in progress");
                 } else {
@@ -817,6 +852,7 @@ impl App {
                 self.open_group_by_picker();
             }
             KeyCode::Char('u') if self.current_tab == Tab::Usage => {
+                self.last_usage_refresh = Instant::now();
                 self.fetch_subscription_usage();
             }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
@@ -853,18 +889,38 @@ impl App {
     }
 
     pub fn fetch_subscription_usage(&mut self) {
+        self.fetch_subscription_usage_with_status(false);
+    }
+
+    fn fetch_subscription_usage_preserving_status(&mut self) {
+        self.fetch_subscription_usage_with_status(true);
+    }
+
+    fn fetch_subscription_usage_with_status(&mut self, preserve_status: bool) {
         if self.usage_rx.is_some() {
-            return; // already fetching
+            self.usage_fetch_preserve_status &= preserve_status;
+            return;
         }
-        self.usage_fetch_attempted = true;
-        self.status_message = Some("Fetching usage data...".into());
-        self.status_message_time = Some(std::time::Instant::now());
         let (tx, rx) = std::sync::mpsc::channel();
-        self.usage_rx = Some(rx);
+        self.begin_subscription_usage_fetch(rx, preserve_status);
         std::thread::spawn(move || {
             let batch = crate::commands::usage::fetch_all();
             let _ = tx.send(batch);
         });
+    }
+
+    fn begin_subscription_usage_fetch(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<crate::commands::usage::UsageFetchBatch>,
+        preserve_status: bool,
+    ) {
+        self.usage_fetch_attempted = true;
+        self.usage_fetch_preserve_status = preserve_status;
+        if !preserve_status {
+            self.status_message = Some("Fetching usage data...".into());
+            self.status_message_time = Some(std::time::Instant::now());
+        }
+        self.usage_rx = Some(rx);
     }
 
     pub fn is_fetching_usage(&self) -> bool {
@@ -1060,6 +1116,7 @@ impl App {
             .unwrap_or_else(|| Self::default_sort_for_tab(target));
         self.sort_field = field;
         self.sort_direction = dir;
+        self.refresh_current_tab_if_overdue();
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
@@ -1491,6 +1548,11 @@ impl App {
 
     fn toggle_auto_refresh(&mut self) {
         self.auto_refresh = !self.auto_refresh;
+        if self.auto_refresh {
+            let now = Instant::now();
+            self.last_refresh = now;
+            self.last_usage_refresh = now;
+        }
         self.settings.auto_refresh_enabled = self.auto_refresh;
         let save_result = self.settings.save();
         let msg = if self.auto_refresh {
@@ -3516,6 +3578,166 @@ mod tests {
         let initial = app.auto_refresh;
         app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
         assert_ne!(app.auto_refresh, initial);
+    }
+
+    #[test]
+    fn test_usage_fetch_preserving_status_when_idle_does_not_overwrite_status() {
+        let mut app = make_app();
+        app.status_message = Some("Existing status".into());
+        let (_tx, rx) = std::sync::mpsc::channel();
+
+        app.begin_subscription_usage_fetch(rx, true);
+
+        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert!(app.usage_fetch_attempted);
+        assert!(app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_usage_fetch_preserving_status_on_completion_does_not_overwrite_status() {
+        let mut app = make_app();
+        app.status_message = Some("Existing status".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.begin_subscription_usage_fetch(rx, true);
+        tx.send(crate::commands::usage::UsageFetchBatch::default())
+            .unwrap();
+
+        app.on_tick();
+
+        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_while_manual_fetching_keeps_result_status() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_usage_refresh = Instant::now() - Duration::from_secs(1);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.begin_subscription_usage_fetch(rx, false);
+        tx.send(crate::commands::usage::UsageFetchBatch::default())
+            .unwrap();
+
+        app.on_tick();
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No usage data available")
+        );
+        assert!(!app.usage_fetch_preserve_status);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_auto_refresh_on_usage_while_auto_fetching_preserves_status() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_usage_refresh = Instant::now() - Duration::from_secs(1);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.begin_subscription_usage_fetch(rx, true);
+        app.status_message = Some("Existing status".into());
+
+        app.on_tick();
+
+        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert!(!app.needs_reload);
+        assert!(app.usage_fetch_preserve_status);
+    }
+
+    #[test]
+    fn test_manual_fetch_while_auto_fetching_shows_result_status() {
+        let mut app = make_app();
+        app.status_message = Some("Existing status".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.begin_subscription_usage_fetch(rx, true);
+
+        app.fetch_subscription_usage();
+        tx.send(crate::commands::usage::UsageFetchBatch::default())
+            .unwrap();
+        app.on_tick();
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No usage data available")
+        );
+        assert!(!app.usage_fetch_preserve_status);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_auto_refresh_on_overview_refreshes_token_data_only() {
+        let mut app = make_app();
+        app.current_tab = Tab::Overview;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_millis(1);
+        app.last_refresh = Instant::now() - Duration::from_secs(1);
+
+        app.on_tick();
+
+        assert!(app.needs_reload);
+        assert!(!app.usage_fetch_attempted);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_usage_auto_refresh_does_not_delay_local_report_refresh() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_secs(60);
+        let stale = Instant::now() - Duration::from_secs(120);
+        app.last_usage_refresh = stale;
+        app.last_refresh = stale;
+
+        app.on_tick();
+
+        assert!(app.usage_fetch_attempted);
+        assert!(!app.needs_reload);
+
+        app.switch_tab(Tab::Overview);
+
+        assert!(app.needs_reload);
+    }
+
+    #[test]
+    fn test_local_report_refresh_does_not_delay_usage_refresh() {
+        let mut app = make_app_with_usage();
+        app.current_tab = Tab::Overview;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_secs(60);
+        let stale = Instant::now() - Duration::from_secs(120);
+        app.last_usage_refresh = stale;
+        app.last_refresh = stale;
+
+        app.on_tick();
+        assert!(app.needs_reload);
+        assert!(!app.usage_fetch_attempted);
+
+        app.needs_reload = false;
+        app.update_data(UsageData::default());
+        app.switch_tab(Tab::Usage);
+
+        assert!(app.usage_fetch_attempted);
+    }
+
+    #[test]
+    fn test_enabling_auto_refresh_waits_for_next_interval() {
+        let mut app = make_app();
+        app.auto_refresh = false;
+        app.auto_refresh_interval = Duration::from_secs(60);
+        app.last_refresh = Instant::now() - Duration::from_secs(120);
+        app.last_usage_refresh = app.last_refresh;
+
+        app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
+        app.on_tick();
+
+        assert!(app.auto_refresh);
+        assert!(!app.needs_reload);
+        assert!(!app.usage_fetch_attempted);
     }
 
     #[test]

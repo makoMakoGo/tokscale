@@ -65,6 +65,7 @@ pub(crate) enum ParserId {
     Cline,
     CommandCode,
     Grok,
+    Zcode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

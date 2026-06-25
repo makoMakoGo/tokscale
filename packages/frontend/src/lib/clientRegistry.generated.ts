@@ -25,6 +25,7 @@ export const BASE_CLIENT_TYPES = [
   "codebuff",
   "antigravity",
   "zed",
+  "zcode",
   "kiro",
   "junie",
   "trae",
@@ -221,6 +222,14 @@ export const CLIENT_REGISTRY = {
     logo: "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
     color: "#084CCF",
     textColor: undefined,
+    submitDefault: true,
+  },
+  "zcode": {
+    displayName: "ZCode",
+    shortName: "ZCode",
+    logo: "https://github.com/zai-org.png",
+    color: "#111827",
+    textColor: "#FFFFFF",
     submitDefault: true,
   },
   "kiro": {
