@@ -82,6 +82,12 @@ pub struct Settings {
     /// the user explicitly wants subscription usage lookups.
     #[serde(default)]
     pub usage_tab_enabled: bool,
+    /// Subscription quota providers the TUI may fetch from the Usage tab.
+    /// Empty means "show cached Usage content only; never fetch remote
+    /// subscription quota providers". Stored as stable lowercase provider ids
+    /// such as `codex`, `zai`, and `minimax-token-plan-cn`.
+    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
+    pub usage_providers: Vec<String>,
     #[cfg(test)]
     #[serde(skip)]
     pub save_path_override: Option<PathBuf>,
@@ -130,6 +136,7 @@ impl Default for Settings {
             default_clients: Vec::new(),
             light: LightSettings::default(),
             usage_tab_enabled: false,
+            usage_providers: Vec::new(),
             #[cfg(test)]
             save_path_override: None,
         }
@@ -714,5 +721,53 @@ mod tests {
         let serialized = serde_json::to_string(&parsed).unwrap();
         let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(round_trip["usageTabEnabled"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn settings_usage_providers_default_to_empty() {
+        let json = r#"{ "colorPalette": "blue" }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+
+        assert!(parsed.usage_providers.is_empty());
+        assert!(Settings::default().usage_providers.is_empty());
+    }
+
+    #[test]
+    fn settings_usage_providers_round_trip() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "usageTabEnabled": true,
+            "usageProviders": ["codex", "zai", "minimax-token-plan-cn"]
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.usage_providers,
+            vec![
+                "codex".to_string(),
+                "zai".to_string(),
+                "minimax-token-plan-cn".to_string(),
+            ]
+        );
+
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            round_trip["usageProviders"],
+            serde_json::json!(["codex", "zai", "minimax-token-plan-cn"])
+        );
+    }
+
+    #[test]
+    fn settings_usage_providers_drop_non_string_elements_silently() {
+        let json = r#"{
+            "colorPalette": "blue",
+            "usageProviders": ["codex", 123, null, "zai", true]
+        }"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            parsed.usage_providers,
+            vec!["codex".to_string(), "zai".to_string()]
+        );
     }
 }

@@ -5,7 +5,6 @@ mod copilot;
 mod grok;
 pub mod helpers;
 mod kimi;
-mod minimax;
 mod minimax_tokenplan;
 mod warp;
 mod zai;
@@ -61,6 +60,54 @@ impl UsageProviderError {
 pub struct UsageFetchBatch {
     pub outputs: Vec<UsageOutput>,
     pub errors: Vec<UsageProviderError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UsageProviderId {
+    Claude,
+    Codex,
+    Zai,
+    Amp,
+    Copilot,
+    Grok,
+    Kimi,
+    MiniMaxTokenPlanCn,
+    MiniMaxTokenPlanGlobal,
+    Warp,
+}
+
+impl UsageProviderId {
+    pub fn from_setting(raw: &str) -> Option<Self> {
+        let normalized = raw.trim().to_lowercase().replace(['_', ' ', '.'], "-");
+        match normalized.as_str() {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "zai" | "z-ai" | "glm" => Some(Self::Zai),
+            "amp" => Some(Self::Amp),
+            "copilot" => Some(Self::Copilot),
+            "grok" | "grok-build" => Some(Self::Grok),
+            "kimi" => Some(Self::Kimi),
+            "minimax-token-plan-cn" | "minimax-cn-token-plan" => Some(Self::MiniMaxTokenPlanCn),
+            "minimax-token-plan-global" | "minimax-global-token-plan" => {
+                Some(Self::MiniMaxTokenPlanGlobal)
+            }
+            "warp" | "oz" | "warp-oz" => Some(Self::Warp),
+            _ => None,
+        }
+    }
+}
+
+pub fn parse_provider_settings(raw: &[String]) -> Vec<UsageProviderId> {
+    let mut ids = Vec::new();
+    for value in raw {
+        let Some(id) = UsageProviderId::from_setting(value) else {
+            continue;
+        };
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 impl UsageAccount {
@@ -197,68 +244,152 @@ impl Fetch {
     }
 }
 
-type UsageProvider = (&'static str, fn() -> bool, Fetch);
-
-pub fn fetch_all() -> UsageFetchBatch {
-    let providers: Vec<UsageProvider> = vec![
-        (
-            "Claude",
-            claude::has_credentials,
-            Fetch::Single(claude::fetch),
-        ),
-        (
-            "Codex",
-            codex::has_credentials,
-            Fetch::Multi(codex::fetch_all),
-        ),
-        ("Z.ai", zai::has_credentials, Fetch::Single(zai::fetch)),
-        ("Amp", amp::has_credentials, Fetch::Single(amp::fetch)),
-        (
-            "Copilot",
-            copilot::has_credentials,
-            Fetch::Single(copilot::fetch),
-        ),
-        (
-            "Grok Build",
-            grok::has_credentials,
-            Fetch::Single(grok::fetch),
-        ),
-        ("Kimi", kimi::has_credentials, Fetch::Single(kimi::fetch)),
-        (
-            "MiniMax",
-            minimax::has_credentials,
-            Fetch::Single(minimax::fetch),
-        ),
-        (
-            "MiniMax Token Plan CN",
-            minimax_tokenplan::has_cn_credentials,
-            Fetch::Single(minimax_tokenplan::fetch_cn),
-        ),
-        (
-            "MiniMax Token Plan Global",
-            minimax_tokenplan::has_global_credentials,
-            Fetch::Single(minimax_tokenplan::fetch_global),
-        ),
-        ("Warp/Oz", warp::has_credentials, Fetch::Single(warp::fetch)),
-    ];
-
-    fetch_providers(providers)
+#[derive(Clone, Copy)]
+struct UsageProvider {
+    id: UsageProviderId,
+    label: &'static str,
+    has_credentials: fn() -> bool,
+    missing_credentials: &'static str,
+    fetch: Fetch,
 }
 
-fn fetch_providers(providers: Vec<UsageProvider>) -> UsageFetchBatch {
-    let active: Vec<_> = providers.into_iter().filter(|(_, has, _)| has()).collect();
+fn all_providers() -> Vec<UsageProvider> {
+    vec![
+        UsageProvider {
+            id: UsageProviderId::Claude,
+            label: "Claude",
+            has_credentials: claude::has_credentials,
+            missing_credentials: "enabled in usageProviders but no Claude Code OAuth credentials were found",
+            fetch: Fetch::Single(claude::fetch),
+        },
+        UsageProvider {
+            id: UsageProviderId::Codex,
+            label: "Codex",
+            has_credentials: codex::has_credentials,
+            missing_credentials: "enabled in usageProviders but no Codex OAuth credentials were found",
+            fetch: Fetch::Multi(codex::fetch_all),
+        },
+        UsageProvider {
+            id: UsageProviderId::Zai,
+            label: "Z.ai GLM Coding Plan",
+            has_credentials: zai::has_credentials,
+            missing_credentials: "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
+            fetch: Fetch::Single(zai::fetch),
+        },
+        UsageProvider {
+            id: UsageProviderId::Amp,
+            label: "Amp",
+            has_credentials: amp::has_credentials,
+            missing_credentials: "enabled in usageProviders but no Amp credentials were found",
+            fetch: Fetch::Single(amp::fetch),
+        },
+        UsageProvider {
+            id: UsageProviderId::Copilot,
+            label: "Copilot",
+            has_credentials: copilot::has_credentials,
+            missing_credentials: "enabled in usageProviders but no GitHub Copilot credentials were found",
+            fetch: Fetch::Single(copilot::fetch),
+        },
+        UsageProvider {
+            id: UsageProviderId::Grok,
+            label: "Grok Build",
+            has_credentials: grok::has_credentials,
+            missing_credentials: "enabled in usageProviders but no Grok Build credentials were found",
+            fetch: Fetch::Single(grok::fetch),
+        },
+        UsageProvider {
+            id: UsageProviderId::Kimi,
+            label: "Kimi Code",
+            has_credentials: kimi::has_credentials,
+            missing_credentials: "enabled in usageProviders but TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY is not set and no Kimi Code OAuth credentials were found",
+            fetch: Fetch::Single(kimi::fetch),
+        },
+        UsageProvider {
+            id: UsageProviderId::MiniMaxTokenPlanCn,
+            label: "MiniMax Token Plan CN",
+            has_credentials: minimax_tokenplan::has_cn_credentials,
+            missing_credentials: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY is not set",
+            fetch: Fetch::Single(minimax_tokenplan::fetch_cn),
+        },
+        UsageProvider {
+            id: UsageProviderId::MiniMaxTokenPlanGlobal,
+            label: "MiniMax Token Plan Global",
+            has_credentials: minimax_tokenplan::has_global_credentials,
+            missing_credentials: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY is not set",
+            fetch: Fetch::Single(minimax_tokenplan::fetch_global),
+        },
+        UsageProvider {
+            id: UsageProviderId::Warp,
+            label: "Warp/Oz",
+            has_credentials: warp::has_credentials,
+            missing_credentials: "enabled in usageProviders but no Warp/Oz credentials were found",
+            fetch: Fetch::Single(warp::fetch),
+        },
+    ]
+}
+
+pub fn fetch_all() -> UsageFetchBatch {
+    fetch_providers(all_providers(), MissingCredentialMode::Ignore)
+}
+
+pub fn fetch_enabled(enabled: &[UsageProviderId]) -> UsageFetchBatch {
+    if enabled.is_empty() {
+        return UsageFetchBatch::default();
+    }
+    fetch_providers(
+        enabled_providers(all_providers(), enabled),
+        MissingCredentialMode::Report,
+    )
+}
+
+fn enabled_providers(
+    providers: Vec<UsageProvider>,
+    enabled: &[UsageProviderId],
+) -> Vec<UsageProvider> {
+    let enabled: std::collections::HashSet<_> = enabled.iter().copied().collect();
+    providers
+        .into_iter()
+        .filter(|provider| enabled.contains(&provider.id))
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum MissingCredentialMode {
+    Ignore,
+    Report,
+}
+
+fn fetch_providers(
+    providers: Vec<UsageProvider>,
+    missing_mode: MissingCredentialMode,
+) -> UsageFetchBatch {
+    let mut batch = UsageFetchBatch::default();
+    let mut active = Vec::new();
+    for provider in providers {
+        if (provider.has_credentials)() {
+            active.push(provider);
+        } else if matches!(missing_mode, MissingCredentialMode::Report) {
+            batch.errors.push(UsageProviderError::new(
+                provider.label,
+                provider.missing_credentials,
+            ));
+        }
+    }
 
     if active.is_empty() {
-        return UsageFetchBatch::default();
+        return batch;
     }
 
     std::thread::scope(|s| {
         let results = active
             .into_iter()
-            .map(|(provider, _, fetch)| {
-                s.spawn(move || match fetch.call() {
+            .map(|provider| {
+                s.spawn(move || match provider.fetch.call() {
                     Ok(outputs) => (outputs, None),
-                    Err(error) => (Vec::new(), Some(UsageProviderError::new(provider, error))),
+                    Err(error) => (
+                        Vec::new(),
+                        Some(UsageProviderError::new(provider.label, error)),
+                    ),
                 })
             })
             .collect::<Vec<_>>()
@@ -275,7 +406,6 @@ fn fetch_providers(providers: Vec<UsageProvider>) -> UsageFetchBatch {
             })
             .collect::<Vec<_>>();
 
-        let mut batch = UsageFetchBatch::default();
         for (outputs, error) in results {
             batch.outputs.extend(outputs);
             if let Some(error) = error {
@@ -462,6 +592,10 @@ mod tests {
         true
     }
 
+    fn test_missing_credentials() -> bool {
+        false
+    }
+
     fn test_fetch_ok() -> Result<UsageOutput> {
         Ok(UsageOutput {
             provider: "Ok".to_string(),
@@ -478,14 +612,25 @@ mod tests {
 
     #[test]
     fn fetch_providers_preserves_outputs_and_errors() {
-        let batch = fetch_providers(vec![
-            ("Ok", test_has_credentials, Fetch::Single(test_fetch_ok)),
-            (
-                "Broken",
-                test_has_credentials,
-                Fetch::Single(test_fetch_err),
-            ),
-        ]);
+        let batch = fetch_providers(
+            vec![
+                UsageProvider {
+                    id: UsageProviderId::Claude,
+                    label: "Ok",
+                    has_credentials: test_has_credentials,
+                    missing_credentials: "missing ok credentials",
+                    fetch: Fetch::Single(test_fetch_ok),
+                },
+                UsageProvider {
+                    id: UsageProviderId::Codex,
+                    label: "Broken",
+                    has_credentials: test_has_credentials,
+                    missing_credentials: "missing broken credentials",
+                    fetch: Fetch::Single(test_fetch_err),
+                },
+            ],
+            MissingCredentialMode::Report,
+        );
 
         assert_eq!(batch.outputs.len(), 1);
         assert_eq!(batch.outputs[0].provider, "Ok");
@@ -495,6 +640,81 @@ mod tests {
                 provider: "Broken".to_string(),
                 message: "token expired".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn fetch_enabled_provider_reports_missing_credentials() {
+        let batch = fetch_providers(
+            vec![UsageProvider {
+                id: UsageProviderId::Zai,
+                label: "Z.ai GLM Coding Plan",
+                has_credentials: test_missing_credentials,
+                missing_credentials:
+                    "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
+                fetch: Fetch::Single(test_fetch_ok),
+            }],
+            MissingCredentialMode::Report,
+        );
+
+        assert!(batch.outputs.is_empty());
+        assert_eq!(
+            batch.errors,
+            vec![UsageProviderError {
+                provider: "Z.ai GLM Coding Plan".to_string(),
+                message: "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set"
+                    .to_string(),
+            }]
+        );
+    }
+
+    static DISPATCH_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn test_fetch_counted() -> Result<UsageOutput> {
+        DISPATCH_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        test_fetch_ok()
+    }
+
+    #[test]
+    fn enabled_providers_dispatches_only_selected_provider() {
+        DISPATCH_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        let providers = enabled_providers(
+            vec![
+                UsageProvider {
+                    id: UsageProviderId::Codex,
+                    label: "Codex",
+                    has_credentials: test_has_credentials,
+                    missing_credentials: "missing codex credentials",
+                    fetch: Fetch::Single(test_fetch_counted),
+                },
+                UsageProvider {
+                    id: UsageProviderId::Zai,
+                    label: "Z.ai GLM Coding Plan",
+                    has_credentials: test_has_credentials,
+                    missing_credentials: "missing zai credentials",
+                    fetch: Fetch::Single(test_fetch_counted),
+                },
+            ],
+            &[UsageProviderId::Codex],
+        );
+        let batch = fetch_providers(providers, MissingCredentialMode::Report);
+
+        assert_eq!(batch.outputs.len(), 1);
+        assert_eq!(DISPATCH_COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn parse_provider_settings_keeps_known_unique_ids() {
+        let ids = parse_provider_settings(&[
+            "z.ai".to_string(),
+            "zai".to_string(),
+            "minimax-token-plan-cn".to_string(),
+            "unknown".to_string(),
+        ]);
+
+        assert_eq!(
+            ids,
+            vec![UsageProviderId::Zai, UsageProviderId::MiniMaxTokenPlanCn]
         );
     }
 }

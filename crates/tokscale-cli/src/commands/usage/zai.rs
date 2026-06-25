@@ -4,6 +4,8 @@ use serde::Deserialize;
 use super::helpers::capitalize;
 use super::{UsageMetric, UsageOutput};
 
+const API_KEY_ENVS: &[&str] = &["TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY"];
+
 #[derive(Debug, Deserialize)]
 struct QuotaResp {
     data: Option<QuotaData>,
@@ -71,15 +73,15 @@ async fn fetch_sub(client: &reqwest::Client, key: &str) -> Result<SubResp> {
 }
 
 pub fn has_credentials() -> bool {
-    std::env::var("ZAI_API_KEY")
-        .or_else(|_| std::env::var("GLM_API_KEY"))
-        .is_ok()
+    super::helpers::read_first_env(API_KEY_ENVS).is_some()
 }
 
 pub fn fetch() -> Result<UsageOutput> {
-    let api_key = std::env::var("ZAI_API_KEY")
-        .or_else(|_| std::env::var("GLM_API_KEY"))
-        .map_err(|_| anyhow::anyhow!("No ZAI_API_KEY or GLM_API_KEY set."))?;
+    let api_key = super::helpers::read_first_env(API_KEY_ENVS).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No Z.ai coding plan API key set. Configure TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY."
+        )
+    })?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -194,5 +196,43 @@ mod tests {
 
         assert_eq!(percentage_from_limit(&high), Some(100.0));
         assert_eq!(percentage_from_limit(&low), Some(0.0));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn credentials_require_tokscale_coding_plan_env() {
+        let vars = [
+            "TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY",
+            "TOKSCALE_USAGE_ZAI_API_KEY",
+            "TOKSCALE_USAGE_GLM_API_KEY",
+            "ZAI_API_KEY",
+            "GLM_API_KEY",
+        ];
+        let saved = vars.map(|key| (key, std::env::var_os(key)));
+        unsafe {
+            for (key, _) in &saved {
+                std::env::remove_var(*key);
+            }
+            std::env::set_var("ZAI_API_KEY", "legacy");
+            std::env::set_var("GLM_API_KEY", "legacy");
+            std::env::set_var("TOKSCALE_USAGE_ZAI_API_KEY", "ambiguous");
+            std::env::set_var("TOKSCALE_USAGE_GLM_API_KEY", "ambiguous");
+        }
+
+        assert!(!has_credentials());
+
+        unsafe {
+            std::env::set_var("TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY", "explicit");
+        }
+        assert!(has_credentials());
+
+        unsafe {
+            for (key, value) in saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 }

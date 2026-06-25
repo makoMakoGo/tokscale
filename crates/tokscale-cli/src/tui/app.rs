@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::commands::usage::UsageProviderId;
 use anyhow::Result;
 use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -349,7 +350,7 @@ pub struct App {
     pub auto_refresh: bool,
     pub auto_refresh_interval: Duration,
     pub last_refresh: Instant,
-    pub last_usage_refresh: Instant,
+    pub last_subscription_usage_check: Option<Instant>,
 
     pub status_message: Option<String>,
     pub status_message_time: Option<Instant>,
@@ -385,10 +386,11 @@ pub struct App {
 
     pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
     pub subscription_usage_errors: Vec<crate::commands::usage::UsageProviderError>,
+    subscription_provider_ids: Vec<UsageProviderId>,
 
     pub usage_fetch_attempted: bool,
+    usage_initial_fetch_started: bool,
     usage_rx: Option<std::sync::mpsc::Receiver<crate::commands::usage::UsageFetchBatch>>,
-    usage_fetch_preserve_status: bool,
 }
 
 impl App {
@@ -432,6 +434,8 @@ impl App {
 
         let auto_refresh = config.refresh > 0 || settings.auto_refresh_enabled;
         let usage_tab_enabled = settings.usage_tab_enabled;
+        let subscription_provider_ids =
+            crate::commands::usage::parse_provider_settings(&settings.usage_providers);
 
         let data_loader = DataLoader::with_filters(
             config.sessions_path.map(std::path::PathBuf::from),
@@ -487,7 +491,7 @@ impl App {
             auto_refresh,
             auto_refresh_interval,
             last_refresh: Instant::now(),
-            last_usage_refresh: Instant::now(),
+            last_subscription_usage_check: None,
             status_message: if has_data {
                 Some("Loaded from cache".to_string())
             } else {
@@ -520,11 +524,13 @@ impl App {
                 Vec::new()
             },
             subscription_usage_errors: Vec::new(),
+            subscription_provider_ids,
             usage_fetch_attempted: false,
+            usage_initial_fetch_started: false,
             usage_rx: None,
-            usage_fetch_preserve_status: false,
         };
         app.build_model_shade_map();
+        app.maybe_fetch_subscription_usage_on_usage_entry();
         Ok(app)
     }
 
@@ -650,12 +656,8 @@ impl App {
         }
 
         let now = Instant::now();
-        if self.current_tab == Tab::Usage {
-            if self.last_usage_refresh.elapsed() >= self.auto_refresh_interval {
-                self.last_usage_refresh = now;
-                self.fetch_subscription_usage_preserving_status();
-            }
-        } else if self.last_refresh.elapsed() >= self.auto_refresh_interval
+        if self.current_tab != Tab::Usage
+            && self.last_refresh.elapsed() >= self.auto_refresh_interval
             && !self.background_loading
         {
             self.last_refresh = now;
@@ -681,48 +683,40 @@ impl App {
         if let Some(ref rx) = self.usage_rx {
             match rx.try_recv() {
                 Ok(batch) => {
-                    let preserve_status = self.usage_fetch_preserve_status;
-                    self.usage_fetch_preserve_status = false;
                     self.usage_rx = None;
                     self.subscription_usage = batch.outputs;
                     self.subscription_usage_errors = batch.errors;
                     if !self.subscription_usage.is_empty() {
                         crate::commands::usage::save_cache(&self.subscription_usage);
-                        if !preserve_status {
-                            if self.subscription_usage_errors.is_empty() {
-                                self.status_message = Some("Usage data loaded".into());
-                            } else {
-                                self.status_message =
-                                    Some("Usage data loaded with provider errors".into());
-                            }
+                        if self.subscription_usage_errors.is_empty() {
+                            self.status_message = Some("Usage data loaded".into());
+                        } else {
+                            self.status_message =
+                                Some("Usage data loaded with provider errors".into());
                         }
                     } else {
                         crate::commands::usage::clear_cache();
-                        if !preserve_status {
-                            if self.subscription_usage_errors.is_empty() {
-                                self.status_message = Some("No usage data available".into());
-                            } else {
-                                self.status_message = Some("Usage fetch failed".into());
-                            }
+                        if self.subscription_usage_errors.is_empty() {
+                            self.status_message = Some("No usage data available".into());
+                        } else {
+                            self.status_message = Some("Usage fetch failed".into());
                         }
                     }
-                    if !preserve_status {
-                        self.status_message_time = Some(std::time::Instant::now());
-                    }
+                    let now = std::time::Instant::now();
+                    self.last_subscription_usage_check = Some(now);
+                    self.status_message_time = Some(now);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    let preserve_status = self.usage_fetch_preserve_status;
-                    self.usage_fetch_preserve_status = false;
                     self.usage_rx = None;
                     self.subscription_usage_errors =
                         vec![crate::commands::usage::UsageProviderError {
                             provider: "unknown".to_string(),
                             message: "usage fetch worker disconnected".to_string(),
                         }];
-                    if !preserve_status {
-                        self.status_message = Some("Usage fetch failed".into());
-                        self.status_message_time = Some(std::time::Instant::now());
-                    }
+                    let now = std::time::Instant::now();
+                    self.last_subscription_usage_check = Some(now);
+                    self.status_message = Some("Usage fetch failed".into());
+                    self.status_message_time = Some(now);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -808,13 +802,11 @@ impl App {
             KeyCode::Char('r') => {
                 let now = Instant::now();
                 self.last_refresh = now;
-                self.last_usage_refresh = now;
                 if self.background_loading {
                     self.set_status("Refresh already in progress");
                 } else {
                     self.needs_reload = true;
                     self.reload_force = true;
-                    self.fetch_subscription_usage();
                 }
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -852,7 +844,6 @@ impl App {
                 self.open_group_by_picker();
             }
             KeyCode::Char('u') if self.current_tab == Tab::Usage => {
-                self.last_usage_refresh = Instant::now();
                 self.fetch_subscription_usage();
             }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
@@ -889,37 +880,50 @@ impl App {
     }
 
     pub fn fetch_subscription_usage(&mut self) {
-        self.fetch_subscription_usage_with_status(false);
-    }
-
-    fn fetch_subscription_usage_preserving_status(&mut self) {
-        self.fetch_subscription_usage_with_status(true);
-    }
-
-    fn fetch_subscription_usage_with_status(&mut self, preserve_status: bool) {
         if self.usage_rx.is_some() {
-            self.usage_fetch_preserve_status &= preserve_status;
+            self.set_status("Subscription usage fetch already in progress");
+            return;
+        }
+        if self.subscription_provider_ids.is_empty() {
+            self.status_message = Some("No subscription usage providers enabled".into());
+            self.status_message_time = Some(std::time::Instant::now());
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        self.begin_subscription_usage_fetch(rx, preserve_status);
+        self.usage_fetch_attempted = true;
+        self.status_message = Some("Fetching subscription usage...".into());
+        self.status_message_time = Some(std::time::Instant::now());
+        self.usage_rx = Some(rx);
+        let enabled = self.subscription_provider_ids.clone();
         std::thread::spawn(move || {
-            let batch = crate::commands::usage::fetch_all();
+            let batch = crate::commands::usage::fetch_enabled(&enabled);
             let _ = tx.send(batch);
         });
     }
 
-    fn begin_subscription_usage_fetch(
+    fn should_start_initial_subscription_usage_fetch(&self) -> bool {
+        self.current_tab == Tab::Usage
+            && self.settings.usage_tab_enabled
+            && !self.usage_initial_fetch_started
+            && !self.subscription_provider_ids.is_empty()
+    }
+
+    fn maybe_fetch_subscription_usage_on_usage_entry(&mut self) {
+        if !self.should_start_initial_subscription_usage_fetch() {
+            return;
+        }
+        self.usage_initial_fetch_started = true;
+        self.fetch_subscription_usage();
+    }
+
+    #[cfg(test)]
+    fn start_subscription_usage_fetch_for_test(
         &mut self,
         rx: std::sync::mpsc::Receiver<crate::commands::usage::UsageFetchBatch>,
-        preserve_status: bool,
     ) {
         self.usage_fetch_attempted = true;
-        self.usage_fetch_preserve_status = preserve_status;
-        if !preserve_status {
-            self.status_message = Some("Fetching usage data...".into());
-            self.status_message_time = Some(std::time::Instant::now());
-        }
+        self.status_message = Some("Fetching subscription usage...".into());
+        self.status_message_time = Some(std::time::Instant::now());
         self.usage_rx = Some(rx);
     }
 
@@ -1117,6 +1121,7 @@ impl App {
         self.sort_field = field;
         self.sort_direction = dir;
         self.refresh_current_tab_if_overdue();
+        self.maybe_fetch_subscription_usage_on_usage_entry();
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
@@ -1551,7 +1556,6 @@ impl App {
         if self.auto_refresh {
             let now = Instant::now();
             self.last_refresh = now;
-            self.last_usage_refresh = now;
         }
         self.settings.auto_refresh_enabled = self.auto_refresh;
         let save_result = self.settings.save();
@@ -2274,6 +2278,20 @@ mod tests {
     fn make_app_with_usage() -> App {
         let mut settings = test_settings();
         settings.usage_tab_enabled = true;
+        make_app_with_settings(settings)
+    }
+
+    fn make_app_with_usage_providers(providers: &[&str]) -> App {
+        let mut settings = test_settings();
+        settings.usage_tab_enabled = true;
+        settings.usage_providers = providers
+            .iter()
+            .map(|provider| provider.to_string())
+            .collect();
+        make_app_with_settings(settings)
+    }
+
+    fn make_app_with_settings(settings: Settings) -> App {
         let config = TuiConfig {
             theme: "blue".to_string(),
             refresh: 0,
@@ -3581,42 +3599,25 @@ mod tests {
     }
 
     #[test]
-    fn test_usage_fetch_preserving_status_when_idle_does_not_overwrite_status() {
+    fn test_usage_fetch_completion_updates_subscription_status_and_timestamp() {
         let mut app = make_app();
-        app.status_message = Some("Existing status".into());
         let (_tx, rx) = std::sync::mpsc::channel();
 
-        app.begin_subscription_usage_fetch(rx, true);
+        app.start_subscription_usage_fetch_for_test(rx);
 
-        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Fetching subscription usage...")
+        );
         assert!(app.usage_fetch_attempted);
         assert!(app.is_fetching_usage());
     }
 
     #[test]
-    fn test_usage_fetch_preserving_status_on_completion_does_not_overwrite_status() {
+    fn test_usage_fetch_completion_sets_subscription_check_clock() {
         let mut app = make_app();
-        app.status_message = Some("Existing status".into());
         let (tx, rx) = std::sync::mpsc::channel();
-        app.begin_subscription_usage_fetch(rx, true);
-        tx.send(crate::commands::usage::UsageFetchBatch::default())
-            .unwrap();
-
-        app.on_tick();
-
-        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
-        assert!(!app.is_fetching_usage());
-    }
-
-    #[test]
-    fn test_auto_refresh_on_usage_while_manual_fetching_keeps_result_status() {
-        let mut app = make_app();
-        app.current_tab = Tab::Usage;
-        app.auto_refresh = true;
-        app.auto_refresh_interval = Duration::from_millis(1);
-        app.last_usage_refresh = Instant::now() - Duration::from_secs(1);
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.begin_subscription_usage_fetch(rx, false);
+        app.start_subscription_usage_fetch_for_test(rx);
         tx.send(crate::commands::usage::UsageFetchBatch::default())
             .unwrap();
 
@@ -3626,46 +3627,24 @@ mod tests {
             app.status_message.as_deref(),
             Some("No usage data available")
         );
-        assert!(!app.usage_fetch_preserve_status);
+        assert!(app.last_subscription_usage_check.is_some());
         assert!(!app.is_fetching_usage());
     }
 
     #[test]
-    fn test_auto_refresh_on_usage_while_auto_fetching_preserves_status() {
+    fn test_fetch_subscription_usage_while_fetching_reports_in_progress() {
         let mut app = make_app();
         app.current_tab = Tab::Usage;
-        app.auto_refresh = true;
-        app.auto_refresh_interval = Duration::from_millis(1);
-        app.last_usage_refresh = Instant::now() - Duration::from_secs(1);
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.begin_subscription_usage_fetch(rx, true);
-        app.status_message = Some("Existing status".into());
-
-        app.on_tick();
-
-        assert_eq!(app.status_message.as_deref(), Some("Existing status"));
-        assert!(!app.needs_reload);
-        assert!(app.usage_fetch_preserve_status);
-    }
-
-    #[test]
-    fn test_manual_fetch_while_auto_fetching_shows_result_status() {
-        let mut app = make_app();
-        app.status_message = Some("Existing status".into());
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.begin_subscription_usage_fetch(rx, true);
+        app.start_subscription_usage_fetch_for_test(rx);
 
         app.fetch_subscription_usage();
-        tx.send(crate::commands::usage::UsageFetchBatch::default())
-            .unwrap();
-        app.on_tick();
 
         assert_eq!(
             app.status_message.as_deref(),
-            Some("No usage data available")
+            Some("Subscription usage fetch already in progress")
         );
-        assert!(!app.usage_fetch_preserve_status);
-        assert!(!app.is_fetching_usage());
+        assert!(app.is_fetching_usage());
     }
 
     #[test]
@@ -3684,18 +3663,17 @@ mod tests {
     }
 
     #[test]
-    fn test_usage_auto_refresh_does_not_delay_local_report_refresh() {
+    fn test_usage_tab_auto_refresh_does_not_fetch_subscription_usage() {
         let mut app = make_app();
         app.current_tab = Tab::Usage;
         app.auto_refresh = true;
         app.auto_refresh_interval = Duration::from_secs(60);
         let stale = Instant::now() - Duration::from_secs(120);
-        app.last_usage_refresh = stale;
         app.last_refresh = stale;
 
         app.on_tick();
 
-        assert!(app.usage_fetch_attempted);
+        assert!(!app.usage_fetch_attempted);
         assert!(!app.needs_reload);
 
         app.switch_tab(Tab::Overview);
@@ -3704,13 +3682,12 @@ mod tests {
     }
 
     #[test]
-    fn test_local_report_refresh_does_not_delay_usage_refresh() {
+    fn test_switching_to_usage_without_enabled_providers_does_not_fetch() {
         let mut app = make_app_with_usage();
         app.current_tab = Tab::Overview;
         app.auto_refresh = true;
         app.auto_refresh_interval = Duration::from_secs(60);
         let stale = Instant::now() - Duration::from_secs(120);
-        app.last_usage_refresh = stale;
         app.last_refresh = stale;
 
         app.on_tick();
@@ -3721,7 +3698,74 @@ mod tests {
         app.update_data(UsageData::default());
         app.switch_tab(Tab::Usage);
 
-        assert!(app.usage_fetch_attempted);
+        assert!(!app.usage_fetch_attempted);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_initial_usage_fetch_requires_enabled_provider() {
+        let mut app = make_app_with_usage();
+        app.current_tab = Tab::Usage;
+        assert!(!app.should_start_initial_subscription_usage_fetch());
+
+        let mut app = make_app_with_usage_providers(&["codex"]);
+        app.current_tab = Tab::Usage;
+        assert!(app.should_start_initial_subscription_usage_fetch());
+    }
+
+    #[test]
+    fn test_initial_usage_fetch_starts_only_once_per_session() {
+        let mut app = make_app_with_usage_providers(&["codex"]);
+        app.current_tab = Tab::Overview;
+        assert!(!app.should_start_initial_subscription_usage_fetch());
+
+        app.current_tab = Tab::Usage;
+        assert!(app.should_start_initial_subscription_usage_fetch());
+        app.usage_initial_fetch_started = true;
+
+        app.current_tab = Tab::Models;
+        assert!(!app.should_start_initial_subscription_usage_fetch());
+
+        app.current_tab = Tab::Usage;
+        assert!(!app.should_start_initial_subscription_usage_fetch());
+    }
+
+    #[test]
+    fn test_r_refreshes_local_report_only_with_enabled_usage_provider() {
+        let mut app = make_app_with_usage_providers(&["codex"]);
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('r')));
+
+        assert!(app.needs_reload);
+        assert!(app.reload_force);
+        assert!(!app.usage_fetch_attempted);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_u_outside_usage_does_not_fetch_subscription_usage() {
+        let mut app = make_app_with_usage_providers(&["codex"]);
+        app.current_tab = Tab::Overview;
+
+        app.handle_key_event(key(KeyCode::Char('u')));
+
+        assert!(!app.usage_fetch_attempted);
+        assert!(!app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_u_on_usage_without_enabled_providers_reports_disabled() {
+        let mut app = make_app_with_usage();
+        app.current_tab = Tab::Usage;
+
+        app.handle_key_event(key(KeyCode::Char('u')));
+
+        assert!(!app.usage_fetch_attempted);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No subscription usage providers enabled")
+        );
     }
 
     #[test]
@@ -3730,7 +3774,6 @@ mod tests {
         app.auto_refresh = false;
         app.auto_refresh_interval = Duration::from_secs(60);
         app.last_refresh = Instant::now() - Duration::from_secs(120);
-        app.last_usage_refresh = app.last_refresh;
 
         app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
         app.on_tick();

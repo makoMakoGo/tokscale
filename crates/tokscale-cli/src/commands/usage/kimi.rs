@@ -4,6 +4,7 @@ use serde::Deserialize;
 use super::helpers::capitalize;
 use super::{UsageMetric, UsageOutput};
 
+const API_KEY_ENVS: &[&str] = &["TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY"];
 const CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 
 #[derive(Debug, Deserialize)]
@@ -77,10 +78,16 @@ fn credentials_path() -> std::path::PathBuf {
 fn read_credentials() -> Result<Credentials> {
     let path = credentials_path();
     if !path.exists() {
-        anyhow::bail!("No Kimi credentials found. Run 'kimi' to log in.");
+        anyhow::bail!(
+            "No Kimi Code credential found. Configure TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY or run 'kimi' to log in."
+        );
     }
     let content = std::fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&content)?)
+}
+
+fn read_api_key() -> Option<String> {
+    super::helpers::read_first_env(API_KEY_ENVS)
 }
 
 fn save_credentials(access_token: &str, refresh_token: &str, expires_in: i64) {
@@ -130,22 +137,32 @@ async fn refresh_token(client: &reqwest::Client, rt: &str) -> Result<RefreshResp
     Ok(resp.json().await?)
 }
 
-async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageResponse> {
+async fn fetch_usage_result(
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<std::result::Result<UsageResponse, reqwest::StatusCode>> {
     let resp = client
         .get("https://api.kimi.com/coding/v1/usages")
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/json")
-        .header("User-Agent", "OpenUsage")
+        .header("User-Agent", "tokscale")
         .send()
         .await?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        anyhow::bail!("NEEDS_AUTH");
+        return Ok(Err(status));
     }
     if !status.is_success() {
         anyhow::bail!("Kimi usage request failed (HTTP {status})");
     }
-    Ok(resp.json().await?)
+    Ok(Ok(resp.json().await?))
+}
+
+async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageResponse> {
+    match fetch_usage_result(client, token).await? {
+        Ok(resp) => Ok(resp),
+        Err(status) => anyhow::bail!("Kimi Code credential rejected (HTTP {status})"),
+    }
 }
 
 fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> {
@@ -176,107 +193,116 @@ fn metric_dedup_key(label: &str, metric: &UsageMetric) -> String {
 }
 
 pub fn has_credentials() -> bool {
-    credentials_path().exists()
+    read_api_key().is_some() || credentials_path().exists()
 }
 
-pub fn fetch() -> Result<UsageOutput> {
+fn usage_output_from_response(resp: UsageResponse) -> UsageOutput {
+    let plan = resp
+        .user
+        .as_ref()
+        .and_then(|u| u.membership.as_ref())
+        .and_then(|m| m.level.as_ref())
+        .map(|l| capitalize(l.trim_start_matches("LEVEL_").replace('_', " ").as_str()));
+
+    let mut metrics = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Parse limits[] - use window duration to determine label.
+    if let Some(ref limits) = resp.limits {
+        for entry in limits.iter() {
+            if let Some(ref detail) = entry.detail {
+                let label = match entry.window.as_ref().and_then(|w| w.duration) {
+                    Some(d) if d <= 3600 => "Session",
+                    _ => "Weekly",
+                };
+                if let Some(metric) = parse_quota_detail(label, detail) {
+                    let key = metric_dedup_key(label, &metric);
+                    if seen.insert(key) {
+                        metrics.push(metric);
+                    }
+                }
+            }
+        }
+    }
+
+    // Parse top-level usage as "Weekly" and deduplicate against limits[].
+    if let Some(ref usage) = resp.usage {
+        if let Some(metric) = parse_quota_detail("Weekly", usage) {
+            let key = metric_dedup_key("Weekly", &metric);
+            if seen.insert(key) {
+                metrics.push(metric);
+            }
+        }
+    }
+
+    UsageOutput {
+        provider: "Kimi Code".into(),
+        plan,
+        email: None,
+        account: None,
+        metrics,
+    }
+}
+
+async fn fetch_with_oauth(client: &reqwest::Client) -> Result<UsageResponse> {
     let creds = read_credentials()?;
     let mut access_token = creds
         .access_token
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("No Kimi access token."))?;
+        .ok_or_else(|| anyhow::anyhow!("No Kimi Code access token."))?;
     let mut stored_refresh_token = creds.refresh_token.clone();
     let expires_at = creds.expires_at;
 
+    // Proactive refresh if token is about to expire.
+    if needs_refresh(expires_at) {
+        if let Some(ref rt_str) = stored_refresh_token {
+            if let Ok(refreshed) = refresh_token(client, rt_str).await {
+                if let Some(new_token) = refreshed.access_token.clone() {
+                    access_token = new_token;
+                    if let (Some(new_rt), Some(expires_in)) =
+                        (&refreshed.refresh_token, refreshed.expires_in)
+                    {
+                        stored_refresh_token = Some(new_rt.clone());
+                        save_credentials(&access_token, new_rt, expires_in);
+                    }
+                }
+            }
+        }
+    }
+
+    match fetch_usage_result(client, &access_token).await? {
+        Ok(resp) => Ok(resp),
+        Err(_) => {
+            let rt_str = stored_refresh_token
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("No Kimi Code refresh token."))?;
+            let refreshed = refresh_token(client, rt_str).await?;
+            let new = refreshed
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Refresh returned no token."))?;
+            if let (Some(new_rt), Some(expires_in)) =
+                (&refreshed.refresh_token, refreshed.expires_in)
+            {
+                save_credentials(&new, new_rt, expires_in);
+            }
+            fetch_usage(client, &new).await
+        }
+    }
+}
+
+pub fn fetch() -> Result<UsageOutput> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
         let client = reqwest::Client::new();
-
-        // Proactive refresh if token is about to expire
-        if needs_refresh(expires_at) {
-            if let Some(ref rt_str) = stored_refresh_token {
-                if let Ok(refreshed) = refresh_token(&client, rt_str).await {
-                    if let Some(new_token) = refreshed.access_token.clone() {
-                        access_token = new_token;
-                        if let (Some(new_rt), Some(expires_in)) =
-                            (&refreshed.refresh_token, refreshed.expires_in)
-                        {
-                            stored_refresh_token = Some(new_rt.clone());
-                            save_credentials(&access_token, new_rt, expires_in);
-                        }
-                    }
-                }
-            }
-        }
-
-        let resp = match fetch_usage(&client, &access_token).await {
-            Ok(r) => r,
-            Err(e) if e.to_string().contains("NEEDS_AUTH") => {
-                let rt_str = stored_refresh_token
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("No refresh token."))?;
-                let refreshed = refresh_token(&client, rt_str).await?;
-                let new = refreshed
-                    .access_token
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("Refresh returned no token."))?;
-                if let (Some(new_rt), Some(expires_in)) =
-                    (&refreshed.refresh_token, refreshed.expires_in)
-                {
-                    save_credentials(&new, new_rt, expires_in);
-                }
-                fetch_usage(&client, &new).await?
-            }
-            Err(e) => return Err(e),
+        let resp = if let Some(api_key) = read_api_key() {
+            fetch_usage(&client, &api_key).await?
+        } else {
+            fetch_with_oauth(&client).await?
         };
-
-        let plan = resp
-            .user
-            .as_ref()
-            .and_then(|u| u.membership.as_ref())
-            .and_then(|m| m.level.as_ref())
-            .map(|l| capitalize(l.trim_start_matches("LEVEL_").replace('_', " ").as_str()));
-
-        let mut metrics = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-
-        // Parse limits[] — use window duration to determine label
-        if let Some(ref limits) = resp.limits {
-            for entry in limits.iter() {
-                if let Some(ref detail) = entry.detail {
-                    let label = match entry.window.as_ref().and_then(|w| w.duration) {
-                        Some(d) if d <= 3600 => "Session",
-                        _ => "Weekly",
-                    };
-                    if let Some(metric) = parse_quota_detail(label, detail) {
-                        let key = metric_dedup_key(label, &metric);
-                        if seen.insert(key) {
-                            metrics.push(metric);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Parse top-level usage as "Weekly" (deduplicate against session)
-        if let Some(ref usage) = resp.usage {
-            if let Some(metric) = parse_quota_detail("Weekly", usage) {
-                let key = metric_dedup_key("Weekly", &metric);
-                if seen.insert(key) {
-                    metrics.push(metric);
-                }
-            }
-        }
-
-        Ok(UsageOutput {
-            provider: "Kimi".into(),
-            plan,
-            email: None,
-            account: None,
-            metrics,
-        })
+        Ok(usage_output_from_response(resp))
     })
 }
 
@@ -302,5 +328,27 @@ mod tests {
             metric_dedup_key("Weekly", &first),
             metric_dedup_key("Weekly", &second)
         );
+    }
+
+    #[test]
+    fn usage_output_labels_provider_as_kimi_code() {
+        let output = usage_output_from_response(UsageResponse {
+            usage: Some(QuotaDetail {
+                limit: Some("100".to_string()),
+                remaining: Some("80".to_string()),
+                reset_time: Some("2026-06-26T00:00:00Z".to_string()),
+            }),
+            limits: None,
+            user: Some(UserInfo {
+                membership: Some(Membership {
+                    level: Some("LEVEL_ALLEGRETTO".to_string()),
+                }),
+            }),
+        });
+
+        assert_eq!(output.provider, "Kimi Code");
+        assert_eq!(output.plan.as_deref(), Some("ALLEGRETTO"));
+        assert_eq!(output.metrics.len(), 1);
+        assert_eq!(output.metrics[0].label, "Weekly");
     }
 }

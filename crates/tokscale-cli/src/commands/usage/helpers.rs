@@ -22,6 +22,14 @@ pub fn read_keychain(service: &str) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim_end().to_string())
 }
 
+pub fn read_first_env(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let value = std::env::var(key).ok()?;
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 pub fn format_reset_time(resets_at: &str) -> String {
     let dt = match DateTime::parse_from_rfc3339(resets_at) {
         Ok(d) => d.with_timezone(&Utc),

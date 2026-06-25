@@ -110,6 +110,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - [Cursor IDE 명령어](#cursor-ide-명령어)
   - [Antigravity 명령어](#antigravity-명령어)
   - [Trae 명령어](#trae-명령어)
+  - [Subscription Usage](#subscription-usage)
   - [예시 출력](#예시-출력---light-버전)
   - [설정](#설정)
   - [환경 변수](#환경-변수)
@@ -262,7 +263,7 @@ tokscale models --json > report.json   # 파일로 저장
   - `v`: Table/Profile 뷰 전환 (Hourly 탭)
   - `y`: 선택된 행을 클립보드에 복사
   - `p`: 9가지 색상 테마 순환
-  - `r`: 데이터 새로고침; `Shift+R`로 자동 새로고침 토글; `+`/`-`로 간격 조정
+  - `r`: 로컬 리포트 새로고침; `Shift+R`로 로컬 리포트 자동 새로고침 토글; `+`/`-`로 간격 조정; `u`는 Usage 탭에서만 구독 사용량 새로고침
   - `e`: JSON으로 내보내기
   - `q` 또는 `Ctrl+C`: 종료
 - **마우스 지원**: 탭, 버튼, 필터 클릭
@@ -511,6 +512,23 @@ tokscale trae logout --variant solo
 
 > **중국판**: 중국판(`trae.com.cn`)은 의도적으로 지원하지 않습니다. CN 백엔드는 세션 단위 사용량 조회 API를 공개하지 않습니다. 공식 엔드포인트가 제공되면 지원을 추가할 예정입니다.
 
+### Subscription Usage
+
+`tokscale usage`는 명시적인 CLI 작업이므로, 사용 가능한 자격 증명이 있는 provider의 구독 quota를 가져옵니다.
+
+TUI에서는 `usageTabEnabled`를 켜고 `usageProviders`에 허용할 provider ID를 적어야 합니다. 빈 `usageProviders`는 캐시 표시 모드이며 Usage 탭은 원격 요청을 보내지 않습니다. Usage 탭에 처음 들어갈 때는 TUI 세션당 최대 한 번만 자동 요청하고, 이후 구독 새로고침은 Usage 탭의 `u` 키로만 실행합니다. `r`은 항상 로컬 리포트 새로고침이고, `R`은 로컬 리포트 자동 새로고침입니다.
+
+```json
+{
+  "usageTabEnabled": true,
+  "usageProviders": ["codex", "zai", "minimax-token-plan-cn"]
+}
+```
+
+Canonical TUI provider IDs: `claude`, `codex`, `zai`, `amp`, `copilot`, `grok`, `kimi`, `minimax-token-plan-cn`, `minimax-token-plan-global`, `warp`.
+
+`zai`는 Z.ai/Zhipu GLM Coding Plan quota를 의미하며 일반 Z.ai API 잔액이 아닙니다. GLM Coding Plan은 domestic/global provider ID로 나누지 않습니다. MiniMax Token Plan은 CN과 Global이 분리되어 key를 서로 사용할 수 없습니다. Kimi는 Kimi Code membership quota이며 Kimi Code Console API key 또는 Kimi Code OAuth를 사용합니다. `ZAI_API_KEY`, `GLM_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, `MINIMAX_API_TOKEN` 같은 범용 환경 변수는 구독 quota 조회에서 의도적으로 무시됩니다.
+
 ### 예시 출력 (`--light` 버전)
 
 <img alt="CLI Light" src="./.github/assets/cli-light.png" />
@@ -523,7 +541,9 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 {
   "colorPalette": "blue",
   "includeUnusedModels": false,
-  "defaultClients": ["opencode", "claude"]
+  "defaultClients": ["opencode", "claude"],
+  "usageTabEnabled": true,
+  "usageProviders": ["codex", "zai", "minimax-token-plan-cn"]
 }
 ```
 
@@ -536,6 +556,8 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 | `nativeTimeoutMs` | number | `300000` | 네이티브 서브프로세스 처리 최대 시간 (5000-3600000ms) |
 | `defaultClients` | string[] | `[]` | `--client/-c` 플래그를 전달하지 않을 때 적용되는 기본 클라이언트 필터. `--client`와 동일한 ID를 받습니다 (예: `["opencode", "claude", "zed"]`). 알 수 없는 ID는 자동으로 무시됩니다. CLI 플래그가 있으면 이 목록은 완전히 무시됩니다 — 병합되지 않습니다. |
 | `light.writeCache` | boolean | `false` | `true`이면 `tokscale --light`가 렌더링 직후 TUI 캐시를 원자적으로 덮어씁니다. CLI 플래그 `--write-cache` / `--no-write-cache`가 실행별로 우선합니다. |
+| `usageTabEnabled` | boolean | `false` | TUI에 구독 quota Usage 탭을 표시합니다. |
+| `usageProviders` | string[] | `[]` | Usage 탭이 요청할 수 있는 구독 provider 명시 allowlist. 빈 배열은 캐시 표시 모드이며 원격 요청을 보내지 않습니다. |
 
 #### 캐시 디렉터리 레이아웃
 
@@ -557,6 +579,10 @@ Tokscale은 설정을 `~/.config/tokscale/settings.json`에 저장합니다:
 |----------|---------|-------------|
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5분) | `nativeTimeoutMs` 설정 오버라이드 |
 | `TOKSCALE_CONFIG_DIR` | unset | 설정 디렉토리 루트(`settings.json`, `star-cache.json`, `cache/`, `antigravity-cache/`, `trae-cache/` 위치)를 오버라이드합니다. 절대 경로 권장; 상대 경로는 프로세스 CWD 기준으로 해석됩니다. CI 샌드박스나 비기본 위치를 고정할 때 유용합니다. 설정되면 tokscale은 macOS 레거시 경로(`~/Library/Application Support/tokscale/`)로 폴백하지 않습니다. |
+| `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY` | unset | Z.ai/Zhipu GLM Coding Plan key for subscription quota lookup. |
+| `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` | unset | Kimi Code Console API key for Kimi Code membership quota lookup. |
+| `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY` | unset | MiniMax CN Token Plan subscription key. |
+| `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY` | unset | MiniMax Global Token Plan subscription key. |
 
 ```bash
 # 예시: 매우 큰 데이터셋에 대한 타임아웃 증가
