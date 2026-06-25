@@ -190,7 +190,9 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
 fn content_chars(content: &serde_json::Value) -> usize {
     match content {
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
+        serde_json::Value::Null => 0,
+        serde_json::Value::Bool(value) => value.to_string().chars().count(),
+        serde_json::Value::Number(value) => value.to_string().chars().count(),
         serde_json::Value::String(value) => value.chars().count(),
         serde_json::Value::Array(items) => items.iter().map(content_chars).sum(),
         serde_json::Value::Object(map) => {
@@ -308,6 +310,8 @@ mod tests {
         assert_eq!(content_chars(&serde_json::Value::Null), 0);
         assert_eq!(content_chars(&json!([])), 0);
         assert_eq!(content_chars(&json!({})), 0);
+        assert_eq!(content_chars(&json!(true)), 4);
+        assert_eq!(content_chars(&json!(123)), 3);
         assert_eq!(content_chars(&json!("abcd")), 4);
         assert_eq!(content_chars(&json!([{"type": "text", "text": "abcd"}])), 4);
         assert_eq!(content_chars(&json!({"type": "text", "text": "abcd"})), 4);
@@ -317,6 +321,22 @@ mod tests {
             ),
             4
         );
+    }
+
+    #[test]
+    fn non_string_assistant_content_emits_estimated_message() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s", "content": true}),
+            json!({"role": "assistant", "sessionId": "s", "content": 123}),
+        );
+        let path = write_session(&dir, "proj", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1);
+        assert_eq!(messages[0].tokens.output, 1);
     }
 
     #[test]
