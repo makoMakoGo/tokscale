@@ -348,8 +348,8 @@ pub struct App {
 
     pub auto_refresh: bool,
     pub auto_refresh_interval: Duration,
-    pub last_auto_refresh: Instant,
     pub last_refresh: Instant,
+    pub last_usage_refresh: Instant,
 
     pub status_message: Option<String>,
     pub status_message_time: Option<Instant>,
@@ -486,8 +486,8 @@ impl App {
             stats_breakdown_total_lines: 0,
             auto_refresh,
             auto_refresh_interval,
-            last_auto_refresh: Instant::now(),
             last_refresh: Instant::now(),
+            last_usage_refresh: Instant::now(),
             status_message: if has_data {
                 Some("Loaded from cache".to_string())
             } else {
@@ -547,7 +547,6 @@ impl App {
     pub fn mark_refresh_checked(&mut self) {
         let now = Instant::now();
         self.last_refresh = now;
-        self.last_auto_refresh = now;
     }
 
     pub fn is_blocking_loading(&self) -> bool {
@@ -575,7 +574,6 @@ impl App {
         self.data = data;
         let now = Instant::now();
         self.last_refresh = now;
-        self.last_auto_refresh = now;
         self.build_model_shade_map();
 
         // Exit Daily-detail mode if the refresh dropped the day we were
@@ -646,6 +644,25 @@ impl App {
         self.data.error = error;
     }
 
+    fn refresh_current_tab_if_overdue(&mut self) {
+        if !self.auto_refresh {
+            return;
+        }
+
+        let now = Instant::now();
+        if self.current_tab == Tab::Usage {
+            if self.last_usage_refresh.elapsed() >= self.auto_refresh_interval {
+                self.last_usage_refresh = now;
+                self.fetch_subscription_usage_preserving_status();
+            }
+        } else if self.last_refresh.elapsed() >= self.auto_refresh_interval
+            && !self.background_loading
+        {
+            self.last_refresh = now;
+            self.needs_reload = true;
+        }
+    }
+
     pub fn on_tick(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % 20;
 
@@ -656,15 +673,7 @@ impl App {
             }
         }
 
-        if self.auto_refresh && self.last_auto_refresh.elapsed() >= self.auto_refresh_interval {
-            if self.current_tab == Tab::Usage {
-                self.last_auto_refresh = Instant::now();
-                self.fetch_subscription_usage_preserving_status();
-            } else if !self.background_loading {
-                self.last_auto_refresh = Instant::now();
-                self.needs_reload = true;
-            }
-        }
+        self.refresh_current_tab_if_overdue();
 
         self.consume_dialog_reload_if_ready();
 
@@ -797,7 +806,9 @@ impl App {
                 self.cycle_theme();
             }
             KeyCode::Char('r') => {
-                self.last_auto_refresh = Instant::now();
+                let now = Instant::now();
+                self.last_refresh = now;
+                self.last_usage_refresh = now;
                 if self.background_loading {
                     self.set_status("Refresh already in progress");
                 } else {
@@ -841,7 +852,7 @@ impl App {
                 self.open_group_by_picker();
             }
             KeyCode::Char('u') if self.current_tab == Tab::Usage => {
-                self.last_auto_refresh = Instant::now();
+                self.last_usage_refresh = Instant::now();
                 self.fetch_subscription_usage();
             }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
@@ -1105,6 +1116,7 @@ impl App {
             .unwrap_or_else(|| Self::default_sort_for_tab(target));
         self.sort_field = field;
         self.sort_direction = dir;
+        self.refresh_current_tab_if_overdue();
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
@@ -1537,7 +1549,9 @@ impl App {
     fn toggle_auto_refresh(&mut self) {
         self.auto_refresh = !self.auto_refresh;
         if self.auto_refresh {
-            self.last_auto_refresh = Instant::now();
+            let now = Instant::now();
+            self.last_refresh = now;
+            self.last_usage_refresh = now;
         }
         self.settings.auto_refresh_enabled = self.auto_refresh;
         let save_result = self.settings.save();
@@ -3600,7 +3614,7 @@ mod tests {
         app.current_tab = Tab::Usage;
         app.auto_refresh = true;
         app.auto_refresh_interval = Duration::from_millis(1);
-        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+        app.last_usage_refresh = Instant::now() - Duration::from_secs(1);
         let (tx, rx) = std::sync::mpsc::channel();
         app.begin_subscription_usage_fetch(rx, false);
         tx.send(crate::commands::usage::UsageFetchBatch::default())
@@ -3622,7 +3636,7 @@ mod tests {
         app.current_tab = Tab::Usage;
         app.auto_refresh = true;
         app.auto_refresh_interval = Duration::from_millis(1);
-        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+        app.last_usage_refresh = Instant::now() - Duration::from_secs(1);
         let (_tx, rx) = std::sync::mpsc::channel();
         app.begin_subscription_usage_fetch(rx, true);
         app.status_message = Some("Existing status".into());
@@ -3660,7 +3674,7 @@ mod tests {
         app.current_tab = Tab::Overview;
         app.auto_refresh = true;
         app.auto_refresh_interval = Duration::from_millis(1);
-        app.last_auto_refresh = Instant::now() - Duration::from_secs(1);
+        app.last_refresh = Instant::now() - Duration::from_secs(1);
 
         app.on_tick();
 
@@ -3670,11 +3684,53 @@ mod tests {
     }
 
     #[test]
+    fn test_usage_auto_refresh_does_not_delay_local_report_refresh() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_secs(60);
+        let stale = Instant::now() - Duration::from_secs(120);
+        app.last_usage_refresh = stale;
+        app.last_refresh = stale;
+
+        app.on_tick();
+
+        assert!(app.usage_fetch_attempted);
+        assert!(!app.needs_reload);
+
+        app.switch_tab(Tab::Overview);
+
+        assert!(app.needs_reload);
+    }
+
+    #[test]
+    fn test_local_report_refresh_does_not_delay_usage_refresh() {
+        let mut app = make_app_with_usage();
+        app.current_tab = Tab::Overview;
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_secs(60);
+        let stale = Instant::now() - Duration::from_secs(120);
+        app.last_usage_refresh = stale;
+        app.last_refresh = stale;
+
+        app.on_tick();
+        assert!(app.needs_reload);
+        assert!(!app.usage_fetch_attempted);
+
+        app.needs_reload = false;
+        app.update_data(UsageData::default());
+        app.switch_tab(Tab::Usage);
+
+        assert!(app.usage_fetch_attempted);
+    }
+
+    #[test]
     fn test_enabling_auto_refresh_waits_for_next_interval() {
         let mut app = make_app();
         app.auto_refresh = false;
         app.auto_refresh_interval = Duration::from_secs(60);
-        app.last_auto_refresh = Instant::now() - Duration::from_secs(120);
+        app.last_refresh = Instant::now() - Duration::from_secs(120);
+        app.last_usage_refresh = app.last_refresh;
 
         app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
         app.on_tick();

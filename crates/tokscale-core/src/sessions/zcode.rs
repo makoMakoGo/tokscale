@@ -31,8 +31,12 @@ struct ZcodeEntry {
 
 #[derive(Debug, Deserialize)]
 struct ZcodeUsage {
-    #[serde(alias = "input_tokens", alias = "prompt_tokens")]
+    #[serde(alias = "input_tokens")]
     input: Option<i64>,
+    #[serde(alias = "promptTokens", alias = "prompt_tokens")]
+    prompt_tokens: Option<i64>,
+    #[serde(alias = "promptTokensDetails", alias = "prompt_tokens_details")]
+    prompt_tokens_details: Option<ZcodePromptTokensDetails>,
     #[serde(alias = "output_tokens", alias = "completion_tokens")]
     output: Option<i64>,
     #[serde(alias = "input_cache_read", alias = "cache_read_tokens")]
@@ -43,11 +47,27 @@ struct ZcodeUsage {
     reasoning: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ZcodePromptTokensDetails {
+    #[serde(alias = "cachedTokens", alias = "cached_tokens")]
+    cached_tokens: Option<i64>,
+}
+
 impl ZcodeUsage {
     fn to_breakdown(&self) -> Option<TokenBreakdown> {
-        let input = self.input.unwrap_or(0).max(0);
+        let nested_cache_read = self
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+            .unwrap_or(0)
+            .max(0);
+        let input = if let Some(prompt_tokens) = self.prompt_tokens {
+            prompt_tokens.max(0).saturating_sub(nested_cache_read)
+        } else {
+            self.input.unwrap_or(0).max(0)
+        };
         let output = self.output.unwrap_or(0).max(0);
-        let cache_read = self.cache_read.unwrap_or(0).max(0);
+        let cache_read = self.cache_read.unwrap_or(0).max(0).max(nested_cache_read);
         let cache_write = self.cache_write.unwrap_or(0).max(0);
         let reasoning = self.reasoning.unwrap_or(0).max(0);
 
@@ -375,6 +395,34 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 100);
+    }
+
+    #[test]
+    fn z_ai_cached_prompt_tokens_are_cache_read() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "content": "bye",
+                "usage": {
+                    "prompt_tokens": 200,
+                    "completion_tokens": 100,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 80
+                    }
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(messages[0].tokens.cache_read, 80);
     }
 
     #[test]
