@@ -157,7 +157,7 @@ tokscale warp logout --purge-cache
 Subscription usage is separate from local token reports.
 
 ```bash
-tokscale usage --light
+tokscale usage
 tokscale usage --json
 ```
 

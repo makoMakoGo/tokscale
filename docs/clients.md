@@ -120,7 +120,7 @@ than normal local token reports:
 ```bash
 tokscale warp login
 tokscale warp sync --json
-tokscale usage --light
+tokscale usage
 ```
 
 ## Retention notes

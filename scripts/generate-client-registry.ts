@@ -40,7 +40,9 @@ function readCatalog(): CatalogEntry[] {
     throw new Error("client-catalog.json must be a non-empty array");
   }
 
+  const variants = new Set<string>();
   const ids = new Set<string>();
+  const hotkeys = new Set<string>();
   return raw.map((entry, index) => {
     if (!entry || typeof entry !== "object") {
       throw new Error(`client-catalog[${index}] must be an object`);
@@ -56,6 +58,11 @@ function readCatalog(): CatalogEntry[] {
     assertString(record.logo, "logo", index);
     assertString(record.color, "color", index);
 
+    if (variants.has(record.variant)) {
+      throw new Error(`duplicate client variant in catalog: ${record.variant}`);
+    }
+    variants.add(record.variant);
+
     if (!/^[a-z0-9][a-z0-9-]*$/.test(record.id)) {
       throw new Error(`client-catalog[${index}].id is not canonical lowercase: ${record.id}`);
     }
@@ -67,8 +74,18 @@ function readCatalog(): CatalogEntry[] {
     if ([...record.hotkey].length !== 1) {
       throw new Error(`client-catalog[${index}].hotkey must be one character`);
     }
+    if (hotkeys.has(record.hotkey)) {
+      throw new Error(`duplicate client hotkey in catalog: ${record.hotkey}`);
+    }
+    hotkeys.add(record.hotkey);
+    if (!isHexColor(record.color)) {
+      throw new Error(`client-catalog[${index}].color must be #RRGGBB`);
+    }
     if (record.textColor !== undefined) {
       assertString(record.textColor, "textColor", index);
+      if (!isHexColor(record.textColor)) {
+        throw new Error(`client-catalog[${index}].textColor must be #RRGGBB`);
+      }
     }
 
     return {
@@ -83,6 +100,10 @@ function readCatalog(): CatalogEntry[] {
       textColor: record.textColor,
     };
   });
+}
+
+function isHexColor(value: string): boolean {
+  return /^#[0-9A-Fa-f]{6}$/.test(value);
 }
 
 function literal(value: string | boolean | undefined): string {

@@ -19,7 +19,7 @@ impl LocalSourceAdapter for TraeAdapter {
         adapter_discover::discover_default_scanned_units(
             ClientId::Trae,
             ctx,
-            FingerprintPolicy::None,
+            FingerprintPolicy::NoMessageCache,
         )
     }
 
@@ -100,8 +100,8 @@ mod tests {
 
         let parsed = TRAE_ADAPTER.parse(
             vec![
-                SourceUnit::no_cache(ClientId::Trae, older),
-                SourceUnit::no_cache(ClientId::Trae, newer),
+                SourceUnit::no_message_cache(ClientId::Trae, older),
+                SourceUnit::no_message_cache(ClientId::Trae, newer),
             ],
             &ParseContext {
                 source_cache: &cache,

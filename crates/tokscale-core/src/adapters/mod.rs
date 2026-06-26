@@ -98,11 +98,11 @@ impl SourceUnit {
         }
     }
 
-    pub(crate) fn no_cache(client: ClientId, path: PathBuf) -> Self {
+    pub(crate) fn no_message_cache(client: ClientId, path: PathBuf) -> Self {
         Self {
             client,
             path,
-            fingerprint_policy: FingerprintPolicy::None,
+            fingerprint_policy: FingerprintPolicy::NoMessageCache,
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
         }
@@ -158,7 +158,9 @@ impl SourceUnit {
                 }
                 paths
             }
-            FingerprintPolicy::PlainFile | FingerprintPolicy::None => vec![self.path.clone()],
+            FingerprintPolicy::PlainFile | FingerprintPolicy::NoMessageCache => {
+                vec![self.path.clone()]
+            }
         }
     }
 }
@@ -242,8 +244,7 @@ pub(crate) enum FingerprintPolicy {
     PrimaryWithSiblings {
         sibling_names: &'static [&'static str],
     },
-    #[allow(dead_code)]
-    None,
+    NoMessageCache,
 }
 
 #[derive(Debug)]

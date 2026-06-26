@@ -168,6 +168,6 @@ fn fingerprint_for_unit(unit: &SourceUnit) -> Option<message_cache::SourceFinger
                 sibling_names.iter().copied(),
             )
         }
-        FingerprintPolicy::None => None,
+        FingerprintPolicy::NoMessageCache => None,
     }
 }

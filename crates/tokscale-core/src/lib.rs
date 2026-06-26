@@ -3385,7 +3385,7 @@ model = "gpt-5.5"
 
     #[test]
     #[serial_test::serial]
-    fn test_compute_source_digest_tracks_adapter_no_cache_file() {
+    fn test_compute_source_digest_tracks_adapter_no_message_cache_file() {
         let source_home = tempfile::TempDir::new().unwrap();
         let trae_dir = source_home
             .path()
@@ -3408,7 +3408,7 @@ model = "gpt-5.5"
 
         assert_ne!(
             digest_one, digest_two,
-            "adapter-discovered no-cache file changes must affect the source digest"
+            "adapter-discovered no-message-cache file changes must affect the source digest"
         );
     }
 

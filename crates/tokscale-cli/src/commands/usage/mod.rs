@@ -248,8 +248,8 @@ impl Fetch {
 struct UsageProvider {
     id: UsageProviderId,
     label: &'static str,
-    has_credentials: fn() -> bool,
-    missing_credentials: &'static str,
+    is_available: fn() -> bool,
+    unavailable_message: &'static str,
     fetch: Fetch,
 }
 
@@ -258,78 +258,79 @@ fn all_providers() -> Vec<UsageProvider> {
         UsageProvider {
             id: UsageProviderId::Claude,
             label: "Claude",
-            has_credentials: claude::has_credentials,
-            missing_credentials: "enabled in usageProviders but no Claude Code OAuth credentials were found",
+            is_available: claude::has_credentials,
+            unavailable_message: "enabled in usageProviders but no Claude Code OAuth credentials were found",
             fetch: Fetch::Single(claude::fetch),
         },
         UsageProvider {
             id: UsageProviderId::Codex,
             label: "Codex",
-            has_credentials: codex::has_credentials,
-            missing_credentials: "enabled in usageProviders but no Codex OAuth credentials were found",
+            is_available: codex::has_credentials,
+            unavailable_message: "enabled in usageProviders but no Codex OAuth credentials were found",
             fetch: Fetch::Multi(codex::fetch_all),
         },
         UsageProvider {
             id: UsageProviderId::Zai,
             label: "Z.ai GLM Coding Plan",
-            has_credentials: zai::has_credentials,
-            missing_credentials: "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
+            is_available: zai::has_credentials,
+            unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
             fetch: Fetch::Single(zai::fetch),
         },
         UsageProvider {
             id: UsageProviderId::Amp,
             label: "Amp",
-            has_credentials: amp::has_credentials,
-            missing_credentials: "enabled in usageProviders but no Amp credentials were found",
+            is_available: amp::has_credentials,
+            unavailable_message: "enabled in usageProviders but no Amp credentials were found",
             fetch: Fetch::Single(amp::fetch),
         },
         UsageProvider {
             id: UsageProviderId::Copilot,
             label: "Copilot",
-            has_credentials: copilot::has_credentials,
-            missing_credentials: "enabled in usageProviders but no GitHub Copilot credentials were found",
+            is_available: copilot::has_credentials,
+            unavailable_message: "enabled in usageProviders but no GitHub Copilot credentials were found",
             fetch: Fetch::Single(copilot::fetch),
         },
         UsageProvider {
             id: UsageProviderId::Grok,
             label: "Grok Build",
-            has_credentials: grok::has_credentials,
-            missing_credentials: "enabled in usageProviders but no Grok Build credentials were found",
+            is_available: grok::has_credentials,
+            unavailable_message: "enabled in usageProviders but no Grok Build credentials were found",
             fetch: Fetch::Single(grok::fetch),
         },
         UsageProvider {
             id: UsageProviderId::Kimi,
             label: "Kimi Code",
-            has_credentials: kimi::has_credentials,
-            missing_credentials: "enabled in usageProviders but TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY is not set and no Kimi Code OAuth credentials were found",
+            is_available: kimi::has_credentials,
+            unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY is not set and no Kimi Code OAuth credentials were found",
             fetch: Fetch::Single(kimi::fetch),
         },
         UsageProvider {
             id: UsageProviderId::MiniMaxTokenPlanCn,
             label: "MiniMax Token Plan CN",
-            has_credentials: minimax_tokenplan::has_cn_credentials,
-            missing_credentials: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY is not set",
+            is_available: minimax_tokenplan::has_cn_credentials,
+            unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY is not set",
             fetch: Fetch::Single(minimax_tokenplan::fetch_cn),
         },
         UsageProvider {
             id: UsageProviderId::MiniMaxTokenPlanGlobal,
             label: "MiniMax Token Plan Global",
-            has_credentials: minimax_tokenplan::has_global_credentials,
-            missing_credentials: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY is not set",
+            is_available: minimax_tokenplan::has_global_credentials,
+            unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY is not set",
             fetch: Fetch::Single(minimax_tokenplan::fetch_global),
         },
         UsageProvider {
             id: UsageProviderId::Warp,
             label: "Warp/Oz",
-            has_credentials: warp::has_credentials,
-            missing_credentials: "enabled in usageProviders but no Warp/Oz credentials were found",
+            is_available: warp::has_usage_cache,
+            unavailable_message:
+                "enabled in usageProviders but no Warp/Oz usage cache was found; run `tokscale warp sync` first",
             fetch: Fetch::Single(warp::fetch),
         },
     ]
 }
 
 pub fn fetch_all() -> UsageFetchBatch {
-    fetch_providers(all_providers(), MissingCredentialMode::Ignore)
+    fetch_providers(all_providers(), UnavailableProviderMode::Ignore)
 }
 
 pub fn fetch_enabled(enabled: &[UsageProviderId]) -> UsageFetchBatch {
@@ -338,7 +339,7 @@ pub fn fetch_enabled(enabled: &[UsageProviderId]) -> UsageFetchBatch {
     }
     fetch_providers(
         enabled_providers(all_providers(), enabled),
-        MissingCredentialMode::Report,
+        UnavailableProviderMode::Report,
     )
 }
 
@@ -354,24 +355,24 @@ fn enabled_providers(
 }
 
 #[derive(Clone, Copy)]
-enum MissingCredentialMode {
+enum UnavailableProviderMode {
     Ignore,
     Report,
 }
 
 fn fetch_providers(
     providers: Vec<UsageProvider>,
-    missing_mode: MissingCredentialMode,
+    unavailable_mode: UnavailableProviderMode,
 ) -> UsageFetchBatch {
     let mut batch = UsageFetchBatch::default();
     let mut active = Vec::new();
     for provider in providers {
-        if (provider.has_credentials)() {
+        if (provider.is_available)() {
             active.push(provider);
-        } else if matches!(missing_mode, MissingCredentialMode::Report) {
+        } else if matches!(unavailable_mode, UnavailableProviderMode::Report) {
             batch.errors.push(UsageProviderError::new(
                 provider.label,
-                provider.missing_credentials,
+                provider.unavailable_message,
             ));
         }
     }
@@ -486,7 +487,7 @@ fn failed_provider_summary(errors: &[UsageProviderError]) -> String {
         .join(", ")
 }
 
-pub fn run(json: bool, _light: bool) -> Result<()> {
+pub fn run(json: bool) -> Result<()> {
     let batch = fetch_all();
     if json {
         println!("{}", serde_json::to_string_pretty(&batch.outputs)?);
@@ -592,7 +593,7 @@ mod tests {
         true
     }
 
-    fn test_missing_credentials() -> bool {
+    fn test_unavailable() -> bool {
         false
     }
 
@@ -617,19 +618,19 @@ mod tests {
                 UsageProvider {
                     id: UsageProviderId::Claude,
                     label: "Ok",
-                    has_credentials: test_has_credentials,
-                    missing_credentials: "missing ok credentials",
+                    is_available: test_has_credentials,
+                    unavailable_message: "missing ok credentials",
                     fetch: Fetch::Single(test_fetch_ok),
                 },
                 UsageProvider {
                     id: UsageProviderId::Codex,
                     label: "Broken",
-                    has_credentials: test_has_credentials,
-                    missing_credentials: "missing broken credentials",
+                    is_available: test_has_credentials,
+                    unavailable_message: "missing broken credentials",
                     fetch: Fetch::Single(test_fetch_err),
                 },
             ],
-            MissingCredentialMode::Report,
+            UnavailableProviderMode::Report,
         );
 
         assert_eq!(batch.outputs.len(), 1);
@@ -644,17 +645,17 @@ mod tests {
     }
 
     #[test]
-    fn fetch_enabled_provider_reports_missing_credentials() {
+    fn fetch_enabled_provider_reports_unavailable_provider() {
         let batch = fetch_providers(
             vec![UsageProvider {
                 id: UsageProviderId::Zai,
                 label: "Z.ai GLM Coding Plan",
-                has_credentials: test_missing_credentials,
-                missing_credentials:
+                is_available: test_unavailable,
+                unavailable_message:
                     "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
                 fetch: Fetch::Single(test_fetch_ok),
             }],
-            MissingCredentialMode::Report,
+            UnavailableProviderMode::Report,
         );
 
         assert!(batch.outputs.is_empty());
@@ -683,21 +684,21 @@ mod tests {
                 UsageProvider {
                     id: UsageProviderId::Codex,
                     label: "Codex",
-                    has_credentials: test_has_credentials,
-                    missing_credentials: "missing codex credentials",
+                    is_available: test_has_credentials,
+                    unavailable_message: "missing codex credentials",
                     fetch: Fetch::Single(test_fetch_counted),
                 },
                 UsageProvider {
                     id: UsageProviderId::Zai,
                     label: "Z.ai GLM Coding Plan",
-                    has_credentials: test_has_credentials,
-                    missing_credentials: "missing zai credentials",
+                    is_available: test_has_credentials,
+                    unavailable_message: "missing zai credentials",
                     fetch: Fetch::Single(test_fetch_counted),
                 },
             ],
             &[UsageProviderId::Codex],
         );
-        let batch = fetch_providers(providers, MissingCredentialMode::Report);
+        let batch = fetch_providers(providers, UnavailableProviderMode::Report);
 
         assert_eq!(batch.outputs.len(), 1);
         assert_eq!(DISPATCH_COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);
