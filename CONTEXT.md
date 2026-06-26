@@ -1,9 +1,9 @@
 # tokscale personal/local-clients context
 
 This fork is maintained for local client usage accounting on the
-`personal/local-clients` branch. Upstream changes are merged frequently, but
-branch decisions in this file take precedence when upstream semantics conflict
-with local needs.
+`personal/local-clients` branch. Upstream changes are reviewed and ported
+selectively; upstream content is not merged wholesale. Branch decisions in this
+file take precedence when upstream semantics conflict with local needs.
 
 ## Vocabulary
 
