@@ -35,6 +35,10 @@ Use conventional commit and PR titles: `<type>(<scope>): <what changed and why>`
 
 Keep this file concise and constraint-focused. Do not add hardcoded module counts or exhaustive lists; prefer commands such as `ls crates/` for discovery. Add nested `AGENTS.md` files for crate-specific rules when needed, and delete outdated guidance instead of preserving it.
 
+Keep `README.md` as the fork entry page. Put longer user-facing command,
+client, pricing, configuration, and development material under `docs/`,
+matching the split documented in `docs/development.md`.
+
 ## Git Identity & Merge Discipline
 
 - Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
@@ -131,142 +135,29 @@ If two branches generate migrations with the same index, resolve the conflict by
 
 ## Release & Deployment
 
-### Overview
+This fork does not currently have an unambiguous public release channel.
 
-Releases are published to npm via a GitHub Actions `workflow_dispatch` pipeline, followed by a manually created GitHub Release with handwritten notes. There is no staging environment — publishes go directly to npm `latest`.
+The public npm packages `tokscale` and `@tokscale/*` belong to the upstream
+distribution. Do not run `.github/workflows/publish-cli.yml`, publish npm
+packages, create tags, or create GitHub Releases for this fork unless the user
+explicitly asks for a fork release and the package names, repository metadata,
+workflow behavior, and version labels have been reviewed first.
 
-### Release Pipeline
+For the current package status, see `docs/fork.md`.
 
-**Workflow:** `.github/workflows/publish-cli.yml`
+When a fork release plan is accepted, document the release identity before
+publishing:
 
-**Trigger:** Manual — GitHub Actions UI → "Publish" → "Run workflow"
+- package name or distribution channel;
+- version/tag format;
+- target repository for release notes and changelog links;
+- whether upstream package names are intentionally reused or replaced;
+- validation commands and rollback/recovery steps.
 
-**Inputs:**
-- `bump`: Version bump type — `patch (x.x.X)` | `minor (x.X.0)` | `major (X.0.0)`
-- `version` (optional): Override string (e.g., `2.0.0-beta.1`), takes precedence over bump
-- `recovery` (optional): Retry an already committed release version. Requires `version` and reuses the current release commit when the manifests already match.
+Until then, prefer source-build validation:
 
-**Stages (sequential):**
-
-| Job | Description |
-|-----|-------------|
-| `bump-versions` | Reads current version from `packages/cli/package.json`, calculates new version, updates the Rust workspace version plus `Cargo.lock`, the CLI, wrapper, and platform package manifests, then uploads the bumped release files as an artifact |
-| `build-cli-binary` | Builds the native Rust binaries defined by the workflow matrix |
-| `prepare-release-provenance` | Checks npm auth/release state, then commits and pushes the release provenance files as `chore: bump version to X.Y.Z`. In recovery mode, reuses the already committed release SHA when there are no manifest diffs. |
-| `publish-platform-packages` | Publishes platform-specific packages (`@tokscale/cli-darwin-arm64`, etc.) containing native binaries to npm, skipping package versions that already exist only during recovery |
-| `publish-cli` | Publishes `@tokscale/cli` to npm (binary dispatcher + optionalDependencies) |
-| `publish-alias` | Publishes `tokscale` wrapper package to npm |
-| `finalize` | Creates or updates tag `vX.Y.Z` and the GitHub Release after npm publishing succeeds |
-
-**Duration:** ~15-20 minutes end-to-end.
-
-**Package publish chain:** `@tokscale/cli` (with platform packages as optionalDependencies) → `tokscale` (depends on cli). Each waits for the previous to succeed.
-
-### Post-Pipeline: Git Tag & GitHub Release
-
-The CI pipeline creates or updates the git tag and GitHub Release after npm publishing succeeds. After the workflow completes successfully:
-
-1. Verify the `chore: bump version to X.Y.Z` commit was pushed by CI or reused by recovery
-2. Verify tag `vX.Y.Z` targets the release provenance commit
-3. Verify the GitHub Release exists and follows the release notes style below
-
-### Versioning Conventions
-
-| Bump Type | When to Use | Example |
-|-----------|-------------|---------|
-| `patch` | Bug fixes, small features, additive parser support | `1.2.0` → `1.2.1` |
-| `minor` | New client support, significant features, UI overhauls | `1.1.2` → `1.2.0` |
-| `major` | Breaking changes (never used so far) | `1.2.1` → `2.0.0` |
-
-Release version is stored in the Rust workspace and the npm package manifests, and CI updates them together:
-- `Cargo.toml` (`[workspace.package].version`) — Rust binary and exported metadata version
-- `Cargo.lock` — local workspace package versions for `tokscale-cli` and `tokscale-core`
-- `packages/cli/package.json` — CLI package version and platform optional dependency versions
-- Platform packages (`packages/cli-*/package.json`) — native package versions
-- `packages/tokscale/package.json` — wrapper version plus `@tokscale/cli` dependency version
-
-### CI-Only Workflow
-
-**`.github/workflows/build-native.yml`** — Runs on PRs touching `crates/tokscale-cli/**`. Builds all 8 native targets to verify compilation. Does not publish.
-
----
-
-### Release Notes Style
-
-#### Title Conventions
-
-| Release Type | Title Format |
-|-------------|--------------|
-| Standard patch/minor | `` `tokscale@vX.Y.Z` is here! `` |
-| Flagship feature | `` EMOJI `tokscale@vX.Y.Z` is here! (Short subtitle with [link](...)) `` |
-| Feature spotlight | Custom banner image replacing the standard hero + call-to-action |
-
-**Examples from past releases:**
-- Standard: `` `tokscale@v1.1.2` is here! ``
-- Flagship: `` 🦞 `tokscale@v1.2.0` is here! (Now supports [OpenClaw](https://github.com/openclaw/openclaw)) ``
-- Spotlight: Custom Wrapped 2025 banner + `` Generate your Wrapped 2025 with `tokscale@v1.0.16` ``
-
-#### Release Notes Template
-
-```markdown
-<div align="center">
-
-[![Tokscale](https://github.com/junhoyeo/tokscale/raw/main/.github/assets/hero-v2.png)](https://github.com/junhoyeo/tokscale)
-
-# `tokscale@vX.Y.Z` is here!
-</div>
-
-## What's Changed
-* scope(area): description by @author in https://github.com/junhoyeo/tokscale/pull/NNN
-* scope(area): description by @author in https://github.com/junhoyeo/tokscale/pull/NNN
-
-## New Contributors
-* @username made their first contribution in https://github.com/junhoyeo/tokscale/pull/NNN
-
-**Full Changelog**: https://github.com/junhoyeo/tokscale/compare/vPREVIOUS...vNEW
-```
-
-#### Style Rules
-
-| Element | Rule |
-|---------|------|
-| **Header** | Always centered `<div align="center">` with hero banner image linked to the repo |
-| **Title** | Backtick-wrapped `tokscale@vX.Y.Z` — package name, not just version |
-| **PR list** | `* scope(area): description by @author in URL` — mirrors the PR title exactly as merged |
-| **Optional summary** | For releases with many changes or when PR titles alone don't convey impact, add a brief bullet list between the title and "What's Changed" (see v1.0.18 as example) |
-| **New Contributors** | Include section when there are first-time contributors |
-| **Full Changelog** | Always present at bottom as a GitHub compare link `vPREV...vNEW` |
-| **Tone** | Concise. No prose paragraphs. Let the PR list speak for itself. |
-| **No draft issues** | Never reference draft release issues (e.g., #121) in the notes |
-
-#### When to Add a Summary Block
-
-Add a short bullet list summary (before "What's Changed") when:
-- The release has 4+ PRs spanning different areas
-- PR titles alone don't convey the user-facing impact
-- A new client/integration is the headline
-
-**Example (v1.0.18):**
-```markdown
-- Improved model price resolver (Rust)
-- Add support for Amp (AmpCode) and Droid (Factory Droid)
-- Improved sorting feature on TUI
-```
-
-### Deployment Checklist
-
-```
-1. [ ] All target PRs merged to main
-2. [ ] `cargo test` passes in crates/tokscale-cli
-3. [ ] No open blocker bugs (regressions from changes being released)
-4. [ ] Run "Publish" workflow via GitHub Actions UI
-   - Select bump type (patch/minor/major)
-   - For a failed publish retry, set `version` to the already committed release version and enable `recovery`
-   - Wait for all stages to complete
-5. [ ] Verify `chore: bump version to X.Y.Z` commit was pushed
-6. [ ] Verify packages on npm: @tokscale/cli, tokscale
-7. [ ] Verify GitHub Release
-   - Tag: vX.Y.Z targeting the bump commit
-   - Release notes follow the template above
-8. [ ] Smoke test: `bunx tokscale@latest --version`
+```bash
+bun install
+bun run build:core
+bun run cli -- --no-spinner --light
 ```
