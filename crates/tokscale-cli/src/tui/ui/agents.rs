@@ -4,7 +4,8 @@ use ratatui::widgets::{
 };
 
 use super::table_layout::{
-    allocate_widths, display_width, distributed_table_area, ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
+    display_width, distributed_table_area, responsive_table_layout, width_for_column,
+    ResponsiveColumn, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
 };
 use super::widgets::{
     format_cost, format_tokens, get_client_display_name, truncate_display_width,
@@ -22,6 +23,29 @@ const TOKENS_WIDTH: u16 = 10;
 const COST_WIDTH: u16 = 10;
 const MSGS_WIDTH: u16 = 6;
 const INSTANCES_WIDTH: u16 = 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentColumn {
+    Rank,
+    Agent,
+    Source,
+    Tokens,
+    Cost,
+    Messages,
+    Instances,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentsTableLayout {
+    columns: Vec<AgentColumn>,
+    widths: Vec<Constraint>,
+}
+
+impl AgentsTableLayout {
+    fn width_for(&self, column: AgentColumn) -> usize {
+        width_for_column(&self.columns, &self.widths, column)
+    }
+}
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -42,8 +66,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = inner.height.saturating_sub(1) as usize;
     app.set_max_visible_items(visible_height);
 
-    let is_narrow = app.is_narrow();
-    let is_very_narrow = app.is_very_narrow();
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
@@ -62,22 +84,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let header_cells = if is_very_narrow {
-        vec!["Agent", "Cost"]
-    } else if is_narrow {
-        vec!["Agent", "Tokens", "Cost"]
-    } else {
-        vec![
-            "#",
-            "Agent",
-            "Source",
-            "Tokens",
-            "Cost",
-            "Msgs",
-            "Instances",
-        ]
-    };
-
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
@@ -88,30 +94,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             ""
         }
     };
-
-    let header = Row::new(
-        header_cells
-            .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let indicator = match i {
-                    3 if !is_narrow => sort_indicator(SortField::Tokens),
-                    4 if !is_narrow => sort_indicator(SortField::Cost),
-                    1 if is_very_narrow => sort_indicator(SortField::Cost),
-                    2 if is_narrow && !is_very_narrow => sort_indicator(SortField::Cost),
-                    1 if is_narrow && !is_very_narrow => sort_indicator(SortField::Tokens),
-                    _ => "",
-                };
-                Cell::from(format!("{}{}", h, indicator))
-            })
-            .collect::<Vec<_>>(),
-    )
-    .style(
-        Style::default()
-            .fg(theme_accent)
-            .add_modifier(Modifier::BOLD),
-    )
-    .height(1);
 
     let agents_len = agents.len();
     let start = scroll_offset.min(agents_len.saturating_sub(1));
@@ -131,13 +113,28 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|agent| client_labels_display_width(&agent.clients))
         .max()
         .unwrap_or(SOURCE_MIN_WIDTH);
-    let widths = agents_widths(
-        table_area.width,
-        is_narrow,
-        is_very_narrow,
-        agent_content_width,
-        source_content_width,
-    );
+    let table_layout =
+        agents_table_layout(table_area.width, agent_content_width, source_content_width);
+    let columns = table_layout.columns.clone();
+
+    let header = Row::new(
+        columns
+            .iter()
+            .map(|column| {
+                let h = agent_column_header(*column);
+                let indicator = agent_column_sort_field(*column)
+                    .map(sort_indicator)
+                    .unwrap_or("");
+                Cell::from(format!("{}{}", h, indicator))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .style(
+        Style::default()
+            .fg(theme_accent)
+            .add_modifier(Modifier::BOLD),
+    )
+    .height(1);
 
     let rows: Vec<Row> = agents[start..end]
         .iter()
@@ -147,54 +144,43 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let cells: Vec<Cell> = if is_very_narrow {
-                vec![
-                    Cell::from(truncate_display_width(
-                        &agent.agent,
-                        constraint_width(&widths, 0, AGENT_MIN_WIDTH),
-                    ))
-                    .style(Style::default().fg(app.theme.foreground)),
-                    Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else if is_narrow {
-                vec![
-                    Cell::from(truncate_display_width(
-                        &agent.agent,
-                        constraint_width(&widths, 0, AGENT_MIN_WIDTH),
-                    ))
-                    .style(Style::default().fg(app.theme.foreground)),
-                    Cell::from(format_tokens(agent.tokens.total())),
-                    Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
-                ]
-            } else {
-                vec![
-                    Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted)),
-                    Cell::from(truncate_display_width(
-                        &agent.agent,
-                        constraint_width(&widths, 1, AGENT_MIN_WIDTH),
-                    ))
-                    .style(
-                        Style::default()
-                            .fg(app.theme.foreground)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Cell::from(truncate_display_width(
-                        &client_labels(&agent.clients),
-                        constraint_width(&widths, 2, SOURCE_MIN_WIDTH),
-                    ))
-                    .style(Style::default().fg(theme_muted)),
-                    Cell::from(format_tokens(agent.tokens.total())),
-                    Cell::from(format_cost(agent.cost)).style(Style::default().fg(Color::Green)),
-                    Cell::from(agent.message_count.to_string())
+            let source_labels = client_labels(&agent.clients);
+            let cell_for_column =
+                |column: AgentColumn| -> Cell {
+                    match column {
+                        AgentColumn::Rank => Cell::from(format!("{}", idx + 1))
+                            .style(Style::default().fg(theme_muted)),
+                        AgentColumn::Agent => Cell::from(truncate_display_width(
+                            &agent.agent,
+                            table_layout.width_for(AgentColumn::Agent),
+                        ))
+                        .style(
+                            Style::default()
+                                .fg(app.theme.foreground)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        AgentColumn::Source => Cell::from(truncate_display_width(
+                            &source_labels,
+                            table_layout.width_for(AgentColumn::Source),
+                        ))
                         .style(Style::default().fg(theme_muted)),
-                    Cell::from(if agent.instance_count > 1 {
-                        agent.instance_count.to_string()
-                    } else {
-                        "-".to_string()
-                    })
-                    .style(Style::default().fg(theme_muted)),
-                ]
-            };
+                        AgentColumn::Tokens => Cell::from(format_tokens(agent.tokens.total())),
+                        AgentColumn::Cost => Cell::from(format_cost(agent.cost))
+                            .style(Style::default().fg(Color::Green)),
+                        AgentColumn::Messages => Cell::from(agent.message_count.to_string())
+                            .style(Style::default().fg(theme_muted)),
+                        AgentColumn::Instances => Cell::from(if agent.instance_count > 1 {
+                            agent.instance_count.to_string()
+                        } else {
+                            "-".to_string()
+                        })
+                        .style(Style::default().fg(theme_muted)),
+                    }
+                };
+            let cells: Vec<Cell> = columns
+                .iter()
+                .map(|column| cell_for_column(*column))
+                .collect();
 
             let row_style = if is_selected {
                 Style::default().bg(theme_selection)
@@ -208,8 +194,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    let widths = table_layout.widths;
     let table = Table::new(rows, widths)
         .header(header)
+        .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
@@ -234,60 +222,95 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn agents_widths(
-    table_width: u16,
-    is_narrow: bool,
-    is_very_narrow: bool,
-    agent_content_width: u16,
-    source_content_width: u16,
-) -> Vec<Constraint> {
-    if is_very_narrow {
-        let agent_width = agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_MAX_WIDTH);
-        return allocate_widths(
-            table_width,
-            &[
-                ColumnWidthSpec::fixed(agent_width),
-                ColumnWidthSpec::fixed(COST_WIDTH),
-            ],
-        );
+fn agent_column_order(column: AgentColumn) -> u16 {
+    match column {
+        AgentColumn::Rank => 0,
+        AgentColumn::Agent => 10,
+        AgentColumn::Source => 20,
+        AgentColumn::Tokens => 30,
+        AgentColumn::Cost => 40,
+        AgentColumn::Messages => 50,
+        AgentColumn::Instances => 60,
     }
-
-    if is_narrow {
-        let agent_width = agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_MAX_WIDTH);
-        return allocate_widths(
-            table_width,
-            &[
-                ColumnWidthSpec::fixed(agent_width),
-                ColumnWidthSpec::fixed(TOKENS_WIDTH),
-                ColumnWidthSpec::fixed(COST_WIDTH),
-            ],
-        );
-    }
-
-    let agent_width = agent_content_width.clamp(AGENT_MIN_WIDTH, AGENT_MAX_WIDTH);
-    let source_width = source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH);
-    allocate_widths(
-        table_width,
-        &[
-            ColumnWidthSpec::fixed(RANK_WIDTH),
-            ColumnWidthSpec::fixed(agent_width),
-            ColumnWidthSpec::fixed(source_width),
-            ColumnWidthSpec::fixed(TOKENS_WIDTH),
-            ColumnWidthSpec::fixed(COST_WIDTH),
-            ColumnWidthSpec::fixed(MSGS_WIDTH),
-            ColumnWidthSpec::fixed(INSTANCES_WIDTH),
-        ],
-    )
 }
 
-fn constraint_width(widths: &[Constraint], index: usize, fallback: u16) -> usize {
-    widths
-        .get(index)
-        .and_then(|constraint| match constraint {
-            Constraint::Length(width) => Some(*width),
-            _ => None,
-        })
-        .unwrap_or(fallback) as usize
+fn agent_column_header(column: AgentColumn) -> &'static str {
+    match column {
+        AgentColumn::Rank => "#",
+        AgentColumn::Agent => "Agent",
+        AgentColumn::Source => "Source",
+        AgentColumn::Tokens => "Tokens",
+        AgentColumn::Cost => "Cost",
+        AgentColumn::Messages => "Msgs",
+        AgentColumn::Instances => "Instances",
+    }
+}
+
+fn agent_column_sort_field(column: AgentColumn) -> Option<SortField> {
+    match column {
+        AgentColumn::Tokens => Some(SortField::Tokens),
+        AgentColumn::Cost => Some(SortField::Cost),
+        _ => None,
+    }
+}
+
+fn agents_table_layout(
+    table_width: u16,
+    agent_content_width: u16,
+    source_content_width: u16,
+) -> AgentsTableLayout {
+    let columns = vec![
+        ResponsiveColumn::measured_required(
+            AgentColumn::Agent,
+            agent_column_order(AgentColumn::Agent),
+            AGENT_MIN_WIDTH,
+            agent_content_width,
+            AGENT_MAX_WIDTH,
+        ),
+        ResponsiveColumn::fixed_required(
+            AgentColumn::Tokens,
+            agent_column_order(AgentColumn::Tokens),
+            TOKENS_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            AgentColumn::Cost,
+            10,
+            agent_column_order(AgentColumn::Cost),
+            COST_WIDTH,
+        ),
+        ResponsiveColumn::measured_atomic_optional(
+            AgentColumn::Source,
+            20,
+            agent_column_order(AgentColumn::Source),
+            SOURCE_MIN_WIDTH,
+            source_content_width,
+            SOURCE_MAX_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            AgentColumn::Messages,
+            30,
+            agent_column_order(AgentColumn::Messages),
+            MSGS_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            AgentColumn::Instances,
+            40,
+            agent_column_order(AgentColumn::Instances),
+            INSTANCES_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            AgentColumn::Rank,
+            50,
+            agent_column_order(AgentColumn::Rank),
+            RANK_WIDTH,
+        ),
+    ];
+    let layout = responsive_table_layout(table_width, &columns);
+
+    AgentsTableLayout {
+        columns: layout.columns,
+        widths: layout.widths,
+    }
 }
 
 fn get_empty_message(app: &App) -> String {
@@ -328,8 +351,8 @@ fn client_labels_display_width(clients: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        agents_widths, client_labels_display_width, get_empty_message, AGENT_MAX_WIDTH, COST_WIDTH,
-        INSTANCES_WIDTH, MSGS_WIDTH, SOURCE_MAX_WIDTH, TOKENS_WIDTH,
+        agents_table_layout, client_labels_display_width, get_empty_message, AgentColumn,
+        AGENT_MAX_WIDTH, COST_WIDTH, INSTANCES_WIDTH, MSGS_WIDTH, SOURCE_MAX_WIDTH, TOKENS_WIDTH,
     };
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
@@ -391,8 +414,21 @@ mod tests {
 
     #[test]
     fn wide_agents_widths_keep_content_columns_capped_and_metrics_fixed() {
-        let widths = agents_widths(120, false, false, 22, 24);
+        let layout = agents_table_layout(120, 22, 24);
+        let widths = &layout.widths;
 
+        assert_eq!(
+            layout.columns,
+            vec![
+                AgentColumn::Rank,
+                AgentColumn::Agent,
+                AgentColumn::Source,
+                AgentColumn::Tokens,
+                AgentColumn::Cost,
+                AgentColumn::Messages,
+                AgentColumn::Instances,
+            ]
+        );
         assert_eq!(length_at(&widths, 0), 3);
         assert_eq!(length_at(&widths, 1), 22);
         assert_eq!(length_at(&widths, 2), 24);
@@ -404,9 +440,46 @@ mod tests {
 
     #[test]
     fn wide_agents_widths_cap_long_text_columns() {
-        let widths = agents_widths(200, false, false, 80, 80);
+        let layout = agents_table_layout(200, 80, 80);
+        let widths = &layout.widths;
 
         assert_eq!(length_at(&widths, 1), AGENT_MAX_WIDTH);
         assert_eq!(length_at(&widths, 2), SOURCE_MAX_WIDTH);
+    }
+
+    #[test]
+    fn very_narrow_agents_layout_keeps_agent_and_tokens_before_cost() {
+        let layout = agents_table_layout(33, 22, 24);
+
+        assert_eq!(
+            layout.columns,
+            vec![AgentColumn::Agent, AgentColumn::Tokens]
+        );
+        assert!(!layout.columns.contains(&AgentColumn::Cost));
+    }
+
+    #[test]
+    fn agents_cost_is_optional_after_tokens() {
+        for width in 1..120 {
+            let layout = agents_table_layout(width, 32, 40);
+
+            assert!(layout.columns.contains(&AgentColumn::Agent));
+            assert!(layout.columns.contains(&AgentColumn::Tokens));
+
+            if layout.columns.contains(&AgentColumn::Cost) {
+                assert!(layout.columns.contains(&AgentColumn::Tokens));
+            }
+        }
+    }
+
+    #[test]
+    fn agents_source_blocks_later_columns_under_strict_priority() {
+        let layout = agents_table_layout(51, 22, 40);
+
+        assert!(layout.columns.contains(&AgentColumn::Tokens));
+        assert!(layout.columns.contains(&AgentColumn::Cost));
+        assert!(!layout.columns.contains(&AgentColumn::Source));
+        assert!(!layout.columns.contains(&AgentColumn::Messages));
+        assert!(!layout.columns.contains(&AgentColumn::Instances));
     }
 }

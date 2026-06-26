@@ -6,14 +6,14 @@ use ratatui::widgets::{
 use std::collections::BTreeMap;
 
 use super::model_usage_layout::{
-    model_usage_table_layout, ModelUsageColumn as PeriodDetailColumn, ModelUsageLayoutProfile,
+    model_usage_table_layout, ModelUsageColumn as PeriodDetailColumn, ModelUsageLayoutSchema,
     ModelUsageTableDensity as PeriodDetailTableDensity,
     ModelUsageTableLayout as PeriodDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
     MODEL_MIN_WIDTH,
 };
 use super::table_layout::{
-    allocate_widths, choose_priority_columns, display_width, distributed_table_area,
-    insert_by_display_order, spaced_width, ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
+    display_width, distributed_table_area, responsive_table_layout, width_for_column,
+    ResponsiveColumn, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
@@ -63,77 +63,17 @@ enum PeriodColumn {
     CostPerMillion,
 }
 
-const PERIOD_DISPLAY_ORDER: [PeriodColumn; 14] = [
-    PeriodColumn::Period,
-    PeriodColumn::ActiveDays,
-    PeriodColumn::TopSource,
-    PeriodColumn::TopModel,
-    PeriodColumn::Turn,
-    PeriodColumn::Messages,
-    PeriodColumn::Input,
-    PeriodColumn::Output,
-    PeriodColumn::CacheRead,
-    PeriodColumn::CacheWrite,
-    PeriodColumn::CacheRate,
-    PeriodColumn::Total,
-    PeriodColumn::Cost,
-    PeriodColumn::CostPerMillion,
-];
-
-const PERIOD_REQUIRED_COLUMNS: [PeriodColumn; 3] = [
-    PeriodColumn::Period,
-    PeriodColumn::Total,
-    PeriodColumn::Cost,
-];
-
-const PERIOD_OPTIONAL_COLUMNS_WITH_TURN: [PeriodColumn; 11] = [
-    PeriodColumn::ActiveDays,
-    PeriodColumn::TopSource,
-    PeriodColumn::TopModel,
-    PeriodColumn::Turn,
-    PeriodColumn::Messages,
-    PeriodColumn::Input,
-    PeriodColumn::Output,
-    PeriodColumn::CacheRead,
-    PeriodColumn::CacheWrite,
-    PeriodColumn::CacheRate,
-    PeriodColumn::CostPerMillion,
-];
-
-const PERIOD_OPTIONAL_COLUMNS_WITHOUT_TURN: [PeriodColumn; 10] = [
-    PeriodColumn::ActiveDays,
-    PeriodColumn::TopSource,
-    PeriodColumn::TopModel,
-    PeriodColumn::Messages,
-    PeriodColumn::Input,
-    PeriodColumn::Output,
-    PeriodColumn::CacheRead,
-    PeriodColumn::CacheWrite,
-    PeriodColumn::CacheRate,
-    PeriodColumn::CostPerMillion,
-];
-
-const PERIOD_DETAIL_OPTIONAL_COLUMNS: [PeriodDetailColumn; 10] = [
-    PeriodDetailColumn::Cost,
-    PeriodDetailColumn::Source,
-    PeriodDetailColumn::Provider,
-    PeriodDetailColumn::Messages,
-    PeriodDetailColumn::Input,
-    PeriodDetailColumn::Output,
-    PeriodDetailColumn::CacheRate,
-    PeriodDetailColumn::CacheRead,
-    PeriodDetailColumn::CacheWrite,
-    PeriodDetailColumn::CostPerMillion,
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PeriodTableLayout {
     columns: Vec<PeriodColumn>,
     widths: Vec<Constraint>,
-    period_width: usize,
-    top_source_width: usize,
-    top_model_width: usize,
     density: PeriodTableDensity,
+}
+
+impl PeriodTableLayout {
+    fn width_for(&self, column: PeriodColumn) -> usize {
+        width_for_column(&self.columns, &self.widths, column)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,58 +112,6 @@ pub fn render_weekly(frame: &mut Frame, app: &mut App, area: Rect) {
     render_period(frame, app, area, PeriodKind::Weekly, " Weekly Usage ");
 }
 
-fn period_column_width(
-    column: PeriodColumn,
-    period_width: u16,
-    top_source_width: u16,
-    top_model_width: u16,
-) -> u16 {
-    match column {
-        PeriodColumn::Period => period_width,
-        PeriodColumn::ActiveDays => DAYS_WIDTH,
-        PeriodColumn::TopSource => top_source_width,
-        PeriodColumn::TopModel => top_model_width,
-        PeriodColumn::Turn => TURN_WIDTH,
-        PeriodColumn::Messages => MSGS_WIDTH,
-        PeriodColumn::Input
-        | PeriodColumn::Output
-        | PeriodColumn::CacheRead
-        | PeriodColumn::CacheWrite
-        | PeriodColumn::Total => NUMERIC_WIDTH,
-        PeriodColumn::CacheRate => CACHE_RATE_WIDTH,
-        PeriodColumn::Cost => COST_WIDTH,
-        PeriodColumn::CostPerMillion => COST_PER_MILLION_WIDTH,
-    }
-}
-
-fn period_column_spec(
-    column: PeriodColumn,
-    period_width: u16,
-    top_source_width: u16,
-    top_model_width: u16,
-) -> ColumnWidthSpec {
-    ColumnWidthSpec::fixed(period_column_width(
-        column,
-        period_width,
-        top_source_width,
-        top_model_width,
-    ))
-}
-
-fn period_layout_width(
-    columns: &[PeriodColumn],
-    period_width: u16,
-    top_source_width: u16,
-    top_model_width: u16,
-) -> u16 {
-    let widths: Vec<u16> = columns
-        .iter()
-        .map(|column| period_column_width(*column, period_width, top_source_width, top_model_width))
-        .collect();
-
-    spaced_width(&widths)
-}
-
 fn period_density_for_columns(columns: &[PeriodColumn]) -> PeriodTableDensity {
     if columns.contains(&PeriodColumn::CacheWrite) {
         PeriodTableDensity::Full
@@ -254,92 +142,178 @@ fn period_density_for_columns(columns: &[PeriodColumn]) -> PeriodTableDensity {
     }
 }
 
-fn period_layout_from_columns(
-    table_width: u16,
-    columns: Vec<PeriodColumn>,
-    density: PeriodTableDensity,
-    period_width: u16,
-    top_source_width: u16,
-    top_model_width: u16,
-) -> PeriodTableLayout {
-    let specs: Vec<ColumnWidthSpec> = columns
-        .iter()
-        .map(|column| period_column_spec(*column, period_width, top_source_width, top_model_width))
-        .collect();
-    let widths = allocate_widths(table_width, &specs);
-
-    PeriodTableLayout {
-        columns,
-        widths,
-        period_width: period_width as usize,
-        top_source_width: top_source_width as usize,
-        top_model_width: top_model_width as usize,
-        density,
+fn period_column_order(column: PeriodColumn) -> u16 {
+    match column {
+        PeriodColumn::Period => 0,
+        PeriodColumn::ActiveDays => 10,
+        PeriodColumn::TopSource => 20,
+        PeriodColumn::TopModel => 30,
+        PeriodColumn::Turn => 40,
+        PeriodColumn::Messages => 50,
+        PeriodColumn::Input => 60,
+        PeriodColumn::Output => 70,
+        PeriodColumn::CacheRead => 80,
+        PeriodColumn::CacheWrite => 90,
+        PeriodColumn::CacheRate => 100,
+        PeriodColumn::Total => 110,
+        PeriodColumn::Cost => 120,
+        PeriodColumn::CostPerMillion => 130,
     }
+}
+
+fn period_columns(
+    has_turn_data: bool,
+    period_content_width: u16,
+    top_source_content_width: u16,
+    top_model_content_width: u16,
+) -> Vec<ResponsiveColumn<PeriodColumn>> {
+    let (
+        top_source_priority,
+        top_model_priority,
+        messages_priority,
+        input_priority,
+        output_priority,
+        cache_read_priority,
+        cache_write_priority,
+        cache_rate_priority,
+        cost_per_million_priority,
+    ) = if has_turn_data {
+        (20, 30, 50, 60, 70, 80, 90, 100, 110)
+    } else {
+        (20, 30, 40, 50, 60, 70, 80, 90, 100)
+    };
+
+    let mut columns = vec![
+        ResponsiveColumn::measured_required(
+            PeriodColumn::Period,
+            period_column_order(PeriodColumn::Period),
+            PERIOD_MIN_WIDTH,
+            period_content_width,
+            PERIOD_MAX_WIDTH,
+        ),
+        ResponsiveColumn::fixed_required(
+            PeriodColumn::Total,
+            period_column_order(PeriodColumn::Total),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_required(
+            PeriodColumn::Cost,
+            period_column_order(PeriodColumn::Cost),
+            COST_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            PeriodColumn::ActiveDays,
+            10,
+            period_column_order(PeriodColumn::ActiveDays),
+            DAYS_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            PeriodColumn::Messages,
+            messages_priority,
+            period_column_order(PeriodColumn::Messages),
+            MSGS_WIDTH,
+        ),
+        ResponsiveColumn::measured_atomic_optional(
+            PeriodColumn::TopSource,
+            top_source_priority,
+            period_column_order(PeriodColumn::TopSource),
+            SOURCE_TOP_MIN_WIDTH,
+            top_source_content_width,
+            SOURCE_TOP_MAX_WIDTH,
+        ),
+        ResponsiveColumn::measured_atomic_optional(
+            PeriodColumn::TopModel,
+            top_model_priority,
+            period_column_order(PeriodColumn::TopModel),
+            MODEL_TOP_MIN_WIDTH,
+            top_model_content_width,
+            MODEL_TOP_MAX_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            PeriodColumn::Input,
+            input_priority,
+            period_column_order(PeriodColumn::Input),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            PeriodColumn::Output,
+            output_priority,
+            period_column_order(PeriodColumn::Output),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            PeriodColumn::CacheRead,
+            cache_read_priority,
+            period_column_order(PeriodColumn::CacheRead),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            PeriodColumn::CacheWrite,
+            cache_write_priority,
+            period_column_order(PeriodColumn::CacheWrite),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            PeriodColumn::CacheRate,
+            cache_rate_priority,
+            period_column_order(PeriodColumn::CacheRate),
+            CACHE_RATE_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            PeriodColumn::CostPerMillion,
+            cost_per_million_priority,
+            period_column_order(PeriodColumn::CostPerMillion),
+            COST_PER_MILLION_WIDTH,
+        ),
+    ];
+
+    if has_turn_data {
+        columns.push(ResponsiveColumn::fixed_optional(
+            PeriodColumn::Turn,
+            40,
+            period_column_order(PeriodColumn::Turn),
+            TURN_WIDTH,
+        ));
+    }
+
+    columns
 }
 
 fn period_table_layout(
     table_width: u16,
-    is_very_narrow: bool,
     has_turn_data: bool,
     period_content_width: u16,
     top_source_content_width: u16,
     top_model_content_width: u16,
 ) -> PeriodTableLayout {
-    let period_width = period_content_width.clamp(PERIOD_MIN_WIDTH, PERIOD_MAX_WIDTH);
-    let top_source_width =
-        top_source_content_width.clamp(SOURCE_TOP_MIN_WIDTH, SOURCE_TOP_MAX_WIDTH);
-    let top_model_width = top_model_content_width.clamp(MODEL_TOP_MIN_WIDTH, MODEL_TOP_MAX_WIDTH);
-
-    if is_very_narrow {
-        return period_layout_from_columns(
-            table_width,
-            PERIOD_REQUIRED_COLUMNS.to_vec(),
-            PeriodTableDensity::VeryCompact,
-            period_width,
-            top_source_width,
-            top_model_width,
-        );
-    }
-
-    let optional_columns = if has_turn_data {
-        &PERIOD_OPTIONAL_COLUMNS_WITH_TURN[..]
-    } else {
-        &PERIOD_OPTIONAL_COLUMNS_WITHOUT_TURN[..]
-    };
-    let columns = choose_priority_columns(
-        table_width,
-        &PERIOD_REQUIRED_COLUMNS,
-        optional_columns,
-        |candidate, column| insert_by_display_order(candidate, column, &PERIOD_DISPLAY_ORDER),
-        |candidate| period_layout_width(candidate, period_width, top_source_width, top_model_width),
+    let specs = period_columns(
+        has_turn_data,
+        period_content_width,
+        top_source_content_width,
+        top_model_content_width,
     );
-    let density = period_density_for_columns(&columns);
+    let layout = responsive_table_layout(table_width, &specs);
+    let density = period_density_for_columns(&layout.columns);
 
-    period_layout_from_columns(
-        table_width,
-        columns,
+    PeriodTableLayout {
+        columns: layout.columns,
+        widths: layout.widths,
         density,
-        period_width,
-        top_source_width,
-        top_model_width,
-    )
+    }
 }
 
 fn period_detail_table_layout(
     table_width: u16,
-    is_very_narrow: bool,
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
 ) -> PeriodDetailTableLayout {
     model_usage_table_layout(
         table_width,
-        is_very_narrow,
         model_content_width,
         provider_content_width,
         source_content_width,
-        ModelUsageLayoutProfile::standard(&PERIOD_DETAIL_OPTIONAL_COLUMNS),
+        ModelUsageLayoutSchema::Detail,
     )
 }
 
@@ -524,7 +498,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let is_very_narrow = app.is_very_narrow();
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
@@ -566,7 +539,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(DETAIL_SOURCE_WIDTH);
     let table_layout = period_detail_table_layout(
         table_area.width,
-        is_very_narrow,
         model_content_width,
         provider_content_width,
         source_content_width,
@@ -616,11 +588,16 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    PeriodDetailColumn::Provider => {
-                        Cell::from(get_provider_display_name(&row.provider))
-                    }
-                    PeriodDetailColumn::Source => Cell::from(get_client_display_name(&row.source))
-                        .style(Style::default().fg(theme_muted)),
+                    PeriodDetailColumn::Provider => Cell::from(truncate_display_width(
+                        &get_provider_display_name(&row.provider),
+                        table_layout.width_for(PeriodDetailColumn::Provider),
+                    ))
+                    .style(Style::default().fg(theme_muted)),
+                    PeriodDetailColumn::Source => Cell::from(truncate_display_width(
+                        &get_client_display_name(&row.source),
+                        table_layout.width_for(PeriodDetailColumn::Source),
+                    ))
+                    .style(Style::default().fg(theme_muted)),
                     PeriodDetailColumn::Messages => Cell::from(row.messages.to_string()),
                     PeriodDetailColumn::Input => {
                         Cell::from(format_tokens(row.tokens.input)).style(metric_input_style)
@@ -676,6 +653,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
@@ -759,7 +737,6 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
     let today = Local::now().date_naive();
     let table_layout = period_table_layout(
         table_area.width,
-        is_very_narrow,
         has_turn_data,
         period_content_width,
         top_source_content_width,
@@ -848,7 +825,7 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
             match column {
                 PeriodColumn::Period => Cell::from(truncate_display_width(
                     &period_text,
-                    table_layout.period_width,
+                    table_layout.width_for(PeriodColumn::Period),
                 ))
                 .style(period_style),
                 PeriodColumn::ActiveDays => Cell::from(period.active_days.to_string()),
@@ -856,7 +833,7 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
                     if let Some(source) = top_source.as_ref() {
                         Cell::from(truncate_display_width(
                             &source.label,
-                            table_layout.top_source_width,
+                            table_layout.width_for(PeriodColumn::TopSource),
                         ))
                         .style(Style::default().fg(theme_muted))
                     } else {
@@ -868,7 +845,7 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
                         let model_color = app.model_color_for(&model.provider, &model.color_key);
                         Cell::from(truncate_model_display_name_to(
                             &model.label,
-                            table_layout.top_model_width,
+                            table_layout.width_for(PeriodColumn::TopModel),
                         ))
                         .style(
                             Style::default()
@@ -933,6 +910,7 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
 
     let table = Table::new(rows, widths)
         .header(header)
+        .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
@@ -964,7 +942,7 @@ mod tests {
 
     #[test]
     fn very_narrow_period_layout_keeps_core_columns() {
-        let layout = period_table_layout(30, true, true, 19, 12, 16);
+        let layout = period_table_layout(30, true, 19, 12, 16);
 
         assert_eq!(layout.density, PeriodTableDensity::VeryCompact);
         assert_eq!(
@@ -975,12 +953,12 @@ mod tests {
                 PeriodColumn::Cost
             ]
         );
-        assert_eq!(constraint_lengths(&layout.widths), vec![19, 10, 10]);
+        assert_eq!(constraint_lengths(&layout.widths), vec![8, 10, 10]);
     }
 
     #[test]
     fn wider_period_layout_adds_context_before_cache_details() {
-        let layout = period_table_layout(92, false, true, 19, 12, 16);
+        let layout = period_table_layout(92, true, 19, 12, 16);
 
         assert!(layout.columns.contains(&PeriodColumn::ActiveDays));
         assert!(layout.columns.contains(&PeriodColumn::TopSource));
@@ -988,6 +966,44 @@ mod tests {
         assert!(layout.columns.contains(&PeriodColumn::Turn));
         assert!(layout.columns.contains(&PeriodColumn::Total));
         assert!(layout.columns.contains(&PeriodColumn::Cost));
+    }
+
+    #[test]
+    fn period_layout_with_turn_uses_original_priority_prefix() {
+        let layout = period_table_layout(77, true, 19, 12, 16);
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                PeriodColumn::Period,
+                PeriodColumn::ActiveDays,
+                PeriodColumn::TopSource,
+                PeriodColumn::TopModel,
+                PeriodColumn::Total,
+                PeriodColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&PeriodColumn::Turn));
+        assert!(!layout.columns.contains(&PeriodColumn::Messages));
+    }
+
+    #[test]
+    fn period_layout_without_turn_uses_original_priority_prefix() {
+        let layout = period_table_layout(77, false, 19, 12, 16);
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                PeriodColumn::Period,
+                PeriodColumn::ActiveDays,
+                PeriodColumn::TopSource,
+                PeriodColumn::TopModel,
+                PeriodColumn::Total,
+                PeriodColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&PeriodColumn::Messages));
+        assert!(!layout.columns.contains(&PeriodColumn::Input));
     }
 
     #[test]

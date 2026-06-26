@@ -4,15 +4,17 @@ use ratatui::widgets::{
 };
 
 use super::model_usage_layout::{
-    model_usage_table_layout, ModelUsageColumn as ModelsColumn, ModelUsageLayoutProfile,
+    model_usage_table_layout, ModelUsageColumn as ModelsColumn, ModelUsageLayoutSchema,
     ModelUsageTableDensity as ModelsTableDensity, ModelUsageTableLayout as ModelsTableLayout,
     DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH,
 };
-use super::table_layout::{display_width, distributed_table_area, DISTRIBUTED_TABLE_FLEX};
+use super::table_layout::{
+    display_width, distributed_table_area, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
+};
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
-    get_client_display_name, get_provider_display_name, truncate_model_display_name_to,
-    viewport_scrollbar_state,
+    get_client_display_name, get_provider_display_name, truncate_display_width,
+    truncate_model_display_name_to, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
@@ -40,40 +42,25 @@ fn model_content_width(models: &[&crate::tui::data::ModelUsage], group_by: &Grou
         .unwrap_or(MODEL_MIN_WIDTH)
 }
 
-const MODEL_OPTIONAL_COLUMNS: [ModelsColumn; 10] = [
-    ModelsColumn::Cost,
-    ModelsColumn::Source,
-    ModelsColumn::Provider,
-    ModelsColumn::Input,
-    ModelsColumn::Output,
-    ModelsColumn::CacheRate,
-    ModelsColumn::CacheRead,
-    ModelsColumn::CacheWrite,
-    ModelsColumn::Performance,
-    ModelsColumn::CostPerMillion,
-];
-
 fn models_table_layout(
     table_width: u16,
-    is_very_narrow: bool,
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
     group_by: &GroupBy,
 ) -> ModelsTableLayout {
-    let profile = if *group_by == GroupBy::WorkspaceModel {
-        ModelUsageLayoutProfile::workspace(&MODEL_OPTIONAL_COLUMNS)
+    let schema = if *group_by == GroupBy::WorkspaceModel {
+        ModelUsageLayoutSchema::WorkspaceModels
     } else {
-        ModelUsageLayoutProfile::standard(&MODEL_OPTIONAL_COLUMNS)
+        ModelUsageLayoutSchema::Models
     };
 
     model_usage_table_layout(
         table_width,
-        is_very_narrow,
         model_content_width,
         provider_content_width,
         source_content_width,
-        profile,
+        schema,
     )
 }
 
@@ -130,7 +117,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = inner.height.saturating_sub(1) as usize;
     app.set_max_visible_items(visible_height);
 
-    let is_very_narrow = app.is_very_narrow();
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
@@ -189,7 +175,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_models = &models[start..end];
     let table_layout = models_table_layout(
         table_area.width,
-        is_very_narrow,
         model_content_width,
         provider_content_width,
         source_content_width,
@@ -236,13 +221,17 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    ModelsColumn::Provider => {
-                        Cell::from(get_provider_display_name(&model.provider))
-                    }
+                    ModelsColumn::Provider => Cell::from(truncate_display_width(
+                        &get_provider_display_name(&model.provider),
+                        table_layout.width_for(ModelsColumn::Provider),
+                    )),
                     // models_table_layout never includes Messages; panic if renderer and layout diverge.
                     ModelsColumn::Messages => unreachable!("models rows do not have message data"),
-                    ModelsColumn::Source => Cell::from(get_client_display_name(&model.client))
-                        .style(Style::default().fg(theme_muted)),
+                    ModelsColumn::Source => Cell::from(truncate_display_width(
+                        &get_client_display_name(&model.client),
+                        table_layout.width_for(ModelsColumn::Source),
+                    ))
+                    .style(Style::default().fg(theme_muted)),
                     ModelsColumn::Input => {
                         Cell::from(format_tokens(model.tokens.input)).style(metric_input_style)
                     }
@@ -294,6 +283,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
@@ -333,7 +323,7 @@ mod tests {
     }
 
     fn model_layout(table_width: u16, model: u16, provider: u16, source: u16) -> ModelsTableLayout {
-        models_table_layout(table_width, false, model, provider, source, &GroupBy::Model)
+        models_table_layout(table_width, model, provider, source, &GroupBy::Model)
     }
 
     fn workspace_model_layout(
@@ -344,7 +334,6 @@ mod tests {
     ) -> ModelsTableLayout {
         models_table_layout(
             table_width,
-            false,
             model,
             provider,
             source,
@@ -353,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn portrait_model_layout_keeps_core_columns_before_cache_details() {
+    fn portrait_model_layout_stops_at_first_non_fitting_priority_column() {
         let layout = model_layout(100, 28, 42, 34);
 
         assert_eq!(layout.density, ModelsTableDensity::Detail);
@@ -368,36 +357,39 @@ mod tests {
         );
         assert!(!layout.columns.contains(&ModelsColumn::Provider));
         assert!(!layout.columns.contains(&ModelsColumn::Input));
-        assert!(!layout.columns.contains(&ModelsColumn::CacheRead));
-        assert!(!layout.columns.contains(&ModelsColumn::CacheWrite));
-        assert!(layout.model_width >= MODEL_MIN_WIDTH as usize);
+        assert!(!layout.columns.contains(&ModelsColumn::Output));
+        assert_eq!(layout.model_width, 28);
     }
 
     #[test]
-    fn narrow_model_layout_keeps_model_tokens_and_cost() {
-        let layout = models_table_layout(74, false, 80, 56, 40, &GroupBy::Model);
+    fn narrow_model_layout_stops_before_context_columns_before_truncating_model() {
+        let layout = models_table_layout(74, 80, 56, 40, &GroupBy::Model);
 
+        assert_eq!(
+            layout.columns,
+            vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost]
+        );
+        assert_eq!(layout.model_width, 29);
+        assert!(!layout.columns.contains(&ModelsColumn::Source));
+        assert!(!layout.columns.contains(&ModelsColumn::Provider));
+        assert!(!layout.columns.contains(&ModelsColumn::Input));
+    }
+
+    #[test]
+    fn very_narrow_model_layout_keeps_tokens_before_optional_detail_columns() {
+        let layout = models_table_layout(54, 80, 56, 40, &GroupBy::Model);
+
+        assert_eq!(layout.density, ModelsTableDensity::Core);
         assert_eq!(
             layout.columns,
             vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost,]
         );
-        assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
+        assert_eq!(layout.model_width, 29);
+        assert!(!layout.columns.contains(&ModelsColumn::Input));
     }
 
     #[test]
-    fn very_narrow_model_layout_still_keeps_tokens_before_cache_details() {
-        let layout = models_table_layout(54, true, 80, 56, 40, &GroupBy::Model);
-
-        assert_eq!(layout.density, ModelsTableDensity::VeryCompact);
-        assert_eq!(
-            layout.columns,
-            vec![ModelsColumn::Model, ModelsColumn::Total]
-        );
-        assert!(!layout.columns.contains(&ModelsColumn::CacheRead));
-    }
-
-    #[test]
-    fn wide_model_layout_is_required_before_cache_columns_are_shown() {
+    fn wider_model_layout_keeps_cache_columns_when_min_widths_fit() {
         let portrait = model_layout(100, 28, 42, 34);
         let wide = model_layout(180, 28, 42, 34);
 
@@ -452,11 +444,9 @@ mod tests {
 
     #[test]
     fn full_model_list_controls_layout_width_not_visible_page() {
-        let visible_only = model_layout(165, 28, 28, 26);
-        let full_dataset = model_layout(165, 28, 56, 26);
+        let visible_only = model_layout(140, 28, 12, 12);
+        let full_dataset = model_layout(140, 28, 22, 12);
 
-        assert!(visible_only.columns.contains(&ModelsColumn::Performance));
-        assert!(!full_dataset.columns.contains(&ModelsColumn::Performance));
         assert!(length_at(&full_dataset.widths, 2) > length_at(&visible_only.widths, 2));
     }
 
