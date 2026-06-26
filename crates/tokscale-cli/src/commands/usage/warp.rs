@@ -1,7 +1,7 @@
 use super::{UsageMetric, UsageOutput};
 use anyhow::Result;
 
-pub fn has_credentials() -> bool {
+pub fn has_usage_cache() -> bool {
     crate::warp::load_usage_cache().is_some()
 }
 

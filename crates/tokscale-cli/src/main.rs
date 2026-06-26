@@ -13,7 +13,7 @@ use crate::tui::{
     client_ui, get_client_display_name, get_provider_display_name, truncate_model_display_name,
 };
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -271,8 +271,6 @@ enum Commands {
     Usage {
         #[arg(long, help = "Output as JSON")]
         json: bool,
-        #[arg(long, help = "Light terminal output (no TUI)")]
-        light: bool,
     },
     #[command(about = "Codex account integration commands")]
     Codex {
@@ -460,7 +458,8 @@ enum WarpSubcommand {
 fn main() -> Result<()> {
     use std::io::IsTerminal;
 
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let can_use_tui = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     if cli.test_data {
@@ -738,9 +737,10 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "antigravity")?;
             run_antigravity_command(subcommand)
         }
-        Some(Commands::Usage { json, light }) => {
+        Some(Commands::Usage { json }) => {
             reject_unsupported_home_override(&cli.home, "usage")?;
-            commands::usage::run(json, light)
+            reject_usage_parent_flags(&matches)?;
+            commands::usage::run(json)
         }
         Some(Commands::Codex { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "codex")?;
@@ -1209,6 +1209,106 @@ fn reject_unsupported_home_override(home_dir: &Option<String>, command: &str) ->
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct UsageParentFlag {
+    id: &'static str,
+    display: &'static str,
+}
+
+const USAGE_PARENT_FLAGS: [UsageParentFlag; 17] = [
+    UsageParentFlag {
+        id: "json",
+        display: "--json",
+    },
+    UsageParentFlag {
+        id: "light",
+        display: "--light",
+    },
+    UsageParentFlag {
+        id: "write_cache",
+        display: "--write-cache",
+    },
+    UsageParentFlag {
+        id: "no_write_cache",
+        display: "--no-write-cache",
+    },
+    UsageParentFlag {
+        id: "clients",
+        display: "--client",
+    },
+    UsageParentFlag {
+        id: "today",
+        display: "--today",
+    },
+    UsageParentFlag {
+        id: "week",
+        display: "--week",
+    },
+    UsageParentFlag {
+        id: "month",
+        display: "--month",
+    },
+    UsageParentFlag {
+        id: "since",
+        display: "--since",
+    },
+    UsageParentFlag {
+        id: "until",
+        display: "--until",
+    },
+    UsageParentFlag {
+        id: "year",
+        display: "--year",
+    },
+    UsageParentFlag {
+        id: "benchmark",
+        display: "--benchmark",
+    },
+    UsageParentFlag {
+        id: "group_by",
+        display: "--group-by",
+    },
+    UsageParentFlag {
+        id: "no_spinner",
+        display: "--no-spinner",
+    },
+    UsageParentFlag {
+        id: "theme",
+        display: "--theme",
+    },
+    UsageParentFlag {
+        id: "refresh",
+        display: "--refresh",
+    },
+    UsageParentFlag {
+        id: "debug",
+        display: "--debug",
+    },
+];
+
+fn reject_usage_parent_flags(matches: &clap::ArgMatches) -> Result<()> {
+    use clap::parser::ValueSource;
+
+    let flags = USAGE_PARENT_FLAGS
+        .into_iter()
+        .filter_map(|flag| {
+            matches
+                .value_source(flag.id)
+                .is_some_and(|source| source == ValueSource::CommandLine)
+                .then_some(flag.display)
+        })
+        .collect::<Vec<_>>();
+
+    if flags.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "`usage` does not support parent flag(s): {}. Use `tokscale usage` or `tokscale usage --json`.",
+        flags.join(", ")
+    ))
 }
 
 fn use_env_roots(home_dir: &Option<String>) -> bool {
@@ -6299,6 +6399,48 @@ mod tests {
         assert!(Cli::try_parse_from(["tokscale", "warp", "status", "--json"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "warp", "sync"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "warp", "sync", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn clap_accepts_usage_without_light_flag() {
+        assert!(Cli::try_parse_from(["tokscale", "usage"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "usage", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "usage", "--light"]).is_err());
+    }
+
+    #[test]
+    fn usage_rejects_parent_flags() {
+        for flag in USAGE_PARENT_FLAGS {
+            let args = usage_parent_flag_test_args(flag.display);
+            let matches = Cli::command().try_get_matches_from(args).unwrap();
+            let error = reject_usage_parent_flags(&matches)
+                .expect_err("usage should reject parent CLI flags")
+                .to_string();
+            assert!(
+                error.contains(flag.display),
+                "expected error to mention {} but got {error}",
+                flag.display
+            );
+        }
+
+        let matches = Cli::command()
+            .try_get_matches_from(["tokscale", "usage", "--json"])
+            .unwrap();
+        assert!(reject_usage_parent_flags(&matches).is_ok());
+    }
+
+    fn usage_parent_flag_test_args(flag: &'static str) -> Vec<&'static str> {
+        match flag {
+            "--write-cache" | "--no-write-cache" => vec!["tokscale", "--light", flag, "usage"],
+            "--client" => vec!["tokscale", flag, "claude", "usage"],
+            "--since" => vec!["tokscale", flag, "2026-01-01", "usage"],
+            "--until" => vec!["tokscale", flag, "2026-01-02", "usage"],
+            "--year" => vec!["tokscale", flag, "2026", "usage"],
+            "--group-by" => vec!["tokscale", flag, "model", "usage"],
+            "--theme" => vec!["tokscale", flag, "red", "usage"],
+            "--refresh" => vec!["tokscale", flag, "1", "usage"],
+            _ => vec!["tokscale", flag, "usage"],
+        }
     }
 
     #[test]
