@@ -126,6 +126,6 @@ fn source_unit_for_policy(
             unit.fingerprint_policy = FingerprintPolicy::PrimaryWithSiblings { sibling_names };
             unit
         }
-        FingerprintPolicy::None => SourceUnit::no_cache(client, path),
+        FingerprintPolicy::NoMessageCache => SourceUnit::no_message_cache(client, path),
     }
 }

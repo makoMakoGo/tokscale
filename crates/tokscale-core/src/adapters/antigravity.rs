@@ -36,7 +36,7 @@ impl LocalSourceAdapter for AntigravityAdapter {
         let mut units = adapter_discover::source_units_from_paths(
             ClientId::Antigravity,
             adapter_discover::scan_roots(ide_roots, def.pattern),
-            FingerprintPolicy::None,
+            FingerprintPolicy::NoMessageCache,
         )
         .into_iter()
         .map(|unit| unit.with_meta(SourceUnitMeta::AntigravityCacheJsonl))
@@ -215,7 +215,7 @@ mod tests {
         assert!(units.iter().any(|unit| {
             unit.client == ClientId::Antigravity
                 && unit.path == cache_path
-                && unit.fingerprint_policy == FingerprintPolicy::None
+                && unit.fingerprint_policy == FingerprintPolicy::NoMessageCache
                 && matches!(unit.meta, SourceUnitMeta::AntigravityCacheJsonl)
         }));
         assert!(units.iter().any(|unit| {
@@ -245,7 +245,7 @@ mod tests {
 
         assert!(units.iter().any(|unit| {
             unit.path == jsonl_path
-                && unit.fingerprint_policy == FingerprintPolicy::None
+                && unit.fingerprint_policy == FingerprintPolicy::NoMessageCache
                 && matches!(unit.meta, SourceUnitMeta::AntigravityCacheJsonl)
         }));
         assert!(units.iter().any(|unit| {
