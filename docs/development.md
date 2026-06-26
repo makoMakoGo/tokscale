@@ -22,11 +22,18 @@ docs/
 
 ## Build
 
+For a complete release-style local build:
+
 ```bash
 bun install
+bun run build
+```
+
+For narrower checks, run only the needed step:
+
+```bash
 bun run build:core
 bun run build:cli
-bun run build
 ```
 
 For quick local CLI runs:
