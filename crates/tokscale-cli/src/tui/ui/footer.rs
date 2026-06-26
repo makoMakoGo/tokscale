@@ -177,7 +177,70 @@ fn current_count_label(app: &App) -> String {
 }
 
 fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
+    let paragraph = Paragraph::new(help_row_line(app));
+    frame.render_widget(paragraph, area);
+}
+
+fn help_row_line(app: &App) -> Line<'static> {
     let is_very_narrow = app.is_very_narrow();
+
+    if app.current_tab == Tab::Usage {
+        let local_auto = if app.auto_refresh {
+            format!("[R:local auto {}s]", app.auto_refresh_interval.as_secs())
+        } else {
+            "[R:local auto off]".to_string()
+        };
+
+        let spans = if is_very_narrow {
+            let mut spans = Vec::new();
+            if app.has_enabled_subscription_providers() {
+                spans.push(Span::styled("[u]", Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            }
+            spans.extend([
+                Span::styled("[r:local]", Style::default().fg(Color::Yellow)),
+                Span::styled("·", Style::default().fg(app.theme.muted)),
+                Span::styled(
+                    "[R:local]",
+                    Style::default().fg(if app.auto_refresh {
+                        Color::Green
+                    } else {
+                        app.theme.muted
+                    }),
+                ),
+                Span::styled("·e·q", Style::default().fg(app.theme.muted)),
+            ]);
+            spans
+        } else {
+            let mut spans = Vec::new();
+            if app.has_enabled_subscription_providers() {
+                spans.push(Span::styled(
+                    "[u:refresh subscription]",
+                    Style::default().fg(Color::Yellow),
+                ));
+                spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+            }
+            spans.extend([
+                Span::styled(
+                    "[r:refresh local reports]",
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(" • ", Style::default().fg(app.theme.muted)),
+                Span::styled(
+                    local_auto,
+                    Style::default().fg(if app.auto_refresh {
+                        Color::Green
+                    } else {
+                        app.theme.muted
+                    }),
+                ),
+                Span::styled(" • e • q", Style::default().fg(app.theme.muted)),
+            ]);
+            spans
+        };
+
+        return Line::from(spans);
+    }
 
     let spans = if is_very_narrow {
         let mut spans = vec![
@@ -286,9 +349,9 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(" ", Style::default()));
         spans.push(Span::styled(
             if app.auto_refresh {
-                format!("[R:auto {}s]", app.auto_refresh_interval.as_secs())
+                format!("[R:local auto {}s]", app.auto_refresh_interval.as_secs())
             } else {
-                "[R:auto off]".to_string()
+                "[R:local auto off]".to_string()
             },
             Style::default().fg(if app.auto_refresh {
                 Color::Green
@@ -298,7 +361,7 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         ));
         spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
         spans.push(Span::styled(
-            "[r:refresh]",
+            "[r:refresh local]",
             Style::default().fg(Color::Yellow),
         ));
         spans.push(Span::styled(
@@ -308,12 +371,19 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         spans
     };
 
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, area);
+    Line::from(spans)
 }
 
 fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
+    let paragraph = Paragraph::new(status_row_line(app));
+    frame.render_widget(paragraph, area);
+}
+
+fn status_row_line(app: &App) -> Line<'static> {
+    if app.current_tab == Tab::Usage {
+        return usage_status_row_line(app);
+    }
+
     let mut spans: Vec<Span> = Vec::new();
 
     if app.data.loading {
@@ -368,16 +438,65 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, area);
+    Line::from(spans)
+}
+
+fn usage_status_row_line(app: &App) -> Line<'static> {
+    let text = if app.is_fetching_usage() {
+        "Fetching subscription usage...".to_string()
+    } else if let Some(msg) = subscription_status_message(app) {
+        msg.to_string()
+    } else if let Some(msg) = app.general_status_message() {
+        msg.to_string()
+    } else if let Some(updated_at) = app.last_subscription_usage_check {
+        format!(
+            "Subscription checked: {}",
+            elapsed_label(updated_at.elapsed())
+        )
+    } else if !app.subscription_usage.is_empty() {
+        if app.has_enabled_subscription_providers() {
+            "Subscription usage loaded from cache".to_string()
+        } else {
+            "Showing cached subscription usage; no remote providers enabled".to_string()
+        }
+    } else if !app.has_enabled_subscription_providers() {
+        "No remote subscription providers enabled; configure usageProviders".to_string()
+    } else {
+        "Press u to refresh subscription usage".to_string()
+    };
+
+    let style = if app.is_fetching_usage() || subscription_status_message(app).is_some() {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.muted)
+    };
+
+    Line::from(vec![Span::styled(text, style)])
+}
+
+fn subscription_status_message(app: &App) -> Option<&str> {
+    app.subscription_status_message.as_deref()
+}
+
+fn elapsed_label(elapsed: std::time::Duration) -> String {
+    if elapsed.as_secs() < 60 {
+        format!("{}s ago", elapsed.as_secs())
+    } else if elapsed.as_secs() < 3600 {
+        format!("{}m ago", elapsed.as_secs() / 60)
+    } else {
+        format!("{}h ago", elapsed.as_secs() / 3600)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::usage::{UsageMetric, UsageOutput, UsageProviderId};
     use crate::tui::app::TuiConfig;
     use crate::tui::data::UsageData;
+    use crate::tui::settings::Settings;
 
     fn make_app_on(tab: Tab) -> App {
         let config = TuiConfig {
@@ -390,7 +509,19 @@ mod tests {
             year: None,
             initial_tab: Some(tab),
         };
-        App::new_with_cached_data(config, Some(UsageData::default())).unwrap()
+        let settings = Settings {
+            usage_tab_enabled: true,
+            ..Settings::default()
+        };
+        App::new_with_cached_data_and_settings(config, Some(UsageData::default()), settings)
+            .unwrap()
+    }
+
+    fn line_text(line: Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 
     #[test]
@@ -411,5 +542,141 @@ mod tests {
         assert_eq!(current_count_label(&make_app_on(Tab::Daily)), " (0 days)");
         assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
         assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
+    }
+
+    #[test]
+    fn usage_help_row_shows_subscription_and_local_refresh_keys() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+
+        let text = line_text(help_row_line(&app));
+
+        assert!(text.contains("[u:refresh subscription]"));
+        assert!(text.contains("[r:refresh local reports]"));
+        assert!(text.contains("[R:local auto"));
+        assert!(text.contains(" • e • q"));
+        assert!(!text.contains("[r:refresh]"));
+    }
+
+    #[test]
+    fn usage_help_row_hides_subscription_refresh_without_enabled_providers() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+
+        let text = line_text(help_row_line(&app));
+
+        assert!(!text.contains("[u:refresh subscription]"));
+        assert!(text.contains("[r:refresh local reports]"));
+        assert!(text.contains("[R:local auto"));
+        assert!(text.contains(" • e • q"));
+    }
+
+    #[test]
+    fn narrow_usage_help_row_hides_u_without_enabled_providers() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.terminal_width = 50;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+
+        let text = line_text(help_row_line(&app));
+
+        assert!(!text.contains("[u]"));
+        assert!(text.contains("[r:local]"));
+        assert!(text.contains("[R:local]"));
+        assert!(text.contains("·e·q"));
+    }
+
+    #[test]
+    fn usage_status_row_uses_subscription_check_clock() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.last_refresh = std::time::Instant::now() - std::time::Duration::from_secs(600);
+        app.last_subscription_usage_check =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+
+        let text = line_text(status_row_line(&app));
+
+        assert!(text.contains("Subscription checked:"));
+        assert!(!text.contains("Last updated"));
+        assert!(!text.contains("Auto:"));
+    }
+
+    #[test]
+    fn usage_status_row_does_not_reuse_local_cache_status() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+        app.set_local_report_status("Loaded from cache");
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(text, "Press u to refresh subscription usage");
+    }
+
+    #[test]
+    fn usage_status_row_ignores_local_usage_status() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+        app.set_local_report_status("Jumped to today's usage");
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(text, "Press u to refresh subscription usage");
+    }
+
+    #[test]
+    fn usage_status_row_shows_general_action_status() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+        app.set_status("Export failed: permission denied");
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(text, "Export failed: permission denied");
+    }
+
+    #[test]
+    fn usage_status_row_reports_cache_display_mode_without_providers() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+        app.subscription_usage.push(UsageOutput {
+            provider: "Codex".to_string(),
+            account: None,
+            plan: None,
+            email: None,
+            metrics: vec![UsageMetric {
+                label: "Weekly".to_string(),
+                used_percent: 10.0,
+                remaining_percent: 90.0,
+                remaining_label: None,
+                resets_at: None,
+            }],
+        });
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(
+            text,
+            "Showing cached subscription usage; no remote providers enabled"
+        );
+    }
+
+    #[test]
+    fn usage_status_row_reports_missing_provider_configuration() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(Vec::new());
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(
+            text,
+            "No remote subscription providers enabled; configure usageProviders"
+        );
     }
 }

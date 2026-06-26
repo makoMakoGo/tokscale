@@ -268,7 +268,7 @@ The interactive TUI mode provides:
   - `v`: Toggle Table/Profile view (Hourly tab)
   - `y`: Copy selected row to clipboard
   - `p`: Cycle through 9 color themes
-  - `r`: Refresh data; `Shift+R` toggles auto-refresh; `+`/`-` adjusts interval
+  - `r`: Refresh local reports; `Shift+R` toggles local-report auto-refresh; `+`/`-` adjusts interval; `u` refreshes subscription usage only on the Usage tab
   - `e`: Export to JSON
   - `q` or `Ctrl+C`: Quit
 - **Mouse Support**: Click tabs, buttons, and filters
@@ -646,7 +646,9 @@ tokscale usage --json
 tokscale usage --light
 ```
 
-In the TUI, enable `usageTabEnabled`, then navigate to the **Usage** tab to see subscription data. Press `u` or `r` to refresh.
+In the TUI, enable `usageTabEnabled` and list the remote providers in `usageProviders`, then navigate to the **Usage** tab to see subscription data. The first visit to the Usage tab may fetch once per TUI session. After that, press `u` on the Usage tab to refresh subscription usage explicitly. `r` always refreshes local reports only, and `R` controls local-report auto-refresh only; tokscale does not poll subscription quotas in the background.
+
+An empty `usageProviders` array is cache-display mode: the Usage tab can show cached subscription data, but it will not make remote requests. The `tokscale usage` command is different: running that command is already explicit user intent, so the CLI still tries every provider that has usable credentials.
 
 > **Note**: Subscription quotas and balances are **vendor-reported** — tokscale calls each provider's own quota endpoint and surfaces the response verbatim. Numbers reflect what the provider reports (which is also what shows up in their official dashboards) and are not independently verified against tokscale's own usage tracking.
 
@@ -656,13 +658,16 @@ In the TUI, enable `usageTabEnabled`, then navigate to the **Usage** tab to see 
 |----------|-------------|---------|-------|
 | **Claude** | OAuth (credentials file or macOS Keychain) | Session (5hr), Weekly, Opus quotas | Run `claude` to log in |
 | **Codex** (OpenAI) | OAuth (`~/.config/codex/auth.json` or `~/.codex/auth.json`) | Session, Weekly quotas | Run `codex` to log in |
-| **Z.ai** | API key (env var) | Token limits, Web Searches | Set `ZAI_API_KEY` or `GLM_API_KEY` |
+| **Z.ai GLM Coding Plan** | GLM Coding Plan API key (`TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY`) | Token limits, Web Searches | Use the GLM Coding Plan key, not a general Z.ai API key |
 | **Amp** | API key (`~/.local/share/amp/secrets.json`) | Free tier balance, Credits | Run `amp` to log in |
 | **GitHub Copilot** | GitHub token (keychain or `~/.config/gh/hosts.yml`) | Premium interactions, Chat quotas | Run `gh auth login` |
-| **Kimi** | OAuth (`$KIMI_CODE_HOME/credentials/kimi-code.json`, fallback: `~/.kimi-code/credentials/kimi-code.json`) | Session, Weekly quotas | Run `kimi` to log in |
-| **MiniMax** | API key (env var) | Prompt quotas per model | Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN` |
+| **Kimi Code** | Kimi Code API key (`TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY`) or Kimi Code OAuth (`$KIMI_CODE_HOME/credentials/kimi-code.json`) | Session, Weekly quotas | Use a Kimi Code Console API key or run `kimi` to log in |
+| **MiniMax Token Plan CN** | CN Token Plan subscription key (`TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY`) | 5-hour and weekly Token Plan windows | Use the CN Token Plan key from the CN console |
+| **MiniMax Token Plan Global** | Global Token Plan subscription key (`TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY`) | 5-hour and weekly Token Plan windows | Use the Global Token Plan key from the Global console |
 
-Providers are auto-detected — only those with valid credentials are shown. If a provider is missing, ensure you've logged in or set the required environment variable.
+Canonical TUI `usageProviders` IDs: `claude`, `codex`, `zai`, `amp`, `copilot`, `grok`, `kimi`, `minimax-token-plan-cn`, `minimax-token-plan-global`, `warp`.
+
+Z.ai's `zai` provider means GLM Coding Plan quota. Z.ai/Zhipu GLM Coding Plan keys are not split into domestic/global provider IDs. MiniMax Token Plan is split: CN and Global keys are not interchangeable. General-purpose provider keys such as `ZAI_API_KEY`, `GLM_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `MINIMAX_API_TOKEN` are intentionally ignored for subscription quota lookups.
 
 #### Example Output
 
@@ -693,6 +698,8 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
   "colorPalette": "blue",
   "includeUnusedModels": false,
   "defaultClients": ["opencode", "claude"],
+  "usageTabEnabled": true,
+  "usageProviders": ["codex", "zai", "minimax-token-plan-cn"],
   "scanner": {
     "extraScanPaths": {
       "codex": [
@@ -721,6 +728,7 @@ Tokscale stores settings in `~/.config/tokscale/settings.json`:
 | `defaultClients` | string[] | `[]` | Client filter applied when no `--client/-c` flag is passed. Accepts the same ids as `--client` (e.g. `["opencode", "claude", "zed"]`). Unknown ids are silently dropped. CLI flags always override this list completely — no merging. |
 | `light.writeCache` | boolean | `false` | When true, `tokscale --light` overwrites the TUI cache atomically after rendering. CLI flags `--write-cache` / `--no-write-cache` override per-invocation. |
 | `usageTabEnabled` | boolean | `false` | Show the subscription quota Usage tab in the TUI. Default-off because local token usage is the primary TUI workflow and subscription lookups are optional. |
+| `usageProviders` | string[] | `[]` | Explicit allowlist of subscription providers the TUI may fetch from the Usage tab. Empty means cache-display mode: show cached Usage content only and never send remote subscription requests. |
 | `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
 
 Use `scanner.extraScanPaths` for persistent extra roots such as project-level `.codex` directories, imported Gemini/OpenClaw histories, Hermes profile databases, or a Windows Zed data directory mounted from WSL. Hermes entries may point at a profile directory containing `state.db` or directly at a `state.db` file. Zed entries may point at a `threads` directory containing `threads.db` or directly at `threads.db`. Tokscale merges these paths with the default scan roots on every run and deduplicates overlapping roots by canonical path.
@@ -749,6 +757,10 @@ Environment variables override config file values. For CI/CD or one-off use:
 | `TOKSCALE_API_TOKEN` | unset | Tokscale personal API token for non-interactive `submit` and `delete-submitted-data` runs. Create one from Settings > API Tokens or save it locally with `tokscale login --token tt_xxx`. |
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
 | `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory root (where `settings.json`, `star-cache.json`, `cache/`, `antigravity-cache/`, and `trae-cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
+| `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY` | unset | Z.ai/Zhipu GLM Coding Plan key for subscription quota lookup. |
+| `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` | unset | Kimi Code Console API key for Kimi Code membership quota lookup. |
+| `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY` | unset | MiniMax CN Token Plan subscription key. |
+| `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY` | unset | MiniMax Global Token Plan subscription key. |
 
 ```bash
 # Example: Increase timeout for very large datasets

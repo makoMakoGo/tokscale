@@ -15,13 +15,13 @@ struct Site {
 const CN_SITE: Site = Site {
     label: "CN",
     base_url: "https://www.minimaxi.com",
-    key_env: "MINIMAX_TOKEN_PLAN_CN_KEY",
+    key_env: "TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY",
 };
 
 const GLOBAL_SITE: Site = Site {
     label: "Global",
     base_url: "https://www.minimax.io",
-    key_env: "MINIMAX_TOKEN_PLAN_GLOBAL_KEY",
+    key_env: "TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY",
 };
 
 #[derive(Debug, Deserialize)]
@@ -47,9 +47,7 @@ struct ModelRemains {
 }
 
 fn read_key(site: &Site) -> Option<String> {
-    let key = std::env::var(site.key_env).ok()?;
-    let trimmed = key.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    super::helpers::read_first_env(&[site.key_env])
 }
 
 pub fn has_cn_credentials() -> bool {
@@ -285,5 +283,47 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no parseable usage"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn token_plan_credentials_require_tokscale_envs() {
+        let vars = [
+            "TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY",
+            "TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY",
+            "MINIMAX_TOKEN_PLAN_CN_KEY",
+            "MINIMAX_TOKEN_PLAN_GLOBAL_KEY",
+        ];
+        let saved = vars.map(|key| (key, std::env::var_os(key)));
+        unsafe {
+            for (key, _) in &saved {
+                std::env::remove_var(*key);
+            }
+            std::env::set_var("MINIMAX_TOKEN_PLAN_CN_KEY", "legacy");
+            std::env::set_var("MINIMAX_TOKEN_PLAN_GLOBAL_KEY", "legacy");
+        }
+
+        assert!(!has_cn_credentials());
+        assert!(!has_global_credentials());
+        assert_eq!(read_key(&CN_SITE), None);
+        assert_eq!(read_key(&GLOBAL_SITE), None);
+
+        unsafe {
+            std::env::set_var("TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY", "cn");
+            std::env::set_var("TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY", "global");
+        }
+        assert!(has_cn_credentials());
+        assert!(has_global_credentials());
+        assert_eq!(read_key(&CN_SITE).as_deref(), Some("cn"));
+        assert_eq!(read_key(&GLOBAL_SITE).as_deref(), Some("global"));
+
+        unsafe {
+            for (key, value) in saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 }
