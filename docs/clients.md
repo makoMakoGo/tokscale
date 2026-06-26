@@ -21,7 +21,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode*.db` and legacy `~/.local/share/opencode/storage/message/` | Scans multiple release-channel databases when present. |
 | `claude` | Claude Code | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Claude Desktop chat history is not treated as Claude Code token accounting. |
 | `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Also supports `tokscale headless codex ...` capture. |
-| `cursor` | Cursor | `~/.config/tokscale/cursor-cache/usage*.csv` | Populated by `tokscale cursor sync`; local `~/.cursor` state is not parsed. |
+| `cursor` | Cursor | `~/.config/tokscale/cursor-cache/usage*.csv` | Reads a local API cache. Logged-in reports and the TUI may auto-refresh stale cache data; local `~/.cursor` state is not parsed. |
 | `gemini` | Gemini CLI | `$GEMINI_CLI_HOME/tmp/**/chats/*`, fallback `~/.gemini/tmp/` | Reads local chat files. |
 | `amp` | Amp | `~/.local/share/amp/threads/T-*.json` | Reads local thread files. |
 | `droid` | Droid | `~/.factory/sessions/**/*.settings.json` | Reads Factory Droid sessions. |
@@ -82,14 +82,31 @@ TOKSCALE_EXTRA_DIRS='codex:/abs/path/.codex/sessions,gemini:/abs/path/gemini/tmp
   tokscale --no-spinner --light
 ```
 
-## Sync-backed clients
+## Cache-backed integrations
 
-These clients need explicit sync before their newest data appears in reports:
+Cursor reads a local API cache, but it is not purely manual-sync-backed. Ordinary
+local reports and the TUI may call the Cursor API before reading reports when
+all of these are true:
+
+- no `--home` override is active;
+- the client filter includes Cursor, including the default unfiltered report;
+- saved Cursor credentials exist;
+- the expected Cursor cache files are older than five minutes.
+
+Manual commands are still available:
 
 ```bash
 tokscale cursor login --name work
 tokscale cursor sync --json
+```
 
+`tokscale cursor sync --json` forces a refresh. Filtering Cursor out with
+`--client` or using `--home` prevents the implicit pre-report refresh.
+
+Antigravity and Trae are different: they do not refresh from the root report or
+TUI command. Run their sync commands before reports when you need fresh data:
+
+```bash
 tokscale antigravity status
 tokscale antigravity sync
 

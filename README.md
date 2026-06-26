@@ -124,8 +124,11 @@ Some catalog entries have explicit boundaries:
   they do not expose a token-level source accepted by this fork.
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
   accounting.
-- `cursor`, `antigravity`, and `trae` use local caches populated by explicit
-  sync commands.
+- `cursor` reads a local API cache. Logged-in local reports and the TUI can
+  refresh a stale cache automatically when no `--home` override is used, Cursor
+  is in scope, and the cache is older than five minutes; `tokscale cursor sync`
+  forces a refresh.
+- `antigravity` and `trae` use local caches refreshed by explicit sync commands.
 
 ## Data and pricing semantics
 
@@ -134,11 +137,11 @@ under Tokscale's pricing service. App-reported cost fields are ignored for
 normal local reports because they can represent subscriptions, credits, bundle
 balances, reseller markup, rounded UI totals, or aggregate spend.
 
-Pricing sources are checked in this order:
-
-1. Exact custom overrides from `custom-pricing.json`
-2. Public catalog rows from LiteLLM, OpenRouter, and models.dev
-3. Direct catalog matching and deterministic normalization rules
+Exact custom overrides from `custom-pricing.json` are checked first. Otherwise,
+Tokscale searches LiteLLM, OpenRouter, and models.dev using provider-aware exact
+and deterministic normalized matching. Those public catalogs do not have a
+simple global precedence order, and normalization is a matching strategy rather
+than a separate price source.
 
 If a model cannot be priced, its derived cost remains `$0.00` instead of using
 a private guessed price. Details: [pricing semantics](docs/pricing.md).

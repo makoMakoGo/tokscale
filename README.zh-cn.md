@@ -105,17 +105,14 @@ OpenCode、Claude Code、Codex CLI、Cursor、Gemini CLI、Amp、Droid、OpenCla
 
 - `crush` 和 `warp` 不参与普通本地 token 报表，因为它们没有被这个 fork 接受的 token 级来源。
 - `commandcode` 是基于 transcript 的估算用量，不是供应商权威 token 记账。
-- `cursor`、`antigravity` 和 `trae` 使用显式 sync 命令写入的本地缓存。
+- `cursor` 读取本地 API 缓存。已登录时，如果没有使用 `--home`，且 Cursor 在客户端范围内，并且缓存超过五分钟，普通本地报表和 TUI 可以自动刷新过期缓存；`tokscale cursor sync` 用于强制刷新。
+- `antigravity` 和 `trae` 使用显式 sync 命令刷新的本地缓存。
 
 ## 数据和定价语义
 
 本地报表只有一种成本含义：把解析出的 token bucket 套用 Tokscale 定价服务后得到的估算价格。普通本地报表会忽略应用自己上报的成本字段，因为那些字段可能代表订阅、积分、套餐余额、渠道加价、四舍五入后的 UI 总额或聚合花费。
 
-价格来源按以下顺序检查：
-
-1. `custom-pricing.json` 里的精确自定义覆盖
-2. LiteLLM、OpenRouter 和 models.dev 的公开目录行
-3. 直接目录匹配和确定性规范化规则
+`custom-pricing.json` 里的精确自定义覆盖会最先检查。否则，Tokscale 会用 provider-aware 的精确匹配和确定性规范化匹配搜索 LiteLLM、OpenRouter 和 models.dev。三个公开目录之间没有简单固定的全局优先级；规范化是匹配策略，不是单独的价格来源。
 
 如果模型无法定价，派生成本保持 `$0.00`，不会使用私有猜测价格。细节见
 [定价语义](docs/pricing.md)。

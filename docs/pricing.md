@@ -26,13 +26,13 @@ See [ADR 0011](adr/0011-token-derived-local-cost.md).
 
 ## Pricing source authority
 
-Pricing lookup uses:
+Exact custom overrides from `custom-pricing.json` are checked first. Otherwise,
+Tokscale searches LiteLLM, OpenRouter, and models.dev using provider-aware exact
+and deterministic normalized matching.
 
-1. Custom pricing overrides from `custom-pricing.json`
-2. LiteLLM public pricing data
-3. OpenRouter public pricing data
-4. models.dev public pricing data
-5. deterministic direct catalog matching and normalization
+The public catalogs do not have a simple fixed global order. The resolver can
+choose among them based on provider-scoped paths, full keys, model-part matches,
+provider hints, version normalization, and tiered pricing support.
 
 Global private aliases are not a substitute for source parsing. Source-specific
 model decoding belongs in the parser or source canonicalizer before pricing.
