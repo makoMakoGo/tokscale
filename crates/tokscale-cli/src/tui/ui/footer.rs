@@ -475,16 +475,7 @@ fn usage_status_row_line(app: &App) -> Line<'static> {
 }
 
 fn subscription_status_message(app: &App) -> Option<&str> {
-    let msg = app.status_message.as_deref()?;
-    if msg.contains("Usage")
-        || msg.contains("usage")
-        || msg.contains("Subscription")
-        || msg.contains("subscription")
-    {
-        Some(msg)
-    } else {
-        None
-    }
+    app.subscription_status_message.as_deref()
 }
 
 fn elapsed_label(elapsed: std::time::Duration) -> String {
@@ -503,6 +494,7 @@ mod tests {
     use crate::commands::usage::{UsageMetric, UsageOutput, UsageProviderId};
     use crate::tui::app::TuiConfig;
     use crate::tui::data::UsageData;
+    use crate::tui::settings::Settings;
 
     fn make_app_on(tab: Tab) -> App {
         let config = TuiConfig {
@@ -515,7 +507,12 @@ mod tests {
             year: None,
             initial_tab: Some(tab),
         };
-        App::new_with_cached_data(config, Some(UsageData::default())).unwrap()
+        let settings = Settings {
+            usage_tab_enabled: true,
+            ..Settings::default()
+        };
+        App::new_with_cached_data_and_settings(config, Some(UsageData::default()), settings)
+            .unwrap()
     }
 
     fn line_text(line: Line<'static>) -> String {
@@ -607,6 +604,18 @@ mod tests {
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
         app.status_message = Some("Loaded from cache".to_string());
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(text, "Press u to refresh subscription usage");
+    }
+
+    #[test]
+    fn usage_status_row_ignores_local_usage_status() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+        app.set_status("Jumped to today's usage");
 
         let text = line_text(status_row_line(&app));
 

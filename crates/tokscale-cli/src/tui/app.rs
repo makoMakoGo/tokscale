@@ -354,6 +354,8 @@ pub struct App {
 
     pub status_message: Option<String>,
     pub status_message_time: Option<Instant>,
+    pub subscription_status_message: Option<String>,
+    pub subscription_status_message_time: Option<Instant>,
 
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -399,7 +401,7 @@ impl App {
         Self::new_with_cached_data_and_settings(config, cached_data, settings)
     }
 
-    fn new_with_cached_data_and_settings(
+    pub(crate) fn new_with_cached_data_and_settings(
         config: TuiConfig,
         cached_data: Option<UsageData>,
         settings: Settings,
@@ -498,6 +500,8 @@ impl App {
                 None
             },
             status_message_time: if has_data { Some(Instant::now()) } else { None },
+            subscription_status_message: None,
+            subscription_status_message_time: None,
             terminal_width: 80,
             terminal_height: 24,
             click_areas: Vec::new(),
@@ -678,6 +682,12 @@ impl App {
                 self.status_message_time = None;
             }
         }
+        if let Some(status_time) = self.subscription_status_message_time {
+            if status_time.elapsed() > Duration::from_secs(3) {
+                self.subscription_status_message = None;
+                self.subscription_status_message_time = None;
+            }
+        }
 
         self.refresh_current_tab_if_overdue();
 
@@ -693,22 +703,20 @@ impl App {
                     if !self.subscription_usage.is_empty() {
                         crate::commands::usage::save_cache(&self.subscription_usage);
                         if self.subscription_usage_errors.is_empty() {
-                            self.status_message = Some("Usage data loaded".into());
+                            self.set_subscription_status("Usage data loaded");
                         } else {
-                            self.status_message =
-                                Some("Usage data loaded with provider errors".into());
+                            self.set_subscription_status("Usage data loaded with provider errors");
                         }
                     } else {
                         crate::commands::usage::clear_cache();
                         if self.subscription_usage_errors.is_empty() {
-                            self.status_message = Some("No usage data available".into());
+                            self.set_subscription_status("No usage data available");
                         } else {
-                            self.status_message = Some("Usage fetch failed".into());
+                            self.set_subscription_status("Usage fetch failed");
                         }
                     }
                     let now = std::time::Instant::now();
                     self.last_subscription_usage_check = Some(now);
-                    self.status_message_time = Some(now);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.usage_rx = None;
@@ -719,8 +727,7 @@ impl App {
                         }];
                     let now = std::time::Instant::now();
                     self.last_subscription_usage_check = Some(now);
-                    self.status_message = Some("Usage fetch failed".into());
-                    self.status_message_time = Some(now);
+                    self.set_subscription_status("Usage fetch failed");
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -885,18 +892,16 @@ impl App {
 
     pub fn fetch_subscription_usage(&mut self) {
         if self.usage_rx.is_some() {
-            self.set_status("Subscription usage fetch already in progress");
+            self.set_subscription_status("Subscription usage fetch already in progress");
             return;
         }
         if self.subscription_provider_ids.is_empty() {
-            self.status_message = Some("No subscription usage providers enabled".into());
-            self.status_message_time = Some(std::time::Instant::now());
+            self.set_subscription_status("No subscription usage providers enabled");
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.usage_fetch_attempted = true;
-        self.status_message = Some("Fetching subscription usage...".into());
-        self.status_message_time = Some(std::time::Instant::now());
+        self.set_subscription_status("Fetching subscription usage...");
         self.usage_rx = Some(rx);
         let enabled = self.subscription_provider_ids.clone();
         std::thread::spawn(move || {
@@ -931,8 +936,7 @@ impl App {
         rx: std::sync::mpsc::Receiver<crate::commands::usage::UsageFetchBatch>,
     ) {
         self.usage_fetch_attempted = true;
-        self.status_message = Some("Fetching subscription usage...".into());
-        self.status_message_time = Some(std::time::Instant::now());
+        self.set_subscription_status("Fetching subscription usage...");
         self.usage_rx = Some(rx);
     }
 
@@ -1721,6 +1725,15 @@ impl App {
     pub fn set_status(&mut self, message: &str) {
         self.status_message = Some(message.to_string());
         self.status_message_time = Some(Instant::now());
+    }
+
+    fn set_subscription_status(&mut self, message: &str) {
+        let now = Instant::now();
+        let message = message.to_string();
+        self.status_message = Some(message.clone());
+        self.status_message_time = Some(now);
+        self.subscription_status_message = Some(message);
+        self.subscription_status_message_time = Some(now);
     }
 
     pub fn get_sorted_models(&self) -> Vec<&ModelUsage> {

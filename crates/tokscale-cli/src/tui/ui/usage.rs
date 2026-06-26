@@ -254,6 +254,7 @@ mod tests {
     use crate::commands::usage::{UsageMetric, UsageProviderId};
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::UsageData;
+    use crate::tui::settings::Settings;
     use crate::tui::themes::{Theme, ThemeName};
 
     fn make_usage_app() -> App {
@@ -267,7 +268,13 @@ mod tests {
             year: None,
             initial_tab: Some(Tab::Usage),
         };
-        let mut app = App::new_with_cached_data(config, Some(UsageData::default())).unwrap();
+        let settings = Settings {
+            usage_tab_enabled: true,
+            ..Settings::default()
+        };
+        let mut app =
+            App::new_with_cached_data_and_settings(config, Some(UsageData::default()), settings)
+                .unwrap();
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(Vec::new());
         app

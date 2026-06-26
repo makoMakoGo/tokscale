@@ -86,7 +86,7 @@ impl UsageProviderId {
             "amp" => Some(Self::Amp),
             "copilot" => Some(Self::Copilot),
             "grok" | "grok-build" => Some(Self::Grok),
-            "kimi" => Some(Self::Kimi),
+            "kimi" | "kimi-code" => Some(Self::Kimi),
             "minimax-token-plan-cn" | "minimax-cn-token-plan" => Some(Self::MiniMaxTokenPlanCn),
             "minimax-token-plan-global" | "minimax-global-token-plan" => {
                 Some(Self::MiniMaxTokenPlanGlobal)
@@ -708,13 +708,18 @@ mod tests {
         let ids = parse_provider_settings(&[
             "z.ai".to_string(),
             "zai".to_string(),
+            "kimi-code".to_string(),
             "minimax-token-plan-cn".to_string(),
             "unknown".to_string(),
         ]);
 
         assert_eq!(
             ids,
-            vec![UsageProviderId::Zai, UsageProviderId::MiniMaxTokenPlanCn]
+            vec![
+                UsageProviderId::Zai,
+                UsageProviderId::Kimi,
+                UsageProviderId::MiniMaxTokenPlanCn
+            ]
         );
     }
 }

@@ -253,6 +253,22 @@ fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> 
     })
 }
 
+fn persist_refreshed_credentials(
+    access_token: &str,
+    refreshed: &RefreshResponse,
+    stored_refresh_token: &mut Option<String>,
+) {
+    if let Some(new_refresh_token) = refreshed.refresh_token.clone() {
+        *stored_refresh_token = Some(new_refresh_token);
+    }
+
+    if let (Some(refresh_token), Some(expires_in)) =
+        (stored_refresh_token.as_deref(), refreshed.expires_in)
+    {
+        save_credentials(access_token, refresh_token, expires_in);
+    }
+}
+
 fn non_empty(value: Option<&String>) -> Option<&str> {
     value
         .map(|value| value.trim())
@@ -386,12 +402,11 @@ async fn fetch_with_oauth(client: &reqwest::Client) -> Result<UsageResponse> {
             if let Ok(refreshed) = refresh_token(client, rt_str).await {
                 if let Some(new_token) = refreshed.access_token.clone() {
                     access_token = new_token;
-                    if let (Some(new_rt), Some(expires_in)) =
-                        (&refreshed.refresh_token, refreshed.expires_in)
-                    {
-                        stored_refresh_token = Some(new_rt.clone());
-                        save_credentials(&access_token, new_rt, expires_in);
-                    }
+                    persist_refreshed_credentials(
+                        &access_token,
+                        &refreshed,
+                        &mut stored_refresh_token,
+                    );
                 }
             }
         }
@@ -408,11 +423,7 @@ async fn fetch_with_oauth(client: &reqwest::Client) -> Result<UsageResponse> {
                 .access_token
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("Refresh returned no token."))?;
-            if let (Some(new_rt), Some(expires_in)) =
-                (&refreshed.refresh_token, refreshed.expires_in)
-            {
-                save_credentials(&new, new_rt, expires_in);
-            }
+            persist_refreshed_credentials(&new, &refreshed, &mut stored_refresh_token);
             fetch_usage(client, &new).await
         }
     }
@@ -630,6 +641,28 @@ mod tests {
         ] {
             assert!(keys.contains(&key), "missing {key}");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn refreshed_credentials_keep_existing_refresh_token_when_missing() {
+        let _guard = EnvGuard::new(&["KIMI_CODE_HOME"]);
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("KIMI_CODE_HOME", temp.path());
+        let refreshed = RefreshResponse {
+            access_token: Some("new-access-token".to_string()),
+            refresh_token: None,
+            expires_in: Some(3600),
+        };
+        let mut stored_refresh_token = Some("old-refresh-token".to_string());
+
+        persist_refreshed_credentials("new-access-token", &refreshed, &mut stored_refresh_token);
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(credentials_path()).unwrap()).unwrap();
+        assert_eq!(stored_refresh_token.as_deref(), Some("old-refresh-token"));
+        assert_eq!(saved["access_token"], "new-access-token");
+        assert_eq!(saved["refresh_token"], "old-refresh-token");
     }
 
     #[test]
