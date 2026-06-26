@@ -147,7 +147,6 @@ enum StatusMessageKind {
     #[default]
     General,
     LocalReport,
-    Subscription,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1752,9 +1751,6 @@ impl App {
     fn set_subscription_status(&mut self, message: &str) {
         let now = Instant::now();
         let message = message.to_string();
-        self.status_message = Some(message.clone());
-        self.status_message_time = Some(now);
-        self.status_message_kind = StatusMessageKind::Subscription;
         self.subscription_status_message = Some(message);
         self.subscription_status_message_time = Some(now);
     }
@@ -3659,9 +3655,10 @@ mod tests {
         app.start_subscription_usage_fetch_for_test(rx);
 
         assert_eq!(
-            app.status_message.as_deref(),
+            app.subscription_status_message.as_deref(),
             Some("Fetching subscription usage...")
         );
+        assert!(app.status_message.is_none());
         assert!(app.usage_fetch_attempted);
         assert!(app.is_fetching_usage());
     }
@@ -3677,9 +3674,10 @@ mod tests {
         app.on_tick();
 
         assert_eq!(
-            app.status_message.as_deref(),
+            app.subscription_status_message.as_deref(),
             Some("No usage data available")
         );
+        assert!(app.status_message.is_none());
         assert!(app.last_subscription_usage_check.is_some());
         assert!(!app.is_fetching_usage());
     }
@@ -3694,9 +3692,10 @@ mod tests {
         app.fetch_subscription_usage();
 
         assert_eq!(
-            app.status_message.as_deref(),
+            app.subscription_status_message.as_deref(),
             Some("Subscription usage fetch already in progress")
         );
+        assert!(app.status_message.is_none());
         assert!(app.is_fetching_usage());
     }
 
@@ -3816,9 +3815,10 @@ mod tests {
 
         assert!(!app.usage_fetch_attempted);
         assert_eq!(
-            app.status_message.as_deref(),
+            app.subscription_status_message.as_deref(),
             Some("No subscription usage providers enabled")
         );
+        assert!(app.status_message.is_none());
     }
 
     #[test]
