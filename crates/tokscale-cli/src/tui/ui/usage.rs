@@ -93,9 +93,7 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn loading_message(app: &App) -> &'static str {
-    if app.data.loading {
-        "Loading subscription data..."
-    } else if app.has_enabled_subscription_providers() {
+    if app.has_enabled_subscription_providers() {
         FETCH_PROMPT
     } else {
         NO_PROVIDERS_PROMPT
@@ -306,6 +304,7 @@ mod tests {
     #[test]
     fn loading_prompt_requires_enabled_provider() {
         let mut app = make_usage_app();
+        app.data.loading = true;
 
         assert_eq!(loading_message(&app), NO_PROVIDERS_PROMPT);
 

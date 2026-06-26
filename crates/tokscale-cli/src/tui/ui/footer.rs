@@ -208,7 +208,7 @@ fn help_row_line(app: &App) -> Line<'static> {
                         app.theme.muted
                     }),
                 ),
-                Span::styled("·q", Style::default().fg(app.theme.muted)),
+                Span::styled("·e·q", Style::default().fg(app.theme.muted)),
             ]);
             spans
         } else {
@@ -234,7 +234,7 @@ fn help_row_line(app: &App) -> Line<'static> {
                         app.theme.muted
                     }),
                 ),
-                Span::styled(" • q", Style::default().fg(app.theme.muted)),
+                Span::styled(" • e • q", Style::default().fg(app.theme.muted)),
             ]);
             spans
         };
@@ -446,6 +446,8 @@ fn usage_status_row_line(app: &App) -> Line<'static> {
         "Fetching subscription usage...".to_string()
     } else if let Some(msg) = subscription_status_message(app) {
         msg.to_string()
+    } else if let Some(msg) = app.general_status_message() {
+        msg.to_string()
     } else if let Some(updated_at) = app.last_subscription_usage_check {
         format!(
             "Subscription checked: {}",
@@ -553,6 +555,7 @@ mod tests {
         assert!(text.contains("[u:refresh subscription]"));
         assert!(text.contains("[r:refresh local reports]"));
         assert!(text.contains("[R:local auto"));
+        assert!(text.contains(" • e • q"));
         assert!(!text.contains("[r:refresh]"));
     }
 
@@ -567,6 +570,7 @@ mod tests {
         assert!(!text.contains("[u:refresh subscription]"));
         assert!(text.contains("[r:refresh local reports]"));
         assert!(text.contains("[R:local auto"));
+        assert!(text.contains(" • e • q"));
     }
 
     #[test]
@@ -581,6 +585,7 @@ mod tests {
         assert!(!text.contains("[u]"));
         assert!(text.contains("[r:local]"));
         assert!(text.contains("[R:local]"));
+        assert!(text.contains("·e·q"));
     }
 
     #[test]
@@ -603,7 +608,7 @@ mod tests {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
-        app.status_message = Some("Loaded from cache".to_string());
+        app.set_local_report_status("Loaded from cache");
 
         let text = line_text(status_row_line(&app));
 
@@ -615,11 +620,23 @@ mod tests {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
-        app.set_status("Jumped to today's usage");
+        app.set_local_report_status("Jumped to today's usage");
 
         let text = line_text(status_row_line(&app));
 
         assert_eq!(text, "Press u to refresh subscription usage");
+    }
+
+    #[test]
+    fn usage_status_row_shows_general_action_status() {
+        let mut app = make_app_on(Tab::Overview);
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
+        app.set_status("Export failed: permission denied");
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(text, "Export failed: permission denied");
     }
 
     #[test]

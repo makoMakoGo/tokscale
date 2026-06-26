@@ -142,6 +142,14 @@ pub enum HourlyViewMode {
     Profile,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StatusMessageKind {
+    #[default]
+    General,
+    LocalReport,
+    Subscription,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDirection {
     Ascending,
@@ -354,6 +362,7 @@ pub struct App {
 
     pub status_message: Option<String>,
     pub status_message_time: Option<Instant>,
+    status_message_kind: StatusMessageKind,
     pub subscription_status_message: Option<String>,
     pub subscription_status_message_time: Option<Instant>,
 
@@ -500,6 +509,11 @@ impl App {
                 None
             },
             status_message_time: if has_data { Some(Instant::now()) } else { None },
+            status_message_kind: if has_data {
+                StatusMessageKind::LocalReport
+            } else {
+                StatusMessageKind::General
+            },
             subscription_status_message: None,
             subscription_status_message_time: None,
             terminal_width: 80,
@@ -680,6 +694,7 @@ impl App {
             if status_time.elapsed() > Duration::from_secs(3) {
                 self.status_message = None;
                 self.status_message_time = None;
+                self.status_message_kind = StatusMessageKind::General;
             }
         }
         if let Some(status_time) = self.subscription_status_message_time {
@@ -1400,9 +1415,9 @@ impl App {
             }
 
             self.selected_graph_cell = None;
-            self.set_status("Jumped to today's usage");
+            self.set_local_report_status("Jumped to today's usage");
         } else {
-            self.set_status("No usage recorded for today");
+            self.set_local_report_status("No usage recorded for today");
         }
     }
 
@@ -1463,7 +1478,7 @@ impl App {
             self.enter_daily_detail_sort_context();
             self.selected_index = 0;
             self.scroll_offset = 0;
-            self.set_status(&format!("Viewing daily details for {}", date));
+            self.set_local_report_status(&format!("Viewing daily details for {}", date));
             self.clamp_selection();
         }
     }
@@ -1495,7 +1510,7 @@ impl App {
             restored_index.saturating_sub(max_visible / 2)
         };
 
-        self.set_status("Returned to daily usage");
+        self.set_local_report_status("Returned to daily usage");
         self.clamp_selection();
     }
 
@@ -1525,7 +1540,7 @@ impl App {
             self.enter_period_detail_sort_context();
             self.selected_index = 0;
             self.scroll_offset = 0;
-            self.set_status(&format!("Viewing period details for {}", label));
+            self.set_local_report_status(&format!("Viewing period details for {}", label));
             self.clamp_selection();
         }
     }
@@ -1557,7 +1572,7 @@ impl App {
             restored_index.saturating_sub(max_visible / 2)
         };
 
-        self.set_status(match selection.kind {
+        self.set_local_report_status(match selection.kind {
             PeriodKind::Monthly => "Returned to monthly usage",
             PeriodKind::Weekly => "Returned to weekly usage",
         });
@@ -1725,6 +1740,13 @@ impl App {
     pub fn set_status(&mut self, message: &str) {
         self.status_message = Some(message.to_string());
         self.status_message_time = Some(Instant::now());
+        self.status_message_kind = StatusMessageKind::General;
+    }
+
+    pub(crate) fn set_local_report_status(&mut self, message: &str) {
+        self.status_message = Some(message.to_string());
+        self.status_message_time = Some(Instant::now());
+        self.status_message_kind = StatusMessageKind::LocalReport;
     }
 
     fn set_subscription_status(&mut self, message: &str) {
@@ -1732,8 +1754,17 @@ impl App {
         let message = message.to_string();
         self.status_message = Some(message.clone());
         self.status_message_time = Some(now);
+        self.status_message_kind = StatusMessageKind::Subscription;
         self.subscription_status_message = Some(message);
         self.subscription_status_message_time = Some(now);
+    }
+
+    pub fn general_status_message(&self) -> Option<&str> {
+        if self.status_message_kind == StatusMessageKind::General {
+            self.status_message.as_deref()
+        } else {
+            None
+        }
     }
 
     pub fn get_sorted_models(&self) -> Vec<&ModelUsage> {
