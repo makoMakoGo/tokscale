@@ -4,23 +4,104 @@ use unicode_width::UnicodeWidthStr;
 
 pub(crate) const TABLE_COLUMN_SPACING: u16 = 1;
 pub(crate) const TABLE_EDGE_PADDING: u16 = 1;
-
-/// Position selected table columns after their content widths have been chosen.
-///
-/// Width allocation decides which columns are visible and how wide their content
-/// boxes are. This flex mode handles only the residual space: keep the first and
-/// last columns pinned to the table edges, then distribute leftover space as
-/// even inter-column padding.
 pub(crate) const DISTRIBUTED_TABLE_FLEX: Flex = Flex::SpaceBetween;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ColumnWidthSpec {
-    pub(crate) width: u16,
+pub(crate) struct ResponsiveColumn<C> {
+    pub(crate) id: C,
+    pub(crate) required: bool,
+    pub(crate) priority: u16,
+    pub(crate) order: u16,
+    pub(crate) min_width: u16,
+    pub(crate) select_width: u16,
 }
 
-impl ColumnWidthSpec {
-    pub(crate) const fn fixed(width: u16) -> Self {
-        Self { width }
+impl<C: Copy> ResponsiveColumn<C> {
+    pub(crate) fn fixed_required(id: C, order: u16, width: u16) -> Self {
+        Self {
+            id,
+            required: true,
+            priority: 0,
+            order,
+            min_width: width,
+            select_width: width,
+        }
+    }
+
+    pub(crate) fn fixed_optional(id: C, priority: u16, order: u16, width: u16) -> Self {
+        Self {
+            id,
+            required: false,
+            priority,
+            order,
+            min_width: width,
+            select_width: width,
+        }
+    }
+
+    pub(crate) fn measured_required(
+        id: C,
+        order: u16,
+        min_width: u16,
+        content_width: u16,
+        max_width: u16,
+    ) -> Self {
+        let width = content_width.clamp(min_width, max_width);
+        Self {
+            id,
+            required: true,
+            priority: 0,
+            order,
+            min_width,
+            select_width: width,
+        }
+    }
+
+    pub(crate) fn measured_atomic_optional(
+        id: C,
+        priority: u16,
+        order: u16,
+        min_width: u16,
+        content_width: u16,
+        max_width: u16,
+    ) -> Self {
+        let width = content_width.clamp(min_width, max_width);
+        Self {
+            id,
+            required: false,
+            priority,
+            order,
+            min_width: width,
+            select_width: width,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResponsiveTableLayout<C> {
+    pub(crate) columns: Vec<C>,
+    pub(crate) widths: Vec<Constraint>,
+}
+
+impl<C: Copy + PartialEq> ResponsiveTableLayout<C> {
+    pub(crate) fn width_for(&self, column: C) -> usize {
+        width_for_column(&self.columns, &self.widths, column)
+    }
+}
+
+pub(crate) fn width_for_column<C: Copy + PartialEq>(
+    columns: &[C],
+    widths: &[Constraint],
+    column: C,
+) -> usize {
+    let index = columns
+        .iter()
+        .position(|candidate| *candidate == column)
+        .expect("layout must contain requested column");
+
+    match widths[index] {
+        Constraint::Length(width) => width as usize,
+        _ => panic!("responsive table layout must produce fixed length constraints"),
     }
 }
 
@@ -40,59 +121,92 @@ pub(crate) fn distributed_table_area(area: Rect) -> Rect {
     })
 }
 
-pub(crate) fn choose_priority_columns<T, InsertAt, Width>(
+pub(crate) fn responsive_table_layout<C: Copy>(
     table_width: u16,
-    required_columns: &[T],
-    optional_columns: &[T],
-    mut insert_at: InsertAt,
-    mut width: Width,
-) -> Vec<T>
-where
-    T: Copy,
-    InsertAt: FnMut(&[T], T) -> usize,
-    Width: FnMut(&[T]) -> u16,
-{
-    let mut columns = required_columns.to_vec();
+    columns: &[ResponsiveColumn<C>],
+) -> ResponsiveTableLayout<C> {
+    let mut selected: Vec<ResponsiveColumn<C>> = columns
+        .iter()
+        .copied()
+        .filter(|column| column.required)
+        .collect();
+    selected.sort_by_key(|column| column.order);
 
-    for column in optional_columns {
-        let mut candidate = columns.clone();
-        let insert_at = insert_at(&candidate, *column).min(candidate.len());
-        candidate.insert(insert_at, *column);
+    if select_table_width(&selected) > table_width {
+        let widths = shrink_required_columns_toward_min_widths(table_width, &selected);
+        return ResponsiveTableLayout {
+            columns: selected.iter().map(|column| column.id).collect(),
+            widths: widths.into_iter().map(Constraint::Length).collect(),
+        };
+    }
 
-        if width(&candidate) <= table_width {
-            columns = candidate;
+    let mut optional: Vec<ResponsiveColumn<C>> = columns
+        .iter()
+        .copied()
+        .filter(|column| !column.required)
+        .collect();
+    optional.sort_by_key(|column| (column.priority, column.order));
+
+    for column in optional {
+        let mut candidate = selected.clone();
+        candidate.push(column);
+        candidate.sort_by_key(|column| column.order);
+
+        if select_table_width(&candidate) <= table_width {
+            selected = candidate;
         } else {
             break;
         }
     }
 
-    columns
+    selected.sort_by_key(|column| column.order);
+    let widths = select_widths(&selected);
+
+    ResponsiveTableLayout {
+        columns: selected.iter().map(|column| column.id).collect(),
+        widths: widths.into_iter().map(Constraint::Length).collect(),
+    }
 }
 
-fn display_rank<T: PartialEq>(column: T, display_order: &[T]) -> usize {
-    display_order
-        .iter()
-        .position(|candidate| *candidate == column)
-        .unwrap_or(display_order.len())
+fn select_table_width<C>(columns: &[ResponsiveColumn<C>]) -> u16 {
+    let widths = select_widths(columns);
+    spaced_width(&widths)
 }
 
-pub(crate) fn insert_by_display_order<T: Copy + PartialEq>(
-    candidate: &[T],
-    column: T,
-    display_order: &[T],
-) -> usize {
-    let column_rank = display_rank(column, display_order);
-    candidate
-        .iter()
-        .position(|existing| display_rank(*existing, display_order) > column_rank)
-        .unwrap_or(candidate.len())
+fn select_widths<C>(columns: &[ResponsiveColumn<C>]) -> Vec<u16> {
+    columns.iter().map(select_width).collect()
 }
 
-pub(crate) fn allocate_widths(_table_width: u16, specs: &[ColumnWidthSpec]) -> Vec<Constraint> {
-    specs
-        .iter()
-        .map(|spec| Constraint::Length(spec.width))
-        .collect()
+fn select_width<C>(column: &ResponsiveColumn<C>) -> u16 {
+    debug_assert!(column.min_width <= column.select_width);
+
+    column.select_width
+}
+
+// Shrinks required columns toward their minimum widths. If required minimums still
+// exceed the table width, the returned layout intentionally overflows rather than
+// dropping required columns.
+fn shrink_required_columns_toward_min_widths<C>(
+    table_width: u16,
+    columns: &[ResponsiveColumn<C>],
+) -> Vec<u16> {
+    let mut widths = select_widths(columns);
+
+    while spaced_width(&widths) > table_width {
+        let Some(index) = columns
+            .iter()
+            .enumerate()
+            .filter(|(index, column)| widths[*index] > column.min_width)
+            .max_by_key(|(index, column)| widths[*index] - column.min_width)
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+
+        widths[index] -= 1;
+    }
+
+    widths
 }
 
 #[cfg(test)]
@@ -114,19 +228,6 @@ mod tests {
     use ratatui::Terminal;
 
     #[test]
-    fn fixed_specs_return_length_constraints() {
-        let specs = [
-            ColumnWidthSpec::fixed(8),
-            ColumnWidthSpec::fixed(10),
-            ColumnWidthSpec::fixed(6),
-        ];
-
-        let widths = allocate_widths(80, &specs);
-
-        assert_eq!(constraint_lengths(&widths), vec![8, 10, 6]);
-    }
-
-    #[test]
     fn distributed_table_area_adds_edge_padding() {
         let area = Rect::new(10, 5, 40, 8);
 
@@ -140,36 +241,108 @@ mod tests {
     }
 
     #[test]
-    fn display_order_insert_uses_ranked_position() {
-        let order = ['a', 'b', 'c', 'd'];
-        let candidate = ['a', 'd'];
+    fn optional_selection_is_strict_priority_prefix() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum C {
+            A,
+            B,
+            Cc,
+            D,
+            E,
+        }
 
-        assert_eq!(insert_by_display_order(&candidate, 'b', &order), 1);
-        assert_eq!(insert_by_display_order(&candidate, 'c', &order), 1);
+        let columns = [
+            ResponsiveColumn::fixed_required(C::A, 0, 5),
+            ResponsiveColumn::fixed_optional(C::B, 10, 10, 5),
+            ResponsiveColumn::fixed_optional(C::Cc, 20, 20, 20),
+            ResponsiveColumn::fixed_optional(C::D, 30, 30, 5),
+            ResponsiveColumn::fixed_optional(C::E, 40, 40, 5),
+        ];
+
+        let layout = responsive_table_layout(17, &columns);
+
+        assert_eq!(layout.columns, vec![C::A, C::B]);
     }
 
     #[test]
-    fn display_order_insert_puts_unknown_columns_last() {
-        let order = ['a', 'b'];
-        let candidate = ['a', 'b'];
+    fn optional_columns_cannot_force_required_columns_below_select_width() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum C {
+            Name,
+            Optional,
+            Total,
+        }
 
-        assert_eq!(insert_by_display_order(&candidate, 'z', &order), 2);
+        let columns = [
+            ResponsiveColumn::measured_required(C::Name, 0, 5, 12, 20),
+            ResponsiveColumn::fixed_optional(C::Optional, 10, 10, 3),
+            ResponsiveColumn::fixed_required(C::Total, 20, 9),
+        ];
+
+        let layout = responsive_table_layout(24, &columns);
+
+        assert_eq!(layout.columns, vec![C::Name, C::Total]);
+        assert_eq!(constraint_lengths(&layout.widths), vec![12, 9]);
+    }
+
+    #[test]
+    fn required_columns_shrink_only_when_select_widths_do_not_fit() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum C {
+            Name,
+            Total,
+        }
+
+        let columns = [
+            ResponsiveColumn::measured_required(C::Name, 0, 5, 12, 20),
+            ResponsiveColumn::fixed_required(C::Total, 10, 9),
+        ];
+
+        let layout = responsive_table_layout(18, &columns);
+
+        assert_eq!(layout.columns, vec![C::Name, C::Total]);
+        assert_eq!(constraint_lengths(&layout.widths), vec![8, 9]);
+    }
+
+    #[test]
+    fn required_columns_are_not_dropped_when_min_width_exceeds_table_width() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum C {
+            A,
+            B,
+            Optional,
+        }
+
+        let columns = [
+            ResponsiveColumn::fixed_required(C::A, 0, 20),
+            ResponsiveColumn::fixed_required(C::B, 20, 20),
+            ResponsiveColumn::fixed_optional(C::Optional, 10, 10, 1),
+        ];
+
+        let layout = responsive_table_layout(10, &columns);
+
+        assert_eq!(layout.columns, vec![C::A, C::B]);
+        assert_eq!(constraint_lengths(&layout.widths), vec![20, 20]);
     }
 
     #[test]
     fn distributed_table_flex_spreads_surplus_width_between_columns() {
-        let backend = TestBackend::new(22, 1);
+        let backend = TestBackend::new(30, 1);
         let mut terminal = Terminal::new(backend).unwrap();
-        let widths = [
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ];
 
         terminal
             .draw(|frame| {
-                let table =
-                    Table::new([Row::new(["A", "B", "C"])], widths).flex(DISTRIBUTED_TABLE_FLEX);
+                let table = Table::new(
+                    [Row::new(["A", "B", "C"])],
+                    [
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ],
+                )
+                .column_spacing(TABLE_COLUMN_SPACING)
+                .flex(DISTRIBUTED_TABLE_FLEX);
+
                 frame.render_widget(table, distributed_table_area(frame.area()));
             })
             .unwrap();
@@ -181,21 +354,13 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let a_index = line.find('A').expect("first column should render");
-        let b_index = line.find('B').expect("middle column should render");
-        let c_index = line.find('C').expect("last column should render");
+        let a = line.find('A').expect("first column should render");
+        let b = line.find('B').expect("middle column should render");
+        let c = line.find('C').expect("last column should render");
 
-        assert!(
-            a_index == usize::from(TABLE_EDGE_PADDING),
-            "first column should start after edge padding: {line}"
-        );
-        assert!(
-            c_index == line.len() - usize::from(TABLE_EDGE_PADDING) - 1,
-            "last column should end before right edge padding: {line}"
-        );
-        assert!(
-            (4..=17).contains(&b_index),
-            "middle column should receive balanced spacing: {line}"
-        );
+        assert_eq!(a, usize::from(TABLE_EDGE_PADDING));
+        assert_eq!(c, line.len() - usize::from(TABLE_EDGE_PADDING) - 1);
+        assert!(b > a + 2, "middle column should be spaced out: {line}");
+        assert!(b < c - 2, "middle column should be spaced out: {line}");
     }
 }

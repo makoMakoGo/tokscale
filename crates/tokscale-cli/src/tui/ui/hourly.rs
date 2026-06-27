@@ -6,17 +6,17 @@ use ratatui::widgets::{
 
 use super::hourly_profile;
 use super::table_layout::{
-    allocate_widths, choose_priority_columns, display_width, distributed_table_area, spaced_width,
-    ColumnWidthSpec, DISTRIBUTED_TABLE_FLEX,
+    display_width, distributed_table_area, responsive_table_layout, width_for_column,
+    ResponsiveColumn, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, viewport_scrollbar_state,
+    get_client_display_name, truncate_display_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
 const HOUR_WIDTH: u16 = 7;
-const SOURCE_MIN_WIDTH: u16 = 12;
+const SOURCE_MIN_WIDTH: u16 = 8;
 const SOURCE_MAX_WIDTH: u16 = 40;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
@@ -48,6 +48,12 @@ struct HourlyTableLayout {
     widths: Vec<Constraint>,
 }
 
+impl HourlyTableLayout {
+    fn width_for(&self, column: HourlyColumn) -> usize {
+        width_for_column(&self.columns, &self.widths, column)
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.hourly_view_mode {
         HourlyViewMode::Table => render_table(frame, app, area),
@@ -55,68 +61,21 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn hourly_column_width(column: HourlyColumn, source_width: u16) -> u16 {
+fn hourly_column_order(column: HourlyColumn) -> u16 {
     match column {
-        HourlyColumn::Hour => HOUR_WIDTH,
-        HourlyColumn::Source => source_width,
-        HourlyColumn::Turn => TURN_WIDTH,
-        HourlyColumn::Messages => MSGS_WIDTH,
-        HourlyColumn::Input
-        | HourlyColumn::Output
-        | HourlyColumn::CacheRead
-        | HourlyColumn::CacheWrite => NUMERIC_WIDTH,
-        HourlyColumn::CacheRate => CACHE_RATE_WIDTH,
-        HourlyColumn::Total => TOTAL_WIDTH,
-        HourlyColumn::Cost => COST_WIDTH,
-        HourlyColumn::CostPerMillion => COST_PER_MILLION_WIDTH,
+        HourlyColumn::Hour => 0,
+        HourlyColumn::Source => 10,
+        HourlyColumn::Turn => 20,
+        HourlyColumn::Messages => 30,
+        HourlyColumn::Input => 40,
+        HourlyColumn::Output => 50,
+        HourlyColumn::CacheRead => 60,
+        HourlyColumn::CacheWrite => 70,
+        HourlyColumn::CacheRate => 80,
+        HourlyColumn::Total => 90,
+        HourlyColumn::Cost => 100,
+        HourlyColumn::CostPerMillion => 110,
     }
-}
-
-fn hourly_column_spec(column: HourlyColumn, source_width: u16) -> ColumnWidthSpec {
-    ColumnWidthSpec::fixed(hourly_column_width(column, source_width))
-}
-
-fn hourly_layout_width(columns: &[HourlyColumn], source_width: u16) -> u16 {
-    let widths: Vec<u16> = columns
-        .iter()
-        .map(|column| hourly_column_width(*column, source_width))
-        .collect();
-
-    spaced_width(&widths)
-}
-
-fn hourly_insert_index(candidate: &[HourlyColumn], column: HourlyColumn) -> usize {
-    if column == HourlyColumn::Cost {
-        return candidate
-            .iter()
-            .position(|existing| *existing == HourlyColumn::Total)
-            .map(|index| index + 1)
-            .unwrap_or(candidate.len());
-    }
-
-    if column == HourlyColumn::CostPerMillion {
-        return candidate
-            .iter()
-            .position(|existing| *existing == HourlyColumn::Cost)
-            .map(|index| index + 1)
-            .or_else(|| {
-                candidate
-                    .iter()
-                    .position(|existing| *existing == HourlyColumn::Total)
-                    .map(|index| index + 1)
-            })
-            .unwrap_or(candidate.len());
-    }
-
-    candidate
-        .iter()
-        .position(|existing| {
-            matches!(
-                existing,
-                HourlyColumn::Total | HourlyColumn::Cost | HourlyColumn::CostPerMillion
-            )
-        })
-        .unwrap_or(candidate.len())
 }
 
 fn hourly_table_layout(
@@ -124,37 +83,90 @@ fn hourly_table_layout(
     has_turn_data: bool,
     source_content_width: u16,
 ) -> HourlyTableLayout {
-    let required_columns = [HourlyColumn::Hour, HourlyColumn::Total];
-    let mut optional_columns = vec![HourlyColumn::Cost, HourlyColumn::Source];
+    let mut columns = vec![
+        ResponsiveColumn::fixed_required(
+            HourlyColumn::Hour,
+            hourly_column_order(HourlyColumn::Hour),
+            HOUR_WIDTH,
+        ),
+        ResponsiveColumn::fixed_required(
+            HourlyColumn::Total,
+            hourly_column_order(HourlyColumn::Total),
+            TOTAL_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            HourlyColumn::Cost,
+            10,
+            hourly_column_order(HourlyColumn::Cost),
+            COST_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            HourlyColumn::Messages,
+            40,
+            hourly_column_order(HourlyColumn::Messages),
+            MSGS_WIDTH,
+        ),
+        ResponsiveColumn::measured_atomic_optional(
+            HourlyColumn::Source,
+            20,
+            hourly_column_order(HourlyColumn::Source),
+            SOURCE_MIN_WIDTH,
+            source_content_width,
+            SOURCE_MAX_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            HourlyColumn::Input,
+            50,
+            hourly_column_order(HourlyColumn::Input),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            HourlyColumn::Output,
+            60,
+            hourly_column_order(HourlyColumn::Output),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            HourlyColumn::CacheRead,
+            70,
+            hourly_column_order(HourlyColumn::CacheRead),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            HourlyColumn::CacheWrite,
+            80,
+            hourly_column_order(HourlyColumn::CacheWrite),
+            NUMERIC_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            HourlyColumn::CacheRate,
+            90,
+            hourly_column_order(HourlyColumn::CacheRate),
+            CACHE_RATE_WIDTH,
+        ),
+        ResponsiveColumn::fixed_optional(
+            HourlyColumn::CostPerMillion,
+            100,
+            hourly_column_order(HourlyColumn::CostPerMillion),
+            COST_PER_MILLION_WIDTH,
+        ),
+    ];
+
     if has_turn_data {
-        optional_columns.push(HourlyColumn::Turn);
+        columns.push(ResponsiveColumn::fixed_optional(
+            HourlyColumn::Turn,
+            30,
+            hourly_column_order(HourlyColumn::Turn),
+            TURN_WIDTH,
+        ));
     }
-    optional_columns.extend([
-        HourlyColumn::Messages,
-        HourlyColumn::Input,
-        HourlyColumn::Output,
-        HourlyColumn::CacheRead,
-        HourlyColumn::CacheWrite,
-        HourlyColumn::CacheRate,
-        HourlyColumn::CostPerMillion,
-    ]);
 
-    let source_width = source_content_width.clamp(SOURCE_MIN_WIDTH, SOURCE_MAX_WIDTH);
-    let columns = choose_priority_columns(
-        table_width,
-        &required_columns,
-        &optional_columns,
-        hourly_insert_index,
-        |candidate| hourly_layout_width(candidate, source_width),
-    );
+    let layout = responsive_table_layout(table_width, &columns);
 
-    let specs: Vec<ColumnWidthSpec> = columns
-        .iter()
-        .map(|column| hourly_column_spec(*column, source_width))
-        .collect();
-    let widths = allocate_widths(table_width, &specs);
-
-    HourlyTableLayout { columns, widths }
+    HourlyTableLayout {
+        columns: layout.columns,
+        widths: layout.widths,
+    }
 }
 
 fn hourly_column_header(column: HourlyColumn) -> &'static str {
@@ -325,7 +337,10 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
         let cell_for_column = |column: HourlyColumn| -> Cell {
             match column {
                 HourlyColumn::Hour => Cell::from(hour_label.clone()).style(hour_style),
-                HourlyColumn::Source => Cell::from(clients_str.clone()),
+                HourlyColumn::Source => Cell::from(truncate_display_width(
+                    &clients_str,
+                    table_layout.width_for(HourlyColumn::Source),
+                )),
                 HourlyColumn::Turn => Cell::from(turn_str.clone()),
                 HourlyColumn::Messages => Cell::from(hour.message_count.to_string()),
                 HourlyColumn::Input => {
@@ -383,6 +398,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
         .row_highlight_style(Style::default().bg(theme_selection));
 
@@ -513,21 +529,23 @@ mod tests {
     }
 
     #[test]
-    fn hourly_layout_prioritizes_cost_over_source() {
+    fn hourly_layout_stops_at_wide_source_after_cost() {
         let layout = hourly_table_layout(44, false, 40);
 
         assert!(layout.columns.contains(&HourlyColumn::Cost));
         assert!(!layout.columns.contains(&HourlyColumn::Source));
+        assert!(!layout.columns.contains(&HourlyColumn::Messages));
     }
 
     #[test]
-    fn hourly_layout_does_not_skip_blocked_source_for_lower_priority_columns() {
+    fn hourly_layout_does_not_skip_source_to_show_turn_or_messages() {
         let layout = hourly_table_layout(45, true, 40);
 
         assert_eq!(
             layout.columns,
             vec![HourlyColumn::Hour, HourlyColumn::Total, HourlyColumn::Cost]
         );
+        assert!(!layout.columns.contains(&HourlyColumn::Source));
         assert!(!layout.columns.contains(&HourlyColumn::Turn));
         assert!(!layout.columns.contains(&HourlyColumn::Messages));
     }
@@ -547,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn hourly_layout_keeps_source_content_width_with_spare_width() {
+    fn hourly_layout_uses_measured_source_width_when_selected() {
         let layout = hourly_table_layout(100, true, 16);
         let source_index = layout
             .columns
@@ -555,7 +573,8 @@ mod tests {
             .position(|column| *column == HourlyColumn::Source)
             .expect("source column should fit");
 
-        assert_eq!(length_at(&layout.widths, source_index), 16);
+        assert!(length_at(&layout.widths, source_index) > SOURCE_MIN_WIDTH);
+        assert!(length_at(&layout.widths, source_index) <= 16);
     }
 
     #[test]
