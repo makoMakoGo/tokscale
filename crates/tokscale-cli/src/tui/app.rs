@@ -12,6 +12,7 @@ use tokscale_core::{ordered_clients_by_token_contribution, ClientContributionOrd
 
 use ratatui::style::Color;
 
+use super::colors::{get_model_color, get_provider_shade, provider_color_key};
 use super::data::{
     build_period_usage, AgentUsage, DailySourceInfo, DailyUsage, DataLoader, HourlyUsage,
     ModelUsage, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
@@ -22,7 +23,6 @@ use super::interaction::{
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
-use super::ui::widgets::{get_model_color, get_provider_shade, provider_color_key};
 
 /// Configuration for TUI initialization
 pub struct TuiConfig {
@@ -2013,7 +2013,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ui::widgets::get_provider_shade;
+    use super::super::colors::get_provider_shade;
     use super::*;
     use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
     use chrono::NaiveDate;

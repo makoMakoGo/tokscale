@@ -3,7 +3,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use ratatui::style::Color;
 use serde::Deserialize;
 
 static CONFIG: OnceLock<TokscaleConfig> = OnceLock::new();
@@ -46,18 +45,15 @@ impl TokscaleConfig {
         })
     }
 
-    pub fn get_provider_color(&self, provider: &str) -> Option<Color> {
+    pub fn get_provider_color_hex(&self, provider_key: &str) -> Option<&str> {
         self.colors
             .providers
-            .get(&provider.to_lowercase())
-            .and_then(|hex| parse_hex_color(hex))
+            .get(provider_key)
+            .map(|hex| hex.as_str())
     }
 
-    pub fn get_client_color(&self, client: &str) -> Option<Color> {
-        self.colors
-            .clients
-            .get(&client.to_lowercase())
-            .and_then(|hex| parse_hex_color(hex))
+    pub fn get_client_color_hex(&self, client_key: &str) -> Option<&str> {
+        self.colors.clients.get(client_key).map(|hex| hex.as_str())
     }
 
     pub fn get_provider_display_name(&self, provider: &str) -> Option<&str> {
@@ -73,15 +69,4 @@ impl TokscaleConfig {
             .get(&client.to_lowercase())
             .map(|s| s.as_str())
     }
-}
-
-fn parse_hex_color(hex: &str) -> Option<Color> {
-    let hex = hex.trim().trim_start_matches('#');
-    if hex.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some(Color::Rgb(r, g, b))
 }

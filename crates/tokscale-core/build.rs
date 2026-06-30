@@ -195,6 +195,10 @@ impl ClientId {{
         self.identity().submit_default
     }}
 
+    pub fn color(self) -> &'static str {{
+        self.identity().color
+    }}
+
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<ClientId> {{
         match s {{

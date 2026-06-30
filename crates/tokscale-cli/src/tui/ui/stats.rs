@@ -1,9 +1,11 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
+use crate::tui::colors::get_client_color;
+
 use super::widgets::{
-    format_cost, format_tokens, get_client_color, get_client_display_name,
-    truncate_model_display_name, truncate_model_display_name_to, viewport_scrollbar_state,
+    format_cost, format_tokens, get_client_display_name, truncate_model_display_name,
+    truncate_model_display_name_to, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, ClickAction};
 
