@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Aggregate messages into daily contributions
-pub(crate) fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
+pub(crate) fn aggregate_by_date(messages: &[UnifiedMessage]) -> Vec<DailyContribution> {
     if messages.is_empty() {
         return Vec::new();
     }
@@ -21,12 +21,12 @@ pub(crate) fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContr
 
     // Parallel aggregation using fold/reduce pattern
     let daily_map: HashMap<String, DayAccumulator> = messages
-        .into_par_iter()
+        .par_iter()
         .fold(
             || HashMap::with_capacity(estimated_days),
             |mut acc: HashMap<String, DayAccumulator>, msg| {
                 let entry = acc.entry(msg.date_string()).or_default();
-                entry.add_message(&msg);
+                entry.add_message(msg);
                 acc
             },
         )
@@ -63,18 +63,18 @@ pub(crate) fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContr
 /// single session and exposes the same client/model breakdown shape as
 /// [`aggregate_by_date`].  Sessions are sorted by `last_seen` descending so the
 /// most recently active sessions appear first.
-pub(crate) fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContribution> {
+pub(crate) fn aggregate_by_session(messages: &[UnifiedMessage]) -> Vec<SessionContribution> {
     if messages.is_empty() {
         return Vec::new();
     }
 
     let session_map: HashMap<String, SessionAccumulator> = messages
-        .into_par_iter()
+        .par_iter()
         .fold(
             HashMap::new,
             |mut acc: HashMap<String, SessionAccumulator>, msg| {
                 let entry = acc.entry(msg.session_id.to_string()).or_default();
-                entry.add_message(&msg);
+                entry.add_message(msg);
                 acc
             },
         )
@@ -284,19 +284,16 @@ impl DayAccumulator {
             .reasoning
             .saturating_add(msg.tokens.reasoning);
 
-        // Update client contribution
-        let key = format!(
-            "{}:{}",
-            msg.client,
-            crate::normalize_model_for_grouping(&msg.model_id)
-        );
+        // Finalization canonicalizes model_id before aggregation.
+        let model_id = msg.model_id.as_ref();
+        let key = format!("{}:{}", msg.client, model_id);
         let provider_id = normalize_provider_for_grouping(&msg.provider_id);
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
                 client: msg.client.to_string(),
-                model_id: crate::normalize_model_for_grouping(&msg.model_id),
+                model_id: model_id.to_string(),
                 provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
@@ -530,15 +527,16 @@ impl SessionAccumulator {
             .saturating_add(msg.tokens.reasoning);
 
         // Track tightest (client, provider, model) by cost contribution.
-        let normalized_model = crate::normalize_model_for_grouping(&msg.model_id);
+        // Finalization canonicalizes model_id before aggregation.
+        let model_id = msg.model_id.as_ref();
         let provider_id = normalize_provider_for_grouping(&msg.provider_id);
-        let key = format!("{}:{}:{}", msg.client, provider_id, normalized_model);
+        let key = format!("{}:{}:{}", msg.client, provider_id, model_id);
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
                 client: msg.client.to_string(),
-                model_id: normalized_model.clone(),
+                model_id: model_id.to_string(),
                 provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
@@ -800,7 +798,7 @@ mod tests {
     #[test]
     fn test_aggregate_by_date_empty() {
         let messages = Vec::new();
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date(&messages);
         assert_eq!(result.len(), 0);
     }
 
@@ -814,7 +812,7 @@ mod tests {
             "opencode",
         )];
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].date, "2024-01-01");
         assert_eq!(result[0].totals.tokens, 1000);
@@ -824,14 +822,14 @@ mod tests {
 
     #[test]
     fn test_aggregate_by_date_normalizes_provider_display_aliases() {
-        let mut first =
-            mock_unified_message("2024-01-01", 1000, 0.05, "xiaomi/mimo-v2.5-pro", "opencode");
+        let mut first = mock_unified_message("2024-01-01", 1000, 0.05, "mimo-v2.5-pro", "opencode");
         first.provider_id = "xiaomi".into();
         let mut second =
-            mock_unified_message("2024-01-01", 2000, 0.10, "xiaomi/mimo-v2.5-pro", "opencode");
+            mock_unified_message("2024-01-01", 2000, 0.10, "mimo-v2.5-pro", "opencode");
         second.provider_id = "xiaomi-token-plan-cn".into();
 
-        let result = aggregate_by_date(vec![first, second]);
+        let messages = vec![first, second];
+        let result = aggregate_by_date(&messages);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].clients.len(), 1);
@@ -841,17 +839,17 @@ mod tests {
 
     #[test]
     fn test_aggregate_by_session_normalizes_provider_display_aliases() {
-        let mut first =
-            mock_unified_message("2024-01-01", 1000, 0.05, "xiaomi/mimo-v2.5-pro", "opencode");
+        let mut first = mock_unified_message("2024-01-01", 1000, 0.05, "mimo-v2.5-pro", "opencode");
         first.provider_id = "xiaomi".into();
         first.session_id = "session-shared".into();
 
         let mut second =
-            mock_unified_message("2024-01-01", 2000, 0.10, "xiaomi/mimo-v2.5-pro", "opencode");
+            mock_unified_message("2024-01-01", 2000, 0.10, "mimo-v2.5-pro", "opencode");
         second.provider_id = "xiaomi-token-plan-cn".into();
         second.session_id = "session-shared".into();
 
-        let result = aggregate_by_session(vec![first, second]);
+        let messages = vec![first, second];
+        let result = aggregate_by_session(&messages);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].provider, "xiaomi");
@@ -868,7 +866,7 @@ mod tests {
             mock_unified_message("2024-01-03", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
         ];
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date(&messages);
         assert_eq!(result.len(), 3);
 
         // Verify sorted by date
@@ -890,7 +888,7 @@ mod tests {
             mock_unified_message("2024-01-01", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
         ];
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].date, "2024-01-01");
         assert_eq!(result[0].totals.tokens, 4500);
@@ -910,7 +908,8 @@ mod tests {
             reasoning: 10,
         };
 
-        let result = aggregate_by_date(vec![msg]);
+        let messages = vec![msg];
+        let result = aggregate_by_date(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].token_breakdown.input, 600);
         assert_eq!(result[0].token_breakdown.output, 300);
@@ -941,7 +940,7 @@ mod tests {
             "claude-sonnet-4.6",
             "opencode",
         )];
-        let contributions = aggregate_by_date(messages);
+        let contributions = aggregate_by_date(&messages);
         let summary = calculate_summary(&contributions);
 
         assert_eq!(summary.total_tokens, 1000);
@@ -959,7 +958,7 @@ mod tests {
             mock_unified_message("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
             mock_unified_message("2024-01-03", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
         ];
-        let contributions = aggregate_by_date(messages);
+        let contributions = aggregate_by_date(&messages);
         let summary = calculate_summary(&contributions);
 
         assert_eq!(summary.total_tokens, 4500);
@@ -1066,7 +1065,7 @@ mod tests {
             mock_unified_message("2024-06-15", 2000, 0.10, "gpt-4", "claude"),
             mock_unified_message("2024-12-31", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
         ];
-        let contributions = aggregate_by_date(messages);
+        let contributions = aggregate_by_date(&messages);
         let years = calculate_years(&contributions);
 
         assert_eq!(years.len(), 1);
@@ -1085,7 +1084,7 @@ mod tests {
             mock_unified_message("2024-06-15", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2025-01-01", 3000, 0.15, "gpt-4", "claude"),
         ];
-        let contributions = aggregate_by_date(messages);
+        let contributions = aggregate_by_date(&messages);
         let years = calculate_years(&contributions);
 
         assert_eq!(years.len(), 3);
@@ -1108,7 +1107,7 @@ mod tests {
             mock_unified_message("2024-12-31", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2025-01-01", 2000, 0.10, "gpt-4", "claude"),
         ];
-        let contributions = aggregate_by_date(messages);
+        let contributions = aggregate_by_date(&messages);
         let years = calculate_years(&contributions);
 
         assert_eq!(years.len(), 2);
@@ -1156,7 +1155,7 @@ mod tests {
             mock_unified_message("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
             mock_unified_message("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
         ];
-        let contributions = aggregate_by_date(messages);
+        let contributions = aggregate_by_date(&messages);
         let result = generate_graph_result(contributions, 150);
 
         assert_eq!(result.contributions.len(), 2);
@@ -1351,7 +1350,7 @@ mod tests {
             mock_unified_message("2024-01-01", 2000, 0.10, "gpt-4", "claude"),
         ];
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].clients.len(), 2);
 
@@ -1382,7 +1381,7 @@ mod tests {
             }
         }
 
-        let result = aggregate_by_date(messages);
+        let result = aggregate_by_date(&messages);
         assert_eq!(result.len(), 10);
 
         // Each day should have 10 messages aggregated
@@ -1424,7 +1423,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_by_session_empty() {
-        assert!(aggregate_by_session(Vec::new()).is_empty());
+        assert!(aggregate_by_session(&[]).is_empty());
     }
 
     #[test]
@@ -1478,7 +1477,7 @@ mod tests {
                 "s-b",
                 "amp",
                 "anthropic",
-                "claude-haiku-4-5",
+                "claude-haiku-4.5",
                 1_700_000_005_000,
                 t.clone(),
                 0.02,
@@ -1487,7 +1486,7 @@ mod tests {
                 "s-b",
                 "amp",
                 "anthropic",
-                "claude-haiku-4-5",
+                "claude-haiku-4.5",
                 1_700_000_006_000,
                 t.clone(),
                 0.02,
@@ -1496,7 +1495,7 @@ mod tests {
                 "s-b",
                 "amp",
                 "anthropic",
-                "claude-haiku-4-5",
+                "claude-haiku-4.5",
                 1_700_000_007_000,
                 t.clone(),
                 0.02,
@@ -1505,7 +1504,7 @@ mod tests {
                 "s-c",
                 "claude",
                 "anthropic",
-                "claude-sonnet-4-5",
+                "claude-sonnet-4.5",
                 1_700_000_100_000,
                 t.clone(),
                 0.05,
@@ -1514,7 +1513,7 @@ mod tests {
                 "s-c",
                 "claude",
                 "anthropic",
-                "claude-sonnet-4-5",
+                "claude-sonnet-4.5",
                 1_700_000_101_000,
                 t.clone(),
                 0.05,
@@ -1523,14 +1522,14 @@ mod tests {
                 "s-c",
                 "claude",
                 "anthropic",
-                "claude-sonnet-4-5",
+                "claude-sonnet-4.5",
                 1_700_000_102_000,
                 t.clone(),
                 0.05,
             ),
         ];
 
-        let result = aggregate_by_session(messages);
+        let result = aggregate_by_session(&messages);
         assert_eq!(result.len(), 3, "expected 3 sessions");
 
         // Most-recent-first ordering: s-c last_seen=1_700_000_102 wins.
@@ -1583,7 +1582,7 @@ mod tests {
                 "shared",
                 "amp",
                 "anthropic",
-                "claude-haiku-4-5",
+                "claude-haiku-4.5",
                 1_700_000_001_000,
                 small,
                 0.001,
@@ -1599,7 +1598,7 @@ mod tests {
             ),
         ];
 
-        let result = aggregate_by_session(messages);
+        let result = aggregate_by_session(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].client, "codex");
         assert_eq!(result[0].provider, "openai");

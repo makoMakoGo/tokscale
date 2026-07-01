@@ -23,8 +23,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::{ParserId, ParserRevision, ParserVersion};
 use crate::{message_cache, pricing, scanner, UnifiedMessage};
+
+pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 2;
 
 pub(crate) trait LocalSourceAdapter: Sync {
     fn client(&self) -> ClientId;
@@ -184,15 +186,37 @@ pub(crate) enum SourceUnitMeta {
 impl SourceUnitMeta {
     fn parser_version(&self, client: ClientId) -> ParserVersion {
         match self {
-            Self::None => ParserVersion::new(default_parser_id(client), 1),
-            Self::OpenCodeSqlite => ParserVersion::new(ParserId::OpenCodeSqlite, 1),
-            Self::OpenCodeJson => ParserVersion::new(ParserId::OpenCodeJson, 1),
-            Self::AntigravityCacheJsonl => ParserVersion::new(ParserId::AntigravityCacheJsonl, 1),
-            Self::AntigravityCliSqlite => ParserVersion::new(ParserId::AntigravityCliSqlite, 1),
-            Self::KiroFile => ParserVersion::new(ParserId::KiroFile, 1),
-            Self::KiroSqlite => ParserVersion::new(ParserId::KiroSqlite, 1),
-            Self::KiroGlobalStorage => ParserVersion::new(ParserId::KiroGlobalStorage, 1),
-            Self::Codex { .. } => ParserVersion::new(ParserId::Codex, 1),
+            Self::None => ParserVersion::new(
+                default_parser_id(client),
+                MODEL_ID_CANONICALIZATION_REVISION,
+            ),
+            Self::OpenCodeSqlite => {
+                ParserVersion::new(ParserId::OpenCodeSqlite, MODEL_ID_CANONICALIZATION_REVISION)
+            }
+            Self::OpenCodeJson => {
+                ParserVersion::new(ParserId::OpenCodeJson, MODEL_ID_CANONICALIZATION_REVISION)
+            }
+            Self::AntigravityCacheJsonl => ParserVersion::new(
+                ParserId::AntigravityCacheJsonl,
+                MODEL_ID_CANONICALIZATION_REVISION,
+            ),
+            Self::AntigravityCliSqlite => ParserVersion::new(
+                ParserId::AntigravityCliSqlite,
+                MODEL_ID_CANONICALIZATION_REVISION,
+            ),
+            Self::KiroFile => {
+                ParserVersion::new(ParserId::KiroFile, MODEL_ID_CANONICALIZATION_REVISION)
+            }
+            Self::KiroSqlite => {
+                ParserVersion::new(ParserId::KiroSqlite, MODEL_ID_CANONICALIZATION_REVISION)
+            }
+            Self::KiroGlobalStorage => ParserVersion::new(
+                ParserId::KiroGlobalStorage,
+                MODEL_ID_CANONICALIZATION_REVISION,
+            ),
+            Self::Codex { .. } => {
+                ParserVersion::new(ParserId::Codex, MODEL_ID_CANONICALIZATION_REVISION)
+            }
         }
     }
 }

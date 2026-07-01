@@ -6,7 +6,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit,
+    ParseContext, ParsedUnit, SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -154,7 +154,12 @@ impl LocalSourceAdapter for CopilotAdapter {
             FingerprintPolicy::PlainFile,
         )
         .into_iter()
-        .map(|unit| unit.with_parser_version(ParserVersion::new(ParserId::Copilot, 1)))
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(
+                ParserId::Copilot,
+                MODEL_ID_CANONICALIZATION_REVISION,
+            ))
+        })
         .collect()
     }
 
@@ -186,61 +191,61 @@ pub(crate) static COPILOT_ADAPTER: CopilotAdapter = CopilotAdapter;
 pub(crate) static CURSOR_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Cursor,
     ParserId::Cursor,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::cursor::parse_cursor_file,
 );
 pub(crate) static GEMINI_ADAPTER: PolicyFileAdapter = PolicyFileAdapter::new(
     ClientId::Gemini,
     ParserId::Gemini,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     parse_gemini_file_with_policy,
 );
 pub(crate) static GROK_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Grok,
     ParserId::Grok,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::grok::parse_grok_updates_file,
 );
 pub(crate) static AMP_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Amp,
     ParserId::Amp,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::amp::parse_amp_file,
 );
 pub(crate) static DROID_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Droid,
     ParserId::Droid,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::droid::parse_droid_file,
 );
 pub(crate) static KIMI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Kimi,
     ParserId::Kimi,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::kimi::parse_kimi_file,
 );
 pub(crate) static QWEN_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Qwen,
     ParserId::Qwen,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::qwen::parse_qwen_file,
 );
 pub(crate) static MUX_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Mux,
     ParserId::Mux,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::mux::parse_mux_file,
 );
 pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::CommandCode,
     ParserId::CommandCode,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::commandcode::parse_commandcode_file,
 );
 pub(crate) static ZCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Zcode,
     ParserId::Zcode,
-    1,
+    MODEL_ID_CANONICALIZATION_REVISION,
     sessions::zcode::parse_zcode_file,
 );
 #[cfg(test)]
@@ -272,10 +277,9 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    fn refresh(messages: &mut [UnifiedMessage]) {
-        for message in messages {
-            message.refresh_derived_fields();
-        }
+    fn finalized(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+        crate::finalize_token_priced_messages(&mut messages, None);
+        messages
     }
 
     fn fold_with_adapter(
@@ -340,8 +344,7 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
 
         let actual = fold_with_adapter(&AMP_ADAPTER, units, &mut cache);
-        let mut expected = sessions::amp::parse_amp_file(&path);
-        refresh(&mut expected);
+        let expected = finalized(sessions::amp::parse_amp_file(&path));
 
         assert_eq!(actual, expected);
     }
@@ -350,10 +353,12 @@ mod tests {
     fn source_units_carry_parser_specific_cache_versions() {
         let path = PathBuf::from("/tmp/shared-source.jsonl");
 
-        let copilot = SourceUnit::plain_file(ClientId::Copilot, path.clone())
-            .with_parser_version(ParserVersion::new(ParserId::Copilot, 1));
-        let cursor = SourceUnit::plain_file(ClientId::Cursor, path.clone())
-            .with_parser_version(ParserVersion::new(ParserId::Cursor, 1));
+        let copilot = SourceUnit::plain_file(ClientId::Copilot, path.clone()).with_parser_version(
+            ParserVersion::new(ParserId::Copilot, MODEL_ID_CANONICALIZATION_REVISION),
+        );
+        let cursor = SourceUnit::plain_file(ClientId::Cursor, path.clone()).with_parser_version(
+            ParserVersion::new(ParserId::Cursor, MODEL_ID_CANONICALIZATION_REVISION),
+        );
         let antigravity_jsonl = SourceUnit::plain_file(ClientId::Antigravity, path.clone())
             .with_meta(crate::adapters::SourceUnitMeta::AntigravityCacheJsonl);
         let antigravity_cli = SourceUnit::sqlite_with_wal(ClientId::Antigravity, path.clone())
@@ -383,9 +388,8 @@ mod tests {
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![default_path]);
-        assert!(units
-            .iter()
-            .all(|unit| unit.parser_version == ParserVersion::new(ParserId::Zcode, 1)));
+        assert!(units.iter().all(|unit| unit.parser_version
+            == ParserVersion::new(ParserId::Zcode, MODEL_ID_CANONICALIZATION_REVISION)));
     }
 
     #[test]
@@ -394,12 +398,14 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, ZCODE_CONTENT);
         let units = vec![SourceUnit::plain_file(ClientId::Zcode, path.clone())
-            .with_parser_version(ParserVersion::new(ParserId::Zcode, 1))];
+            .with_parser_version(ParserVersion::new(
+                ParserId::Zcode,
+                MODEL_ID_CANONICALIZATION_REVISION,
+            ))];
         let mut cache = message_cache::SourceMessageCache::default();
 
         let actual = fold_with_adapter(&ZCODE_ADAPTER, units, &mut cache);
-        let mut expected = sessions::zcode::parse_zcode_file(&path);
-        refresh(&mut expected);
+        let expected = finalized(sessions::zcode::parse_zcode_file(&path));
 
         assert_eq!(actual, expected);
     }

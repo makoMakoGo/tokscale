@@ -653,7 +653,10 @@ mod tests {
         assert!(cache
             .get_meta(
                 &path,
-                message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1),
+                message_cache::ParserVersion::new(
+                    message_cache::ParserId::Codex,
+                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+                ),
             )
             .and_then(|meta| meta.codex_incremental)
             .is_some());
@@ -806,7 +809,10 @@ mod tests {
         let mut remover = message_cache::SourceMessageCache::load();
         remover.remove(
             &path,
-            message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1),
+            message_cache::ParserVersion::new(
+                message_cache::ParserId::Codex,
+                crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            ),
         );
         remover.save_if_dirty();
 

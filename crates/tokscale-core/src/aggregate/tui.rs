@@ -1,7 +1,8 @@
 //! The TUI usage aggregation: one fold over `UnifiedMessage`s producing
 //! [`crate::usage_views::UsageData`] (models/agents/daily/hourly/graph/streaks).
 //! `AggregationEngine` owns this accumulator when `ViewSet::TUI` is requested;
-//! CLI code drives that engine instead of carrying its own fold (#37).
+//! core report loading drives that engine instead of the CLI carrying its own
+//! fold (#37).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -16,12 +17,9 @@ use crate::{
     aggregate::keys::{
         daily_source_model_key, grouped_model_bucket_key, hourly_model_key, workspace_bucket,
     },
-    normalize_model_for_grouping, normalize_provider_for_grouping,
-    ordered_clients_by_token_contribution, sessions, ClientContributionOrder, GroupBy,
-    ModelPerformance, UnifiedMessage,
+    normalize_provider_for_grouping, ordered_clients_by_token_contribution, sessions,
+    ClientContributionOrder, GroupBy, ModelPerformance, UnifiedMessage,
 };
-
-pub use crate::aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
 
 fn positive_unified_token_total(tokens: &crate::TokenBreakdown) -> i64 {
     tokens.input.max(0)
@@ -476,7 +474,7 @@ impl TuiAcc {
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         let group_by = &self.group_by;
-        let normalized_model = normalize_model_for_grouping(&msg.model_id);
+        let canonical_model_id = msg.model_id.to_string();
         let provider = normalize_provider_for_grouping(&msg.provider_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
         let (key, merge_clients) = grouped_model_bucket_key(
@@ -485,7 +483,7 @@ impl TuiAcc {
             &provider,
             &workspace_group_key,
             &msg.session_id,
-            &normalized_model,
+            &canonical_model_id,
         );
 
         let msg_cost = sane_cost(msg.cost);
@@ -494,7 +492,7 @@ impl TuiAcc {
             .model_map
             .entry(key.clone())
             .or_insert_with(|| UsageModelEntry {
-                model: normalized_model.clone(),
+                model: canonical_model_id.clone(),
                 provider: provider.clone(),
                 client: msg.client.to_string(),
                 workspace_key: if *group_by == GroupBy::WorkspaceModel {
@@ -617,7 +615,7 @@ impl TuiAcc {
                 &workspace_group_key,
                 &provider,
                 &msg.session_id,
-                &normalized_model,
+                &canonical_model_id,
             );
             let model_info = source_entry
                 .models
@@ -628,9 +626,9 @@ impl TuiAcc {
                         group_by,
                         &workspace_label,
                         &msg.session_id,
-                        &normalized_model,
+                        &canonical_model_id,
                     ),
-                    color_key: model_color_key(group_by, &provider, &normalized_model),
+                    color_key: model_color_key(group_by, &provider, &canonical_model_id),
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                     messages: 0,
@@ -662,14 +660,14 @@ impl TuiAcc {
             if msg.is_turn_start {
                 hourly_entry.turn_count += 1;
             }
-            let hkey = hourly_model_key(group_by, &provider, &normalized_model);
+            let hkey = hourly_model_key(group_by, &provider, &canonical_model_id);
             let hmodel = hourly_entry
                 .models
                 .entry(hkey)
                 .or_insert_with(|| HourlyModelInfo {
                     provider: provider.clone(),
-                    display_name: hourly_model_display_name(group_by, &normalized_model),
-                    color_key: model_color_key(group_by, &provider, &normalized_model),
+                    display_name: hourly_model_display_name(group_by, &canonical_model_id),
+                    color_key: model_color_key(group_by, &provider, &canonical_model_id),
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                 });
@@ -764,9 +762,10 @@ impl TuiAcc {
     }
 }
 
-/// Compatibility helper for callers/tests that still pass a finished message
-/// vector. The fold itself is owned by `TuiAcc` and driven through the same
-/// `push`/`finish` shape as `AggregationEngine`.
+/// Compatibility helper for callers/tests that still pass a finalized
+/// local-report message vector. The fold itself is owned by `TuiAcc` and driven
+/// through the same `push`/`finish` shape as `AggregationEngine`; it deliberately
+/// does not re-canonicalize model ids.
 pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -> UsageData {
     let mut acc = TuiAcc::new(group_by.clone());
     for msg in &messages {

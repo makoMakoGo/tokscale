@@ -1,4 +1,4 @@
-//! Per-view accumulators ported verbatim from the old fold sites
+//! Per-view accumulators derived from the old fold sites
 //! (`aggregate_model_usage_entries`, `MonthAggregator`/month fold,
 //! `HourAggregator`/hour fold). The graph/session/time-metrics views are
 //! inherently two-pass; the engine buffers messages and replays the existing
@@ -8,10 +8,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
-    aggregator, normalize_model_for_grouping, normalize_provider_for_grouping,
-    ordered_clients_by_token_contribution, positive_token_total, ClientContributionOrder,
-    DailyContribution, GraphResult, GroupBy, HourlyUsage, ModelPerformance, ModelUsage,
-    MonthlyUsage, SessionContribution, TimeMetricsReport, UnifiedMessage, ViewSet,
+    aggregator, normalize_provider_for_grouping, ordered_clients_by_token_contribution,
+    positive_token_total, ClientContributionOrder, DailyContribution, GraphResult, GroupBy,
+    HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
+    TimeMetricsReport, UnifiedMessage, ViewSet,
 };
 
 fn hourly_label(hour_key: &str) -> String {
@@ -39,7 +39,7 @@ impl ModelEntries {
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         let group_by = &self.group_by;
-        let normalized = normalize_model_for_grouping(&msg.model_id);
+        let canonical_model_id = msg.model_id.to_string();
         let provider = normalize_provider_for_grouping(&msg.provider_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
         let (key, merge_clients) = grouped_model_bucket_key(
@@ -48,7 +48,7 @@ impl ModelEntries {
             &provider,
             &workspace_group_key,
             &msg.session_id,
-            &normalized,
+            &canonical_model_id,
         );
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = self
@@ -76,7 +76,7 @@ impl ModelEntries {
                 } else {
                     None
                 },
-                model: normalized.clone(),
+                model: canonical_model_id.clone(),
                 provider: provider.clone(),
                 input: 0,
                 output: 0,
@@ -198,8 +198,7 @@ impl MonthAcc {
     }
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
-        self.models
-            .insert(normalize_model_for_grouping(&msg.model_id));
+        self.models.insert(msg.model_id.to_string());
         self.input += msg.tokens.input;
         self.output += msg.tokens.output;
         self.cache_read += msg.tokens.cache_read;
@@ -267,8 +266,7 @@ pub(super) struct HourAcc {
 impl HourAcc {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         self.clients.insert(msg.client.to_string());
-        self.models
-            .insert(normalize_model_for_grouping(&msg.model_id));
+        self.models.insert(msg.model_id.to_string());
         self.input += msg.tokens.input;
         self.output += msg.tokens.output;
         self.cache_read += msg.tokens.cache_read;
@@ -344,7 +342,7 @@ pub(super) fn finish_buffered_views(messages: &[UnifiedMessage], views: ViewSet)
     };
 
     let graph = views.contains(ViewSet::GRAPH).then(|| {
-        let contributions = aggregator::aggregate_by_date(messages.to_vec());
+        let contributions = aggregator::aggregate_by_date(messages);
         let mut result = aggregator::generate_graph_result(contributions, 0);
         result.time_metrics = time_metrics_value.clone();
         if let Some(daily_active_time) = &daily_active_time {
@@ -360,7 +358,7 @@ pub(super) fn finish_buffered_views(messages: &[UnifiedMessage], views: ViewSet)
     let daily_contributions = graph.as_ref().map(|graph| graph.contributions.clone());
     let session_contributions = views
         .contains(ViewSet::SESSIONS)
-        .then(|| aggregator::aggregate_by_session(messages.to_vec()));
+        .then(|| aggregator::aggregate_by_session(messages));
     let time_metrics = views
         .contains(ViewSet::TIME_METRICS)
         .then(|| TimeMetricsReport {

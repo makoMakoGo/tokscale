@@ -137,6 +137,10 @@ under Tokscale's pricing service. App-reported cost fields are ignored for
 normal local reports because they can represent subscriptions, credits, bundle
 balances, reseller markup, rounded UI totals, or aggregate spend.
 
+Local reports canonicalize model ids before grouping and pricing, stripping
+release, date, free-channel, and source decorations that this fork does not
+preserve as model identity.
+
 Exact custom overrides from `custom-pricing.json` are checked first. Otherwise,
 Tokscale searches LiteLLM, OpenRouter, and models.dev using provider-aware exact
 and deterministic normalized matching. Those public catalogs do not have a

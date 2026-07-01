@@ -10,8 +10,12 @@ file take precedence when upstream semantics conflict with local needs.
 - `source` is the client or data origin that produced usage records.
 - `client` is a concrete local tool or integration with its own files, parsing
   policy, display facts, and filters.
-- `model_id` is the raw model identifier used for pricing and grouping. Keep it
-  raw unless a documented pricing helper explicitly normalizes it.
+- `model_id` is the canonical model identifier used for grouping and local
+  pricing. Raw source labels may contain route, tier, release-date, or
+  free-channel decorations; local report finalization normalizes them through
+  the core model canonicalizer before aggregation and pricing. Date, release,
+  free-channel, and source decorations are not preserved as model identity in
+  this branch.
 - `workspace` is the local working directory attribution used by reports and
   the TUI.
 

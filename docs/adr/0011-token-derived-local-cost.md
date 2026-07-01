@@ -35,8 +35,10 @@ reports look precise while measuring different things.
 - Aggregate-only clients without a token-level source do not contribute usage
   rows. Crush and Warp are disabled under this rule; Warp BYOK support can be
   added later only if a token-level source is found.
-- Cache schema changes that affect local cost semantics bump
-  `CACHE_SCHEMA_VERSION` so stale parser costs are rebuilt.
+- Cache serialization layout changes bump `CACHE_FORMAT_VERSION`. Parser or
+  source semantic changes, including model canonicalization, bump the relevant
+  `SourceUnit` parser revision so stale source-message cache shards are
+  rebuilt.
 
 ## Consequences
 
@@ -47,4 +49,5 @@ reports look precise while measuring different things.
   service-tier pricing, or route-specific pricing.
 - Clients that only expose spend cannot be added as normal usage sources until
   a token-level source is found.
-- First run after this change rebuilds the source-message cache.
+- First run after parser or source semantic changes may rebuild the affected
+  source-message cache shards.

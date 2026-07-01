@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 pub(crate) const DEEPSEEK_V4_PRO_BETA_ALIAS: &str = "model1";
 pub(crate) const DEEPSEEK_V4_FLASH_BETA_ALIAS: &str = "model2";
 
@@ -19,25 +21,152 @@ pub(crate) fn is_deepseek_v4_beta_alias(model: &str) -> bool {
     )
 }
 
-pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
-    let model = model.trim();
-    if model.is_empty() {
-        return None;
+/// Canonical model-id source of truth for report grouping, finalization, and pricing.
+pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
+    let normalized = normalized_terminal_model_id(model_id);
+    let normalized_id = normalized.as_ref();
+    if normalized_id.is_empty() || !normalized_id.is_ascii() {
+        return normalized.into_owned();
     }
-    if !canonical_model_segment(model).is_ascii() {
-        return None;
-    }
-    let lower = model.to_ascii_lowercase();
 
-    canonicalize_modern_claude_source_model(&lower)
-        .or_else(|| canonicalize_openai_source_model(&lower))
-        .or_else(|| canonicalize_glm_source_model(&lower).map(str::to_string))
-        .or_else(|| canonicalize_qwen_source_model(&lower))
-        .or_else(|| canonicalize_kimi_source_model(&lower))
-        .or_else(|| canonicalize_grok_source_model(&lower))
-        .or_else(|| canonicalize_mimo_source_model(&lower))
-        .or_else(|| canonicalize_deepseek_source_model(&lower))
-        .or_else(|| canonicalize_longcat_source_model(&lower).map(str::to_string))
+    let source_canonical = canonicalize_source_specific_model_id(normalized_id)
+        .unwrap_or_else(|| normalized.into_owned());
+
+    strip_global_suffixes_to_stable(source_canonical)
+}
+
+/// Parser convenience shim; not the authoritative model identity boundary.
+///
+/// Returns `Some` only when canonicalization changes the normalized terminal id.
+pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
+    let normalized = normalized_terminal_model_id(model);
+    let canonical = canonicalize_model_id(model);
+    if canonical == normalized.as_ref() {
+        None
+    } else {
+        Some(canonical)
+    }
+}
+
+fn normalized_terminal_model_id(model_id: &str) -> Cow<'_, str> {
+    let trimmed = model_id.trim();
+    let without_custom = strip_custom_model_prefix(trimmed);
+    let segment = canonical_model_segment(without_custom);
+    let segment = strip_custom_model_prefix(segment);
+    if segment.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        let lower = segment.to_ascii_lowercase();
+        Cow::Owned(strip_custom_model_prefix(&lower).to_string())
+    } else {
+        Cow::Borrowed(strip_custom_model_prefix(segment))
+    }
+}
+
+fn strip_custom_model_prefix(model_id: &str) -> &str {
+    model_id.strip_prefix("custom:").unwrap_or(model_id)
+}
+
+fn canonicalize_source_specific_model_id(model: &str) -> Option<String> {
+    if is_claude_source_candidate(model) {
+        if let Some(canonical) = canonicalize_modern_claude_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("gpt-") {
+        if let Some(canonical) = canonicalize_openai_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("glm-") {
+        if let Some(canonical) = canonicalize_glm_source_model(model) {
+            return Some(canonical.to_string());
+        }
+    }
+    if model.starts_with("qwen") {
+        if let Some(canonical) = canonicalize_qwen_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("kimi") || model.starts_with("k2") {
+        if let Some(canonical) = canonicalize_kimi_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("grok") {
+        if let Some(canonical) = canonicalize_grok_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("mimo-") {
+        if let Some(canonical) = canonicalize_mimo_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("deepseek-") {
+        if let Some(canonical) = canonicalize_deepseek_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("longcat-") {
+        if let Some(canonical) = canonicalize_longcat_source_model(model) {
+            return Some(canonical.to_string());
+        }
+    }
+    None
+}
+
+fn strip_global_suffixes_to_stable(mut model: String) -> String {
+    loop {
+        if let Some(base) = strip_release_suffix(&model) {
+            model.truncate(base.len());
+            continue;
+        }
+        if let Some(strip) = strip_free_channel_tag(&model) {
+            match strip {
+                FreeChannelTagStrip::Truncate(len) => model.truncate(len),
+                FreeChannelTagStrip::Replace(stripped) => model = stripped,
+            }
+            continue;
+        }
+        return model;
+    }
+}
+
+enum FreeChannelTagStrip {
+    Truncate(usize),
+    Replace(String),
+}
+
+fn strip_free_channel_tag(model: &str) -> Option<FreeChannelTagStrip> {
+    if let Some(base) = model.strip_suffix("-free") {
+        return Some(FreeChannelTagStrip::Truncate(base.len()));
+    }
+    if let Some(base) = model.strip_suffix(":free") {
+        return Some(FreeChannelTagStrip::Truncate(base.len()));
+    }
+    if let Some(base) = model.strip_suffix(" (free)") {
+        return Some(FreeChannelTagStrip::Truncate(base.len()));
+    }
+    if let Some((head, tail)) = model.split_once("-free-") {
+        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
+    }
+    if let Some((head, tail)) = model.split_once(":free-") {
+        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
+    }
+    if let Some((head, tail)) = model.split_once(" (free)-") {
+        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
+    }
+    None
+}
+
+fn stripped_free_channel_tag(model: &str, strip: FreeChannelTagStrip) -> String {
+    match strip {
+        FreeChannelTagStrip::Truncate(len) => model[..len].to_string(),
+        FreeChannelTagStrip::Replace(stripped) => stripped,
+    }
+}
+
+fn is_claude_source_candidate(model: &str) -> bool {
+    model.contains("claude") || CLAUDE_FAMILIES.iter().any(|family| model.contains(family))
 }
 
 fn canonical_model_segment(model: &str) -> &str {
@@ -52,7 +181,10 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
 
     if let Some(base) = strip_full_release_date_suffix(model) {
-        if base == "gpt-4.1" || is_openai_gpt_source_base_model(base) {
+        if base == "gpt-4.1"
+            || is_openai_gpt_4o_source_base_model(base)
+            || is_openai_gpt_source_base_model(base)
+        {
             return Some(base.to_string());
         }
     }
@@ -62,6 +194,13 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     }
 
     if let Some((base, tier)) = model.rsplit_once('-') {
+        let stripped_base;
+        let base = if let Some(strip) = strip_free_channel_tag(base) {
+            stripped_base = stripped_free_channel_tag(base, strip);
+            stripped_base.as_str()
+        } else {
+            base
+        };
         if (tier == "fast" || OPENAI_REASONING_TIERS.contains(&tier))
             && is_openai_gpt_source_base_model(base)
         {
@@ -82,6 +221,10 @@ fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn is_openai_gpt_4o_source_base_model(model: &str) -> bool {
+    matches!(model, "gpt-4o" | "gpt-4o-mini")
 }
 
 fn is_openai_gpt_source_base_model(model: &str) -> bool {
@@ -350,19 +493,22 @@ mod tests {
     #[test]
     fn canonicalizes_modern_claude_source_models_to_dotted_ids() {
         let cases = [
-            ("claude-opus-4-6", "claude-opus-4.6"),
-            ("claude-opus-4.6", "claude-opus-4.6"),
-            ("claude-opus-4-6-thinking", "claude-opus-4.6"),
-            ("anthropic/claude-4-6-sonnet", "claude-sonnet-4.6"),
-            ("anthropic/claude-4-5-haiku", "claude-haiku-4.5"),
-            ("openrouter/anthropic/claude-4-6-opus", "claude-opus-4.6"),
-            ("claude-sonnet-4-20250514", "claude-sonnet-4"),
-            ("claude-fable-5", "claude-fable-5"),
-            ("anthropic/claude-5-fable", "claude-fable-5"),
+            ("claude-opus-4-6", Some("claude-opus-4.6")),
+            ("claude-opus-4.6", None),
+            ("claude-opus-4-6-thinking", Some("claude-opus-4.6")),
+            ("anthropic/claude-4-6-sonnet", Some("claude-sonnet-4.6")),
+            ("anthropic/claude-4-5-haiku", Some("claude-haiku-4.5")),
+            (
+                "openrouter/anthropic/claude-4-6-opus",
+                Some("claude-opus-4.6"),
+            ),
+            ("claude-sonnet-4-20250514", Some("claude-sonnet-4")),
+            ("claude-fable-5", None),
+            ("anthropic/claude-5-fable", Some("claude-fable-5")),
         ];
 
         for (raw, expected) in cases {
-            assert_eq!(canonicalize_source_model_id(raw).as_deref(), Some(expected));
+            assert_eq!(canonicalize_source_model_id(raw).as_deref(), expected);
         }
     }
 
@@ -370,13 +516,13 @@ mod tests {
     fn does_not_canonicalize_legacy_claude_three_line() {
         assert_eq!(canonicalize_source_model_id("claude-3-5-sonnet"), None);
         assert_eq!(
-            canonicalize_source_model_id("claude-3-5-sonnet-20241022"),
-            None
+            canonicalize_source_model_id("claude-3-5-sonnet-20241022").as_deref(),
+            Some("claude-3-5-sonnet")
         );
     }
 
     #[test]
-    fn canonicalizes_source_specific_kimi_and_grok_ids() {
+    fn canonicalizes_parser_shim_aliases_and_global_cleanup() {
         assert_eq!(
             canonicalize_source_model_id("k2p5").as_deref(),
             Some("kimi-k2.5")
@@ -401,7 +547,10 @@ mod tests {
             canonicalize_source_model_id("moonshotai/kimi-k2-0711").as_deref(),
             Some("kimi-k2")
         );
-        assert_eq!(canonicalize_source_model_id("kimi-k20-0711"), None);
+        assert_eq!(
+            canonicalize_source_model_id("kimi-k20-0711").as_deref(),
+            Some("kimi-k20")
+        );
         assert_eq!(
             canonicalize_source_model_id("grok-composer-2.5-fast").as_deref(),
             Some("composer-2.5-fast")
@@ -414,10 +563,22 @@ mod tests {
             canonicalize_source_model_id("grok-code-fast-1-0901").as_deref(),
             Some("grok-code-fast-1")
         );
+        assert_eq!(
+            canonicalize_source_model_id("mimo-v2-pro-20260318").as_deref(),
+            Some("mimo-v2-pro")
+        );
+        assert_eq!(
+            canonicalize_source_model_id("gpt-4o-mini-2024-07-18").as_deref(),
+            Some("gpt-4o-mini")
+        );
+        assert_eq!(
+            canonicalize_source_model_id("nemotron-3-ultra-free").as_deref(),
+            Some("nemotron-3-ultra")
+        );
     }
 
     #[test]
-    fn canonicalizes_source_specific_release_suffixes() {
+    fn canonicalizes_parser_shim_release_tiers_and_free_tags() {
         let cases = [
             ("gpt-4.1-2025-04-14", "gpt-4.1"),
             ("gpt-5.5-fast", "gpt-5.5"),
@@ -430,6 +591,8 @@ mod tests {
             ("openai/gpt-5.5 (xhigh)", "gpt-5.5"),
             ("gpt-5.5-high", "gpt-5.5"),
             ("gpt-5.5-xhigh", "gpt-5.5"),
+            ("gpt-5.5-free-high", "gpt-5.5"),
+            ("openai/gpt-5.5:free-xhigh", "gpt-5.5"),
             ("gpt-5.4-mini-xhigh", "gpt-5.4-mini"),
             ("gpt-5.4-mini(high)", "gpt-5.4-mini"),
             ("gpt-5.4-nano-xhigh", "gpt-5.4-nano"),
@@ -467,7 +630,10 @@ mod tests {
 
         assert_eq!(canonicalize_source_model_id("gpt-5.3-codex-spark"), None);
         assert_eq!(canonicalize_source_model_id("gpt-4o-high"), None);
-        assert_eq!(canonicalize_source_model_id("mistral-small-2603"), None);
+        assert_eq!(
+            canonicalize_source_model_id("mistral-small-2603").as_deref(),
+            Some("mistral-small")
+        );
         assert_eq!(canonicalize_source_model_id("qwen-模型abcdef"), None);
         assert_eq!(
             canonicalize_source_model_id("gpt-5.3-codex-spark-lite"),

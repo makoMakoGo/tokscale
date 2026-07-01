@@ -35,7 +35,20 @@ choose among them based on provider-scoped paths, full keys, model-part matches,
 provider hints, version normalization, and tiered pricing support.
 
 Global private aliases are not a substitute for source parsing. Source-specific
-model decoding belongs in the parser or source canonicalizer before pricing.
+model decoding may happen in the parser, but local report finalization,
+grouping, and pricing all use the core `canonicalize_model_id` path before
+pricing lookup.
+
+### Model identity before pricing
+
+Local reports canonicalize parsed model ids before pricing lookup. Parsers may
+clean obvious source labels early, but the report finalization path still
+normalizes every `UnifiedMessage.model_id` through the core model canonicalizer
+before aggregation and `PricingService::calculate_cost_with_provider`.
+
+The pricing resolver is therefore not a route cleanup layer. It receives the
+final canonical report model id and matches that id against custom overrides
+and public catalog rows.
 
 If no pricing match exists, derived cost stays `$0.00`. The unresolved model id
 should remain visible so the missing catalog entry can be fixed explicitly.
@@ -50,12 +63,12 @@ Create `custom-pricing.json` in the Tokscale config directory:
 {
   "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
-    "accounts/fireworks/routers/kimi-k2p6-turbo": {
+    "kimi-k2.6": {
       "input_cost_per_million_tokens": 2.0,
       "output_cost_per_million_tokens": 8.0,
       "cache_read_input_token_cost_per_million_tokens": 0.3,
       "source": "https://docs.fireworks.ai/serverless/pricing",
-      "notes": "Fireworks Kimi K2.6 Turbo preview"
+      "notes": "Kimi K2.6 local report override"
     }
   }
 }
@@ -67,9 +80,13 @@ present and positive. Cache-read and cache-creation prices are optional.
 
 Overrides are exact-only and case-insensitive:
 
-- Local reports match the canonical model id emitted by the source parser.
+- Local reports match the canonical model id after model canonicalization, not
+  necessarily the raw source label emitted by a client or parser.
+- For local report overrides, key the entry by that final canonical id unless a
+  parser intentionally preserves the full route.
 - `tokscale pricing <model>` matches the command argument as a catalog query.
-- Gateway paths must be written as full keys when you want that exact route.
+- Full gateway paths are only needed when you intentionally query or override
+  that exact route as a catalog key.
 
 Restart the command after editing the file because overrides are loaded at
 startup.
