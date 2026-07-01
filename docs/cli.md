@@ -96,8 +96,10 @@ tokscale pricing grok-code --provider openrouter --no-spinner
 tokscale pricing list-overrides --json
 ```
 
-Standalone pricing lookup is a catalog query. Source-specific route cleanup
-belongs in the parser or model canonicalizer that emitted the usage row.
+Standalone pricing lookup is a catalog query. Local report pricing
+canonicalizes parsed model ids before lookup, but standalone
+`tokscale pricing <model>` does not replay arbitrary local source cleanup unless
+the command itself is explicitly changed later.
 
 ## Integration commands
 

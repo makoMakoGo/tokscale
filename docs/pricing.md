@@ -35,7 +35,20 @@ choose among them based on provider-scoped paths, full keys, model-part matches,
 provider hints, version normalization, and tiered pricing support.
 
 Global private aliases are not a substitute for source parsing. Source-specific
-model decoding belongs in the parser or source canonicalizer before pricing.
+model decoding may happen in the parser, but local report finalization,
+grouping, and pricing all use the core `canonicalize_model_id` path before
+pricing lookup.
+
+### Model identity before pricing
+
+Local reports canonicalize parsed model ids before pricing lookup. Parsers may
+clean obvious source labels early, but the report finalization path still
+normalizes every `UnifiedMessage.model_id` through the core model canonicalizer
+before aggregation and `PricingService::calculate_cost_with_provider`.
+
+The pricing resolver is therefore not a route cleanup layer. It receives the
+final canonical report model id and matches that id against custom overrides
+and public catalog rows.
 
 If no pricing match exists, derived cost stays `$0.00`. The unresolved model id
 should remain visible so the missing catalog entry can be fixed explicitly.
@@ -67,7 +80,8 @@ present and positive. Cache-read and cache-creation prices are optional.
 
 Overrides are exact-only and case-insensitive:
 
-- Local reports match the canonical model id emitted by the source parser.
+- Local reports match the canonical model id after model canonicalization, not
+  necessarily the raw source label emitted by a client or parser.
 - `tokscale pricing <model>` matches the command argument as a catalog query.
 - Gateway paths must be written as full keys when you want that exact route.
 
