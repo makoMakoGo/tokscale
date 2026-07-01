@@ -8,10 +8,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
-    aggregator, normalize_model_for_grouping, normalize_provider_for_grouping,
-    ordered_clients_by_token_contribution, positive_token_total, ClientContributionOrder,
-    DailyContribution, GraphResult, GroupBy, HourlyUsage, ModelPerformance, ModelUsage,
-    MonthlyUsage, SessionContribution, TimeMetricsReport, UnifiedMessage, ViewSet,
+    aggregator, normalize_provider_for_grouping, ordered_clients_by_token_contribution,
+    positive_token_total, ClientContributionOrder, DailyContribution, GraphResult, GroupBy,
+    HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
+    TimeMetricsReport, UnifiedMessage, ViewSet,
 };
 
 fn hourly_label(hour_key: &str) -> String {
@@ -39,7 +39,7 @@ impl ModelEntries {
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         let group_by = &self.group_by;
-        let normalized = normalize_model_for_grouping(&msg.model_id);
+        let normalized = msg.model_id.to_string();
         let provider = normalize_provider_for_grouping(&msg.provider_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
         let (key, merge_clients) = grouped_model_bucket_key(
@@ -198,8 +198,7 @@ impl MonthAcc {
     }
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
-        self.models
-            .insert(normalize_model_for_grouping(&msg.model_id));
+        self.models.insert(msg.model_id.to_string());
         self.input += msg.tokens.input;
         self.output += msg.tokens.output;
         self.cache_read += msg.tokens.cache_read;
@@ -267,8 +266,7 @@ pub(super) struct HourAcc {
 impl HourAcc {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         self.clients.insert(msg.client.to_string());
-        self.models
-            .insert(normalize_model_for_grouping(&msg.model_id));
+        self.models.insert(msg.model_id.to_string());
         self.input += msg.tokens.input;
         self.output += msg.tokens.output;
         self.cache_read += msg.tokens.cache_read;

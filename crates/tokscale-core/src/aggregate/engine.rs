@@ -43,8 +43,10 @@ impl AggregationEngine {
         }
     }
 
-    /// The per-message fold. Applies the date filter once (mirroring
-    /// `filter_messages_for_report`) before dispatching to enabled accumulators.
+    /// The per-message fold. Messages are expected to be finalized already:
+    /// accumulators trust `UnifiedMessage.model_id` as the canonical report id.
+    /// Applies the date filter once (mirroring `filter_messages_for_report`)
+    /// before dispatching to enabled accumulators.
     pub fn push(&mut self, msg: &UnifiedMessage) {
         let date = msg.date_string();
         if !self.config.date_range.contains(&date) {

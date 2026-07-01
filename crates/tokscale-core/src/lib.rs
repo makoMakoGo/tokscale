@@ -38,6 +38,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Canonicalize a raw model string for callers that do not already hold a
+/// finalized `UnifiedMessage`.
+///
+/// Local report aggregation consumes finalized messages directly and treats
+/// `UnifiedMessage.model_id` as already canonical.
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
     model_aliases::canonicalize_model_id(model_id)
 }
@@ -1486,6 +1491,18 @@ mod tests {
         )
     }
 
+    fn aggregate_finalized_model_usage_entries(
+        mut messages: Vec<UnifiedMessage>,
+        group_by: &GroupBy,
+    ) -> Vec<crate::ModelUsage> {
+        for msg in &mut messages {
+            let model = crate::model_aliases::canonicalize_model_id(&msg.model_id);
+            msg.model_id = crate::sessions::intern::intern(&model);
+            msg.refresh_derived_fields();
+        }
+        aggregate_model_usage_entries(messages, group_by)
+    }
+
     fn write_streaming_fold_fixture(home: &Path) {
         let opencode_dir = home.join(".local/share/opencode/storage/message/project-streaming");
         std::fs::create_dir_all(&opencode_dir).unwrap();
@@ -2491,7 +2508,7 @@ mod tests {
 
     #[test]
     fn test_model_grouping_cleans_fast_variant() {
-        let entries = aggregate_model_usage_entries(
+        let entries = aggregate_finalized_model_usage_entries(
             vec![
                 make_workspace_message(
                     "opencode",
@@ -2515,7 +2532,7 @@ mod tests {
 
     #[test]
     fn test_model_grouping_cleans_hyphenated_date_snapshot() {
-        let entries = aggregate_model_usage_entries(
+        let entries = aggregate_finalized_model_usage_entries(
             vec![
                 make_workspace_message(
                     "qwen",
@@ -2547,7 +2564,7 @@ mod tests {
 
     #[test]
     fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
-        let entries = aggregate_model_usage_entries(
+        let entries = aggregate_finalized_model_usage_entries(
             vec![
                 make_workspace_message(
                     "claude",
@@ -2579,7 +2596,7 @@ mod tests {
 
     #[test]
     fn test_model_grouping_normalizes_provider_display_aliases() {
-        let entries = aggregate_model_usage_entries(
+        let entries = aggregate_finalized_model_usage_entries(
             vec![
                 make_workspace_message(
                     "opencode",
@@ -2612,7 +2629,7 @@ mod tests {
 
     #[test]
     fn test_client_provider_model_grouping_normalizes_provider_display_aliases() {
-        let entries = aggregate_model_usage_entries(
+        let entries = aggregate_finalized_model_usage_entries(
             vec![
                 make_workspace_message(
                     "opencode",

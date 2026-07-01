@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 pub(crate) const DEEPSEEK_V4_PRO_BETA_ALIAS: &str = "model1";
 pub(crate) const DEEPSEEK_V4_FLASH_BETA_ALIAS: &str = "model2";
 
@@ -22,12 +24,13 @@ pub(crate) fn is_deepseek_v4_beta_alias(model: &str) -> bool {
 /// Canonical model-id source of truth for report grouping, finalization, and pricing.
 pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
     let normalized = normalized_terminal_model_id(model_id);
-    if normalized.is_empty() || !normalized.is_ascii() {
-        return normalized;
+    let normalized_id = normalized.as_ref();
+    if normalized_id.is_empty() || !normalized_id.is_ascii() {
+        return normalized.into_owned();
     }
 
-    let source_canonical =
-        canonicalize_source_specific_model_id(&normalized).unwrap_or_else(|| normalized.clone());
+    let source_canonical = canonicalize_source_specific_model_id(normalized_id)
+        .unwrap_or_else(|| normalized.into_owned());
 
     strip_global_suffixes_to_stable(source_canonical)
 }
@@ -38,20 +41,24 @@ pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
 pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
     let normalized = normalized_terminal_model_id(model);
     let canonical = canonicalize_model_id(model);
-    if canonical == normalized {
+    if canonical == normalized.as_ref() {
         None
     } else {
         Some(canonical)
     }
 }
 
-fn normalized_terminal_model_id(model_id: &str) -> String {
+fn normalized_terminal_model_id(model_id: &str) -> Cow<'_, str> {
     let trimmed = model_id.trim();
     let without_custom = strip_custom_model_prefix(trimmed);
     let segment = canonical_model_segment(without_custom);
     let segment = strip_custom_model_prefix(segment);
-    let lower = segment.to_ascii_lowercase();
-    strip_custom_model_prefix(&lower).to_string()
+    if segment.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        let lower = segment.to_ascii_lowercase();
+        Cow::Owned(strip_custom_model_prefix(&lower).to_string())
+    } else {
+        Cow::Borrowed(strip_custom_model_prefix(segment))
+    }
 }
 
 fn strip_custom_model_prefix(model_id: &str) -> &str {
@@ -59,50 +66,107 @@ fn strip_custom_model_prefix(model_id: &str) -> &str {
 }
 
 fn canonicalize_source_specific_model_id(model: &str) -> Option<String> {
-    canonicalize_modern_claude_source_model(model)
-        .or_else(|| canonicalize_openai_source_model(model))
-        .or_else(|| canonicalize_glm_source_model(model).map(str::to_string))
-        .or_else(|| canonicalize_qwen_source_model(model))
-        .or_else(|| canonicalize_kimi_source_model(model))
-        .or_else(|| canonicalize_grok_source_model(model))
-        .or_else(|| canonicalize_mimo_source_model(model))
-        .or_else(|| canonicalize_deepseek_source_model(model))
-        .or_else(|| canonicalize_longcat_source_model(model).map(str::to_string))
+    if is_claude_source_candidate(model) {
+        if let Some(canonical) = canonicalize_modern_claude_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("gpt-") {
+        if let Some(canonical) = canonicalize_openai_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("glm-") {
+        if let Some(canonical) = canonicalize_glm_source_model(model) {
+            return Some(canonical.to_string());
+        }
+    }
+    if model.starts_with("qwen") {
+        if let Some(canonical) = canonicalize_qwen_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("kimi") || model.starts_with("k2") {
+        if let Some(canonical) = canonicalize_kimi_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("grok") {
+        if let Some(canonical) = canonicalize_grok_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("mimo-") {
+        if let Some(canonical) = canonicalize_mimo_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("deepseek-") {
+        if let Some(canonical) = canonicalize_deepseek_source_model(model) {
+            return Some(canonical);
+        }
+    }
+    if model.starts_with("longcat-") {
+        if let Some(canonical) = canonicalize_longcat_source_model(model) {
+            return Some(canonical.to_string());
+        }
+    }
+    None
 }
 
 fn strip_global_suffixes_to_stable(mut model: String) -> String {
     loop {
-        let before = model.clone();
         if let Some(base) = strip_release_suffix(&model) {
-            model = base.to_string();
+            model.truncate(base.len());
+            continue;
         }
-        model = strip_free_channel_tag(&model);
-        if model == before {
-            return model;
+        if let Some(strip) = strip_free_channel_tag(&model) {
+            match strip {
+                FreeChannelTagStrip::Truncate(len) => model.truncate(len),
+                FreeChannelTagStrip::Replace(stripped) => model = stripped,
+            }
+            continue;
         }
+        return model;
     }
 }
 
-fn strip_free_channel_tag(model: &str) -> String {
+enum FreeChannelTagStrip {
+    Truncate(usize),
+    Replace(String),
+}
+
+fn strip_free_channel_tag(model: &str) -> Option<FreeChannelTagStrip> {
     if let Some(base) = model.strip_suffix("-free") {
-        return base.to_string();
+        return Some(FreeChannelTagStrip::Truncate(base.len()));
     }
     if let Some(base) = model.strip_suffix(":free") {
-        return base.to_string();
+        return Some(FreeChannelTagStrip::Truncate(base.len()));
     }
     if let Some(base) = model.strip_suffix(" (free)") {
-        return base.to_string();
+        return Some(FreeChannelTagStrip::Truncate(base.len()));
     }
     if let Some((head, tail)) = model.split_once("-free-") {
-        return format!("{head}-{tail}");
+        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
     }
     if let Some((head, tail)) = model.split_once(":free-") {
-        return format!("{head}-{tail}");
+        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
     }
     if let Some((head, tail)) = model.split_once(" (free)-") {
-        return format!("{head}-{tail}");
+        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
     }
-    model.to_string()
+    None
+}
+
+fn stripped_free_channel_tag(model: &str, strip: FreeChannelTagStrip) -> String {
+    match strip {
+        FreeChannelTagStrip::Truncate(len) => model[..len].to_string(),
+        FreeChannelTagStrip::Replace(stripped) => stripped,
+    }
+}
+
+fn is_claude_source_candidate(model: &str) -> bool {
+    model.contains("claude") || CLAUDE_FAMILIES.iter().any(|family| model.contains(family))
 }
 
 fn canonical_model_segment(model: &str) -> &str {
@@ -130,8 +194,13 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     }
 
     if let Some((base, tier)) = model.rsplit_once('-') {
-        let base_without_free = strip_free_channel_tag(base);
-        let base = base_without_free.as_str();
+        let stripped_base;
+        let base = if let Some(strip) = strip_free_channel_tag(base) {
+            stripped_base = stripped_free_channel_tag(base, strip);
+            stripped_base.as_str()
+        } else {
+            base
+        };
         if (tier == "fast" || OPENAI_REASONING_TIERS.contains(&tier))
             && is_openai_gpt_source_base_model(base)
         {

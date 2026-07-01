@@ -16,9 +16,8 @@ use crate::{
     aggregate::keys::{
         daily_source_model_key, grouped_model_bucket_key, hourly_model_key, workspace_bucket,
     },
-    normalize_model_for_grouping, normalize_provider_for_grouping,
-    ordered_clients_by_token_contribution, sessions, ClientContributionOrder, GroupBy,
-    ModelPerformance, UnifiedMessage,
+    normalize_provider_for_grouping, ordered_clients_by_token_contribution, sessions,
+    ClientContributionOrder, GroupBy, ModelPerformance, UnifiedMessage,
 };
 
 pub use crate::aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
@@ -476,7 +475,7 @@ impl TuiAcc {
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         let group_by = &self.group_by;
-        let normalized_model = normalize_model_for_grouping(&msg.model_id);
+        let normalized_model = msg.model_id.to_string();
         let provider = normalize_provider_for_grouping(&msg.provider_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
         let (key, merge_clients) = grouped_model_bucket_key(
