@@ -150,9 +150,9 @@ mod tests {
     }
 
     fn refresh(messages: &mut [crate::UnifiedMessage]) {
-        for message in messages {
-            message.refresh_derived_fields();
-        }
+        let mut owned = messages.to_vec();
+        crate::finalize_token_priced_messages(&mut owned, None);
+        messages.clone_from_slice(&owned);
     }
 
     #[test]

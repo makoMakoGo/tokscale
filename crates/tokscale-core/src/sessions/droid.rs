@@ -276,10 +276,7 @@ mod tests {
         assert_eq!(normalize_model_name("opus-4.5"), "claude-opus-4.5");
         assert_eq!(normalize_model_name("custom:sonnet-4"), "claude-sonnet-4");
         assert_eq!(normalize_model_name("haiku-3"), "claude-haiku-3");
-        assert_eq!(
-            normalize_model_name("haiku-3-20250514"),
-            "claude-haiku-3-20250514"
-        );
+        assert_eq!(normalize_model_name("haiku-3-20250514"), "claude-haiku-3");
     }
 
     #[test]

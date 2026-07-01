@@ -39,27 +39,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
-    let lowercased = model_id.trim().to_lowercase();
-    let mut name = strip_custom_model_prefix(&lowercased);
-
-    if let Some(segment) = last_non_empty_path_segment(name) {
-        name = strip_custom_model_prefix(segment);
-    }
-
-    name.to_string()
-}
-
-fn strip_custom_model_prefix(model_id: &str) -> &str {
-    model_id.strip_prefix("custom:").unwrap_or(model_id)
-}
-
-fn last_non_empty_path_segment(value: &str) -> Option<&str> {
-    let segment = value.rsplit('/').find(|segment| !segment.is_empty())?;
-    if segment.len() == value.len() {
-        None
-    } else {
-        Some(segment)
-    }
+    model_aliases::canonicalize_model_id(model_id)
 }
 
 fn retain_for_requested_clients(
@@ -1032,12 +1012,18 @@ fn canonicalize_message_provider(message: &mut UnifiedMessage) {
     message.provider_id = sessions::intern::intern(&provider);
 }
 
+fn canonicalize_message_model(message: &mut UnifiedMessage) {
+    let model = model_aliases::canonicalize_model_id(&message.model_id);
+    message.model_id = sessions::intern::intern(&model);
+}
+
 pub(crate) fn finalize_token_priced_messages(
     messages: &mut Vec<UnifiedMessage>,
     pricing: Option<&pricing::PricingService>,
 ) {
     messages.retain_mut(|message| {
         normalize_token_breakdown(&mut message.tokens);
+        canonicalize_message_model(message);
         message.refresh_derived_fields();
         canonicalize_message_provider(message);
         if !has_positive_tokens(&message.tokens) {
@@ -2064,31 +2050,31 @@ mod tests {
     fn test_normalize_model_for_grouping() {
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-20251101"),
-            "claude-opus-4-5-20251101"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-20250929"),
-            "claude-sonnet-4-5-20250929"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-20250514"),
-            "claude-sonnet-4-20250514"
+            "claude-sonnet-4"
         );
         assert_eq!(
             normalize_model_for_grouping("qwen3.7-max-2026-05-20"),
-            "qwen3.7-max-2026-05-20"
+            "qwen3.7-max"
         );
         assert_eq!(
             normalize_model_for_grouping("qwen/qwen3.7-max-20260520"),
-            "qwen3.7-max-20260520"
+            "qwen3.7-max"
         );
         assert_eq!(
             normalize_model_for_grouping("qwen3.7-max-2605"),
-            "qwen3.7-max-2605"
+            "qwen3.7-max"
         );
         assert_eq!(
             normalize_model_for_grouping("qwen3.7-max-05-20"),
-            "qwen3.7-max-05-20"
+            "qwen3.7-max"
         );
 
         assert_eq!(
@@ -2105,57 +2091,42 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-6"),
-            "claude-opus-4-6"
+            "claude-opus-4.6"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-7"),
-            "claude-opus-4-7"
+            "claude-opus-4.7"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-6"),
-            "claude-sonnet-4-6"
+            "claude-sonnet-4.6"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-6-sonnet"),
-            "claude-4-6-sonnet"
+            "claude-sonnet-4.6"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-5-haiku"),
-            "claude-4-5-haiku"
+            "claude-haiku-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("anthropic/claude-4-6-opus"),
-            "claude-4-6-opus"
+            "claude-opus-4.6"
         );
 
         assert_eq!(normalize_model_for_grouping("gpt-5.2"), "gpt-5.2");
-        assert_eq!(
-            normalize_model_for_grouping("gpt-5.4(xhigh)"),
-            "gpt-5.4(xhigh)"
-        );
-        assert_eq!(
-            normalize_model_for_grouping("gpt-5.4(high)"),
-            "gpt-5.4(high)"
-        );
-        assert_eq!(
-            normalize_model_for_grouping("gpt-5.4(minimal)"),
-            "gpt-5.4(minimal)"
-        );
-        assert_eq!(
-            normalize_model_for_grouping("gpt-5.4(auto)"),
-            "gpt-5.4(auto)"
-        );
-        assert_eq!(
-            normalize_model_for_grouping("gpt-5.4(none)"),
-            "gpt-5.4(none)"
-        );
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(xhigh)"), "gpt-5.4");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(high)"), "gpt-5.4");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(minimal)"), "gpt-5.4");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(auto)"), "gpt-5.4");
+        assert_eq!(normalize_model_for_grouping("gpt-5.4(none)"), "gpt-5.4");
         assert_eq!(
             normalize_model_for_grouping("gpt-5.4(weirdgarbage)"),
             "gpt-5.4(weirdgarbage)"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4.5(high)"),
-            "claude-sonnet-4.5(high)"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("gemini-3-pro(auto)"),
@@ -2167,45 +2138,45 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("longcat-flash-3b-all-quant-0203-eagle3"),
-            "longcat-flash-3b-all-quant-0203-eagle3"
+            "longcat-flash-3b"
         );
         assert_eq!(
             normalize_model_for_grouping("LongCat-Flash-3B-All-Quant-0203-Eagle3"),
-            "longcat-flash-3b-all-quant-0203-eagle3"
+            "longcat-flash-3b"
         );
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-high"),
-            "claude-opus-4-5-high"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-thinking-high"),
-            "claude-opus-4-5-thinking-high"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-sub2api-pro"),
-            "claude-opus-4-5-sub2api-pro"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4-5-20251101-sub2api-pro"),
-            "claude-opus-4-5-20251101-sub2api-pro"
+            "claude-opus-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-20250929-thinking"),
-            "claude-sonnet-4-5-20250929-thinking"
+            "claude-sonnet-4.5"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-5-high"),
-            "claude-sonnet-4-5-high"
+            "claude-sonnet-4.5"
         );
 
         assert_eq!(
             normalize_model_for_grouping("claude-4-sonnet"),
-            "claude-4-sonnet"
+            "claude-sonnet-4"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-4-opus-thinking"),
-            "claude-4-opus-thinking"
+            "claude-opus-4"
         );
 
         assert_eq!(normalize_model_for_grouping("big-pickle"), "big-pickle");
@@ -2213,73 +2184,85 @@ mod tests {
 
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.5-20251101"),
-            "claude-opus-4.5-20251101"
+            "claude-opus-4.5"
         );
 
-        assert_eq!(normalize_model_for_grouping("glm-4.7-free"), "glm-4.7-free");
-        assert_eq!(
-            normalize_model_for_grouping("glm-4.7 (free)"),
-            "glm-4.7 (free)"
-        );
-        assert_eq!(normalize_model_for_grouping("glm-4.7:free"), "glm-4.7:free");
-        assert_eq!(
-            normalize_model_for_grouping("glm-4.7-free-high"),
-            "glm-4.7-free-high"
-        );
+        assert_eq!(normalize_model_for_grouping("glm-4.7-free"), "glm-4.7");
+        assert_eq!(normalize_model_for_grouping("glm-4.7 (free)"), "glm-4.7");
+        assert_eq!(normalize_model_for_grouping("glm-4.7:free"), "glm-4.7");
+        assert_eq!(normalize_model_for_grouping("glm-4.7-free-high"), "glm-4.7");
         assert_eq!(
             normalize_model_for_grouping("glm-4.7-free-sub2api-pro"),
-            "glm-4.7-free-sub2api-pro"
+            "glm-4.7"
         );
-        assert_eq!(
-            normalize_model_for_grouping("glm-4.7:free-fast"),
-            "glm-4.7:free-fast"
-        );
+        assert_eq!(normalize_model_for_grouping("glm-4.7:free-fast"), "glm-4.7");
         assert_eq!(
             normalize_model_for_grouping("glm-4.7 (free)-medium"),
-            "glm-4.7 (free)-medium"
+            "glm-4.7"
         );
         assert_eq!(normalize_model_for_grouping("glm-5.1"), "glm-5.1");
         assert_eq!(
             normalize_model_for_grouping("gemini-2.5-pro-free"),
-            "gemini-2.5-pro-free"
+            "gemini-2.5-pro"
         );
         assert_eq!(
             normalize_model_for_grouping("gemini-2.5-pro-free-xhigh"),
-            "gemini-2.5-pro-free-xhigh"
+            "gemini-2.5-pro-xhigh"
         );
         assert_eq!(
             normalize_model_for_grouping("claude-sonnet-4-free-thinking"),
-            "claude-sonnet-4-free-thinking"
+            "claude-sonnet-4-thinking"
         );
         assert_eq!(
             normalize_model_for_grouping("deepseek-v4 (free)"),
-            "deepseek-v4 (free)"
+            "deepseek-v4"
+        );
+        assert_eq!(normalize_model_for_grouping("kimi-k2.5:free"), "kimi-k2.5");
+        assert_eq!(
+            normalize_model_for_grouping("mimo-v2-pro-20260318"),
+            "mimo-v2-pro"
         );
         assert_eq!(
-            normalize_model_for_grouping("kimi-k2.5:free"),
-            "kimi-k2.5:free"
+            normalize_model_for_grouping("gpt-4o-mini-2024-07-18"),
+            "gpt-4o-mini"
         );
-        assert_eq!(normalize_model_for_grouping("k2p5"), "k2p5");
-        assert_eq!(normalize_model_for_grouping("k2-p5"), "k2-p5");
-        assert_eq!(normalize_model_for_grouping("k2p6"), "k2p6");
-        assert_eq!(normalize_model_for_grouping("k2-p6"), "k2-p6");
-        assert_eq!(normalize_model_for_grouping("kimi-for-coding/k2p5"), "k2p5");
-        assert_eq!(normalize_model_for_grouping("kimi-for-coding/k2p6"), "k2p6");
+        assert_eq!(
+            normalize_model_for_grouping("openai/gpt-4o-mini-2024-07-18"),
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("nemotron-3-ultra-free"),
+            "nemotron-3-ultra"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("qwen3.7-max-free"),
+            "qwen3.7-max"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("mistral-small-2603"),
+            "mistral-small"
+        );
+        assert_eq!(normalize_model_for_grouping("k2p5"), "kimi-k2.5");
+        assert_eq!(normalize_model_for_grouping("k2-p5"), "kimi-k2.5");
+        assert_eq!(normalize_model_for_grouping("k2p6"), "kimi-k2.6");
+        assert_eq!(normalize_model_for_grouping("k2-p6"), "kimi-k2.6");
+        assert_eq!(
+            normalize_model_for_grouping("kimi-for-coding/k2p5"),
+            "kimi-k2.5"
+        );
+        assert_eq!(
+            normalize_model_for_grouping("kimi-for-coding/k2p6"),
+            "kimi-k2.6"
+        );
 
         assert_eq!(
             normalize_model_for_grouping("custom:gpt-5.5-xhigh-sub2api-pro"),
             "gpt-5.5-xhigh-sub2api-pro"
         );
-        assert_eq!(
-            normalize_model_for_grouping("gpt-5.5-xhigh"),
-            "gpt-5.5-xhigh"
-        );
-        assert_eq!(normalize_model_for_grouping("gpt-5.5-fast"), "gpt-5.5-fast");
+        assert_eq!(normalize_model_for_grouping("gpt-5.5-xhigh"), "gpt-5.5");
+        assert_eq!(normalize_model_for_grouping("gpt-5.5-fast"), "gpt-5.5");
         assert_eq!(normalize_model_for_grouping("gpt-5-5-0"), "gpt-5-5-0");
-        assert_eq!(
-            normalize_model_for_grouping("gpt-5.4-medium"),
-            "gpt-5.4-medium"
-        );
+        assert_eq!(normalize_model_for_grouping("gpt-5.4-medium"), "gpt-5.4");
         assert_eq!(
             normalize_model_for_grouping("deepseek/deepseek-v4-pro"),
             "deepseek-v4-pro"
@@ -2290,7 +2273,7 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("accounts/fireworks/models/deepseek-v3-0324"),
-            "deepseek-v3-0324"
+            "deepseek-v3"
         );
         assert_eq!(
             normalize_model_for_grouping("gpt-5.3-codex"),
@@ -2302,11 +2285,11 @@ mod tests {
         );
         assert_eq!(
             normalize_model_for_grouping("gpt-5.5-codex-fast"),
-            "gpt-5.5-codex-fast"
+            "gpt-5.5-codex"
         );
         assert_eq!(
             normalize_model_for_grouping("gpt-5.1-codex-max-xhigh"),
-            "gpt-5.1-codex-max-xhigh"
+            "gpt-5.1-codex-max"
         );
     }
 
@@ -2507,7 +2490,7 @@ mod tests {
     }
 
     #[test]
-    fn test_model_grouping_does_not_clean_fast_variant() {
+    fn test_model_grouping_cleans_fast_variant() {
         let entries = aggregate_model_usage_entries(
             vec![
                 make_workspace_message(
@@ -2524,17 +2507,14 @@ mod tests {
             &GroupBy::Model,
         );
 
-        assert_eq!(entries.len(), 2);
-        assert!(entries
-            .iter()
-            .any(|entry| entry.model == "gpt-5.5-fast" && entry.cost == 3.0));
-        assert!(entries
-            .iter()
-            .any(|entry| entry.model == "gpt-5.5" && entry.cost == 2.0));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "gpt-5.5");
+        assert_eq!(entries[0].cost, 5.0);
+        assert_eq!(entries[0].message_count, 2);
     }
 
     #[test]
-    fn test_model_grouping_does_not_clean_hyphenated_date_snapshot() {
+    fn test_model_grouping_cleans_hyphenated_date_snapshot() {
         let entries = aggregate_model_usage_entries(
             vec![
                 make_workspace_message(
@@ -2559,17 +2539,14 @@ mod tests {
             &GroupBy::ClientModel,
         );
 
-        assert_eq!(entries.len(), 2);
-        assert!(entries
-            .iter()
-            .any(|entry| entry.model == "qwen3.7-max-2026-05-20" && entry.cost == 1.25));
-        assert!(entries
-            .iter()
-            .any(|entry| entry.model == "qwen3.7-max" && entry.cost == 2.75));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "qwen3.7-max");
+        assert_eq!(entries[0].cost, 4.0);
+        assert_eq!(entries[0].message_count, 2);
     }
 
     #[test]
-    fn test_model_grouping_does_not_clean_anthropic_prefixed_claude_variant() {
+    fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
         let entries = aggregate_model_usage_entries(
             vec![
                 make_workspace_message(
@@ -2594,13 +2571,10 @@ mod tests {
             &GroupBy::ClientModel,
         );
 
-        assert_eq!(entries.len(), 2);
-        assert!(entries
-            .iter()
-            .any(|entry| entry.model == "claude-4-6-sonnet" && entry.cost == 1.25));
-        assert!(entries
-            .iter()
-            .any(|entry| entry.model == "claude-sonnet-4.6" && entry.cost == 2.75));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "claude-sonnet-4.6");
+        assert_eq!(entries[0].cost, 4.0);
+        assert_eq!(entries[0].message_count, 2);
     }
 
     #[test]
@@ -3123,7 +3097,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "cursor");
-        assert_eq!(messages[0].model_id.as_ref(), "Composer 1.5");
+        assert_eq!(messages[0].model_id.as_ref(), "composer 1.5");
         assert_eq!(messages[0].tokens.input, 1000);
         assert_eq!(messages[0].tokens.output, 2000);
         assert_eq!(messages[0].tokens.cache_read, 5000);
@@ -3268,7 +3242,10 @@ model = "gpt-5.5"
             let mut cache = message_cache::SourceMessageCache::load();
             cache.insert(message_cache::CachedSourceEntry::new_with_version(
                 &path,
-                message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                message_cache::ParserVersion::new(
+                    message_cache::ParserId::OpenCodeJson,
+                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+                ),
                 fingerprint,
                 vec![stale_message],
                 Vec::new(),
@@ -3452,7 +3429,10 @@ model = "gpt-5.5"
                 cache
                     .take_messages(&message_cache::CacheReadPlan::new(
                         &path,
-                        message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                        message_cache::ParserVersion::new(
+                            message_cache::ParserId::OpenCodeJson,
+                            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                        ),
                         fingerprint.clone(),
                     ))
                     .map(|messages| messages.len()),
@@ -3462,7 +3442,10 @@ model = "gpt-5.5"
             assert_eq!(
                 cache.take_messages(&message_cache::CacheReadPlan::new(
                     std::path::Path::new("/nonexistent/source.json"),
-                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::OpenCodeJson,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    ),
                     fingerprint,
                 )),
                 None
@@ -3514,7 +3497,10 @@ model = "gpt-5.5"
             assert!(cache
                 .get_meta(
                     &path,
-                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1)
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::OpenCodeJson,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    )
                 )
                 .is_none());
 
@@ -3561,7 +3547,10 @@ model = "gpt-5.5"
             let mut cache = message_cache::SourceMessageCache::load();
             cache.insert(message_cache::CachedSourceEntry::new_with_version(
                 &path,
-                message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                message_cache::ParserVersion::new(
+                    message_cache::ParserId::OpenCodeJson,
+                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+                ),
                 fingerprint,
                 Vec::new(),
                 Vec::new(),
@@ -3582,7 +3571,10 @@ model = "gpt-5.5"
             let repaired_messages = loaded
                 .take_messages(&message_cache::CacheReadPlan::new(
                     &path,
-                    message_cache::ParserVersion::new(message_cache::ParserId::OpenCodeJson, 1),
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::OpenCodeJson,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+                    ),
                     repaired_fingerprint,
                 ))
                 .unwrap();
@@ -4309,7 +4301,10 @@ model = "gpt-5.5"
             assert!(message_cache::SourceMessageCache::load()
                 .get_meta(
                     &path,
-                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::Codex,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    )
                 )
                 .and_then(|meta| meta.codex_incremental)
                 .is_some());
@@ -4483,7 +4478,10 @@ model = "gpt-5.5"
             assert!(message_cache::SourceMessageCache::load()
                 .get_meta(
                     &path,
-                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::Codex,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    )
                 )
                 .is_none());
 
@@ -4657,7 +4655,10 @@ model = "gpt-5.5"
             assert!(cache
                 .get_meta(
                     &path,
-                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::Codex,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    )
                 )
                 .is_none());
         }
@@ -4703,7 +4704,10 @@ model = "gpt-5.5"
             assert!(message_cache::SourceMessageCache::load()
                 .get_meta(
                     &path,
-                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::Codex,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    )
                 )
                 .is_none());
 
@@ -4745,7 +4749,10 @@ model = "gpt-5.5"
             assert!(message_cache::SourceMessageCache::load()
                 .get_meta(
                     &path,
-                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::Codex,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    )
                 )
                 .is_some());
         }
@@ -4789,7 +4796,10 @@ model = "gpt-5.5"
             assert!(message_cache::SourceMessageCache::load()
                 .get_meta(
                     &path,
-                    message_cache::ParserVersion::new(message_cache::ParserId::Codex, 1)
+                    message_cache::ParserVersion::new(
+                        message_cache::ParserId::Codex,
+                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    )
                 )
                 .is_none());
 
@@ -4851,7 +4861,7 @@ model = "gpt-5.5"
 
             let mut litellm = HashMap::new();
             litellm.insert(
-                "Composer 1.5".into(),
+                "composer 1.5".into(),
                 pricing::ModelPricing {
                     input_cost_per_token: Some(0.001),
                     output_cost_per_token: Some(0.002),
@@ -5285,22 +5295,22 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_apply_token_pricing_does_not_clean_free_variant() {
-        let mut openrouter = HashMap::new();
-        openrouter.insert(
-            "z-ai/glm-4.7".into(),
+    fn test_finalize_token_pricing_cleans_free_variant_before_lookup() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "nemotron-3-ultra".into(),
             pricing::ModelPricing {
                 input_cost_per_token: Some(0.001),
                 output_cost_per_token: Some(0.002),
                 ..Default::default()
             },
         );
-        let pricing = pricing::PricingService::new(HashMap::new(), openrouter);
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
-        let mut msg = UnifiedMessage::new(
+        let msg = UnifiedMessage::new(
             "opencode",
-            "glm-4.7-free",
-            "modal",
+            "nemotron-3-ultra-free",
+            "nvidia",
             "session-1",
             1_733_011_200_000,
             TokenBreakdown {
@@ -5312,10 +5322,50 @@ model = "gpt-5.5"
             },
             0.0,
         );
+        let mut messages = vec![msg];
 
-        apply_token_pricing(&mut msg, Some(&pricing));
+        finalize_token_priced_messages(&mut messages, Some(&pricing));
 
-        assert_eq!(msg.cost, 0.0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "nemotron-3-ultra");
+        assert!(messages[0].cost > 0.0);
+    }
+
+    #[test]
+    fn test_finalize_token_pricing_cleans_date_variant_before_lookup() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4o-mini".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let msg = UnifiedMessage::new(
+            "copilot",
+            "gpt-4o-mini-2024-07-18",
+            "openai",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+        let mut messages = vec![msg];
+
+        finalize_token_priced_messages(&mut messages, Some(&pricing));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
+        assert!(messages[0].cost > 0.0);
     }
 
     #[test]
@@ -6181,7 +6231,7 @@ model = "gpt-5.5"
         );
         assert_eq!(
             parsed_with_settings.messages[0].model_id,
-            "claude-sonnet-4-5"
+            "claude-sonnet-4.5"
         );
         assert_eq!(parsed_with_settings.messages[0].input, 42);
         assert_eq!(parsed_with_settings.messages[0].output, 7);
@@ -6396,7 +6446,7 @@ model = "gpt-5.5"
         );
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].client, "amp");
-        assert_eq!(parsed.messages[0].model_id, "claude-opus-4-7");
+        assert_eq!(parsed.messages[0].model_id, "claude-opus-4.7");
     }
 
     #[test]
@@ -6451,7 +6501,7 @@ model = "gpt-5.5"
         );
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].client, "codebuff");
-        assert_eq!(parsed.messages[0].model_id, "claude-sonnet-4-20250514");
+        assert_eq!(parsed.messages[0].model_id, "claude-sonnet-4");
     }
 
     #[test]
@@ -6768,7 +6818,7 @@ model = "gpt-5.5"
         assert_eq!(parsed.counts.get(ClientId::Amp), 1);
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].client, "amp");
-        assert_eq!(parsed.messages[0].model_id, "claude-opus-4-7");
+        assert_eq!(parsed.messages[0].model_id, "claude-opus-4.7");
         assert_eq!(parsed.messages[0].provider_id, "anthropic");
         assert_eq!(parsed.messages[0].input, 10);
         assert_eq!(parsed.messages[0].output, 2);
