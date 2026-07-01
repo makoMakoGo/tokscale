@@ -5952,10 +5952,7 @@ model = "gpt-5.5"
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "opencode");
-        assert_eq!(
-            messages[0].model_id.as_ref(),
-            "hf:deepseek-ai/DeepSeek-V3-0324"
-        );
+        assert_eq!(messages[0].model_id.as_ref(), "deepseek-v3");
         assert_eq!(messages[0].provider_id.as_ref(), "deepseek");
     }
 
@@ -5986,10 +5983,7 @@ model = "gpt-5.5"
         assert_eq!(parsed.counts.get(ClientId::OpenCode), 1);
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].client, "opencode");
-        assert_eq!(
-            parsed.messages[0].model_id,
-            "accounts/fireworks/models/deepseek-v3-0324"
-        );
+        assert_eq!(parsed.messages[0].model_id, "deepseek-v3");
         assert_eq!(parsed.messages[0].provider_id, "fireworks_ai");
     }
 

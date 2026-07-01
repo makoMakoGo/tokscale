@@ -283,7 +283,7 @@ mod tests {
         let message = &messages[0];
         assert_eq!(message.client.as_ref(), "junie");
         assert_eq!(message.session_id.as_ref(), "session-250622-101010");
-        assert_eq!(message.model_id.as_ref(), "gpt-4.1-2025-04-14");
+        assert_eq!(message.model_id.as_ref(), "gpt-4.1");
         assert_eq!(message.provider_id.as_ref(), "openai");
         assert_eq!(message.tokens.input, 100);
         assert_eq!(message.tokens.cache_read, 20);

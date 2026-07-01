@@ -1749,7 +1749,7 @@ after"#,
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].client, "opencode");
         assert_eq!(usage.models[0].provider, "fireworks");
-        assert_eq!(usage.models[0].model, "deepseek-v3-0324");
+        assert_eq!(usage.models[0].model, "deepseek-v3");
         assert_eq!(usage.models[0].tokens.total(), 15);
         assert_cost_matches(usage.models[0].cost, expected_cost);
 
