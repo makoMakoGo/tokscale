@@ -372,7 +372,7 @@ mod tests {
                 vec![
                     make_workspace_message(
                         "opencode",
-                        "xiaomi/mimo-v2.5-pro",
+                        "mimo-v2.5-pro",
                         "xiaomi",
                         "session-1",
                         1.0,
@@ -381,7 +381,7 @@ mod tests {
                     ),
                     make_workspace_message(
                         "opencode",
-                        "xiaomi/mimo-v2.5-pro",
+                        "mimo-v2.5-pro",
                         "xiaomi-token-plan-cn",
                         "session-2",
                         2.0,
@@ -407,7 +407,7 @@ mod tests {
                 vec![
                     make_workspace_message(
                         "opencode",
-                        "xiaomi/mimo-v2.5-pro",
+                        "mimo-v2.5-pro",
                         "xiaomi",
                         "session-1",
                         1.0,
@@ -416,7 +416,7 @@ mod tests {
                     ),
                     make_workspace_message(
                         "opencode",
-                        "xiaomi/mimo-v2.5-pro",
+                        "mimo-v2.5-pro",
                         "xiaomi-token-plan-cn",
                         "session-2",
                         2.0,
@@ -446,7 +446,7 @@ mod tests {
             .aggregate_messages(
                 vec![make_workspace_message(
                     "opencode",
-                    "openai/gpt-5.5",
+                    "gpt-5.5",
                     "openai",
                     "session-1",
                     1.0,
@@ -516,7 +516,7 @@ mod tests {
                 vec![
                     make_workspace_message(
                         "opencode",
-                        "openai/gpt-5.5",
+                        "gpt-5.5",
                         "openai",
                         "session-1",
                         1.0,
@@ -525,7 +525,7 @@ mod tests {
                     ),
                     make_workspace_message(
                         "opencode",
-                        "openai/gpt-5.5",
+                        "gpt-5.5",
                         "openai",
                         "session-2",
                         2.0,

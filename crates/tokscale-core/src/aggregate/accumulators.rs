@@ -1,4 +1,4 @@
-//! Per-view accumulators ported verbatim from the old fold sites
+//! Per-view accumulators derived from the old fold sites
 //! (`aggregate_model_usage_entries`, `MonthAggregator`/month fold,
 //! `HourAggregator`/hour fold). The graph/session/time-metrics views are
 //! inherently two-pass; the engine buffers messages and replays the existing
