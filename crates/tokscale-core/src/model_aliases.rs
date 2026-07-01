@@ -126,6 +126,8 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     }
 
     if let Some((base, tier)) = model.rsplit_once('-') {
+        let base_without_free = strip_free_channel_tag(base);
+        let base = base_without_free.as_str();
         if (tier == "fast" || OPENAI_REASONING_TIERS.contains(&tier))
             && is_openai_gpt_source_base_model(base)
         {
@@ -516,6 +518,8 @@ mod tests {
             ("openai/gpt-5.5 (xhigh)", "gpt-5.5"),
             ("gpt-5.5-high", "gpt-5.5"),
             ("gpt-5.5-xhigh", "gpt-5.5"),
+            ("gpt-5.5-free-high", "gpt-5.5"),
+            ("openai/gpt-5.5:free-xhigh", "gpt-5.5"),
             ("gpt-5.4-mini-xhigh", "gpt-5.4-mini"),
             ("gpt-5.4-mini(high)", "gpt-5.4-mini"),
             ("gpt-5.4-nano-xhigh", "gpt-5.4-nano"),

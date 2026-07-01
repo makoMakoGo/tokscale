@@ -149,10 +149,9 @@ mod tests {
         .unwrap();
     }
 
-    fn refresh(messages: &mut [crate::UnifiedMessage]) {
-        let mut owned = messages.to_vec();
-        crate::finalize_token_priced_messages(&mut owned, None);
-        messages.clone_from_slice(&owned);
+    fn finalized(mut messages: Vec<crate::UnifiedMessage>) -> Vec<crate::UnifiedMessage> {
+        crate::finalize_token_priced_messages(&mut messages, None);
+        messages
     }
 
     #[test]
@@ -214,8 +213,7 @@ mod tests {
             &mut actual,
         );
 
-        let mut expected = sessions::zed::parse_zed_sqlite(&db_path);
-        refresh(&mut expected);
+        let expected = finalized(sessions::zed::parse_zed_sqlite(&db_path));
         assert_eq!(actual, expected);
     }
 }

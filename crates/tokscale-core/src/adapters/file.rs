@@ -277,10 +277,9 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    fn refresh(messages: &mut [UnifiedMessage]) {
-        let mut owned = messages.to_vec();
-        crate::finalize_token_priced_messages(&mut owned, None);
-        messages.clone_from_slice(&owned);
+    fn finalized(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+        crate::finalize_token_priced_messages(&mut messages, None);
+        messages
     }
 
     fn fold_with_adapter(
@@ -345,8 +344,7 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
 
         let actual = fold_with_adapter(&AMP_ADAPTER, units, &mut cache);
-        let mut expected = sessions::amp::parse_amp_file(&path);
-        refresh(&mut expected);
+        let expected = finalized(sessions::amp::parse_amp_file(&path));
 
         assert_eq!(actual, expected);
     }
@@ -407,8 +405,7 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
 
         let actual = fold_with_adapter(&ZCODE_ADAPTER, units, &mut cache);
-        let mut expected = sessions::zcode::parse_zcode_file(&path);
-        refresh(&mut expected);
+        let expected = finalized(sessions::zcode::parse_zcode_file(&path));
 
         assert_eq!(actual, expected);
     }
