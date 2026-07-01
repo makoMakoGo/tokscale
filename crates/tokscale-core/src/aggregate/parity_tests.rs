@@ -183,7 +183,7 @@ fn parity_graph_result() {
         let intervals = sessionize::sessionize(&msgs, sessionize::DEFAULT_IDLE_GAP_MS);
         let tm = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
         let dat = sessionize::compute_daily_active_time(&intervals);
-        let contribs = aggregator::aggregate_by_date(msgs.clone());
+        let contribs = aggregator::aggregate_by_date(&msgs);
         let mut r = aggregator::generate_graph_result(contribs, 0);
         r.time_metrics = Some(tm);
         for c in &mut r.contributions {
@@ -341,7 +341,7 @@ fn parity_time_metrics() {
 #[serial]
 fn parity_session_contributions() {
     let msgs = corpus();
-    let old = aggregator::aggregate_by_session(msgs.clone());
+    let old = aggregator::aggregate_by_session(&msgs);
     let new = {
         let mut e = AggregationEngine::new(AggregationConfig {
             group_by: GroupBy::ClientModel,

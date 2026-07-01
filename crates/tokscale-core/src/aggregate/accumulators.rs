@@ -342,7 +342,7 @@ pub(super) fn finish_buffered_views(messages: &[UnifiedMessage], views: ViewSet)
     };
 
     let graph = views.contains(ViewSet::GRAPH).then(|| {
-        let contributions = aggregator::aggregate_by_date(messages.to_vec());
+        let contributions = aggregator::aggregate_by_date(messages);
         let mut result = aggregator::generate_graph_result(contributions, 0);
         result.time_metrics = time_metrics_value.clone();
         if let Some(daily_active_time) = &daily_active_time {
@@ -358,7 +358,7 @@ pub(super) fn finish_buffered_views(messages: &[UnifiedMessage], views: ViewSet)
     let daily_contributions = graph.as_ref().map(|graph| graph.contributions.clone());
     let session_contributions = views
         .contains(ViewSet::SESSIONS)
-        .then(|| aggregator::aggregate_by_session(messages.to_vec()));
+        .then(|| aggregator::aggregate_by_session(messages));
     let time_metrics = views
         .contains(ViewSet::TIME_METRICS)
         .then(|| TimeMetricsReport {
