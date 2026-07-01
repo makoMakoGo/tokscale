@@ -20,20 +20,20 @@ pub(crate) fn is_deepseek_v4_beta_alias(model: &str) -> bool {
 }
 
 pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
-    let lower = model.trim().to_lowercase();
-    if lower.is_empty() {
+    let model = model.trim();
+    if model.is_empty() || !model.is_ascii() {
         return None;
     }
+    let lower = model.to_ascii_lowercase();
 
     canonicalize_modern_claude_source_model(&lower)
         .or_else(|| canonicalize_openai_source_model(&lower))
         .or_else(|| canonicalize_glm_source_model(&lower).map(str::to_string))
         .or_else(|| canonicalize_qwen_source_model(&lower))
         .or_else(|| canonicalize_kimi_source_model(&lower))
-        .or_else(|| canonicalize_grok_source_model(&lower).map(str::to_string))
+        .or_else(|| canonicalize_grok_source_model(&lower))
         .or_else(|| canonicalize_mimo_source_model(&lower))
         .or_else(|| canonicalize_deepseek_source_model(&lower))
-        .or_else(|| canonicalize_mistral_source_model(&lower))
         .or_else(|| canonicalize_longcat_source_model(&lower).map(str::to_string))
 }
 
@@ -147,7 +147,9 @@ fn canonicalize_qwen_source_model(model: &str) -> Option<String> {
 
 fn canonicalize_kimi_source_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
-    if let Some(base) = strip_release_suffix(model).filter(|base| base.starts_with("kimi-k2-")) {
+    if let Some(base) = strip_release_suffix(model)
+        .filter(|base| *base == "kimi-k2" || base.starts_with("kimi-k2-"))
+    {
         return Some(base.to_string());
     }
 
@@ -165,11 +167,17 @@ fn canonicalize_kimi_source_model(model: &str) -> Option<String> {
     }
 }
 
-fn canonicalize_grok_source_model(model: &str) -> Option<&'static str> {
-    match canonical_model_segment(model) {
-        "grok-code-fast-1-0825" => Some("grok-code-fast-1"),
-        "grok-composer-2.5" => Some("composer-2.5"),
-        "grok-composer-2.5-fast" => Some("composer-2.5-fast"),
+fn canonicalize_grok_source_model(model: &str) -> Option<String> {
+    let model = canonical_model_segment(model);
+    if let Some(base) = strip_release_suffix(model) {
+        if base == "grok-code-fast-1" {
+            return Some(base.to_string());
+        }
+    }
+
+    match model {
+        "grok-composer-2.5" => Some("composer-2.5".to_string()),
+        "grok-composer-2.5-fast" => Some("composer-2.5-fast".to_string()),
         _ => None,
     }
 }
@@ -195,15 +203,6 @@ fn canonicalize_deepseek_source_model(model: &str) -> Option<String> {
                 return Some(format!("deepseek-r1-{suffix}"));
             }
         }
-    }
-
-    strip_release_suffix(model).map(str::to_string)
-}
-
-fn canonicalize_mistral_source_model(model: &str) -> Option<String> {
-    let model = canonical_model_segment(model);
-    if !model.starts_with("mistral-") {
-        return None;
     }
 
     strip_release_suffix(model).map(str::to_string)
@@ -392,11 +391,24 @@ mod tests {
             Some("kimi-k2-instruct")
         );
         assert_eq!(
+            canonicalize_source_model_id("kimi-k2-0711").as_deref(),
+            Some("kimi-k2")
+        );
+        assert_eq!(
+            canonicalize_source_model_id("moonshotai/kimi-k2-0711").as_deref(),
+            Some("kimi-k2")
+        );
+        assert_eq!(canonicalize_source_model_id("kimi-k20-0711"), None);
+        assert_eq!(
             canonicalize_source_model_id("grok-composer-2.5-fast").as_deref(),
             Some("composer-2.5-fast")
         );
         assert_eq!(
             canonicalize_source_model_id("grok-code-fast-1-0825").as_deref(),
+            Some("grok-code-fast-1")
+        );
+        assert_eq!(
+            canonicalize_source_model_id("grok-code-fast-1-0901").as_deref(),
             Some("grok-code-fast-1")
         );
     }
@@ -433,7 +445,6 @@ mod tests {
             ("mimo-v2-20260318", "mimo-v2"),
             ("xiaomi/mimo-v2-20260318", "mimo-v2"),
             ("mimo-v2.5-pro-20260318", "mimo-v2.5-pro"),
-            ("mistral-small-2603", "mistral-small"),
             ("deepseek-v3-0324", "deepseek-v3"),
             (
                 "deepseek-r1-0528-distill-qwen3-8b",
@@ -452,6 +463,8 @@ mod tests {
 
         assert_eq!(canonicalize_source_model_id("gpt-5.3-codex-spark"), None);
         assert_eq!(canonicalize_source_model_id("gpt-4o-high"), None);
+        assert_eq!(canonicalize_source_model_id("mistral-small-2603"), None);
+        assert_eq!(canonicalize_source_model_id("qwen-模型abcdef"), None);
         assert_eq!(
             canonicalize_source_model_id("gpt-5.3-codex-spark-lite"),
             None
