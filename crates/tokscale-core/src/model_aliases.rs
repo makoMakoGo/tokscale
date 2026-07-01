@@ -210,6 +210,7 @@ fn canonicalize_mistral_source_model(model: &str) -> Option<String> {
 }
 
 pub(crate) fn canonicalize_longcat_source_model(model: &str) -> Option<&'static str> {
+    let model = canonical_model_segment(model);
     if model == "longcat-flash-3b" {
         return Some("longcat-flash-3b");
     }
@@ -439,6 +440,10 @@ mod tests {
                 "deepseek-r1-distill-qwen3-8b",
             ),
             ("longcat-flash-3b-all-quant-0203-eagle3", "longcat-flash-3b"),
+            (
+                "meituan/longcat-flash-3b-all-quant-0203-eagle3",
+                "longcat-flash-3b",
+            ),
         ];
 
         for (raw, expected) in cases {
