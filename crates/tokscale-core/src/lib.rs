@@ -1017,18 +1017,36 @@ fn canonicalize_message_provider(message: &mut UnifiedMessage) {
     message.provider_id = sessions::intern::intern(&provider);
 }
 
-fn canonicalize_message_model(message: &mut UnifiedMessage) {
-    let model = model_aliases::canonicalize_model_id(&message.model_id);
-    message.model_id = sessions::intern::intern(&model);
+fn canonicalize_message_model(
+    message: &mut UnifiedMessage,
+    model_cache: &mut HashMap<Arc<str>, Arc<str>>,
+) {
+    if let Some(canonical) = model_cache.get(&message.model_id) {
+        message.model_id = Arc::clone(canonical);
+        return;
+    }
+
+    let raw = Arc::clone(&message.model_id);
+    let canonical = model_aliases::canonicalize_model_id(raw.as_ref());
+    let canonical = if canonical == raw.as_ref() {
+        Arc::clone(&raw)
+    } else {
+        sessions::intern::intern(&canonical)
+    };
+
+    model_cache.insert(raw, Arc::clone(&canonical));
+    message.model_id = canonical;
 }
 
 pub(crate) fn finalize_token_priced_messages(
     messages: &mut Vec<UnifiedMessage>,
     pricing: Option<&pricing::PricingService>,
 ) {
+    let mut model_cache = HashMap::new();
+
     messages.retain_mut(|message| {
         normalize_token_breakdown(&mut message.tokens);
-        canonicalize_message_model(message);
+        canonicalize_message_model(message, &mut model_cache);
         message.refresh_derived_fields();
         canonicalize_message_provider(message);
         if !has_positive_tokens(&message.tokens) {
@@ -5383,6 +5401,61 @@ model = "gpt-5.5"
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
         assert!(messages[0].cost > 0.0);
+    }
+
+    #[test]
+    fn test_finalize_token_pricing_cleans_repeated_date_variant_before_lookup() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4o-mini".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut messages = vec![
+            UnifiedMessage::new(
+                "copilot",
+                "gpt-4o-mini-2024-07-18",
+                "openai",
+                "session-1",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            ),
+            UnifiedMessage::new(
+                "copilot",
+                "gpt-4o-mini-2024-07-18",
+                "openai",
+                "session-2",
+                1_733_011_201_000,
+                TokenBreakdown {
+                    input: 20,
+                    output: 10,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            ),
+        ];
+
+        finalize_token_priced_messages(&mut messages, Some(&pricing));
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages
+            .iter()
+            .all(|message| message.model_id.as_ref() == "gpt-4o-mini"));
+        assert!(messages.iter().all(|message| message.cost > 0.0));
     }
 
     #[test]
