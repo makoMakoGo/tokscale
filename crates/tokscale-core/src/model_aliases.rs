@@ -19,16 +19,7 @@ pub(crate) fn is_deepseek_v4_beta_alias(model: &str) -> bool {
     )
 }
 
-pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
-    let normalized = normalized_terminal_model_id(model);
-    let canonical = canonicalize_model_id(model);
-    if canonical == normalized {
-        None
-    } else {
-        Some(canonical)
-    }
-}
-
+/// Canonical model-id source of truth for report grouping, finalization, and pricing.
 pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
     let normalized = normalized_terminal_model_id(model_id);
     if normalized.is_empty() || !normalized.is_ascii() {
@@ -39,6 +30,19 @@ pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
         canonicalize_source_specific_model_id(&normalized).unwrap_or_else(|| normalized.clone());
 
     strip_global_suffixes_to_stable(source_canonical)
+}
+
+/// Parser convenience shim; not the authoritative model identity boundary.
+///
+/// Returns `Some` only when canonicalization changes the normalized terminal id.
+pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
+    let normalized = normalized_terminal_model_id(model);
+    let canonical = canonicalize_model_id(model);
+    if canonical == normalized {
+        None
+    } else {
+        Some(canonical)
+    }
 }
 
 fn normalized_terminal_model_id(model_id: &str) -> String {
@@ -449,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizes_source_specific_kimi_and_grok_ids() {
+    fn canonicalizes_parser_shim_aliases_and_global_cleanup() {
         assert_eq!(
             canonicalize_source_model_id("k2p5").as_deref(),
             Some("kimi-k2.5")
@@ -505,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizes_source_specific_release_suffixes() {
+    fn canonicalizes_parser_shim_release_tiers_and_free_tags() {
         let cases = [
             ("gpt-4.1-2025-04-14", "gpt-4.1"),
             ("gpt-5.5-fast", "gpt-5.5"),
