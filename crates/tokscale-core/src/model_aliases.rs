@@ -29,8 +29,11 @@ pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
         .or_else(|| canonicalize_openai_source_model(&lower))
         .or_else(|| canonicalize_glm_source_model(&lower).map(str::to_string))
         .or_else(|| canonicalize_qwen_source_model(&lower))
-        .or_else(|| canonicalize_kimi_source_model(&lower).map(str::to_string))
+        .or_else(|| canonicalize_kimi_source_model(&lower))
         .or_else(|| canonicalize_grok_source_model(&lower).map(str::to_string))
+        .or_else(|| canonicalize_mimo_source_model(&lower))
+        .or_else(|| canonicalize_deepseek_source_model(&lower))
+        .or_else(|| canonicalize_mistral_source_model(&lower))
         .or_else(|| canonicalize_longcat_source_model(&lower).map(str::to_string))
 }
 
@@ -44,6 +47,12 @@ fn canonical_model_segment(model: &str) -> &str {
 
 fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
+
+    if let Some(base) = strip_full_release_date_suffix(model) {
+        if base == "gpt-4.1" || is_openai_gpt_source_base_model(base) {
+            return Some(base.to_string());
+        }
+    }
 
     if let Some(base) = strip_parenthesized_openai_reasoning_tier(model) {
         return Some(base.to_string());
@@ -133,28 +142,71 @@ fn canonicalize_qwen_source_model(model: &str) -> Option<String> {
         return None;
     }
 
-    strip_qwen_date_suffix(model).map(str::to_string)
+    strip_release_suffix(model).map(str::to_string)
 }
 
-fn canonicalize_kimi_source_model(model: &str) -> Option<&'static str> {
+fn canonicalize_kimi_source_model(model: &str) -> Option<String> {
+    let model = canonical_model_segment(model);
+    if let Some(base) = strip_release_suffix(model).filter(|base| base.starts_with("kimi-k2-")) {
+        return Some(base.to_string());
+    }
+
     match canonical_model_segment(model) {
-        "k2p5" | "k2-p5" | "kimi-for-coding/k2p5" | "kimi-for-coding/k2-p5" => Some("kimi-k2.5"),
-        "k2p6" | "k2-p6" | "kimi-k2p6" | "kimi-for-coding/k2p6" | "kimi-for-coding/k2-p6" => {
-            Some("kimi-k2.6")
+        "k2p5" | "k2-p5" | "kimi-for-coding/k2p5" | "kimi-for-coding/k2-p5" => {
+            Some("kimi-k2.5".to_string())
         }
-        "kimi-k2.5-thinking" => Some("kimi-k2-thinking"),
-        "kimi-for-coding" => Some("kimi-k2.5"),
-        "kimi-k2.5-nvfp4" | "kimi-k2-instruct-0905" => Some("kimi-k2.5"),
+        "k2p6" | "k2-p6" | "kimi-k2p6" | "kimi-for-coding/k2p6" | "kimi-for-coding/k2-p6" => {
+            Some("kimi-k2.6".to_string())
+        }
+        "kimi-k2.5-thinking" => Some("kimi-k2-thinking".to_string()),
+        "kimi-for-coding" => Some("kimi-k2.5".to_string()),
+        "kimi-k2.5-nvfp4" => Some("kimi-k2.5".to_string()),
         _ => None,
     }
 }
 
 fn canonicalize_grok_source_model(model: &str) -> Option<&'static str> {
     match canonical_model_segment(model) {
+        "grok-code-fast-1-0825" => Some("grok-code-fast-1"),
         "grok-composer-2.5" => Some("composer-2.5"),
         "grok-composer-2.5-fast" => Some("composer-2.5-fast"),
         _ => None,
     }
+}
+
+fn canonicalize_mimo_source_model(model: &str) -> Option<String> {
+    let model = canonical_model_segment(model);
+    if !model.starts_with("mimo-") {
+        return None;
+    }
+
+    strip_release_suffix(model).map(str::to_string)
+}
+
+fn canonicalize_deepseek_source_model(model: &str) -> Option<String> {
+    let model = canonical_model_segment(model);
+    if !model.starts_with("deepseek-") {
+        return None;
+    }
+
+    if let Some(rest) = model.strip_prefix("deepseek-r1-") {
+        if let Some((release, suffix)) = rest.split_once('-') {
+            if is_short_compact_release(release) {
+                return Some(format!("deepseek-r1-{suffix}"));
+            }
+        }
+    }
+
+    strip_release_suffix(model).map(str::to_string)
+}
+
+fn canonicalize_mistral_source_model(model: &str) -> Option<String> {
+    let model = canonical_model_segment(model);
+    if !model.starts_with("mistral-") {
+        return None;
+    }
+
+    strip_release_suffix(model).map(str::to_string)
 }
 
 pub(crate) fn canonicalize_longcat_source_model(model: &str) -> Option<&'static str> {
@@ -228,11 +280,16 @@ fn is_compact_date(value: &str) -> bool {
     value.len() == 8 && value.starts_with("20") && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn strip_qwen_date_suffix(model: &str) -> Option<&str> {
+fn strip_release_suffix(model: &str) -> Option<&str> {
+    strip_full_release_date_suffix(model).or_else(|| strip_short_release_date_suffix(model))
+}
+
+fn strip_full_release_date_suffix(model: &str) -> Option<&str> {
     if model.len() > 11 {
         let potential_date = &model[model.len() - 10..];
         let bytes = potential_date.as_bytes();
-        if bytes[4] == b'-'
+        if potential_date.starts_with("20")
+            && bytes[4] == b'-'
             && bytes[7] == b'-'
             && potential_date
                 .bytes()
@@ -246,14 +303,41 @@ fn strip_qwen_date_suffix(model: &str) -> Option<&str> {
 
     if model.len() > 9 {
         let potential_date = &model[model.len() - 8..];
-        if potential_date.bytes().all(|byte| byte.is_ascii_digit())
-            && model.as_bytes()[model.len() - 9] == b'-'
-        {
+        if is_compact_date(potential_date) && model.as_bytes()[model.len() - 9] == b'-' {
             return Some(&model[..model.len() - 9]);
         }
     }
 
     None
+}
+
+fn strip_short_release_date_suffix(model: &str) -> Option<&str> {
+    if model.len() > 6 {
+        let potential_date = &model[model.len() - 5..];
+        let bytes = potential_date.as_bytes();
+        if bytes[2] == b'-'
+            && potential_date
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| index == 2 || byte.is_ascii_digit())
+            && model.as_bytes()[model.len() - 6] == b'-'
+        {
+            return Some(&model[..model.len() - 6]);
+        }
+    }
+
+    if model.len() > 5 {
+        let potential_date = &model[model.len() - 4..];
+        if is_short_compact_release(potential_date) && model.as_bytes()[model.len() - 5] == b'-' {
+            return Some(&model[..model.len() - 5]);
+        }
+    }
+
+    None
+}
+
+fn is_short_compact_release(value: &str) -> bool {
+    value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -303,14 +387,23 @@ mod tests {
             Some("kimi-k2.6")
         );
         assert_eq!(
+            canonicalize_source_model_id("kimi-k2-instruct-0905").as_deref(),
+            Some("kimi-k2-instruct")
+        );
+        assert_eq!(
             canonicalize_source_model_id("grok-composer-2.5-fast").as_deref(),
             Some("composer-2.5-fast")
+        );
+        assert_eq!(
+            canonicalize_source_model_id("grok-code-fast-1-0825").as_deref(),
+            Some("grok-code-fast-1")
         );
     }
 
     #[test]
-    fn canonicalizes_source_specific_openai_glm_and_qwen_ids() {
+    fn canonicalizes_source_specific_release_suffixes() {
         let cases = [
+            ("gpt-4.1-2025-04-14", "gpt-4.1"),
             ("gpt-5.5-fast", "gpt-5.5"),
             ("openai/gpt-5.5-fast", "gpt-5.5"),
             ("gpt-5.5(high)", "gpt-5.5"),
@@ -334,14 +427,24 @@ mod tests {
             ("opencode/glm-4.7-free-sub2api-pro", "glm-4.7"),
             ("qwen3.7-max-2026-05-20", "qwen3.7-max"),
             ("qwen/qwen3.7-max-20260520", "qwen3.7-max"),
+            ("qwen3.7-max-2605", "qwen3.7-max"),
+            ("qwen3.7-max-05-20", "qwen3.7-max"),
+            ("mimo-v2-20260318", "mimo-v2"),
+            ("xiaomi/mimo-v2-20260318", "mimo-v2"),
+            ("mimo-v2.5-pro-20260318", "mimo-v2.5-pro"),
+            ("mistral-small-2603", "mistral-small"),
+            ("deepseek-v3-0324", "deepseek-v3"),
+            (
+                "deepseek-r1-0528-distill-qwen3-8b",
+                "deepseek-r1-distill-qwen3-8b",
+            ),
+            ("longcat-flash-3b-all-quant-0203-eagle3", "longcat-flash-3b"),
         ];
 
         for (raw, expected) in cases {
             assert_eq!(canonicalize_source_model_id(raw).as_deref(), Some(expected));
         }
 
-        assert_eq!(canonicalize_source_model_id("qwen3.7-max-2605"), None);
-        assert_eq!(canonicalize_source_model_id("qwen3.7-max-05-20"), None);
         assert_eq!(canonicalize_source_model_id("gpt-5.3-codex-spark"), None);
         assert_eq!(canonicalize_source_model_id("gpt-4o-high"), None);
         assert_eq!(
