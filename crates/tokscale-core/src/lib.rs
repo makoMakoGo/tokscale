@@ -18,10 +18,17 @@ pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
 
-pub mod aggregate;
+mod aggregate;
 pub mod usage_views;
 
-pub use aggregate::{AggregatedViews, AggregationConfig, DateRange, ViewSet};
+#[doc(hidden)]
+pub use aggregate::aggregate_usage_data as aggregate_finalized_usage_data;
+pub use aggregate::{
+    aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
+    build_contribution_graph_for_today, build_period_usage, calculate_streaks,
+    calculate_streaks_for_today, find_peak_hour, AggregatedViews, AggregationConfig, DateRange,
+    PeriodBucket, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
+};
 pub use aggregator::{calculate_summary, calculate_years};
 pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
 pub use parser::*;
@@ -404,9 +411,6 @@ pub struct ModelReport {
     pub total_cost: f64,
     pub processing_time_ms: u32,
 }
-
-#[cfg(test)]
-pub(crate) use aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonthlyReport {

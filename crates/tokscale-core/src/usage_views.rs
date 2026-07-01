@@ -2,8 +2,8 @@
 //!
 //! These types (`UsageData`, `UsageModelEntry`, `AgentEntry`, `DailyUsage`,
 //! `HourlyUsage`, …) are the TUI's view models. They live in core so the
-//! [`crate::aggregate::AggregationEngine`] can produce them directly (#37:
-//! one aggregation site), but they stay distinct from the report types in
+//! core's aggregation engine can produce them directly (#37: one aggregation
+//! site), but they stay distinct from the report types in
 //! [`crate`] (e.g. core `TokenBreakdown` is the parsed `i64` form; the
 //! [`UsageTokenBreakdown`] here is the sanitized `u64` saturating form the TUI
 //! renders).

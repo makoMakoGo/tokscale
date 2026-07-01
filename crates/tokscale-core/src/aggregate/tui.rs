@@ -1,7 +1,8 @@
 //! The TUI usage aggregation: one fold over `UnifiedMessage`s producing
 //! [`crate::usage_views::UsageData`] (models/agents/daily/hourly/graph/streaks).
 //! `AggregationEngine` owns this accumulator when `ViewSet::TUI` is requested;
-//! CLI code drives that engine instead of carrying its own fold (#37).
+//! core report loading drives that engine instead of the CLI carrying its own
+//! fold (#37).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -19,8 +20,6 @@ use crate::{
     normalize_provider_for_grouping, ordered_clients_by_token_contribution, sessions,
     ClientContributionOrder, GroupBy, ModelPerformance, UnifiedMessage,
 };
-
-pub use crate::aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
 
 fn positive_unified_token_total(tokens: &crate::TokenBreakdown) -> i64 {
     tokens.input.max(0)
@@ -763,9 +762,10 @@ impl TuiAcc {
     }
 }
 
-/// Compatibility helper for callers/tests that still pass a finished message
-/// vector. The fold itself is owned by `TuiAcc` and driven through the same
-/// `push`/`finish` shape as `AggregationEngine`.
+/// Compatibility helper for callers/tests that still pass a finalized
+/// local-report message vector. The fold itself is owned by `TuiAcc` and driven
+/// through the same `push`/`finish` shape as `AggregationEngine`; it deliberately
+/// does not re-canonicalize model ids.
 pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -> UsageData {
     let mut acc = TuiAcc::new(group_by.clone());
     for msg in &messages {

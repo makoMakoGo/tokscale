@@ -19,6 +19,13 @@ pub use tokscale_core::usage_views::{
     HourlyModelInfo, HourlyUsage, PeriodKind, PeriodUsage, UsageData, UsageGraphData as GraphData,
     UsageModelEntry as ModelUsage, UsageTokenBreakdown as TokenBreakdown,
 };
+#[allow(unused_imports)]
+pub use tokscale_core::{
+    aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
+    build_contribution_graph_for_today, build_period_usage, calculate_streaks,
+    calculate_streaks_for_today, find_peak_hour, PeriodBucket, WeekdayBucket,
+    UNKNOWN_WORKSPACE_LABEL,
+};
 
 /// Returns the scanner settings that `DataLoader` should use when building
 /// `LocalParseOptions`. Under `#[cfg(test)]` this intentionally ignores
@@ -56,18 +63,6 @@ pub struct DataLoadResult {
     pub data: UsageData,
     pub pricing_diagnostics: Vec<String>,
 }
-
-// Re-export the TUI aggregation helpers that live in core (#37). The CLI
-// keeps no aggregation logic of its own. Several are consumed only by the
-// test module below (`build_contribution_graph`, `PeriodBucket`, the
-// `*_for_today` variants) but are re-exported as the module's public surface.
-#[allow(unused_imports)]
-pub use tokscale_core::aggregate::tui::{
-    aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
-    build_contribution_graph_for_today, build_period_usage, calculate_streaks,
-    calculate_streaks_for_today, find_peak_hour, PeriodBucket, WeekdayBucket,
-    UNKNOWN_WORKSPACE_LABEL,
-};
 
 impl DataLoader {
     pub fn new(sessions_path: Option<PathBuf>) -> Self {
@@ -203,16 +198,9 @@ impl DataLoader {
         messages: Vec<UnifiedMessage>,
         group_by: &GroupBy,
     ) -> Result<UsageData> {
-        let mut engine =
-            tokscale_core::aggregate::AggregationEngine::new(tokscale_core::AggregationConfig {
-                group_by: group_by.clone(),
-                date_range: tokscale_core::DateRange::none(),
-                views: tokscale_core::ViewSet::TUI,
-            });
-        for msg in &messages {
-            engine.push(msg);
-        }
-        Ok(engine.finish().tui_usage.expect("tui view requested"))
+        Ok(tokscale_core::aggregate_finalized_usage_data(
+            messages, group_by,
+        ))
     }
 }
 #[cfg(test)]
