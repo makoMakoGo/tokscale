@@ -21,7 +21,10 @@ pub(crate) fn is_deepseek_v4_beta_alias(model: &str) -> bool {
 
 pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
     let model = model.trim();
-    if model.is_empty() || !model.is_ascii() {
+    if model.is_empty() {
+        return None;
+    }
+    if !canonical_model_segment(model).is_ascii() {
         return None;
     }
     let lower = model.to_ascii_lowercase();
@@ -455,6 +458,7 @@ mod tests {
                 "meituan/longcat-flash-3b-all-quant-0203-eagle3",
                 "longcat-flash-3b",
             ),
+            ("自定义/qwen3.7-max-2605", "qwen3.7-max"),
         ];
 
         for (raw, expected) in cases {
