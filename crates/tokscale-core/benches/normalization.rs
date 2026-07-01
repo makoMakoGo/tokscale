@@ -3,7 +3,7 @@ use codspeed_criterion_compat::{
 };
 use tokscale_core::{normalize_model_for_grouping, normalize_provider_for_grouping};
 
-const MODEL_CASES: &[(&str, &str)] = &[
+const RAW_MODEL_CASES: &[(&str, &str)] = &[
     ("gpt_custom_tier", "custom:openai/gpt-5.3-codex-high"),
     (
         "claude_anthropic_date",
@@ -15,7 +15,18 @@ const MODEL_CASES: &[(&str, &str)] = &[
         "meituan/longcat-flash-3b-all-quant-int8",
     ),
     ("qwen_openrouter_free", "openrouter/qwen/qwen3-coder:free"),
-    ("unknown_fast_suffix", "composer-2.5-fast"),
+    ("gpt4o_mini_date", "openai/gpt-4o-mini-2024-07-18"),
+    ("nemotron_free", "nemotron-3-ultra-free"),
+];
+
+const CANONICAL_MODEL_CASES: &[(&str, &str)] = &[
+    ("gpt_codex", "gpt-5.3-codex"),
+    ("claude_sonnet", "claude-sonnet-4"),
+    ("kimi", "kimi-k2.5"),
+    ("longcat", "longcat-flash-3b"),
+    ("qwen", "qwen3-coder"),
+    ("gpt4o_mini", "gpt-4o-mini"),
+    ("nemotron", "nemotron-3-ultra"),
 ];
 
 const PROVIDER_CASES: &[(&str, &str)] = &[
@@ -30,20 +41,30 @@ const PROVIDER_CASES: &[(&str, &str)] = &[
     ),
 ];
 
-fn normalize_models(c: &mut Criterion) {
-    let mut group = c.benchmark_group("normalize_model_for_grouping");
+fn canonical_model_id_cleanup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("canonical_model_id_cleanup");
 
-    group.bench_function("mixed_batch", |b| {
+    group.bench_function("raw_source_labels_mixed_batch", |b| {
         b.iter(|| {
             let mut total_len = 0usize;
-            for (_, model) in black_box(MODEL_CASES) {
-                total_len += normalize_model_for_grouping(model).len();
+            for (_, model) in black_box(RAW_MODEL_CASES) {
+                total_len += normalize_model_for_grouping(black_box(model)).len();
             }
             black_box(total_len)
         });
     });
 
-    for (case_id, model) in MODEL_CASES {
+    group.bench_function("already_canonical_mixed_batch", |b| {
+        b.iter(|| {
+            let mut total_len = 0usize;
+            for (_, model) in black_box(CANONICAL_MODEL_CASES) {
+                total_len += normalize_model_for_grouping(black_box(model)).len();
+            }
+            black_box(total_len)
+        });
+    });
+
+    for (case_id, model) in RAW_MODEL_CASES {
         group.bench_with_input(BenchmarkId::from_parameter(*case_id), model, |b, model| {
             b.iter(|| black_box(normalize_model_for_grouping(black_box(*model)).len()));
         });
@@ -78,5 +99,5 @@ fn normalize_providers(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, normalize_models, normalize_providers);
+criterion_group!(benches, canonical_model_id_cleanup, normalize_providers);
 criterion_main!(benches);
