@@ -63,12 +63,12 @@ Create `custom-pricing.json` in the Tokscale config directory:
 {
   "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
-    "accounts/fireworks/routers/kimi-k2p6-turbo": {
+    "kimi-k2.6": {
       "input_cost_per_million_tokens": 2.0,
       "output_cost_per_million_tokens": 8.0,
       "cache_read_input_token_cost_per_million_tokens": 0.3,
       "source": "https://docs.fireworks.ai/serverless/pricing",
-      "notes": "Fireworks Kimi K2.6 Turbo preview"
+      "notes": "Kimi K2.6 local report override"
     }
   }
 }
@@ -82,8 +82,11 @@ Overrides are exact-only and case-insensitive:
 
 - Local reports match the canonical model id after model canonicalization, not
   necessarily the raw source label emitted by a client or parser.
+- For local report overrides, key the entry by that final canonical id unless a
+  parser intentionally preserves the full route.
 - `tokscale pricing <model>` matches the command argument as a catalog query.
-- Gateway paths must be written as full keys when you want that exact route.
+- Full gateway paths are only needed when you intentionally query or override
+  that exact route as a catalog key.
 
 Restart the command after editing the file because overrides are loaded at
 startup.

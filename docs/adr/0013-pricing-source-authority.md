@@ -65,9 +65,9 @@ as a separate dimension.
 
 ## Consequences
 
-- Wrong or missing model-price coverage is visible as `$0.00` until the parser
-  produces a canonical model id, a public catalog gains the model, or the user
-  adds an exact custom price.
+- Wrong or missing model-price coverage is visible as `$0.00` until parser/core
+  model canonicalization produces a priceable canonical id, a public catalog
+  gains the model, or the user adds an exact custom price.
 - The resolver is simpler and less surprising: no hardcoded Cursor/OpenCode
   price table, no private alias registry, and no silent model substitution.
 - Local reports may show lower total cost than before for private or dirty
