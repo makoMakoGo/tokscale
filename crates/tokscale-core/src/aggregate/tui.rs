@@ -474,7 +474,7 @@ impl TuiAcc {
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         let group_by = &self.group_by;
-        let normalized_model = msg.model_id.to_string();
+        let canonical_model_id = msg.model_id.to_string();
         let provider = normalize_provider_for_grouping(&msg.provider_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
         let (key, merge_clients) = grouped_model_bucket_key(
@@ -483,7 +483,7 @@ impl TuiAcc {
             &provider,
             &workspace_group_key,
             &msg.session_id,
-            &normalized_model,
+            &canonical_model_id,
         );
 
         let msg_cost = sane_cost(msg.cost);
@@ -492,7 +492,7 @@ impl TuiAcc {
             .model_map
             .entry(key.clone())
             .or_insert_with(|| UsageModelEntry {
-                model: normalized_model.clone(),
+                model: canonical_model_id.clone(),
                 provider: provider.clone(),
                 client: msg.client.to_string(),
                 workspace_key: if *group_by == GroupBy::WorkspaceModel {
@@ -615,7 +615,7 @@ impl TuiAcc {
                 &workspace_group_key,
                 &provider,
                 &msg.session_id,
-                &normalized_model,
+                &canonical_model_id,
             );
             let model_info = source_entry
                 .models
@@ -626,9 +626,9 @@ impl TuiAcc {
                         group_by,
                         &workspace_label,
                         &msg.session_id,
-                        &normalized_model,
+                        &canonical_model_id,
                     ),
-                    color_key: model_color_key(group_by, &provider, &normalized_model),
+                    color_key: model_color_key(group_by, &provider, &canonical_model_id),
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                     messages: 0,
@@ -660,14 +660,14 @@ impl TuiAcc {
             if msg.is_turn_start {
                 hourly_entry.turn_count += 1;
             }
-            let hkey = hourly_model_key(group_by, &provider, &normalized_model);
+            let hkey = hourly_model_key(group_by, &provider, &canonical_model_id);
             let hmodel = hourly_entry
                 .models
                 .entry(hkey)
                 .or_insert_with(|| HourlyModelInfo {
                     provider: provider.clone(),
-                    display_name: hourly_model_display_name(group_by, &normalized_model),
-                    color_key: model_color_key(group_by, &provider, &normalized_model),
+                    display_name: hourly_model_display_name(group_by, &canonical_model_id),
+                    color_key: model_color_key(group_by, &provider, &canonical_model_id),
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                 });

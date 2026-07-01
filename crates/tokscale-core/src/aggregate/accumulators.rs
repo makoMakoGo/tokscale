@@ -39,7 +39,7 @@ impl ModelEntries {
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         let group_by = &self.group_by;
-        let normalized = msg.model_id.to_string();
+        let canonical_model_id = msg.model_id.to_string();
         let provider = normalize_provider_for_grouping(&msg.provider_id);
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
         let (key, merge_clients) = grouped_model_bucket_key(
@@ -48,7 +48,7 @@ impl ModelEntries {
             &provider,
             &workspace_group_key,
             &msg.session_id,
-            &normalized,
+            &canonical_model_id,
         );
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = self
@@ -76,7 +76,7 @@ impl ModelEntries {
                 } else {
                     None
                 },
-                model: normalized.clone(),
+                model: canonical_model_id.clone(),
                 provider: provider.clone(),
                 input: 0,
                 output: 0,
