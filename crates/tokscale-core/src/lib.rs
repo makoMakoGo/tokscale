@@ -21,13 +21,11 @@ pub mod sessions;
 mod aggregate;
 pub mod usage_views;
 
-#[doc(hidden)]
-pub use aggregate::aggregate_usage_data as aggregate_finalized_usage_data;
 pub use aggregate::{
     aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
     build_contribution_graph_for_today, build_period_usage, calculate_streaks,
     calculate_streaks_for_today, find_peak_hour, AgentUsage, AggregatedViews, AggregationConfig,
-    DateRange, PeriodBucket, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
+    AggregationEngine, DateRange, PeriodBucket, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
 };
 pub use aggregator::{calculate_summary, calculate_years};
 pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
@@ -50,6 +48,7 @@ use std::time::Instant;
 ///
 /// Local report aggregation consumes finalized messages directly and treats
 /// `UnifiedMessage.model_id` as already canonical.
+#[doc(hidden)]
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
     model_aliases::canonicalize_model_id(model_id)
 }
