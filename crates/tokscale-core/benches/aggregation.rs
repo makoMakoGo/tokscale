@@ -108,6 +108,11 @@ fn push_and_finish(messages: &[UnifiedMessage], views: ViewSet, group_by: GroupB
         .as_ref()
         .map(|sessions| sessions.len())
         .unwrap_or(0);
+    rows += views
+        .agent_usage
+        .as_ref()
+        .map(|agents| agents.len())
+        .unwrap_or(0);
     if views.time_metrics.is_some() {
         rows += 1;
     }
