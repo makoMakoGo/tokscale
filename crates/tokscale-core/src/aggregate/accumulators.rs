@@ -11,8 +11,10 @@ use crate::{
     aggregator, normalize_provider_for_grouping, ordered_clients_by_token_contribution,
     positive_token_total, ClientContributionOrder, DailyContribution, GraphResult, GroupBy,
     HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
-    TimeMetricsReport, UnifiedMessage, ViewSet,
+    TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
 };
+
+use super::views::AgentUsage;
 
 fn hourly_label(hour_key: &str) -> String {
     // `hourly_report_label` returns `key[5..]` ("MM-DD HH:00"). Kept inline to
@@ -311,6 +313,58 @@ pub(super) fn finish_hour_map(hour_map: HashMap<String, HourAcc>) -> Vec<HourlyU
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries.into_iter().map(|(_, entry)| entry).collect()
+}
+
+#[derive(Default)]
+pub(super) struct AgentEntries {
+    agents: HashMap<(String, String), AgentUsage>,
+}
+
+impl AgentEntries {
+    pub(super) fn push(&mut self, msg: &UnifiedMessage) {
+        let Some(agent) = msg.agent.as_ref() else {
+            return;
+        };
+
+        let normalized_agent = if msg.client.as_ref() == "opencode" {
+            crate::sessions::normalize_opencode_agent_name(agent)
+        } else if msg.client.as_ref() == "copilot" {
+            crate::sessions::normalize_copilot_agent_name(agent)
+        } else {
+            crate::sessions::normalize_agent_name(agent)
+        };
+        let client = msg.client.to_string();
+        let entry = self
+            .agents
+            .entry((client.clone(), normalized_agent.clone()))
+            .or_insert_with(|| AgentUsage {
+                client,
+                agent: normalized_agent,
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                message_count: 0,
+            });
+
+        entry.tokens.input += msg.tokens.input;
+        entry.tokens.output += msg.tokens.output;
+        entry.tokens.cache_read += msg.tokens.cache_read;
+        entry.tokens.cache_write += msg.tokens.cache_write;
+        entry.tokens.reasoning += msg.tokens.reasoning;
+        entry.cost += msg.cost;
+        entry.message_count += 1;
+    }
+
+    pub(super) fn finish(self) -> Vec<AgentUsage> {
+        let mut agents: Vec<AgentUsage> = self.agents.into_values().collect();
+        agents.sort_by(|a, b| {
+            a.client
+                .cmp(&b.client)
+                .then_with(|| b.message_count.cmp(&a.message_count))
+                .then_with(|| b.tokens.total().cmp(&a.tokens.total()))
+                .then_with(|| a.agent.cmp(&b.agent))
+        });
+        agents
+    }
 }
 
 pub(super) struct BufferedViews {

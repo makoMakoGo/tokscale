@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 use tokscale_core::{
-    generate_graph, parse_local_clients, ClientId, GroupBy, LocalParseOptions, ReportOptions,
+    load_aggregated_views_with_pricing, ClientId, GroupBy, ReportOptions, ViewSet,
 };
 
 const SCALE: i32 = 2;
@@ -224,35 +224,30 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         clients.clone()
     };
 
-    let parsed_local = if options.include_agents && !local_clients.is_empty() {
-        Some(
-            parse_local_clients(LocalParseOptions {
-                home_dir: None,
-                use_env_roots: true,
-                clients: Some(local_clients),
-                since: Some(since.clone()),
-                until: Some(until.clone()),
-                year: Some(year.clone()),
-                scanner_settings: crate::tui::settings::load_scanner_settings(),
-            })
-            .map_err(anyhow::Error::msg)?,
-        )
-    } else {
-        None
-    };
+    let mut views = ViewSet::GRAPH | ViewSet::TIME_METRICS;
+    if options.include_agents && !local_clients.is_empty() {
+        views |= ViewSet::AGENTS;
+    }
 
-    let graph = generate_graph(ReportOptions {
-        home_dir: None,
-        use_env_roots: true,
-        clients: Some(graph_clients),
-        since: Some(since),
-        until: Some(until),
-        year: Some(year.clone()),
-        group_by: GroupBy::default(),
-        scanner_settings: crate::tui::settings::load_scanner_settings(),
-    })
-    .await
+    let pricing = tokscale_core::pricing::PricingService::get_or_init()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let aggregated = load_aggregated_views_with_pricing(
+        &ReportOptions {
+            home_dir: None,
+            use_env_roots: true,
+            clients: Some(graph_clients),
+            since: Some(since),
+            until: Some(until),
+            year: Some(year.clone()),
+            group_by: GroupBy::default(),
+            scanner_settings: crate::tui::settings::load_scanner_settings(),
+        },
+        views,
+        Some(pricing.as_ref()),
+    )
     .map_err(anyhow::Error::msg)?;
+    let graph = aggregated.graph.expect("graph view requested");
 
     let mut model_map: HashMap<String, WrappedRankedEntry> = HashMap::new();
     let mut client_map: HashMap<String, WrappedRankedEntry> = HashMap::new();
@@ -306,9 +301,10 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     top_clients.truncate(3);
 
     let top_agents = if options.include_agents {
-        parsed_local
+        aggregated
+            .agent_usage
             .as_ref()
-            .map(build_top_agents)
+            .map(|agents| build_top_agents(agents))
             .filter(|agents| !agents.is_empty())
     } else {
         None
@@ -355,34 +351,25 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     })
 }
 
-fn build_top_agents(parsed: &tokscale_core::ParsedMessages) -> Vec<WrappedAgentEntry> {
+fn build_top_agents(agent_usage: &[tokscale_core::AgentUsage]) -> Vec<WrappedAgentEntry> {
     let mut agent_map: HashMap<String, WrappedAgentEntry> = HashMap::new();
 
-    for message in &parsed.messages {
-        if message.client != "opencode" {
+    for agent in agent_usage {
+        if agent.client != "opencode" {
             continue;
         }
 
-        let Some(agent) = message.agent.as_ref() else {
-            continue;
-        };
-
-        let normalized = tokscale_core::sessions::normalize_opencode_agent_name(agent);
-        let tokens = message.input
-            + message.output
-            + message.cache_read
-            + message.cache_write
-            + message.reasoning;
+        let tokens = agent.tokens.total();
 
         let entry = agent_map
-            .entry(normalized.clone())
+            .entry(agent.agent.clone())
             .or_insert_with(|| WrappedAgentEntry {
-                name: normalized,
+                name: agent.agent.clone(),
                 tokens: 0,
                 messages: 0,
             });
         entry.tokens += tokens;
-        entry.messages += 1;
+        entry.messages += agent.message_count;
     }
 
     let mut agents: Vec<WrappedAgentEntry> = agent_map.into_values().collect();
@@ -1863,6 +1850,59 @@ mod tests {
         assert_eq!(format_tokens_short(123), "123");
         assert_eq!(format_tokens_short(0), "0");
         assert_eq!(format_tokens_short(999), "999");
+    }
+
+    #[test]
+    fn build_top_agents_filters_to_opencode_usage() {
+        let agents = build_top_agents(&[
+            tokscale_core::AgentUsage {
+                client: "opencode".to_string(),
+                agent: "Sisyphus".to_string(),
+                tokens: tokscale_core::TokenBreakdown {
+                    input: 10,
+                    output: 20,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 0.0,
+                message_count: 2,
+            },
+            tokscale_core::AgentUsage {
+                client: "codex".to_string(),
+                agent: "Sisyphus".to_string(),
+                tokens: tokscale_core::TokenBreakdown {
+                    input: 1000,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 0.0,
+                message_count: 50,
+            },
+            tokscale_core::AgentUsage {
+                client: "opencode".to_string(),
+                agent: "Reviewer".to_string(),
+                tokens: tokscale_core::TokenBreakdown {
+                    input: 5,
+                    output: 5,
+                    cache_read: 5,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                cost: 0.0,
+                message_count: 3,
+            },
+        ]);
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].name, "Sisyphus");
+        assert_eq!(agents[0].tokens, 30);
+        assert_eq!(agents[0].messages, 2);
+        assert_eq!(agents[1].name, "Reviewer");
+        assert_eq!(agents[1].tokens, 15);
+        assert_eq!(agents[1].messages, 3);
     }
 
     // ========== format_cost tests ==========

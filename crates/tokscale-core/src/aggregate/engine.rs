@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use crate::{
     aggregate::accumulators::{
-        finish_buffered_views, finish_hour_map, finish_month_map, hour_key, HourAcc, ModelEntries,
-        MonthAcc,
+        finish_buffered_views, finish_hour_map, finish_month_map, hour_key, AgentEntries, HourAcc,
+        ModelEntries, MonthAcc,
     },
     aggregate::tui::TuiAcc,
     AggregatedViews, AggregationConfig, ViewSet,
@@ -20,6 +20,7 @@ pub struct AggregationEngine {
     tui: Option<TuiAcc>,
     month_map: Option<HashMap<String, MonthAcc>>,
     hour_map: Option<HashMap<String, HourAcc>>,
+    agent_entries: Option<AgentEntries>,
     graph_buffer: Option<Vec<UnifiedMessage>>,
 }
 
@@ -38,6 +39,7 @@ impl AggregationEngine {
                 .then(|| TuiAcc::new(config.group_by.clone())),
             month_map: views.contains(ViewSet::MONTHLY).then(HashMap::new),
             hour_map: views.contains(ViewSet::HOURLY).then(HashMap::new),
+            agent_entries: views.contains(ViewSet::AGENTS).then(AgentEntries::default),
             graph_buffer: graph_needed.then(Vec::new),
             config,
         }
@@ -68,6 +70,9 @@ impl AggregationEngine {
             let key = hour_key(msg);
             hour_map.entry(key).or_default().push(msg);
         }
+        if let Some(agent_entries) = &mut self.agent_entries {
+            agent_entries.push(msg);
+        }
         if let Some(buffer) = &mut self.graph_buffer {
             buffer.push(msg.clone());
         }
@@ -80,6 +85,7 @@ impl AggregationEngine {
             tui,
             month_map,
             hour_map,
+            agent_entries,
             graph_buffer,
         } = self;
 
@@ -109,6 +115,8 @@ impl AggregationEngine {
             }
         });
 
+        let agent_usage = agent_entries.map(AgentEntries::finish);
+
         // Graph, sessions, and time-metrics share the same buffered projection.
         // `processing_time_ms` is the caller's responsibility (set after
         // `finish`); 0 here.
@@ -134,6 +142,7 @@ impl AggregationEngine {
             session_contributions,
             time_metrics,
             daily_contributions,
+            agent_usage,
         }
     }
 }

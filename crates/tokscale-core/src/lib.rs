@@ -26,8 +26,8 @@ pub use aggregate::aggregate_usage_data as aggregate_finalized_usage_data;
 pub use aggregate::{
     aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
     build_contribution_graph_for_today, build_period_usage, calculate_streaks,
-    calculate_streaks_for_today, find_peak_hour, AggregatedViews, AggregationConfig, DateRange,
-    PeriodBucket, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
+    calculate_streaks_for_today, find_peak_hour, AgentUsage, AggregatedViews, AggregationConfig,
+    DateRange, PeriodBucket, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
 };
 pub use aggregator::{calculate_summary, calculate_years};
 pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
@@ -61,6 +61,14 @@ fn retain_for_requested_clients(
     requested: &HashSet<&str>,
 ) -> bool {
     requested.contains(client) || (requested.contains("claude") && client.starts_with("cc-mirror/"))
+}
+
+fn client_count_bucket(client: &str) -> Option<ClientId> {
+    if client.starts_with("cc-mirror/") {
+        return Some(ClientId::Claude);
+    }
+
+    ClientId::from_str(client)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
@@ -226,6 +234,13 @@ pub struct ParsedMessage {
 pub struct ParsedMessages {
     pub messages: Vec<ParsedMessage>,
     pub counts: ClientCounts,
+    pub processing_time_ms: u32,
+}
+
+#[derive(Debug)]
+pub struct LocalClientMessageCounts {
+    pub counts: ClientCounts,
+    pub headless_codex_count: i32,
     pub processing_time_ms: u32,
 }
 
@@ -555,6 +570,39 @@ struct AggregationSink<'a>(&'a mut crate::aggregate::AggregationEngine);
 impl adapters::MessageSink for AggregationSink<'_> {
     fn push_message(&mut self, message: UnifiedMessage) {
         self.0.push(&message);
+    }
+}
+
+struct ClientCountSink {
+    counts: ClientCounts,
+    headless_codex_count: i32,
+    date_range: DateRange,
+}
+
+impl ClientCountSink {
+    fn new(date_range: DateRange) -> Self {
+        Self {
+            counts: ClientCounts::new(),
+            headless_codex_count: 0,
+            date_range,
+        }
+    }
+}
+
+impl adapters::MessageSink for ClientCountSink {
+    fn push_message(&mut self, message: UnifiedMessage) {
+        let date = message.date_string();
+        if !self.date_range.contains(&date) {
+            return;
+        }
+
+        if message.client.as_ref() == "codex" && message.agent.as_deref() == Some("headless") {
+            self.headless_codex_count += 1;
+        }
+
+        if let Some(client) = client_count_bucket(&message.client) {
+            self.counts.add(client, message.message_count.max(0));
+        }
     }
 }
 
@@ -1244,6 +1292,32 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     Ok(ParsedMessages {
         messages: filtered,
         counts,
+        processing_time_ms: start.elapsed().as_millis() as u32,
+    })
+}
+
+#[doc(hidden)]
+pub fn count_local_client_messages(
+    options: LocalParseOptions,
+) -> Result<LocalClientMessageCounts, String> {
+    let start = Instant::now();
+    let (home_dir, clients) = resolve_local_parse_request(&options)?;
+    let mut sink = ClientCountSink::new(DateRange {
+        since: options.since.clone(),
+        until: options.until.clone(),
+        year: options.year.clone(),
+    });
+    fold_local_sources_with_pricing(
+        &home_dir,
+        &clients,
+        None,
+        options.use_env_roots,
+        &options.scanner_settings,
+        &mut sink,
+    )?;
+    Ok(LocalClientMessageCounts {
+        counts: sink.counts,
+        headless_codex_count: sink.headless_codex_count,
         processing_time_ms: start.elapsed().as_millis() as u32,
     })
 }
@@ -3089,6 +3163,31 @@ mod tests {
             "anthropic",
             &requested
         ));
+    }
+
+    #[test]
+    fn test_client_count_sink_attributes_cc_mirror_variants_to_claude() {
+        let mut sink = super::ClientCountSink::new(DateRange::none());
+        let mut message = UnifiedMessage::new(
+            "cc-mirror/zai-worker",
+            "claude-sonnet-4",
+            "zai",
+            "mirror-session",
+            1_717_977_600_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.01,
+        );
+        message.message_count = 3;
+
+        super::adapters::MessageSink::push_message(&mut sink, message);
+
+        assert_eq!(sink.counts.get(ClientId::Claude), 3);
     }
 
     #[test]
