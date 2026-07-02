@@ -5,12 +5,15 @@
 use crate::sessions::UnifiedMessage;
 use crate::{
     normalize_provider_for_grouping, ClientContribution, DailyContribution, DailyTotals,
-    DataSummary, GraphMeta, GraphResult, SessionContribution, TokenBreakdown, YearSummary,
+    DataSummary, SessionContribution, TokenBreakdown, YearSummary,
 };
+#[cfg(test)]
+use crate::{GraphMeta, GraphResult};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Aggregate messages into daily contributions
+#[cfg(test)]
 pub(crate) fn aggregate_by_date(messages: &[UnifiedMessage]) -> Vec<DailyContribution> {
     if messages.is_empty() {
         return Vec::new();
@@ -198,6 +201,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
 }
 
 /// Generate complete graph result
+#[cfg(test)]
 pub(crate) fn generate_graph_result(
     contributions: Vec<DailyContribution>,
     processing_time_ms: u32,
@@ -233,12 +237,14 @@ pub(crate) fn generate_graph_result(
 // Internal helpers
 // =============================================================================
 
+#[cfg(test)]
 struct DayAccumulator {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
     clients: HashMap<String, ClientContribution>,
 }
 
+#[cfg(test)]
 impl Default for DayAccumulator {
     fn default() -> Self {
         Self {
@@ -249,6 +255,7 @@ impl Default for DayAccumulator {
     }
 }
 
+#[cfg(test)]
 impl DayAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
         let total_tokens = msg
@@ -721,6 +728,7 @@ struct YearAccumulator {
     end: String,
 }
 
+#[cfg(test)]
 fn calculate_intensities(contributions: &mut [DailyContribution]) {
     let max_cost = contributions
         .iter()
