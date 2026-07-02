@@ -155,6 +155,18 @@ pub enum SortDirection {
     Descending,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DetailSortContextKind {
+    Daily,
+    Period,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DetailSortContext {
+    list_sort_before_detail: Option<(SortField, SortDirection)>,
+    detail_sort_state: Option<(SortField, SortDirection)>,
+}
+
 pub struct ClickArea {
     pub rect: Rect,
     pub action: ClickAction,
@@ -336,20 +348,14 @@ pub struct App {
     pub scroll_offset: usize,
     pub selected_index: usize,
     pub max_visible_items: usize,
+    list_interactions: HashMap<Tab, ListInteraction>,
     pub(crate) usage_viewport: TextViewport,
     usage_text_total_lines: usize,
     pub(crate) hourly_profile_viewport: TextViewport,
     hourly_profile_text_total_lines: usize,
     pub selected_daily_detail_date: Option<NaiveDate>,
-    daily_list_selected_index: usize,
-    daily_list_scroll_offset: usize,
-    daily_list_sort_before_detail: Option<(SortField, SortDirection)>,
-    daily_detail_sort_state: Option<(SortField, SortDirection)>,
     pub selected_period_detail: Option<PeriodDetailSelection>,
-    period_list_selected_index: usize,
-    period_list_scroll_offset: usize,
-    period_list_sort_before_detail: Option<(SortField, SortDirection)>,
-    period_detail_sort_state: Option<(SortField, SortDirection)>,
+    detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
 
     pub selected_graph_cell: Option<(usize, usize)>,
     pub stats_breakdown_total_lines: usize,
@@ -482,20 +488,14 @@ impl App {
             scroll_offset: 0,
             selected_index: 0,
             max_visible_items: 20,
+            list_interactions: HashMap::new(),
             usage_viewport: TextViewport::default(),
             usage_text_total_lines: 0,
             hourly_profile_viewport: TextViewport::default(),
             hourly_profile_text_total_lines: 0,
             selected_daily_detail_date: None,
-            daily_list_selected_index: 0,
-            daily_list_scroll_offset: 0,
-            daily_list_sort_before_detail: None,
-            daily_detail_sort_state: None,
             selected_period_detail: None,
-            period_list_selected_index: 0,
-            period_list_scroll_offset: 0,
-            period_list_sort_before_detail: None,
-            period_detail_sort_state: None,
+            detail_sort_contexts: HashMap::new(),
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -610,8 +610,7 @@ impl App {
             if !self.data.daily.iter().any(|day| day.date == date) {
                 self.leave_daily_detail_sort_context();
                 self.selected_daily_detail_date = None;
-                self.selected_index = self.daily_list_selected_index;
-                self.scroll_offset = self.daily_list_scroll_offset;
+                self.set_current_list_interaction(self.stored_list_interaction(Tab::Daily));
             }
         }
         if let Some(selection) = self.selected_period_detail {
@@ -622,10 +621,10 @@ impl App {
                         && period.end_date == selection.end_date
                 });
             if !period_still_exists {
+                let tab = Self::period_tab(selection.kind);
                 self.leave_period_detail_sort_context();
                 self.selected_period_detail = None;
-                self.selected_index = self.period_list_selected_index;
-                self.scroll_offset = self.period_list_scroll_offset;
+                self.set_current_list_interaction(self.stored_list_interaction(tab));
             }
         }
 
@@ -774,22 +773,18 @@ impl App {
             KeyCode::Tab => {
                 let next = self.next_visible_tab();
                 self.switch_tab(next);
-                self.reset_selection();
             }
             KeyCode::BackTab => {
                 let prev = self.prev_visible_tab();
                 self.switch_tab(prev);
-                self.reset_selection();
             }
             KeyCode::Left => {
                 let prev = self.prev_visible_tab();
                 self.switch_tab(prev);
-                self.reset_selection();
             }
             KeyCode::Right => {
                 let next = self.next_visible_tab();
                 self.switch_tab(next);
-                self.reset_selection();
             }
             KeyCode::Up => {
                 self.move_selection_up();
@@ -896,8 +891,7 @@ impl App {
             KeyCode::Esc if self.selected_graph_cell.is_some() => {
                 self.selected_graph_cell = None;
                 self.stats_breakdown_total_lines = 0;
-                self.selected_index = 0;
-                self.scroll_offset = 0;
+                self.reset_current_list_interaction();
             }
             _ => {}
         }
@@ -979,7 +973,6 @@ impl App {
                         match &area.action {
                             ClickAction::Tab(tab) => {
                                 self.switch_tab(*tab);
-                                self.reset_selection();
                             }
                             ClickAction::Sort(field) => {
                                 self.set_sort(*field);
@@ -1078,6 +1071,64 @@ impl App {
         self.apply_text_viewport_move(command)
     }
 
+    fn current_list_interaction(&self) -> ListInteraction {
+        ListInteraction {
+            selected: self.selected_index,
+            scroll: self.scroll_offset,
+            visible: self.max_visible_items,
+        }
+    }
+
+    fn set_current_list_interaction(&mut self, interaction: ListInteraction) {
+        self.selected_index = interaction.selected;
+        self.scroll_offset = interaction.scroll;
+        self.max_visible_items = interaction.visible.max(1);
+    }
+
+    fn persist_list_interaction_for(&mut self, tab: Tab) {
+        self.list_interactions
+            .insert(tab, self.current_list_interaction());
+    }
+
+    fn should_persist_current_list_interaction(&self) -> bool {
+        if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
+            return false;
+        }
+        if self.current_period_kind().is_some() && self.is_period_detail_active() {
+            return false;
+        }
+        true
+    }
+
+    fn persist_current_list_interaction(&mut self) {
+        if self.should_persist_current_list_interaction() {
+            self.persist_list_interaction_for(self.current_tab);
+        }
+    }
+
+    fn stored_list_interaction(&self, tab: Tab) -> ListInteraction {
+        let mut interaction = self
+            .list_interactions
+            .get(&tab)
+            .copied()
+            .unwrap_or_default();
+        if interaction.visible == 0 {
+            interaction.visible = self.max_visible_items.max(1);
+        }
+        interaction
+    }
+
+    fn restore_current_list_interaction(&mut self) {
+        self.set_current_list_interaction(self.stored_list_interaction(self.current_tab));
+        self.clamp_selection();
+    }
+
+    fn reset_current_list_interaction(&mut self) {
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.persist_current_list_interaction();
+    }
+
     /// Clamp selection and scroll offset to valid bounds after data/resize changes.
     /// Stats breakdown is skipped here because `render_breakdown_panel` clamps
     /// with the actual panel height (not the full-terminal `max_visible_items`).
@@ -1085,15 +1136,12 @@ impl App {
         if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
             return;
         }
+
         let len = self.get_current_list_len();
-        if len == 0 {
-            self.selected_index = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        self.selected_index = self.selected_index.min(len.saturating_sub(1));
-        let max_scroll = len.saturating_sub(self.max_visible_items);
-        self.scroll_offset = self.scroll_offset.min(max_scroll);
+        let mut interaction = self.current_list_interaction();
+        interaction.set_visible(self.max_visible_items, len);
+        self.set_current_list_interaction(interaction);
+        self.persist_current_list_interaction();
     }
 
     pub fn clear_click_areas(&mut self) {
@@ -1107,16 +1155,12 @@ impl App {
     fn reset_selection(&mut self) {
         self.scroll_offset = 0;
         self.selected_index = 0;
+        self.list_interactions.clear();
         self.usage_viewport.scroll = 0;
         self.hourly_profile_viewport.scroll = 0;
         self.selected_daily_detail_date = None;
-        self.daily_list_selected_index = 0;
-        self.daily_list_scroll_offset = 0;
-        self.daily_list_sort_before_detail = None;
         self.selected_period_detail = None;
-        self.period_list_selected_index = 0;
-        self.period_list_scroll_offset = 0;
-        self.period_list_sort_before_detail = None;
+        self.detail_sort_contexts.clear();
         self.selected_graph_cell = None;
         self.stats_breakdown_total_lines = 0;
     }
@@ -1129,15 +1173,20 @@ impl App {
         let was_daily_detail = self.current_tab == Tab::Daily && self.is_daily_detail_active();
         let was_period_detail = self.is_period_detail_active();
         self.persist_current_sort();
+        self.persist_current_list_interaction();
 
         self.current_tab = target;
         if target != Tab::Daily || was_daily_detail {
             self.selected_daily_detail_date = None;
-            self.daily_list_sort_before_detail = None;
+            self.clear_detail_sort_context(DetailSortContextKind::Daily);
         }
         if was_period_detail {
             self.selected_period_detail = None;
-            self.period_list_sort_before_detail = None;
+            self.clear_detail_sort_context(DetailSortContextKind::Period);
+        }
+        if target != Tab::Stats {
+            self.selected_graph_cell = None;
+            self.stats_breakdown_total_lines = 0;
         }
 
         let (field, dir) = self
@@ -1147,6 +1196,7 @@ impl App {
             .unwrap_or_else(|| Self::default_sort_for_tab(target));
         self.sort_field = field;
         self.sort_direction = dir;
+        self.restore_current_list_interaction();
         self.refresh_current_tab_if_overdue();
         self.maybe_fetch_subscription_usage_on_usage_entry();
     }
@@ -1216,18 +1266,30 @@ impl App {
     fn persist_current_sort(&mut self) {
         let current_sort = (self.sort_field, self.sort_direction);
         if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
-            self.daily_detail_sort_state = Some(current_sort);
+            let context = self
+                .detail_sort_contexts
+                .entry(DetailSortContextKind::Daily)
+                .or_default();
+            context.detail_sort_state = Some(current_sort);
             let daily_sort = self
-                .daily_list_sort_before_detail
+                .detail_sort_contexts
+                .get(&DetailSortContextKind::Daily)
+                .and_then(|context| context.list_sort_before_detail)
                 .unwrap_or_else(|| Self::default_sort_for_tab(Tab::Daily));
             self.tab_sort_state.insert(Tab::Daily, daily_sort);
             return;
         }
         if let Some(selection) = self.selected_period_detail {
-            self.period_detail_sort_state = Some(current_sort);
+            let context = self
+                .detail_sort_contexts
+                .entry(DetailSortContextKind::Period)
+                .or_default();
+            context.detail_sort_state = Some(current_sort);
             let tab = Self::period_tab(selection.kind);
             let period_sort = self
-                .period_list_sort_before_detail
+                .detail_sort_contexts
+                .get(&DetailSortContextKind::Period)
+                .and_then(|context| context.list_sort_before_detail)
                 .unwrap_or_else(|| Self::default_sort_for_tab(tab));
             self.tab_sort_state.insert(tab, period_sort);
             return;
@@ -1236,50 +1298,68 @@ impl App {
         self.tab_sort_state.insert(self.current_tab, current_sort);
     }
 
-    fn enter_daily_detail_sort_context(&mut self) {
-        self.daily_list_sort_before_detail = Some((self.sort_field, self.sort_direction));
+    fn enter_detail_sort_context(
+        &mut self,
+        kind: DetailSortContextKind,
+        default_detail_sort: fn() -> (SortField, SortDirection),
+    ) {
+        let list_sort = (self.sort_field, self.sort_direction);
+        let context = self.detail_sort_contexts.entry(kind).or_default();
+        context.list_sort_before_detail = Some(list_sort);
         let (field, direction) = self
-            .daily_detail_sort_state
-            .unwrap_or_else(Self::default_sort_for_daily_detail);
+            .detail_sort_contexts
+            .get(&kind)
+            .and_then(|context| context.detail_sort_state)
+            .unwrap_or_else(default_detail_sort);
         self.sort_field = field;
         self.sort_direction = direction;
+    }
+
+    fn leave_detail_sort_context(&mut self, kind: DetailSortContextKind, tab: Tab) {
+        let detail_sort = (self.sort_field, self.sort_direction);
+        let saved_tab_sort = self.tab_sort_state.get(&tab).copied();
+        let context = self.detail_sort_contexts.entry(kind).or_default();
+        context.detail_sort_state = Some(detail_sort);
+        let list_sort = context
+            .list_sort_before_detail
+            .take()
+            .or(saved_tab_sort)
+            .unwrap_or_else(|| Self::default_sort_for_tab(tab));
+        self.sort_field = list_sort.0;
+        self.sort_direction = list_sort.1;
+        self.tab_sort_state.insert(tab, list_sort);
+    }
+
+    fn clear_detail_sort_context(&mut self, kind: DetailSortContextKind) {
+        if let Some(context) = self.detail_sort_contexts.get_mut(&kind) {
+            context.list_sort_before_detail = None;
+        }
+    }
+
+    fn enter_daily_detail_sort_context(&mut self) {
+        self.enter_detail_sort_context(
+            DetailSortContextKind::Daily,
+            Self::default_sort_for_daily_detail,
+        );
     }
 
     fn leave_daily_detail_sort_context(&mut self) {
-        self.daily_detail_sort_state = Some((self.sort_field, self.sort_direction));
-        let daily_sort = self
-            .daily_list_sort_before_detail
-            .take()
-            .or_else(|| self.tab_sort_state.get(&Tab::Daily).copied())
-            .unwrap_or_else(|| Self::default_sort_for_tab(Tab::Daily));
-        self.sort_field = daily_sort.0;
-        self.sort_direction = daily_sort.1;
-        self.tab_sort_state.insert(Tab::Daily, daily_sort);
+        self.leave_detail_sort_context(DetailSortContextKind::Daily, Tab::Daily);
     }
 
     fn enter_period_detail_sort_context(&mut self) {
-        self.period_list_sort_before_detail = Some((self.sort_field, self.sort_direction));
-        let (field, direction) = self
-            .period_detail_sort_state
-            .unwrap_or_else(Self::default_sort_for_period_detail);
-        self.sort_field = field;
-        self.sort_direction = direction;
+        self.enter_detail_sort_context(
+            DetailSortContextKind::Period,
+            Self::default_sort_for_period_detail,
+        );
     }
 
     fn leave_period_detail_sort_context(&mut self) {
-        self.period_detail_sort_state = Some((self.sort_field, self.sort_direction));
         let tab = self
             .selected_period_detail
             .map(|selection| Self::period_tab(selection.kind))
             .unwrap_or(self.current_tab);
-        let period_sort = self
-            .period_list_sort_before_detail
-            .take()
-            .or_else(|| self.tab_sort_state.get(&tab).copied())
-            .unwrap_or_else(|| Self::default_sort_for_tab(tab));
-        self.sort_field = period_sort.0;
-        self.sort_direction = period_sort.1;
-        self.tab_sort_state.insert(tab, period_sort);
+        self.leave_detail_sort_context(DetailSortContextKind::Period, tab);
     }
 
     fn move_selection_up(&mut self) {
@@ -1314,15 +1394,10 @@ impl App {
             WrapMode::Wrap
         };
 
-        let mut interaction = ListInteraction {
-            selected: self.selected_index,
-            scroll: self.scroll_offset,
-            visible: self.max_visible_items,
-        };
+        let mut interaction = self.current_list_interaction();
         let outcome = interaction.apply_move(command, len, wrap);
-        self.selected_index = interaction.selected;
-        self.scroll_offset = interaction.scroll;
-        self.max_visible_items = interaction.visible;
+        self.set_current_list_interaction(interaction);
+        self.persist_current_list_interaction();
         outcome
     }
 
@@ -1375,7 +1450,9 @@ impl App {
             self.selected_index = 0;
             self.scroll_offset = 0;
         } else {
-            self.reset_selection();
+            self.selected_graph_cell = None;
+            self.stats_breakdown_total_lines = 0;
+            self.reset_current_list_interaction();
         }
         self.set_status(&format!(
             "Sorted by {:?} {:?}",
@@ -1414,6 +1491,7 @@ impl App {
             }
 
             self.selected_graph_cell = None;
+            self.persist_current_list_interaction();
             self.set_local_report_status("Jumped to today's usage");
         } else {
             self.set_local_report_status("No usage recorded for today");
@@ -1471,8 +1549,7 @@ impl App {
         };
 
         if let Some(date) = selected_date {
-            self.daily_list_selected_index = self.selected_index;
-            self.daily_list_scroll_offset = self.scroll_offset;
+            self.persist_list_interaction_for(Tab::Daily);
             self.selected_daily_detail_date = Some(date);
             self.enter_daily_detail_sort_context();
             self.selected_index = 0;
@@ -1496,15 +1573,16 @@ impl App {
             .get_sorted_daily()
             .iter()
             .position(|day| day.date == detail_date)
-            .unwrap_or(self.daily_list_selected_index);
+            .unwrap_or_else(|| self.stored_list_interaction(Tab::Daily).selected);
 
         self.selected_index = restored_index;
 
+        let daily_interaction = self.stored_list_interaction(Tab::Daily);
         let max_visible = self.max_visible_items.max(1);
-        let viewport_still_holds = restored_index >= self.daily_list_scroll_offset
-            && restored_index < self.daily_list_scroll_offset + max_visible;
+        let viewport_still_holds = restored_index >= daily_interaction.scroll
+            && restored_index < daily_interaction.scroll + max_visible;
         self.scroll_offset = if viewport_still_holds {
-            self.daily_list_scroll_offset
+            daily_interaction.scroll
         } else {
             restored_index.saturating_sub(max_visible / 2)
         };
@@ -1533,8 +1611,7 @@ impl App {
         };
 
         if let Some((selection, label)) = selected_period {
-            self.period_list_selected_index = self.selected_index;
-            self.period_list_scroll_offset = self.scroll_offset;
+            self.persist_list_interaction_for(Self::period_tab(kind));
             self.selected_period_detail = Some(selection);
             self.enter_period_detail_sort_context();
             self.selected_index = 0;
@@ -1558,15 +1635,19 @@ impl App {
             .position(|period| {
                 period.start_date == selection.start_date && period.end_date == selection.end_date
             })
-            .unwrap_or(self.period_list_selected_index);
+            .unwrap_or_else(|| {
+                self.stored_list_interaction(Self::period_tab(selection.kind))
+                    .selected
+            });
 
         self.selected_index = restored_index;
 
+        let period_interaction = self.stored_list_interaction(Self::period_tab(selection.kind));
         let max_visible = self.max_visible_items.max(1);
-        let viewport_still_holds = restored_index >= self.period_list_scroll_offset
-            && restored_index < self.period_list_scroll_offset + max_visible;
+        let viewport_still_holds = restored_index >= period_interaction.scroll
+            && restored_index < period_interaction.scroll + max_visible;
         self.scroll_offset = if viewport_still_holds {
-            self.period_list_scroll_offset
+            period_interaction.scroll
         } else {
             restored_index.saturating_sub(max_visible / 2)
         };
@@ -2700,16 +2781,85 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_key_tab_resets_selection() {
+    fn test_handle_key_tab_restores_target_tab_selection() {
+        let mut app = make_app_with_models(5);
+        app.switch_tab(Tab::Models);
+        app.max_visible_items = 3;
+        app.selected_index = 3;
+        app.scroll_offset = 1;
+        app.switch_tab(Tab::Overview);
+        app.selected_graph_cell = Some((2, 4));
+
+        app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Models);
+        assert_eq!(app.selected_index, 3);
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.selected_graph_cell, None);
+    }
+
+    #[test]
+    fn test_switch_tab_preserves_each_tab_list_interaction() {
+        let mut app = make_app_with_models(5);
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage("2026-05-17", 7.0, vec![("target", "openai", 7.0)]),
+            daily_usage("2026-05-18", 3.0, vec![("other", "google", 3.0)]),
+        ];
+
+        app.switch_tab(Tab::Models);
+        app.max_visible_items = 3;
+        app.selected_index = 4;
+        app.scroll_offset = 2;
+
+        app.switch_tab(Tab::Daily);
+        app.max_visible_items = 2;
+        app.selected_index = 1;
+        app.scroll_offset = 1;
+
+        app.switch_tab(Tab::Models);
+        assert_eq!(app.selected_index, 4);
+        assert_eq!(app.scroll_offset, 2);
+
+        app.switch_tab(Tab::Daily);
+        assert_eq!(app.selected_index, 1);
+        assert_eq!(app.scroll_offset, 1);
+    }
+
+    #[test]
+    fn test_switch_tab_from_daily_detail_restores_daily_parent_state() {
+        let mut app = make_app_with_models(5);
+        app.current_tab = Tab::Daily;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage("2026-05-17", 7.0, vec![("target", "openai", 7.0)]),
+            daily_usage("2026-05-18", 3.0, vec![("other", "google", 3.0)]),
+        ];
+
+        app.max_visible_items = 2;
+        app.selected_index = 1;
+        app.scroll_offset = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_daily_detail_active());
+
+        app.switch_tab(Tab::Models);
+        assert!(!app.is_daily_detail_active());
+
+        app.switch_tab(Tab::Daily);
+        assert_eq!(app.selected_index, 1);
+        assert_eq!(app.scroll_offset, 1);
+    }
+
+    #[test]
+    fn test_handle_key_tab_resets_selection_when_target_has_no_saved_state() {
         let mut app = make_app_with_models(5);
         app.selected_index = 3;
         app.scroll_offset = 1;
-        app.selected_graph_cell = Some((2, 4));
 
         app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.selected_index, 0);
         assert_eq!(app.scroll_offset, 0);
-        assert_eq!(app.selected_graph_cell, None);
     }
 
     #[test]
