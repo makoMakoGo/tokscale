@@ -78,22 +78,6 @@ mod tests {
     }
 
     #[test]
-    fn submit_default_matches_catalog_policy() {
-        let excluded: HashSet<ClientId> = ClientId::iter()
-            .filter(|client| !client.submit_default())
-            .collect();
-        assert_eq!(
-            excluded,
-            HashSet::from([
-                ClientId::Crush,
-                ClientId::Trae,
-                ClientId::Warp,
-                ClientId::CommandCode,
-            ])
-        );
-    }
-
-    #[test]
     fn client_counts_get_set_add_work() {
         let mut counts = ClientCounts::new();
 

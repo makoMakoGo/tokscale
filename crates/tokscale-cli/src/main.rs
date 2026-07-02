@@ -1,9 +1,7 @@
 mod antigravity;
-mod auth;
 mod claude_diagnostics;
 mod commands;
 mod cursor;
-mod device;
 mod paths;
 mod trae;
 mod tui;
@@ -180,23 +178,6 @@ enum Commands {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
-    #[command(about = "Login to Tokscale (opens browser for GitHub auth)")]
-    Login {
-        #[arg(
-            long,
-            help = "Save an existing Tokscale API token without browser auth"
-        )]
-        token: Option<String>,
-    },
-    #[command(about = "Logout from Tokscale")]
-    Logout,
-    #[command(about = "Show current logged in user")]
-    Whoami,
-    #[command(about = "Display saved API token as QR code")]
-    Qr {
-        #[arg(long, help = "Skip the on-screen warning + confirmation prompt")]
-        yes: bool,
-    },
     #[command(about = "Export contribution graph data as JSON")]
     Graph {
         #[arg(long, help = "Write to file instead of stdout")]
@@ -216,18 +197,6 @@ enum Commands {
         clients: ClientFlags,
         #[command(flatten)]
         date: DateRangeFlags,
-    },
-    #[command(about = "Submit usage data to the Tokscale social platform")]
-    Submit {
-        #[command(flatten)]
-        clients: ClientFlags,
-        #[command(flatten)]
-        date: DateRangeFlags,
-        #[arg(
-            long,
-            help = "Show what would be submitted without actually submitting"
-        )]
-        dry_run: bool,
     },
     #[command(about = "Capture subprocess output for token usage tracking")]
     Headless {
@@ -297,8 +266,6 @@ enum Commands {
         #[command(subcommand)]
         subcommand: WarpSubcommand,
     },
-    #[command(about = "Delete all submitted usage data from the server")]
-    DeleteSubmittedData,
     #[command(
         about = "Show session time metrics (usage time, longest continuous, max concurrent)"
     )]
@@ -618,22 +585,6 @@ fn main() -> Result<()> {
             run_pricing_lookup(&model_id, json, provider.as_deref(), no_spinner)
         }
         Some(Commands::Clients { json }) => run_clients_command(json, cli.home.clone()),
-        Some(Commands::Login { token }) => {
-            reject_unsupported_home_override(&cli.home, "login")?;
-            run_login_command(token)
-        }
-        Some(Commands::Logout) => {
-            reject_unsupported_home_override(&cli.home, "logout")?;
-            run_logout_command()
-        }
-        Some(Commands::Whoami) => {
-            reject_unsupported_home_override(&cli.home, "whoami")?;
-            run_whoami_command()
-        }
-        Some(Commands::Qr { yes }) => {
-            reject_unsupported_home_override(&cli.home, "qr")?;
-            run_qr_command(yes)
-        }
         Some(Commands::Graph {
             output,
             clients,
@@ -677,25 +628,6 @@ fn main() -> Result<()> {
                 year,
                 None,
             )
-        }
-        Some(Commands::Submit {
-            clients,
-            date,
-            dry_run,
-        }) => {
-            reject_unsupported_home_override(&cli.home, "submit")?;
-            let today = date.today;
-            let week = date.week;
-            let month = date.month;
-            let (since, until) = build_date_filter(today, week, month, date.since, date.until);
-            let year = normalize_year_filter(today, week, month, date.year);
-            // Bypass settings.json defaultClients for the submit path: we want the
-            // submit-specific default_submit_clients() fallback (in run_submit_command)
-            // to fire when the user passes no client flags, not the user's general
-            // defaultClients view filter (which may exclude clients they still want
-            // to upload). Pass an explicit empty defaults slice.
-            let clients = build_client_filter_with_defaults(clients, &[])?;
-            run_submit_command(clients, since, until, year, dry_run)
         }
         Some(Commands::Headless {
             source,
@@ -753,10 +685,6 @@ fn main() -> Result<()> {
         Some(Commands::Warp { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "warp")?;
             run_warp_command(subcommand)
-        }
-        Some(Commands::DeleteSubmittedData) => {
-            reject_unsupported_home_override(&cli.home, "delete-submitted-data")?;
-            run_delete_data_command()
         }
         Some(Commands::TimeMetrics {
             json,
@@ -1191,13 +1119,6 @@ fn emit_cursor_sync_warning(
         };
         eprintln!("{}", format!("  {}: {}", prefix, error).yellow());
     }
-}
-
-fn default_submit_clients() -> Vec<String> {
-    tokscale_core::ClientId::iter()
-        .filter(|client| client.submit_default())
-        .map(|client| client.as_str().to_string())
-        .collect()
 }
 
 fn reject_unsupported_home_override(home_dir: &Option<String>, command: &str) -> Result<()> {
@@ -3234,25 +3155,6 @@ fn aggregate_model_report_performance(
     performance
 }
 
-/// Format a URL as an OSC 8 clickable hyperlink for supported terminals.
-/// Falls back to plain URL text when stdout is not a terminal.
-fn osc8_link(url: &str) -> String {
-    if std::io::stdout().is_terminal() {
-        format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, url)
-    } else {
-        url.to_string()
-    }
-}
-/// Format text as an OSC 8 clickable hyperlink with custom display text.
-/// Falls back to plain display text when stdout is not a terminal.
-fn osc8_link_with_text(url: &str, text: &str) -> String {
-    if std::io::stdout().is_terminal() {
-        format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, text)
-    } else {
-        text.to_string()
-    }
-}
-
 fn dim_borders(table_str: &str) -> String {
     let border_chars: &[char] = &['┌', '─', '┬', '┐', '│', '├', '┼', '┤', '└', '┴', '┘'];
     let mut result = String::with_capacity(table_str.len() * 2);
@@ -3776,7 +3678,7 @@ fn format_number(n: i32) -> String {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsTokenBreakdown {
+struct GraphTokenBreakdown {
     input: i64,
     output: i64,
     cache_read: i64,
@@ -3786,19 +3688,19 @@ struct TsTokenBreakdown {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsSourceContribution {
+struct GraphSourceContribution {
     client: String,
     model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_id: Option<String>,
-    tokens: TsTokenBreakdown,
+    tokens: GraphTokenBreakdown,
     cost: f64,
     messages: i32,
 }
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsDailyTotals {
+struct GraphDailyTotals {
     tokens: i64,
     cost: f64,
     messages: i32,
@@ -3806,34 +3708,34 @@ struct TsDailyTotals {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsDailyContribution {
+struct GraphDailyContribution {
     date: String,
-    totals: TsDailyTotals,
+    totals: GraphDailyTotals,
     intensity: u8,
-    token_breakdown: TsTokenBreakdown,
-    clients: Vec<TsSourceContribution>,
+    token_breakdown: GraphTokenBreakdown,
+    clients: Vec<GraphSourceContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_time_ms: Option<i64>,
 }
 
 #[derive(serde::Serialize)]
-struct DateRange {
+struct GraphDateRange {
     start: String,
     end: String,
 }
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsYearSummary {
+struct GraphYearSummary {
     year: String,
     total_tokens: i64,
     total_cost: f64,
-    range: DateRange,
+    range: GraphDateRange,
 }
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsDataSummary {
+struct GraphDataSummary {
     total_tokens: i64,
     total_cost: f64,
     total_days: i32,
@@ -3846,23 +3748,15 @@ struct TsDataSummary {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsExportMeta {
+struct GraphExportMeta {
     generated_at: String,
     version: String,
-    date_range: DateRange,
+    date_range: GraphDateRange,
 }
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsSubmitDevice {
-    id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TsTimeMetrics {
+struct GraphTimeMetrics {
     total_active_time_ms: i64,
     longest_continuous_ms: i64,
     max_concurrent_sessions: u32,
@@ -3871,37 +3765,28 @@ struct TsTimeMetrics {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TsTokenContributionData {
-    meta: TsExportMeta,
+struct GraphExportData {
+    meta: GraphExportMeta,
+    summary: GraphDataSummary,
+    years: Vec<GraphYearSummary>,
+    contributions: Vec<GraphDailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    device: Option<TsSubmitDevice>,
-    summary: TsDataSummary,
-    years: Vec<TsYearSummary>,
-    contributions: Vec<TsDailyContribution>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    time_metrics: Option<TsTimeMetrics>,
+    time_metrics: Option<GraphTimeMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mcp_servers: Option<Vec<String>>,
 }
 
-fn to_ts_token_contribution_data(
-    graph: &tokscale_core::GraphResult,
-    device: Option<&device::SubmitDevice>,
-) -> TsTokenContributionData {
-    TsTokenContributionData {
-        meta: TsExportMeta {
+fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphExportData {
+    GraphExportData {
+        meta: GraphExportMeta {
             generated_at: graph.meta.generated_at.clone(),
             version: graph.meta.version.clone(),
-            date_range: DateRange {
+            date_range: GraphDateRange {
                 start: graph.meta.date_range_start.clone(),
                 end: graph.meta.date_range_end.clone(),
             },
         },
-        device: device.map(|d| TsSubmitDevice {
-            id: d.id.clone(),
-            name: d.name.clone(),
-        }),
-        summary: TsDataSummary {
+        summary: GraphDataSummary {
             total_tokens: graph.summary.total_tokens,
             total_cost: graph.summary.total_cost,
             total_days: graph.summary.total_days,
@@ -3914,11 +3799,11 @@ fn to_ts_token_contribution_data(
         years: graph
             .years
             .iter()
-            .map(|y| TsYearSummary {
+            .map(|y| GraphYearSummary {
                 year: y.year.clone(),
                 total_tokens: y.total_tokens,
                 total_cost: y.total_cost,
-                range: DateRange {
+                range: GraphDateRange {
                     start: y.range_start.clone(),
                     end: y.range_end.clone(),
                 },
@@ -3927,15 +3812,15 @@ fn to_ts_token_contribution_data(
         contributions: graph
             .contributions
             .iter()
-            .map(|d| TsDailyContribution {
+            .map(|d| GraphDailyContribution {
                 date: d.date.clone(),
-                totals: TsDailyTotals {
+                totals: GraphDailyTotals {
                     tokens: d.totals.tokens,
                     cost: d.totals.cost,
                     messages: d.totals.messages,
                 },
                 intensity: d.intensity,
-                token_breakdown: TsTokenBreakdown {
+                token_breakdown: GraphTokenBreakdown {
                     input: d.token_breakdown.input,
                     output: d.token_breakdown.output,
                     cache_read: d.token_breakdown.cache_read,
@@ -3945,7 +3830,7 @@ fn to_ts_token_contribution_data(
                 clients: d
                     .clients
                     .iter()
-                    .map(|s| TsSourceContribution {
+                    .map(|s| GraphSourceContribution {
                         client: s.client.clone(),
                         model_id: s.model_id.clone(),
                         provider_id: if s.provider_id.is_empty() {
@@ -3953,7 +3838,7 @@ fn to_ts_token_contribution_data(
                         } else {
                             Some(s.provider_id.clone())
                         },
-                        tokens: TsTokenBreakdown {
+                        tokens: GraphTokenBreakdown {
                             input: s.tokens.input,
                             output: s.tokens.output,
                             cache_read: s.tokens.cache_read,
@@ -3967,7 +3852,7 @@ fn to_ts_token_contribution_data(
                 active_time_ms: d.active_time_ms,
             })
             .collect(),
-        time_metrics: graph.time_metrics.as_ref().map(|tm| TsTimeMetrics {
+        time_metrics: graph.time_metrics.as_ref().map(|tm| GraphTimeMetrics {
             total_active_time_ms: tm.total_active_time_ms,
             longest_continuous_ms: tm.longest_continuous_ms,
             max_concurrent_sessions: tm.max_concurrent_sessions,
@@ -3982,331 +3867,6 @@ fn to_ts_token_contribution_data(
             }
         },
     }
-}
-
-fn run_login_command(token: Option<String>) -> Result<()> {
-    use tokio::runtime::Runtime;
-
-    let rt = Runtime::new()?;
-    rt.block_on(async {
-        match token {
-            Some(token) => auth::login_with_token(&token).await,
-            None => auth::login().await,
-        }
-    })
-}
-
-fn run_logout_command() -> Result<()> {
-    auth::logout()
-}
-
-fn run_whoami_command() -> Result<()> {
-    auth::whoami()
-}
-
-fn run_qr_command(yes: bool) -> Result<()> {
-    auth::show_qr(yes)
-}
-
-fn run_delete_data_command() -> Result<()> {
-    use colored::Colorize;
-    use std::io::{self, Write};
-    use tokio::runtime::Runtime;
-
-    let auth_token = auth::resolve_api_token().ok_or_else(|| {
-        anyhow::anyhow!("Not logged in. Run `tokscale login` or set TOKSCALE_API_TOKEN.")
-    })?;
-
-    println!("\n{}", "  ⚠ Delete all submitted usage data".red().bold());
-    println!("{}", "  This will permanently remove:".bright_black());
-    println!("{}", "    • Leaderboard entries".bright_black());
-    println!("{}", "    • Public profile stats".bright_black());
-    println!("{}", "    • Daily usage history".bright_black());
-    println!(
-        "{}",
-        "  Your account and API tokens will stay active.\n".bright_black()
-    );
-
-    print!(
-        "{}",
-        "  Are you sure you want to delete all submitted data? (y/N): ".white()
-    );
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    if input.trim().to_lowercase() != "y" {
-        println!("{}", "  Cancelled.".bright_black());
-        return Ok(());
-    }
-
-    print!(
-        "{}",
-        "  This cannot be undone. You will lose all historical token/cost data. Continue? (y/N): "
-            .white()
-    );
-    io::stdout().flush()?;
-    input.clear();
-    io::stdin().read_line(&mut input)?;
-    if input.trim().to_lowercase() != "y" {
-        println!("{}", "  Cancelled.".bright_black());
-        return Ok(());
-    }
-
-    print!("{}", "  Type \"delete my data\" to confirm: ".white());
-    io::stdout().flush()?;
-    input.clear();
-    io::stdin().read_line(&mut input)?;
-    if input.trim().to_lowercase() != "delete my data" {
-        println!("{}", "  Confirmation failed. Cancelled.".bright_black());
-        return Ok(());
-    }
-
-    println!("\n{}", "  Deleting submitted data...".bright_black());
-
-    let api_url = auth::get_api_base_url();
-    let rt = Runtime::new()?;
-
-    let response = rt.block_on(async {
-        reqwest::Client::new()
-            .delete(format!("{}/api/settings/submitted-data", api_url))
-            .header("Authorization", format!("Bearer {}", auth_token.token))
-            .send()
-            .await
-    });
-
-    match response {
-        Ok(resp) => {
-            let status = resp.status();
-            let body: serde_json::Value =
-                rt.block_on(async { resp.json().await }).unwrap_or_default();
-
-            match interpret_delete_submitted_data_response(status, &body)? {
-                DeleteSubmittedDataOutcome::Deleted(count) => {
-                    println!(
-                        "{}",
-                        format!(
-                            "  ✓ Deleted {} submission(s). Leaderboard and profile will refresh shortly.",
-                            count
-                        )
-                        .green()
-                    );
-                }
-                DeleteSubmittedDataOutcome::NotFound => {
-                    println!("{}", "  No submitted data found for this account.".yellow());
-                }
-            }
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!("Request failed: {}", e));
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum DeleteSubmittedDataOutcome {
-    Deleted(i64),
-    NotFound,
-}
-
-fn interpret_delete_submitted_data_response(
-    status: reqwest::StatusCode,
-    body: &serde_json::Value,
-) -> Result<DeleteSubmittedDataOutcome> {
-    if status.is_success() {
-        let deleted = body
-            .get("deleted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let count = body
-            .get("deletedSubmissions")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
-        if deleted {
-            Ok(DeleteSubmittedDataOutcome::Deleted(count))
-        } else {
-            Ok(DeleteSubmittedDataOutcome::NotFound)
-        }
-    } else {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        Err(anyhow::anyhow!("Failed ({}): {}", status, err))
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct StarCache {
-    #[serde(default)]
-    username: String,
-    #[serde(default)]
-    has_starred: bool,
-    #[serde(default)]
-    checked_at: String,
-}
-
-fn star_cache_path() -> Option<PathBuf> {
-    Some(crate::paths::get_config_dir().join("star-cache.json"))
-}
-
-fn legacy_macos_star_cache_path() -> Option<PathBuf> {
-    crate::paths::legacy_macos_config_dir().map(|d| d.join("star-cache.json"))
-}
-
-fn load_star_cache(username: &str) -> Option<StarCache> {
-    // Read the canonical path first; on macOS, fall back once to the
-    // pre-#468 location under `~/Library/Application Support/tokscale/`
-    // so existing users don't get re-prompted to star the repo just
-    // because their previous cache lives at the legacy path. The legacy
-    // read is suppressed when `TOKSCALE_CONFIG_DIR` is set so isolated
-    // profiles stay hermetic.
-    let primary = star_cache_path().and_then(|path| std::fs::read_to_string(path).ok());
-    let content = primary.or_else(|| {
-        legacy_macos_star_cache_path().and_then(|legacy| std::fs::read_to_string(legacy).ok())
-    })?;
-    let cache: StarCache = serde_json::from_str(&content).ok()?;
-    // Must match username and have hasStarred=true
-    if cache.username != username || !cache.has_starred {
-        return None;
-    }
-    Some(cache)
-}
-
-fn save_star_cache(username: &str, has_starred: bool) {
-    // Only cache positive confirmations (matching v1 behavior)
-    if !has_starred {
-        return;
-    }
-    let Some(path) = star_cache_path() else {
-        return;
-    };
-    let now = chrono::Utc::now().to_rfc3339();
-    let cache = StarCache {
-        username: username.to_string(),
-        has_starred,
-        checked_at: now,
-    };
-    if let Ok(content) = serde_json::to_string_pretty(&cache) {
-        if let Some(dir) = path.parent() {
-            if std::fs::create_dir_all(dir).is_err() {
-                return;
-            }
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let tmp_filename = format!(".star-cache.{}.{:x}.tmp", std::process::id(), nanos);
-            let tmp_path = dir.join(tmp_filename);
-
-            let write_result = (|| -> std::io::Result<()> {
-                use std::io::Write;
-                let mut file = std::fs::File::create(&tmp_path)?;
-                file.write_all(content.as_bytes())?;
-                file.sync_all()?;
-                tokscale_core::fs_atomic::replace_file(&tmp_path, &path)
-            })();
-
-            if write_result.is_err() {
-                let _ = std::fs::remove_file(&tmp_path);
-            }
-        }
-    }
-}
-
-fn prompt_star_repo(username: &str) -> Result<()> {
-    use colored::Colorize;
-    use std::io::{self, Write};
-    use std::process::Command;
-
-    // Check local cache first (avoids network call)
-    if load_star_cache(username).is_some() {
-        return Ok(());
-    }
-
-    // Check if gh CLI is available
-    let gh_available = Command::new("gh")
-        .arg("--version")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false);
-
-    if !gh_available {
-        return Ok(());
-    }
-
-    // Check if user has already starred via gh API
-    // Returns exit 0 (HTTP 204) if starred, non-zero (HTTP 404) if not
-    let already_starred = Command::new("gh")
-        .args(["api", "/user/starred/junhoyeo/tokscale"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if already_starred {
-        save_star_cache(username, true);
-        return Ok(());
-    }
-
-    println!();
-    println!("{}", "  Help us grow! \u{2b50}".cyan());
-    println!(
-        "{}",
-        "  Starring tokscale helps others discover the project.".bright_black()
-    );
-    println!(
-        "  {}\n",
-        osc8_link("https://github.com/junhoyeo/tokscale").bright_black()
-    );
-    print!(
-        "{}",
-        "  \u{2b50} Would you like to star tokscale? (Y/n): ".white()
-    );
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let answer = input.trim().to_lowercase();
-    if answer == "n" || answer == "no" {
-        // Decline: don't cache (will re-prompt next time, matching v1)
-        println!();
-        return Ok(());
-    }
-
-    // Star via gh API (gh repo star is not a valid command)
-    let status = Command::new("gh")
-        .args([
-            "api",
-            "--silent",
-            "--method",
-            "PUT",
-            "/user/starred/junhoyeo/tokscale",
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            println!(
-                "{}",
-                "  \u{2713} Starred! Thank you for your support.\n".green()
-            );
-            save_star_cache(username, true);
-        }
-        _ => {
-            println!(
-                "{}",
-                "  Failed to star via gh CLI. Continuing to submit...\n".yellow()
-            );
-        }
-    }
-
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4472,7 +4032,7 @@ fn run_graph_command(
     emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
-    let output_data = to_ts_token_contribution_data(&graph_result, None);
+    let output_data = to_graph_export_data(&graph_result);
     let json_output = serde_json::to_string_pretty(&output_data)?;
 
     if let Some(output_path) = output {
@@ -4530,353 +4090,6 @@ fn run_graph_command(
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
-struct SubmitResponse {
-    #[serde(rename = "submissionId")]
-    submission_id: Option<String>,
-    #[allow(dead_code)]
-    username: Option<String>,
-    metrics: Option<SubmitMetrics>,
-    warnings: Option<Vec<String>>,
-    error: Option<String>,
-    details: Option<Vec<String>>,
-}
-
-#[derive(serde::Deserialize)]
-struct SubmitMetrics {
-    #[serde(rename = "totalTokens")]
-    total_tokens: Option<i64>,
-    #[serde(rename = "totalCost")]
-    total_cost: Option<f64>,
-    #[serde(rename = "activeDays")]
-    active_days: Option<i32>,
-    #[allow(dead_code)]
-    sources: Option<Vec<String>>,
-}
-
-fn cap_graph_result_to_utc_today(
-    graph_result: &mut tokscale_core::GraphResult,
-    utc_today: &str,
-) -> bool {
-    let pre_cap_len = graph_result.contributions.len();
-    graph_result
-        .contributions
-        .retain(|c| c.date.as_str() <= utc_today);
-    if graph_result.contributions.len() == pre_cap_len {
-        return false;
-    }
-
-    graph_result.meta.date_range_start = graph_result
-        .contributions
-        .first()
-        .map(|c| c.date.clone())
-        .unwrap_or_default();
-    graph_result.meta.date_range_end = graph_result
-        .contributions
-        .last()
-        .map(|c| c.date.clone())
-        .unwrap_or_default();
-    graph_result.summary = tokscale_core::calculate_summary(&graph_result.contributions);
-    graph_result.years = tokscale_core::calculate_years(&graph_result.contributions);
-
-    true
-}
-
-fn run_submit_command(
-    clients: Option<Vec<String>>,
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
-    dry_run: bool,
-) -> Result<()> {
-    use colored::Colorize;
-    use std::io::IsTerminal;
-    use tokio::runtime::Runtime;
-    use tokscale_core::{generate_graph, GroupBy, ReportOptions};
-
-    let auth_token = match auth::resolve_api_token() {
-        Some(token) => token,
-        None => {
-            eprintln!("\n  {}", "Not logged in.".yellow());
-            eprintln!(
-                "{}",
-                "  Run 'bunx tokscale@latest login' or set TOKSCALE_API_TOKEN.\n".bright_black()
-            );
-            std::process::exit(1);
-        }
-    };
-
-    if auth_token.source == auth::ApiTokenSource::StoredCredentials
-        && std::io::stdin().is_terminal()
-        && std::io::stdout().is_terminal()
-    {
-        if let Some(username) = auth_token.username.as_deref() {
-            let _ = prompt_star_repo(username);
-        }
-    }
-
-    println!("\n  {}\n", "Tokscale - Submit Usage Data".cyan());
-
-    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
-    let explicit_warp_filter = client_filter_explicitly_requests_warp(&clients);
-    let clients = clients.or_else(|| Some(default_submit_clients()));
-
-    let include_cursor = clients
-        .as_ref()
-        .is_none_or(|s| s.iter().any(|src| src == "cursor"));
-    let report_home: Option<String> = None;
-    let has_cursor_cache = has_cursor_usage_cache_for_report(&report_home);
-    if include_cursor && cursor::is_cursor_logged_in() {
-        println!("{}", "  Syncing Cursor usage data...".bright_black());
-        let rt_sync = Runtime::new()?;
-        let sync_result = rt_sync.block_on(async { cursor::sync_cursor_cache().await });
-        if sync_result.synced {
-            println!(
-                "{}",
-                format!("  Cursor: {} usage events synced", sync_result.rows).bright_black()
-            );
-        } else if let Some(err) = sync_result.error {
-            if has_cursor_cache {
-                println!(
-                    "{}",
-                    format!("  Cursor sync failed; using cached data: {}", err).yellow()
-                );
-            }
-        }
-    }
-    if explicit_cursor_filter || explicit_warp_filter {
-        let cursor_setup_warnings = setup_warnings_for_report(&report_home, &clients);
-        emit_cursor_setup_warnings(&cursor_setup_warnings);
-    }
-
-    println!("{}", "  Scanning local session data...".bright_black());
-
-    let rt = Runtime::new()?;
-    let graph_result = rt
-        .block_on(async {
-            generate_graph(ReportOptions {
-                home_dir: None,
-                use_env_roots: true,
-                clients,
-                since,
-                until,
-                year,
-                group_by: GroupBy::default(),
-                scanner_settings: tui::settings::load_scanner_settings(),
-            })
-            .await
-        })
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    // Cap contributions to UTC today to prevent timezone-related future-date
-    // rejections. The CLI generates dates using chrono::Local, but the server
-    // validates against UTC. In UTC+ timezones the local date can be ahead of
-    // UTC around midnight, causing valid same-day data to be flagged as
-    // "future dates". Capped contributions will be included in the next
-    // submission once the UTC date catches up.
-    // See: https://github.com/junhoyeo/tokscale/issues/318
-    let utc_today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let mut graph_result = graph_result;
-    cap_graph_result_to_utc_today(&mut graph_result, &utc_today);
-
-    println!("{}", "  Data to submit:".white());
-    println!(
-        "{}",
-        format!(
-            "    Date range: {} to {}",
-            graph_result.meta.date_range_start, graph_result.meta.date_range_end,
-        )
-        .bright_black()
-    );
-    println!(
-        "{}",
-        format!("    Active days: {}", graph_result.summary.active_days).bright_black()
-    );
-    println!(
-        "{}",
-        format!(
-            "    Total tokens: {}",
-            format_tokens_with_commas(graph_result.summary.total_tokens)
-        )
-        .bright_black()
-    );
-    println!(
-        "{}",
-        format!(
-            "    Total cost: {}",
-            format_currency(graph_result.summary.total_cost)
-        )
-        .bright_black()
-    );
-    println!(
-        "{}",
-        format!("    Clients: {}", graph_result.summary.clients.join(", ")).bright_black()
-    );
-    println!(
-        "{}",
-        format!("    Models: {} models", graph_result.summary.models.len()).bright_black()
-    );
-    println!();
-
-    if graph_result.summary.total_tokens == 0 {
-        println!("{}", "  No usage data found to submit.\n".yellow());
-        return Ok(());
-    }
-
-    if dry_run {
-        println!("{}", "  Dry run - not submitting data.\n".yellow());
-        return Ok(());
-    }
-
-    println!("{}", "  Submitting to server...".bright_black());
-
-    let api_url = auth::get_api_base_url();
-
-    let submit_device = device::resolve_submit_device()?;
-    let submit_payload = to_ts_token_contribution_data(&graph_result, Some(&submit_device));
-
-    let response = rt.block_on(async {
-        reqwest::Client::new()
-            .post(format!("{}/api/submit", api_url))
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", auth_token.token))
-            .json(&submit_payload)
-            .send()
-            .await
-    });
-
-    match response {
-        Ok(resp) => {
-            let status = resp.status();
-            let body: SubmitResponse =
-                rt.block_on(async { resp.json().await })
-                    .unwrap_or_else(|_| SubmitResponse {
-                        submission_id: None,
-                        username: None,
-                        metrics: None,
-                        warnings: None,
-                        error: Some(format!(
-                            "Server returned {} with unparseable response",
-                            status
-                        )),
-                        details: None,
-                    });
-
-            if !status.is_success() {
-                eprintln!(
-                    "\n  {}",
-                    format!(
-                        "Error: {}",
-                        body.error
-                            .unwrap_or_else(|| "Submission failed".to_string())
-                    )
-                    .red()
-                );
-                if let Some(details) = body.details {
-                    for detail in details {
-                        eprintln!("{}", format!("    - {}", detail).bright_black());
-                    }
-                }
-                println!();
-                std::process::exit(1);
-            }
-
-            println!("\n  {}", "Successfully submitted!".green());
-            println!();
-            println!("{}", "  Summary:".white());
-            if let Some(id) = body.submission_id {
-                println!("{}", format!("    Submission ID: {}", id).bright_black());
-            }
-            if let Some(metrics) = &body.metrics {
-                if let Some(tokens) = metrics.total_tokens {
-                    println!(
-                        "{}",
-                        format!("    Total tokens: {}", format_tokens_with_commas(tokens))
-                            .bright_black()
-                    );
-                }
-                if let Some(cost) = metrics.total_cost {
-                    println!(
-                        "{}",
-                        format!("    Total cost: {}", format_currency(cost)).bright_black()
-                    );
-                }
-                if let Some(days) = metrics.active_days {
-                    println!("{}", format!("    Active days: {}", days).bright_black());
-                }
-            }
-            if let Some(username) = body
-                .username
-                .clone()
-                .or_else(|| auth_token.username.clone())
-            {
-                println!();
-                println!(
-                    "{}",
-                    osc8_link_with_text(
-                        &format!("{}/u/{}", api_url, username),
-                        &format!("  View your profile: {}/u/{}", api_url, username),
-                    )
-                    .cyan()
-                );
-                println!();
-            }
-
-            if let Some(warnings) = body.warnings {
-                if !warnings.is_empty() {
-                    println!("{}", "  Warnings:".yellow());
-                    for warning in warnings {
-                        println!("{}", format!("    - {}", warning).bright_black());
-                    }
-                    println!();
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!("\n  {}", "Error: Failed to connect to server.".red());
-            eprintln!("{}\n", format!("  {}", err).bright_black());
-            std::process::exit(1);
-        }
-    }
-
-    // Warm the TUI cache so the next `tokscale` launch is instant.
-    // Detached subprocess so submit returns to the shell immediately on large
-    // datasets — a full re-scan would otherwise block for tens of seconds.
-    spawn_warm_tui_cache_detached();
-
-    Ok(())
-}
-
-fn spawn_warm_tui_cache_detached() {
-    use std::process::{Command, Stdio};
-
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(err) => {
-            eprintln!("tokscale: failed to resolve executable for TUI cache warm: {err}");
-            return;
-        }
-    };
-
-    let mut cmd = Command::new(exe);
-    cmd.arg("warm-tui-cache")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // New process group so the child is not killed by Ctrl-C in the
-        // parent's shell and survives after submit exits.
-        cmd.process_group(0);
-    }
-
-    if let Err(err) = cmd.spawn() {
-        eprintln!("tokscale: failed to spawn TUI cache warm process: {err}");
-    }
-}
-
 /// Resolve the filter set used by a no-`--client`-flag TUI launch.
 ///
 /// Mirrors the resolution that `build_client_filter` + `tui::run` perform
@@ -4888,9 +4101,9 @@ fn spawn_warm_tui_cache_detached() {
 ///
 /// This **must** stay in lockstep with the resolution that
 /// `tui::run(.., clients = None, ..)` would compute. If it drifts, the
-/// `submit` warm cache uses one filter set while the next no-flag TUI
-/// launch wants another, the cache key mismatches, and the warming
-/// becomes a wasted background scan.
+/// local warm cache uses one filter set while the next no-flag TUI launch
+/// wants another, the cache key mismatches, and the warming becomes a
+/// wasted background scan.
 fn resolve_default_tui_filter_set() -> Result<std::collections::HashSet<ClientId>> {
     resolve_default_tui_filter_set_with(&tui::settings::load_default_clients())
 }
@@ -4983,21 +4196,17 @@ fn run_warm_tui_cache() -> Result<()> {
     use crate::tui::{save_cached_data, CacheReportScope, DataLoader, TUI_DEFAULT_GROUP_BY};
     use tokscale_core::ClientId;
 
-    // Warm the cache using the same default filter set the TUI uses on
-    // a no-flag launch. Going through `resolve_default_tui_filter_set()`
-    // keeps these two paths in lockstep — including the user's
-    // `defaultClients` setting, which the TUI honors via
-    // `build_client_filter`. If they drift, every TUI launch after
-    // `submit` becomes a cache miss instead of a fresh hit, defeating
-    // the warming.
+    // Warm the cache using the same default filter set the TUI uses on a
+    // no-flag launch. Going through `resolve_default_tui_filter_set()` keeps
+    // these two paths in lockstep, including the user's `defaultClients`
+    // setting.
     //
     // The `group_by` MUST be `TUI_DEFAULT_GROUP_BY`, NOT
     // `GroupBy::default()`. Using `GroupBy::default()` here is the bug
     // that motivated this constant — the TUI's cache reader keys on
     // `TUI_DEFAULT_GROUP_BY` (= `GroupBy::Model`) while
     // `GroupBy::default()` is `GroupBy::ClientModel`, so the warm cache
-    // was written under a key the TUI never queried. Every submit
-    // silently invalidated the next TUI launch.
+    // was written under a key the TUI never queried.
     let enabled_set = resolve_default_tui_filter_set()?;
     let mut scan_clients: Vec<ClientId> = enabled_set.iter().copied().collect();
     scan_clients.sort_by_key(|client| *client as usize);
@@ -5411,11 +4620,6 @@ fn run_headless_command(
 mod tests {
     use super::*;
     use clap::Parser;
-    use reqwest::StatusCode;
-    use tokscale_core::{
-        calculate_summary, calculate_years, ClientContribution, DailyContribution, DailyTotals,
-        GraphMeta, GraphResult, TokenBreakdown, YearSummary,
-    };
 
     #[test]
     fn test_parse_variant_arg_accepts_known_values() {
@@ -5448,75 +4652,6 @@ mod tests {
     #[test]
     fn test_parse_variant_arg_rejects_empty_string() {
         assert!(parse_variant_arg(Some("")).is_err());
-    }
-
-    fn token_breakdown(total_tokens: i64) -> TokenBreakdown {
-        TokenBreakdown {
-            input: total_tokens,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        }
-    }
-
-    fn daily_contribution(
-        date: &str,
-        total_tokens: i64,
-        total_cost: f64,
-        client: &str,
-        model_id: &str,
-    ) -> DailyContribution {
-        DailyContribution {
-            date: date.to_string(),
-            totals: DailyTotals {
-                tokens: total_tokens,
-                cost: total_cost,
-                messages: 1,
-            },
-            intensity: 0,
-            token_breakdown: token_breakdown(total_tokens),
-            clients: vec![ClientContribution {
-                client: client.to_string(),
-                model_id: model_id.to_string(),
-                provider_id: "openai".to_string(),
-                tokens: token_breakdown(total_tokens),
-                cost: total_cost,
-                messages: 1,
-            }],
-            active_time_ms: None,
-        }
-    }
-
-    fn graph_result_with_contributions(contributions: Vec<DailyContribution>) -> GraphResult {
-        GraphResult {
-            meta: GraphMeta {
-                generated_at: "2026-03-24T00:00:00Z".to_string(),
-                version: "test".to_string(),
-                date_range_start: contributions
-                    .first()
-                    .map(|c| c.date.clone())
-                    .unwrap_or_default(),
-                date_range_end: contributions
-                    .last()
-                    .map(|c| c.date.clone())
-                    .unwrap_or_default(),
-                processing_time_ms: 0,
-            },
-            summary: calculate_summary(&contributions),
-            years: calculate_years(&contributions),
-            contributions,
-            time_metrics: None,
-        }
-    }
-
-    fn year_summary(graph: &GraphResult, year: &str) -> YearSummary {
-        graph
-            .years
-            .iter()
-            .find(|entry| entry.year == year)
-            .cloned()
-            .unwrap()
     }
 
     // Tests below call `build_client_filter_with_defaults` directly with
@@ -5789,13 +4924,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_submit_clients_excludes_crush() {
-        let clients = default_submit_clients();
-        assert!(clients.contains(&"zed".to_string()));
-        assert!(!clients.contains(&"crush".to_string()));
-    }
-
-    #[test]
     fn test_build_client_filter_with_defaults_uses_defaults_when_no_flags() {
         let flags = ClientFlags::default();
         let defaults = vec!["opencode".to_string(), "claude".to_string()];
@@ -5809,49 +4937,6 @@ mod tests {
     fn test_build_client_filter_with_defaults_empty_defaults_returns_none() {
         let flags = ClientFlags::default();
         assert_eq!(build_client_filter_with_defaults(flags, &[]).unwrap(), None);
-    }
-
-    #[test]
-    fn test_delete_submitted_data_command_parses() {
-        let cli = Cli::try_parse_from(["tokscale", "delete-submitted-data"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::DeleteSubmittedData)));
-    }
-
-    #[test]
-    fn test_login_token_option_parses() {
-        let cli = Cli::try_parse_from(["tokscale", "login", "--token", "tt_ci_token"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Login {
-                token: Some(token)
-            }) if token == "tt_ci_token"
-        ));
-    }
-
-    #[test]
-    fn test_interpret_delete_submitted_data_response_success() {
-        let body = serde_json::json!({
-            "deleted": true,
-            "deletedSubmissions": 2
-        });
-
-        let outcome = interpret_delete_submitted_data_response(StatusCode::OK, &body).unwrap();
-        match outcome {
-            DeleteSubmittedDataOutcome::Deleted(count) => assert_eq!(count, 2),
-            DeleteSubmittedDataOutcome::NotFound => panic!("expected deleted outcome"),
-        }
-    }
-
-    #[test]
-    fn test_interpret_delete_submitted_data_response_failure() {
-        let body = serde_json::json!({
-            "error": "Not authenticated"
-        });
-
-        let err = interpret_delete_submitted_data_response(StatusCode::UNAUTHORIZED, &body)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("Failed (401 Unauthorized): Not authenticated"));
     }
 
     #[test]
@@ -6130,102 +5215,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cap_graph_result_to_utc_today_recalculates_all_derived_fields() {
-        let mut graph = graph_result_with_contributions(vec![
-            daily_contribution("2026-12-30", 10, 1.25, "codex", "model-a"),
-            daily_contribution("2026-12-31", 20, 2.50, "codex", "model-b"),
-            daily_contribution("2027-01-01", 30, 3.75, "cursor", "model-c"),
-        ]);
-
-        let changed = cap_graph_result_to_utc_today(&mut graph, "2026-12-31");
-
-        assert!(changed);
-        assert_eq!(graph.meta.date_range_start, "2026-12-30");
-        assert_eq!(graph.meta.date_range_end, "2026-12-31");
-        assert_eq!(graph.contributions.len(), 2);
-        assert_eq!(graph.summary.total_tokens, 30);
-        assert_eq!(graph.summary.total_cost, 3.75);
-        assert_eq!(graph.summary.total_days, 2);
-        assert_eq!(graph.summary.active_days, 2);
-        assert_eq!(graph.summary.clients, vec!["codex".to_string()]);
-        assert_eq!(
-            graph.summary.models,
-            vec!["model-a".to_string(), "model-b".to_string()]
-        );
-        assert_eq!(graph.years.len(), 1);
-        assert_eq!(year_summary(&graph, "2026").total_tokens, 30);
-    }
-
-    #[test]
-    fn test_cap_graph_result_to_utc_today_clears_empty_post_cap_state() {
-        let mut graph = graph_result_with_contributions(vec![daily_contribution(
-            "2027-01-01",
-            30,
-            3.75,
-            "cursor",
-            "model-c",
-        )]);
-
-        let changed = cap_graph_result_to_utc_today(&mut graph, "2026-12-31");
-
-        assert!(changed);
-        assert!(graph.contributions.is_empty());
-        assert_eq!(graph.meta.date_range_start, "");
-        assert_eq!(graph.meta.date_range_end, "");
-        assert_eq!(graph.summary.total_tokens, 0);
-        assert_eq!(graph.summary.total_cost, 0.0);
-        assert_eq!(graph.summary.total_days, 0);
-        assert_eq!(graph.summary.active_days, 0);
-        assert!(graph.summary.clients.is_empty());
-        assert!(graph.summary.models.is_empty());
-        assert!(graph.years.is_empty());
-    }
-
-    #[test]
-    fn test_cap_graph_result_to_utc_today_is_noop_when_all_dates_are_in_range() {
-        let mut graph = graph_result_with_contributions(vec![
-            daily_contribution("2026-12-30", 10, 1.25, "codex", "model-a"),
-            daily_contribution("2026-12-31", 20, 2.50, "codex", "model-b"),
-        ]);
-        let original_summary = graph.summary.clone();
-        let original_years = graph.years.clone();
-
-        let changed = cap_graph_result_to_utc_today(&mut graph, "2026-12-31");
-
-        assert!(!changed);
-        assert_eq!(graph.meta.date_range_start, "2026-12-30");
-        assert_eq!(graph.meta.date_range_end, "2026-12-31");
-        assert_eq!(graph.summary.total_tokens, original_summary.total_tokens);
-        assert_eq!(graph.summary.total_cost, original_summary.total_cost);
-        assert_eq!(graph.summary.clients, original_summary.clients);
-        assert_eq!(graph.summary.models, original_summary.models);
-        assert_eq!(graph.years.len(), original_years.len());
-    }
-
-    #[test]
-    fn test_submit_payload_includes_device_when_provided() {
-        let graph = graph_result_with_contributions(vec![daily_contribution(
-            "2026-12-31",
-            20,
-            2.50,
-            "codex",
-            "model-b",
-        )]);
-        let device = device::SubmitDevice {
-            id: "dev_test".to_string(),
-            name: Some("Test device".to_string()),
-        };
-
-        let payload = to_ts_token_contribution_data(&graph, Some(&device));
-
-        assert_eq!(payload.device.as_ref().unwrap().id, "dev_test");
-        assert_eq!(
-            payload.device.as_ref().unwrap().name.as_deref(),
-            Some("Test device")
-        );
-    }
-
-    #[test]
     #[cfg(target_os = "macos")]
     #[serial_test::serial]
     fn test_load_star_cache_falls_back_to_legacy_macos_path() {
@@ -6494,12 +5483,6 @@ mod tests {
             ),
             vec!["/tmp/agy-cli".to_string()]
         );
-    }
-
-    #[test]
-    fn default_submit_clients_excludes_warp_aggregate_source() {
-        let clients = default_submit_clients();
-        assert!(!clients.contains(&"warp".to_string()));
     }
 
     #[test]

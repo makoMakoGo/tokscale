@@ -504,7 +504,6 @@ mod tests {
         assert_eq!(def.relative_path, ".junie/sessions");
         assert_eq!(def.pattern, "events.jsonl");
         assert!(ClientId::Junie.parse_local());
-        assert!(ClientId::Junie.submit_default());
     }
 
     #[test]
@@ -515,7 +514,6 @@ mod tests {
         assert_eq!(def.relative_path, ".zcode/projects");
         assert_eq!(def.pattern, "*.jsonl");
         assert!(ClientId::Zcode.parse_local());
-        assert!(ClientId::Zcode.submit_default());
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 ## Project Structure & Module Organization
 
-Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing, scanning, aggregation, pricing, and session readers live in `crates/tokscale-core/src/`; CLI and TUI code live in `crates/tokscale-cli/src/`, with integration tests under `crates/tokscale-cli/tests/` and crate-level tests under `crates/tokscale-core/tests/`. npm-facing packages live in `packages/`: `packages/cli` is the TypeScript binary dispatcher, `packages/tokscale` is the wrapper package, `packages/frontend` is the Next.js app, and `packages/cli-*` contain platform package manifests.
+Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing, scanning, aggregation, pricing, and session readers live in `crates/tokscale-core/src/`; CLI and TUI code live in `crates/tokscale-cli/src/`, with integration tests under `crates/tokscale-cli/tests/` and crate-level tests under `crates/tokscale-core/tests/`. npm-facing packages live in `packages/`: `packages/cli` is the TypeScript binary dispatcher, `packages/tokscale` is the wrapper package, and `packages/cli-*` contain platform package manifests.
 
 ## Build, Test, and Development Commands
 
@@ -17,7 +17,6 @@ Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing,
 - `bun run build` — build the release Rust binary and TypeScript CLI package.
 - `bun run build:cli` — compile `packages/cli` with `tsc`.
 - `bun run cli -- --no-spinner ...` — run the local CLI wrapper; keep `--no-spinner` in automated runs unless spinner behavior is under test.
-- `bun run --cwd packages/frontend lint` — lint the frontend when changing Next.js code.
 
 ## Coding Style & Naming Conventions
 
