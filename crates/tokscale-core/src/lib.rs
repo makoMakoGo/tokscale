@@ -63,6 +63,14 @@ fn retain_for_requested_clients(
     requested.contains(client) || (requested.contains("claude") && client.starts_with("cc-mirror/"))
 }
 
+fn client_count_bucket(client: &str) -> Option<ClientId> {
+    if client.starts_with("cc-mirror/") {
+        return Some(ClientId::Claude);
+    }
+
+    ClientId::from_str(client)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub enum GroupBy {
     Model,
@@ -592,7 +600,7 @@ impl adapters::MessageSink for ClientCountSink {
             self.headless_codex_count += 1;
         }
 
-        if let Some(client) = ClientId::from_str(&message.client) {
+        if let Some(client) = client_count_bucket(&message.client) {
             self.counts.add(client, message.message_count.max(0));
         }
     }
@@ -3155,6 +3163,31 @@ mod tests {
             "anthropic",
             &requested
         ));
+    }
+
+    #[test]
+    fn test_client_count_sink_attributes_cc_mirror_variants_to_claude() {
+        let mut sink = super::ClientCountSink::new(DateRange::none());
+        let mut message = UnifiedMessage::new(
+            "cc-mirror/zai-worker",
+            "claude-sonnet-4",
+            "zai",
+            "mirror-session",
+            1_717_977_600_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.01,
+        );
+        message.message_count = 3;
+
+        super::adapters::MessageSink::push_message(&mut sink, message);
+
+        assert_eq!(sink.counts.get(ClientId::Claude), 3);
     }
 
     #[test]
