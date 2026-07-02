@@ -198,9 +198,15 @@ impl DataLoader {
         messages: Vec<UnifiedMessage>,
         group_by: &GroupBy,
     ) -> Result<UsageData> {
-        Ok(tokscale_core::aggregate_finalized_usage_data(
-            messages, group_by,
-        ))
+        let mut engine = tokscale_core::AggregationEngine::new(tokscale_core::AggregationConfig {
+            group_by: group_by.clone(),
+            date_range: tokscale_core::DateRange::default(),
+            views: tokscale_core::ViewSet::TUI,
+        });
+        for message in &messages {
+            engine.push(message);
+        }
+        Ok(engine.finish().tui_usage.expect("tui view requested"))
     }
 }
 #[cfg(test)]

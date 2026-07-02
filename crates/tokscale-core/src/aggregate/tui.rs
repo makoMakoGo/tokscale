@@ -762,18 +762,6 @@ impl TuiAcc {
     }
 }
 
-/// Compatibility helper for callers/tests that still pass a finalized
-/// local-report message vector. The fold itself is owned by `TuiAcc` and driven
-/// through the same `push`/`finish` shape as `AggregationEngine`; it deliberately
-/// does not re-canonicalize model ids.
-pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -> UsageData {
-    let mut acc = TuiAcc::new(group_by.clone());
-    for msg in &messages {
-        acc.push(msg);
-    }
-    acc.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
