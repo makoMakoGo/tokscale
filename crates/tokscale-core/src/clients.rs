@@ -1,6 +1,7 @@
 pub use crate::client_catalog::{ClientId, ClientIdentity, CLIENT_IDENTITIES};
 pub use crate::local_clients::{LocalClientDef, PathRoot, LOCAL_CLIENTS};
 
+#[derive(Debug)]
 pub struct ClientCounts {
     counts: [i32; ClientId::COUNT],
 }

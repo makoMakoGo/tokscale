@@ -169,6 +169,63 @@ fn engine_usage_data(msgs: &[UnifiedMessage], group_by: GroupBy) -> UsageData {
     engine.finish().tui_usage.expect("tui view requested")
 }
 
+#[test]
+fn agents_view_keeps_client_dimension() {
+    let _tz = pin_tz();
+    let messages = vec![
+        UnifiedMessage::new_with_agent(
+            "opencode",
+            "gpt-5",
+            "openai",
+            "s1",
+            ts("2024-06-10"),
+            TokenBreakdown {
+                input: 7,
+                output: 5,
+                cache_read: 3,
+                cache_write: 2,
+                reasoning: 1,
+            },
+            0.5,
+            Some("shared-agent".to_string()),
+        ),
+        UnifiedMessage::new_with_agent(
+            "codex",
+            "gpt-5",
+            "openai",
+            "s2",
+            ts("2024-06-10"),
+            TokenBreakdown {
+                input: 11,
+                output: 13,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.75,
+            Some("shared-agent".to_string()),
+        ),
+    ];
+    let mut engine = AggregationEngine::new(AggregationConfig {
+        group_by: GroupBy::default(),
+        date_range: DateRange::none(),
+        views: ViewSet::AGENTS,
+    });
+    for message in &messages {
+        engine.push(message);
+    }
+
+    let agents = engine.finish().agent_usage.expect("agents view requested");
+
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0].client, "codex");
+    assert_eq!(agents[0].agent, "Shared Agent");
+    assert_eq!(agents[0].tokens.total(), 24);
+    assert_eq!(agents[1].client, "opencode");
+    assert_eq!(agents[1].agent, "Shared Agent");
+    assert_eq!(agents[1].tokens.total(), 18);
+}
+
 // ---- Primitive parity and entrypoint consistency tests ----
 
 #[test]
