@@ -1,6 +1,6 @@
-//! [`AggregatedViews`] — the materialized output of
-//! `AggregationEngine::finish`. It carries the pre-existing public report types
-//! unchanged so consumers change wiring, not their own types.
+//! [`AggregatedViews`] — the materialized output of the internal aggregation
+//! fold. It carries the pre-existing public report types unchanged so consumers
+//! change wiring, not their own types.
 
 use crate::{
     usage_views::UsageData, DailyContribution, GraphResult, HourlyReport, ModelReport,
@@ -19,11 +19,11 @@ pub struct AgentUsage {
     pub message_count: i32,
 }
 
-/// Output of `AggregationEngine::finish`. Every field is `Option` so a consumer
-/// pays only for the views it requested via `AggregationConfig.views`.
+/// Output of the internal aggregation fold. Every field is `Option` so a
+/// consumer pays only for the views it requested via `AggregationConfig.views`.
 ///
 /// The TUI `UsageData` bundle lives in core's `usage_views` module, so the same
-/// engine interface can produce report and TUI views.
+/// fold can produce report and TUI views.
 #[derive(Debug, Default)]
 pub struct AggregatedViews {
     pub tui_usage: Option<UsageData>,

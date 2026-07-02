@@ -762,18 +762,6 @@ impl TuiAcc {
     }
 }
 
-/// Compatibility helper for callers/tests that still pass a finalized
-/// local-report message vector. The fold itself is owned by `TuiAcc` and driven
-/// through the same `push`/`finish` shape as `AggregationEngine`; it deliberately
-/// does not re-canonicalize model ids.
-pub fn aggregate_usage_data(messages: Vec<UnifiedMessage>, group_by: &GroupBy) -> UsageData {
-    let mut acc = TuiAcc::new(group_by.clone());
-    for msg in &messages {
-        acc.push(msg);
-    }
-    acc.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -781,6 +769,937 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::*;
+    use crate::aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
+    use crate::sessions::UnifiedMessage;
+
+    struct TuiUsageHarness;
+
+    impl TuiUsageHarness {
+        fn aggregate_messages(
+            &self,
+            messages: Vec<UnifiedMessage>,
+            group_by: &GroupBy,
+        ) -> Result<UsageData, String> {
+            let mut acc = TuiAcc::new(group_by.clone());
+            for message in &messages {
+                acc.push(message);
+            }
+            Ok(acc.finish())
+        }
+    }
+
+    fn make_workspace_message(
+        client: &str,
+        model_id: &str,
+        provider_id: &str,
+        session_id: &str,
+        cost: f64,
+        workspace_key: Option<&str>,
+        workspace_label: Option<&str>,
+    ) -> UnifiedMessage {
+        let mut msg = UnifiedMessage::new(
+            client,
+            model_id,
+            provider_id,
+            session_id,
+            1_735_689_600_000,
+            crate::TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+        );
+        msg.set_workspace(
+            workspace_key.map(str::to_string),
+            workspace_label.map(str::to_string),
+        );
+        msg
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_message_with_tokens(
+        client: &str,
+        model_id: &str,
+        provider_id: &str,
+        session_id: &str,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+        reasoning: i64,
+    ) -> UnifiedMessage {
+        UnifiedMessage::new(
+            client,
+            model_id,
+            provider_id,
+            session_id,
+            1_735_689_600_000,
+            crate::TokenBreakdown {
+                input,
+                output,
+                cache_read,
+                cache_write,
+                reasoning,
+            },
+            0.0,
+        )
+    }
+
+    #[test]
+    fn test_aggregate_messages_model_grouping_normalizes_provider_display_aliases() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "opencode",
+                        "mimo-v2.5-pro",
+                        "xiaomi",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "opencode",
+                        "mimo-v2.5-pro",
+                        "xiaomi-token-plan-cn",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].model, "mimo-v2.5-pro");
+        assert_eq!(usage.models[0].provider, "xiaomi");
+        assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_client_provider_model_normalizes_provider_display_aliases() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "opencode",
+                        "mimo-v2.5-pro",
+                        "xiaomi",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "opencode",
+                        "mimo-v2.5-pro",
+                        "xiaomi-token-plan-cn",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].provider, "xiaomi");
+        assert_eq!(usage.models[0].cost, 3.0);
+
+        let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
+        assert_eq!(daily_models.len(), 1);
+        let daily_model = daily_models.get("opencode:xiaomi:mimo-v2.5-pro").unwrap();
+        assert_eq!(daily_model.provider, "xiaomi");
+        assert_eq!(daily_model.display_name, "mimo-v2.5-pro");
+    }
+
+    #[test]
+    fn test_client_provider_model_daily_detail_label_matches_models_tab() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![make_workspace_message(
+                    "opencode",
+                    "gpt-5.5",
+                    "openai",
+                    "session-1",
+                    1.0,
+                    None,
+                    None,
+                )],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].model, "gpt-5.5");
+        assert_eq!(usage.models[0].provider, "openai");
+
+        let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
+        assert_eq!(daily_models.len(), 1);
+        let daily_model = daily_models.get("opencode:openai:gpt-5.5").unwrap();
+        assert_eq!(daily_model.provider, "openai");
+        assert_eq!(daily_model.display_name, "gpt-5.5");
+    }
+
+    #[test]
+    fn test_client_provider_model_keeps_same_model_distinct_by_provider() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "opencode",
+                        "gpt-5.5",
+                        "openai",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "opencode",
+                        "gpt-5.5",
+                        "azure",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+
+        let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
+        assert_eq!(daily_models.len(), 2);
+        assert!(daily_models.contains_key("opencode:openai:gpt-5.5"));
+        assert!(daily_models.contains_key("opencode:azure:gpt-5.5"));
+        assert!(daily_models
+            .values()
+            .all(|model| model.display_name == "gpt-5.5"));
+    }
+
+    #[test]
+    fn test_session_grouping_splits_daily_models_by_session() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "opencode",
+                        "gpt-5.5",
+                        "openai",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "opencode",
+                        "gpt-5.5",
+                        "openai",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::Session,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+
+        let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
+        assert_eq!(daily_models.len(), 2);
+        assert!(daily_models.contains_key("session-1:gpt-5.5"));
+        assert!(daily_models.contains_key("session-2:gpt-5.5"));
+        assert_eq!(
+            daily_models["session-1:gpt-5.5"].display_name,
+            "session-1 / gpt-5.5"
+        );
+        assert_eq!(
+            daily_models["session-2:gpt-5.5"].display_name,
+            "session-2 / gpt-5.5"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_messages_normalizes_moonshot_provider_to_kimi() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "kimi-for-coding",
+                        "moonshotai",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "kimi-for-coding",
+                        "kimi-for-coding",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].provider, "kimi");
+        assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_builds_agent_usage() {
+        let loader = TuiUsageHarness;
+        let messages = vec![
+            UnifiedMessage::new_with_agent(
+                "opencode",
+                "claude-sonnet-4",
+                "anthropic",
+                "session-1",
+                1_735_689_600_000,
+                crate::TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                1.25,
+                Some("builder".to_string()),
+            ),
+            UnifiedMessage::new_with_agent(
+                "roocode",
+                "claude-sonnet-4",
+                "anthropic",
+                "session-2",
+                1_735_689_700_000,
+                crate::TokenBreakdown {
+                    input: 20,
+                    output: 10,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                2.75,
+                Some("builder".to_string()),
+            ),
+        ];
+
+        let usage = loader
+            .aggregate_messages(messages, &GroupBy::Model)
+            .unwrap();
+
+        assert_eq!(usage.agents.len(), 1);
+        assert_eq!(usage.agents[0].agent, "Builder");
+        assert_eq!(usage.agents[0].clients, "opencode, roocode");
+        assert_eq!(usage.agents[0].message_count, 2);
+        assert!((usage.agents[0].cost - 4.0).abs() < f64::EPSILON);
+        assert_eq!(usage.agents[0].tokens.total(), 45);
+    }
+
+    #[test]
+    fn test_aggregate_messages_orders_model_clients_by_total_tokens() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_message_with_tokens(
+                        "opencode",
+                        "gpt-5.5",
+                        "openai",
+                        "session-opencode",
+                        10,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ),
+                    make_message_with_tokens(
+                        "codex",
+                        "gpt-5.5",
+                        "openai",
+                        "session-codex",
+                        30,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ),
+                    make_message_with_tokens(
+                        "pi",
+                        "gpt-5.5",
+                        "openai",
+                        "session-pi",
+                        100,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].client, "pi, codex, opencode");
+    }
+
+    #[test]
+    fn test_aggregate_messages_groups_by_workspace_and_model() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-1",
+                        1.25,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                    make_workspace_message(
+                        "qwen",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-2",
+                        2.75,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].workspace_key.as_deref(), Some("/repo-a"));
+        assert_eq!(usage.models[0].workspace_label.as_deref(), Some("repo-a"));
+        assert_eq!(usage.models[0].model, "claude-sonnet-4.5");
+        assert_eq!(usage.models[0].client, "claude, qwen");
+        assert_eq!(usage.models[0].session_count, 2);
+        assert_eq!(usage.models[0].cost, 4.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_keeps_unknown_bucket_visible() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        None,
+                        None,
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].workspace_key, None);
+        assert_eq!(
+            usage.models[0].workspace_label.as_deref(),
+            Some(UNKNOWN_WORKSPACE_LABEL)
+        );
+        assert_eq!(usage.models[0].session_count, 2);
+        assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_keeps_real_unknown_workspace_separate() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("unknown-workspace"),
+                        Some("unknown-workspace"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        None,
+                        None,
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("unknown-workspace")
+                && model.workspace_label.as_deref() == Some("unknown-workspace")
+                && (model.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.is_none()
+                && model.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
+                && (model.cost - 2.0).abs() < f64::EPSILON
+        }));
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_splits_daily_models_by_workspace() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("/repo-b"),
+                        Some("repo-b"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
+        assert_eq!(daily_keys.len(), 2);
+        assert_ne!(daily_keys[0], daily_keys[1]);
+        let daily_display_names: Vec<_> = claude
+            .models
+            .values()
+            .map(|info| info.display_name.clone())
+            .collect();
+        assert_eq!(
+            daily_display_names,
+            vec![
+                "repo-a / claude-sonnet-4.5".to_string(),
+                "repo-b / claude-sonnet-4.5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_disambiguates_identical_labels() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("/srv/team-a/demo"),
+                        Some("demo"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("/srv/team-b/demo"),
+                        Some("demo"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
+
+        // Keys must differ even though display names are identical
+        let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
+        assert_eq!(daily_keys.len(), 2);
+        assert_ne!(daily_keys[0], daily_keys[1]);
+
+        let display_names: Vec<_> = claude
+            .models
+            .values()
+            .map(|info| info.display_name.clone())
+            .collect();
+        assert_eq!(
+            display_names,
+            vec![
+                "demo / claude-sonnet-4.5".to_string(),
+                "demo / claude-sonnet-4.5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_aggregate_messages_workspace_grouping_avoids_separator_key_collisions() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    make_workspace_message(
+                        "claude",
+                        "c",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("a:b"),
+                        Some("workspace-ab"),
+                    ),
+                    make_workspace_message(
+                        "claude",
+                        "b:c",
+                        "anthropic",
+                        "session-2",
+                        2.0,
+                        Some("a"),
+                        Some("workspace-a"),
+                    ),
+                ],
+                &GroupBy::WorkspaceModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.models.len(), 2);
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("a:b")
+                && model.model == "c"
+                && (model.cost - 1.0).abs() < f64::EPSILON
+        }));
+        assert!(usage.models.iter().any(|model| {
+            model.workspace_key.as_deref() == Some("a")
+                && model.model == "b:c"
+                && (model.cost - 2.0).abs() < f64::EPSILON
+        }));
+
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
+    }
+
+    #[test]
+    fn test_aggregate_messages_client_provider_model_splits_providers_in_daily_breakdown() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-1",
+                        1_735_689_600_000,
+                        crate::TokenBreakdown {
+                            input: 10,
+                            output: 5,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        1.0,
+                    ),
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "github-copilot",
+                        "session-2",
+                        1_735_689_600_000,
+                        crate::TokenBreakdown {
+                            input: 20,
+                            output: 10,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        2.0,
+                    ),
+                ],
+                &GroupBy::ClientProviderModel,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.models.len(), 2);
+
+        let anthropic_key = "claude:anthropic:claude-sonnet-4.5";
+        let copilot_key = "claude:github-copilot:claude-sonnet-4.5";
+        let anthropic_model = claude.models.get(anthropic_key).unwrap();
+        assert_eq!(anthropic_model.display_name, "claude-sonnet-4.5");
+        assert_eq!(anthropic_model.provider, "anthropic");
+        assert_eq!(anthropic_model.tokens.total(), 15);
+        assert_eq!(anthropic_model.messages, 1);
+
+        let copilot_model = claude.models.get(copilot_key).unwrap();
+        assert_eq!(copilot_model.display_name, "claude-sonnet-4.5");
+        assert_eq!(copilot_model.provider, "github-copilot");
+        assert_eq!(copilot_model.tokens.total(), 30);
+        assert_eq!(copilot_model.messages, 1);
+    }
+
+    #[test]
+    fn test_aggregate_messages_keeps_same_model_split_across_sources_in_daily_breakdown() {
+        let loader = TuiUsageHarness;
+        let usage = loader
+            .aggregate_messages(
+                vec![
+                    UnifiedMessage::new(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-1",
+                        1_735_689_600_000,
+                        crate::TokenBreakdown {
+                            input: 10,
+                            output: 5,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        1.0,
+                    ),
+                    UnifiedMessage::new(
+                        "cursor",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-2",
+                        1_735_689_600_000,
+                        crate::TokenBreakdown {
+                            input: 20,
+                            output: 10,
+                            cache_read: 0,
+                            cache_write: 0,
+                            reasoning: 0,
+                        },
+                        2.0,
+                    ),
+                ],
+                &GroupBy::Model,
+            )
+            .unwrap();
+
+        assert_eq!(usage.daily.len(), 1);
+        assert_eq!(usage.daily[0].source_breakdown.len(), 2);
+
+        let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
+        assert_eq!(claude.cost, 1.0);
+        assert_eq!(claude.models.len(), 1);
+        let claude_model = claude.models.get("claude-sonnet-4.5").unwrap();
+        assert_eq!(claude_model.display_name, "claude-sonnet-4.5");
+        assert_eq!(claude_model.tokens.total(), 15);
+
+        let cursor = usage.daily[0].source_breakdown.get("cursor").unwrap();
+        assert_eq!(cursor.cost, 2.0);
+        assert_eq!(cursor.models.len(), 1);
+        let cursor_model = cursor.models.get("claude-sonnet-4.5").unwrap();
+        assert_eq!(cursor_model.display_name, "claude-sonnet-4.5");
+        assert_eq!(cursor_model.tokens.total(), 30);
+    }
+
+    #[test]
+    fn test_aggregate_messages_merges_oh_my_opencode_agent_variants() {
+        let loader = TuiUsageHarness;
+        let messages = vec![
+            UnifiedMessage::new_with_agent(
+                "opencode",
+                "claude-opus-4.6",
+                "anthropic",
+                "session-1",
+                1_735_689_600_000,
+                crate::TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 100,
+                    cache_write: 20,
+                    reasoning: 0,
+                },
+                1.5,
+                Some("Sisyphus".to_string()),
+            ),
+            UnifiedMessage::new_with_agent(
+                "opencode",
+                "claude-opus-4.6",
+                "anthropic",
+                "session-2",
+                1_735_689_700_000,
+                crate::TokenBreakdown {
+                    input: 20,
+                    output: 10,
+                    cache_read: 200,
+                    cache_write: 40,
+                    reasoning: 0,
+                },
+                2.5,
+                Some("Sisyphus (Ultraworker)".to_string()),
+            ),
+        ];
+
+        let usage = loader
+            .aggregate_messages(messages, &GroupBy::Model)
+            .unwrap();
+
+        assert_eq!(usage.agents.len(), 1);
+        assert_eq!(usage.agents[0].agent, "Sisyphus");
+        assert_eq!(usage.agents[0].clients, "opencode");
+        assert_eq!(usage.agents[0].message_count, 2);
+        assert!((usage.agents[0].cost - 4.0).abs() < f64::EPSILON);
+        assert_eq!(usage.agents[0].tokens.total(), 405);
+    }
+
+    #[test]
+    fn test_aggregate_messages_merges_opencode_agent_case_variants() {
+        let loader = TuiUsageHarness;
+        let messages = vec![
+            UnifiedMessage::new_with_agent(
+                "opencode",
+                "claude-opus-4.6",
+                "anthropic",
+                "session-1",
+                1_735_689_600_000,
+                crate::TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                1.5,
+                Some("Hephaestus".to_string()),
+            ),
+            UnifiedMessage::new_with_agent(
+                "opencode",
+                "claude-opus-4.6",
+                "anthropic",
+                "session-2",
+                1_735_689_700_000,
+                crate::TokenBreakdown {
+                    input: 20,
+                    output: 10,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                2.5,
+                Some("hephaestus".to_string()),
+            ),
+        ];
+
+        let usage = loader
+            .aggregate_messages(messages, &GroupBy::Model)
+            .unwrap();
+
+        assert_eq!(usage.agents.len(), 1);
+        assert_eq!(usage.agents[0].agent, "Hephaestus");
+        assert_eq!(usage.agents[0].clients, "opencode");
+        assert_eq!(usage.agents[0].message_count, 2);
+        assert!((usage.agents[0].cost - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_aggregate_messages_does_not_merge_omo_variants_for_non_opencode_clients() {
+        let loader = TuiUsageHarness;
+        let messages = vec![
+            UnifiedMessage::new_with_agent(
+                "claude",
+                "claude-opus-4.6",
+                "anthropic",
+                "session-1",
+                1_735_689_600_000,
+                crate::TokenBreakdown {
+                    input: 10,
+                    output: 5,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                1.5,
+                Some("Sisyphus".to_string()),
+            ),
+            UnifiedMessage::new_with_agent(
+                "claude",
+                "claude-opus-4.6",
+                "anthropic",
+                "session-2",
+                1_735_689_700_000,
+                crate::TokenBreakdown {
+                    input: 20,
+                    output: 10,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                2.5,
+                Some("Sisyphus (Ultraworker)".to_string()),
+            ),
+        ];
+
+        let usage = loader
+            .aggregate_messages(messages, &GroupBy::Model)
+            .unwrap();
+
+        assert_eq!(usage.agents.len(), 2);
+        assert!(usage.agents.iter().any(|agent| agent.agent == "Sisyphus"));
+        assert!(usage
+            .agents
+            .iter()
+            .any(|agent| agent.agent == "Sisyphus (Ultraworker)"));
+    }
 
     fn hourly(hour: u32, input_tokens: u64, cost: f64) -> HourlyUsage {
         HourlyUsage {
