@@ -203,64 +203,11 @@ impl ModelPerformance {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ParsedMessage {
-    pub client: String,
-    pub model_id: String,
-    pub provider_id: String,
-    pub session_id: String,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
-    pub timestamp: i64,
-    pub date: String,
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub reasoning: i64,
-    pub duration_ms: Option<i64>,
-    pub message_count: i32,
-    pub agent: Option<String>,
-}
-
-pub struct ParsedMessages {
-    pub messages: Vec<ParsedMessage>,
-    pub counts: ClientCounts,
-    pub processing_time_ms: u32,
-}
-
 #[derive(Debug)]
 pub struct LocalClientMessageCounts {
     pub counts: ClientCounts,
     pub headless_codex_count: i32,
     pub processing_time_ms: u32,
-}
-
-impl Clone for ParsedMessages {
-    fn clone(&self) -> Self {
-        let mut counts = ClientCounts::new();
-        for client in ClientId::iter() {
-            counts.set(client, self.counts.get(client));
-        }
-
-        Self {
-            messages: self.messages.clone(),
-            counts,
-            processing_time_ms: self.processing_time_ms,
-        }
-    }
-}
-
-impl std::fmt::Debug for ParsedMessages {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f.debug_struct("ParsedMessages");
-        debug.field("messages", &self.messages);
-        for client in ClientId::iter() {
-            debug.field(client.as_str(), &self.counts.get(client));
-        }
-        debug.field("processing_time_ms", &self.processing_time_ms);
-        debug.finish()
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -460,7 +407,7 @@ pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, S
         })
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn parse_all_messages_with_pricing(
     home_dir: &str,
     clients: &[String],
@@ -1219,75 +1166,6 @@ fn parse_local_unified_messages_resolved(
     )?;
     Ok(filter_unified_messages(messages, &options))
 }
-pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
-    let start = Instant::now();
-
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        ClientId::iter()
-            .filter(|c| c.parse_local())
-            .map(|c| c.as_str().to_string())
-            .collect()
-    });
-    let include_all = clients.is_empty();
-
-    let selected_adapters = adapters::selected_adapters(&clients);
-    let mut messages: Vec<ParsedMessage> = Vec::new();
-    let mut counts = ClientCounts::new();
-    // parse_local_clients historically parsed directly without the persisted
-    // source-message cache; keep that non-cached count path while reusing the
-    // adapter fold contract.
-    let mut adapter_source_cache = message_cache::SourceMessageCache::default();
-    let scan_ctx = adapters::AdapterScanContext {
-        home_dir: &home_dir,
-        use_env_roots: options.use_env_roots,
-        scanner_settings: &options.scanner_settings,
-    };
-    for adapter in selected_adapters {
-        let units = adapter.discover(&scan_ctx);
-        let parsed = {
-            let parse_ctx = adapters::ParseContext {
-                source_cache: &adapter_source_cache,
-                pricing: None,
-            };
-            adapter.parse(units, &parse_ctx)
-        };
-        let mut adapter_messages = Vec::new();
-        adapter.fold(
-            parsed,
-            &mut adapters::FoldContext {
-                source_cache: &mut adapter_source_cache,
-                pricing: None,
-            },
-            &mut adapter_messages,
-        );
-        let adapter_parsed: Vec<ParsedMessage> =
-            adapter_messages.iter().map(unified_to_parsed).collect();
-        let count = adapter_parsed
-            .iter()
-            .map(|message| message.message_count.max(0))
-            .sum::<i32>();
-        counts.set(adapter.client(), count);
-        messages.extend(adapter_parsed);
-    }
-
-    if !include_all {
-        let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
-        messages.retain(|msg| {
-            retain_for_requested_clients(&msg.client, &msg.model_id, &msg.provider_id, &requested)
-        });
-    }
-
-    let filtered = filter_parsed_messages(messages, &options);
-
-    Ok(ParsedMessages {
-        messages: filtered,
-        counts,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-    })
-}
-
 #[doc(hidden)]
 pub fn count_local_client_messages(
     options: LocalParseOptions,
@@ -1382,77 +1260,8 @@ pub async fn load_usage_data(
     load_usage_data_with_pricing(options, group_by, pricing.as_deref())
 }
 
-fn unified_to_parsed(msg: &UnifiedMessage) -> ParsedMessage {
-    ParsedMessage {
-        client: msg.client.to_string(),
-        model_id: msg.model_id.to_string(),
-        provider_id: msg.provider_id.to_string(),
-        session_id: msg.session_id.to_string(),
-        workspace_key: msg.workspace_key.as_deref().map(str::to_string),
-        workspace_label: msg.workspace_label.as_deref().map(str::to_string),
-        timestamp: msg.timestamp,
-        date: msg.date_string(),
-        input: msg.tokens.input,
-        output: msg.tokens.output,
-        cache_read: msg.tokens.cache_read,
-        cache_write: msg.tokens.cache_write,
-        reasoning: msg.tokens.reasoning,
-        duration_ms: msg.duration_ms,
-        message_count: msg.message_count,
-        agent: msg.agent.as_deref().map(str::to_string),
-    }
-}
-
 fn should_keep_deduped_message(seen_keys: &mut HashSet<u64>, message: &UnifiedMessage) -> bool {
     message.dedup_key.is_none_or(|key| seen_keys.insert(key))
-}
-
-fn filter_parsed_messages(
-    messages: Vec<ParsedMessage>,
-    options: &LocalParseOptions,
-) -> Vec<ParsedMessage> {
-    let mut filtered = messages;
-
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        filtered.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if let Some(since) = &options.since {
-        filtered.retain(|m| m.date.as_str() >= since.as_str());
-    }
-
-    if let Some(until) = &options.until {
-        filtered.retain(|m| m.date.as_str() <= until.as_str());
-    }
-
-    filtered
-}
-
-pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
-    UnifiedMessage {
-        client: sessions::intern::intern(&msg.client),
-        model_id: sessions::intern::intern(&msg.model_id),
-        provider_id: sessions::intern::intern(&msg.provider_id),
-        session_id: sessions::intern::intern(&msg.session_id),
-        workspace_key: msg.workspace_key.as_deref().map(sessions::intern::intern),
-        workspace_label: msg.workspace_label.as_deref().map(sessions::intern::intern),
-        timestamp: msg.timestamp,
-        tokens: TokenBreakdown {
-            input: msg.input,
-            output: msg.output,
-            cache_read: msg.cache_read,
-            cache_write: msg.cache_write,
-            reasoning: msg.reasoning,
-        },
-        cost,
-        duration_ms: msg.duration_ms,
-        message_count: msg.message_count,
-        agent: msg.agent.as_deref().map(sessions::intern::intern),
-        agent_instance: None,
-        dedup_key: None,
-        is_turn_start: false,
-    }
 }
 
 #[cfg(test)]
@@ -1463,9 +1272,9 @@ mod tests {
         load_aggregated_views_with_pricing, load_cache_only_pricing_with_diagnostics,
         load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
         parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients, parsed_to_unified, positive_token_total, pricing,
-        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
-        AggregatedViews, AggregationConfig, ClientId, DateRange, GraphResult, GroupBy,
+        parse_local_unified_messages_resolved, positive_token_total, pricing,
+        retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
+        AggregationConfig, ClientCounts, ClientId, DateRange, GraphResult, GroupBy,
         LocalParseOptions, ReportOptions, TimeMetricsReport, TokenBreakdown, UnifiedMessage,
         ViewSet, UNKNOWN_WORKSPACE_LABEL,
     };
@@ -1475,6 +1284,20 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::sync::Arc;
+
+    struct LocalMessagesForTest {
+        messages: Vec<UnifiedMessage>,
+        counts: ClientCounts,
+    }
+
+    fn load_local_messages_for_test(
+        options: LocalParseOptions,
+    ) -> Result<LocalMessagesForTest, String> {
+        let counts = super::count_local_client_messages(options.clone())?.counts;
+        let (home_dir, clients) = super::resolve_local_parse_request(&options)?;
+        let messages = parse_local_unified_messages_resolved(options, &home_dir, &clients, None)?;
+        Ok(LocalMessagesForTest { messages, counts })
+    }
 
     struct HomeEnvGuard(Option<OsString>);
 
@@ -2896,44 +2719,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parsed_round_trip_preserves_workspace_metadata() {
-        let mut unified = UnifiedMessage::new(
-            "qwen",
-            "qwen3.5-plus",
-            "qwen",
-            "session-1",
-            1_742_390_400_000,
-            TokenBreakdown {
-                input: 10,
-                output: 5,
-                cache_read: 2,
-                cache_write: 0,
-                reasoning: 1,
-            },
-            1.25,
-        );
-        unified.set_workspace(
-            Some("//server/share/demo-workspace".to_string()),
-            Some("demo-workspace".to_string()),
-        );
-        unified.duration_ms = Some(2500);
-
-        let parsed = unified_to_parsed(&unified);
-        let round_tripped = parsed_to_unified(&parsed, 2.5);
-
-        assert_eq!(
-            round_tripped.workspace_key.as_deref(),
-            Some("//server/share/demo-workspace")
-        );
-        assert_eq!(
-            round_tripped.workspace_label.as_deref(),
-            Some("demo-workspace")
-        );
-        assert_eq!(round_tripped.cost, 2.5);
-        assert_eq!(round_tripped.duration_ms, Some(2500));
-    }
-
-    #[test]
     fn test_workspace_model_grouping_keeps_real_unknown_workspace_separate() {
         let entries = aggregate_model_usage_entries(
             vec![
@@ -3268,7 +3053,7 @@ model = "gpt-5.5"
 
     #[test]
     #[serial_test::serial]
-    fn test_parse_local_clients_kimi_code_usage_records() {
+    fn test_local_message_loader_kimi_code_usage_records() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
@@ -3277,7 +3062,7 @@ model = "gpt-5.5"
         {
             write_kimi_code_usage_fixture(source_home.path());
 
-            let parsed = parse_local_clients(LocalParseOptions {
+            let parsed = load_local_messages_for_test(LocalParseOptions {
                 home_dir: Some(source_home.path().to_str().unwrap().to_string()),
                 use_env_roots: false,
                 clients: Some(vec!["kimi".to_string()]),
@@ -3290,11 +3075,24 @@ model = "gpt-5.5"
 
             assert_eq!(parsed.counts.get(ClientId::Kimi), 2);
             assert_eq!(parsed.messages.len(), 2);
-            assert_eq!(parsed.messages[0].provider_id, "openai");
-            assert_eq!(parsed.messages[0].model_id, "gpt-5.5");
-            assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 30);
-            assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 3);
-            assert_eq!(parsed.messages.iter().map(|m| m.cache_read).sum::<i64>(), 5);
+            assert_eq!(parsed.messages[0].provider_id.as_ref(), "openai");
+            assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.5");
+            assert_eq!(
+                parsed.messages.iter().map(|m| m.tokens.input).sum::<i64>(),
+                30
+            );
+            assert_eq!(
+                parsed.messages.iter().map(|m| m.tokens.output).sum::<i64>(),
+                3
+            );
+            assert_eq!(
+                parsed
+                    .messages
+                    .iter()
+                    .map(|m| m.tokens.cache_read)
+                    .sum::<i64>(),
+                5
+            );
         }
 
         match original_home {
@@ -3972,7 +3770,7 @@ model = "gpt-5.5"
 
     #[test]
     #[serial_test::serial]
-    fn test_parse_local_clients_opencode_sqlite_counts_deduplicated_forked_history() {
+    fn test_local_message_loader_opencode_sqlite_counts_deduplicated_forked_history() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
@@ -4030,7 +3828,7 @@ model = "gpt-5.5"
             }
             drop(conn);
 
-            let parsed = parse_local_clients(LocalParseOptions {
+            let parsed = load_local_messages_for_test(LocalParseOptions {
                 home_dir: Some(source_home.path().to_str().unwrap().to_string()),
                 use_env_roots: false,
                 clients: Some(vec!["opencode".to_string()]),
@@ -4043,8 +3841,14 @@ model = "gpt-5.5"
 
             assert_eq!(parsed.counts.get(ClientId::OpenCode), 3);
             assert_eq!(parsed.messages.len(), 3);
-            assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 600);
-            assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 250);
+            assert_eq!(
+                parsed.messages.iter().map(|m| m.tokens.input).sum::<i64>(),
+                600
+            );
+            assert_eq!(
+                parsed.messages.iter().map(|m| m.tokens.output).sum::<i64>(),
+                250
+            );
         }
 
         match original_home {
@@ -4317,7 +4121,7 @@ model = "gpt-5.5"
 
     #[test]
     #[serial_test::serial]
-    fn test_parse_local_clients_codex_counts_deduplicated_forked_history() {
+    fn test_local_message_loader_codex_counts_deduplicated_forked_history() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
         let original_home = std::env::var("HOME").ok();
@@ -4326,7 +4130,7 @@ model = "gpt-5.5"
         {
             write_codex_forked_history_fixture(source_home.path());
 
-            let parsed = parse_local_clients(LocalParseOptions {
+            let parsed = load_local_messages_for_test(LocalParseOptions {
                 home_dir: Some(source_home.path().to_str().unwrap().to_string()),
                 use_env_roots: false,
                 clients: Some(vec!["codex".to_string()]),
@@ -4343,7 +4147,7 @@ model = "gpt-5.5"
                 parsed
                     .messages
                     .iter()
-                    .map(|message| message.input)
+                    .map(|message| message.tokens.input)
                     .sum::<i64>(),
                 88
             );
@@ -4351,7 +4155,7 @@ model = "gpt-5.5"
                 parsed
                     .messages
                     .iter()
-                    .map(|message| message.cache_read)
+                    .map(|message| message.tokens.cache_read)
                     .sum::<i64>(),
                 22
             );
@@ -4359,7 +4163,7 @@ model = "gpt-5.5"
                 parsed
                     .messages
                     .iter()
-                    .map(|message| message.output)
+                    .map(|message| message.tokens.output)
                     .sum::<i64>(),
                 33
             );
@@ -6167,7 +5971,7 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_parse_local_clients_preserves_gateway_message_client_counts() {
+    fn test_local_message_loader_preserves_gateway_message_client_counts() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let message_dir = temp_dir
             .path()
@@ -6179,7 +5983,7 @@ model = "gpt-5.5"
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["opencode".to_string()]),
@@ -6192,14 +5996,14 @@ model = "gpt-5.5"
 
         assert_eq!(parsed.counts.get(ClientId::OpenCode), 1);
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].client, "opencode");
-        assert_eq!(parsed.messages[0].model_id, "deepseek-v3");
-        assert_eq!(parsed.messages[0].provider_id, "fireworks_ai");
+        assert_eq!(parsed.messages[0].client.as_ref(), "opencode");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "deepseek-v3");
+        assert_eq!(parsed.messages[0].provider_id.as_ref(), "fireworks_ai");
     }
 
     #[test]
-    fn test_parse_local_clients_honors_scanner_settings_opencode_db_paths() {
-        // Regression guard: `parse_local_clients` used to call
+    fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
+        // Regression guard: local message loading used to call
         // `scan_all_clients_with_env_strategy`, which silently dropped
         // `options.scanner_settings`. Users with
         // `scanner.opencodeDbPaths` pointing at an OPENCODE_DB outside the
@@ -6242,7 +6046,7 @@ model = "gpt-5.5"
         drop(conn);
 
         // Without scanner_settings: no rows (nothing auto-discoverable).
-        let parsed_default = parse_local_clients(LocalParseOptions {
+        let parsed_default = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["opencode".to_string()]),
@@ -6257,7 +6061,7 @@ model = "gpt-5.5"
 
         // With scanner_settings pointing at the external db: the user
         // row must show up.
-        let parsed_with_settings = parse_local_clients(LocalParseOptions {
+        let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["opencode".to_string()]),
@@ -6273,15 +6077,18 @@ model = "gpt-5.5"
         assert_eq!(
             parsed_with_settings.counts.get(ClientId::OpenCode),
             1,
-            "scanner.opencodeDbPaths must reach the parse_local_clients path"
+            "scanner.opencodeDbPaths must reach the local message loading path"
         );
         assert_eq!(parsed_with_settings.messages.len(), 1);
-        assert_eq!(parsed_with_settings.messages[0].client, "opencode");
-        assert_eq!(parsed_with_settings.messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(parsed_with_settings.messages[0].client.as_ref(), "opencode");
+        assert_eq!(
+            parsed_with_settings.messages[0].model_id.as_ref(),
+            "claude-sonnet-4"
+        );
     }
 
     #[test]
-    fn test_parse_local_clients_honors_scanner_extra_scan_paths_for_hermes_profile_db() {
+    fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_db() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
         std::fs::create_dir_all(&profile_dir).unwrap();
@@ -6298,7 +6105,7 @@ model = "gpt-5.5"
         );
         drop(conn);
 
-        let parsed_default = parse_local_clients(LocalParseOptions {
+        let parsed_default = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["hermes".to_string()]),
@@ -6313,7 +6120,7 @@ model = "gpt-5.5"
 
         let mut extra_scan_paths = std::collections::BTreeMap::new();
         extra_scan_paths.insert("hermes".to_string(), vec![profile_dir]);
-        let parsed_with_settings = parse_local_clients(LocalParseOptions {
+        let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["hermes".to_string()]),
@@ -6329,22 +6136,25 @@ model = "gpt-5.5"
 
         assert_eq!(parsed_with_settings.counts.get(ClientId::Hermes), 2);
         assert_eq!(parsed_with_settings.messages.len(), 1);
-        assert_eq!(parsed_with_settings.messages[0].client, "hermes");
+        assert_eq!(parsed_with_settings.messages[0].client.as_ref(), "hermes");
         assert_eq!(
             parsed_with_settings.messages[0].agent.as_deref(),
             Some("Hermes Agent")
         );
         assert_eq!(
-            parsed_with_settings.messages[0].session_id,
+            parsed_with_settings.messages[0].session_id.as_ref(),
             "hermes-extra-session"
         );
-        assert_eq!(parsed_with_settings.messages[0].model_id, "claude-sonnet-4");
-        assert_eq!(parsed_with_settings.messages[0].input, 100);
-        assert_eq!(parsed_with_settings.messages[0].output, 25);
+        assert_eq!(
+            parsed_with_settings.messages[0].model_id.as_ref(),
+            "claude-sonnet-4"
+        );
+        assert_eq!(parsed_with_settings.messages[0].tokens.input, 100);
+        assert_eq!(parsed_with_settings.messages[0].tokens.output, 25);
     }
 
     #[test]
-    fn test_parse_local_clients_honors_scanner_extra_scan_paths_for_zed_threads_db() {
+    fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let windows_threads_dir = temp_dir.path().join("AppData/Local/Zed/threads");
         std::fs::create_dir_all(&windows_threads_dir).unwrap();
@@ -6353,7 +6163,7 @@ model = "gpt-5.5"
         insert_zed_thread(&conn, "zed-extra-thread", "claude-sonnet-4-5");
         drop(conn);
 
-        let parsed_default = parse_local_clients(LocalParseOptions {
+        let parsed_default = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["zed".to_string()]),
@@ -6368,7 +6178,7 @@ model = "gpt-5.5"
 
         let mut extra_scan_paths = std::collections::BTreeMap::new();
         extra_scan_paths.insert("zed".to_string(), vec![windows_threads_dir]);
-        let parsed_with_settings = parse_local_clients(LocalParseOptions {
+        let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["zed".to_string()]),
@@ -6384,17 +6194,17 @@ model = "gpt-5.5"
 
         assert_eq!(parsed_with_settings.counts.get(ClientId::Zed), 1);
         assert_eq!(parsed_with_settings.messages.len(), 1);
-        assert_eq!(parsed_with_settings.messages[0].client, "zed");
+        assert_eq!(parsed_with_settings.messages[0].client.as_ref(), "zed");
         assert_eq!(
-            parsed_with_settings.messages[0].session_id,
+            parsed_with_settings.messages[0].session_id.as_ref(),
             "zed-extra-thread"
         );
         assert_eq!(
-            parsed_with_settings.messages[0].model_id,
+            parsed_with_settings.messages[0].model_id.as_ref(),
             "claude-sonnet-4.5"
         );
-        assert_eq!(parsed_with_settings.messages[0].input, 42);
-        assert_eq!(parsed_with_settings.messages[0].output, 7);
+        assert_eq!(parsed_with_settings.messages[0].tokens.input, 42);
+        assert_eq!(parsed_with_settings.messages[0].tokens.output, 7);
     }
 
     #[test]
@@ -6445,7 +6255,7 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_parse_local_clients_dedups_zed_threads_across_default_and_extra_dbs() {
+    fn test_local_message_loader_dedups_zed_threads_across_default_and_extra_dbs() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
         // Place threads.db at the default platform path so the scanner finds it
@@ -6461,7 +6271,7 @@ model = "gpt-5.5"
         // the thread from appearing twice.
         let mut extra_scan_paths = std::collections::BTreeMap::new();
         extra_scan_paths.insert("zed".to_string(), vec![default_threads_dir.clone()]);
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["zed".to_string()]),
@@ -6478,11 +6288,11 @@ model = "gpt-5.5"
         // Should see exactly 1 message, not 2 (deduped by canonicalize).
         assert_eq!(parsed.counts.get(ClientId::Zed), 1);
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].session_id, "shared-zed-thread");
+        assert_eq!(parsed.messages[0].session_id.as_ref(), "shared-zed-thread");
     }
 
     #[test]
-    fn test_parse_local_clients_zed_extra_scan_paths_nonexistent_dir_is_silent() {
+    fn test_local_message_loader_zed_extra_scan_paths_nonexistent_dir_is_silent() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
         let mut extra_scan_paths = std::collections::BTreeMap::new();
@@ -6490,7 +6300,7 @@ model = "gpt-5.5"
             "zed".to_string(),
             vec![temp_dir.path().join("does/not/exist")],
         );
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["zed".to_string()]),
@@ -6529,7 +6339,7 @@ model = "gpt-5.5"
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["zed".to_string()]),
@@ -6547,8 +6357,8 @@ model = "gpt-5.5"
             "only adapter clients must not turn an empty legacy partition into an all-client scan"
         );
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].client, "zed");
-        assert_eq!(parsed.messages[0].session_id, "zed-only-thread");
+        assert_eq!(parsed.messages[0].client.as_ref(), "zed");
+        assert_eq!(parsed.messages[0].session_id.as_ref(), "zed-only-thread");
     }
 
     #[test]
@@ -6587,7 +6397,7 @@ model = "gpt-5.5"
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["amp".to_string()]),
@@ -6605,8 +6415,8 @@ model = "gpt-5.5"
             "only C3.1 adapter clients must not turn an empty legacy partition into an all-client scan"
         );
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].client, "amp");
-        assert_eq!(parsed.messages[0].model_id, "claude-opus-4.7");
+        assert_eq!(parsed.messages[0].client.as_ref(), "amp");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-opus-4.7");
     }
 
     #[test]
@@ -6642,7 +6452,7 @@ model = "gpt-5.5"
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["codebuff".to_string()]),
@@ -6660,8 +6470,8 @@ model = "gpt-5.5"
             "only C3.2 adapter clients must not turn an empty legacy partition into an all-client scan"
         );
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].client, "codebuff");
-        assert_eq!(parsed.messages[0].model_id, "claude-sonnet-4");
+        assert_eq!(parsed.messages[0].client.as_ref(), "codebuff");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-sonnet-4");
     }
 
     #[test]
@@ -6678,7 +6488,7 @@ model = "gpt-5.5"
             .join(".omp/agent/sessions/project/root-session");
         write_omp_parent_child_fixture(&omp_session_root);
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["pi".to_string(), "omp".to_string()]),
@@ -6694,10 +6504,11 @@ model = "gpt-5.5"
         assert!(parsed
             .messages
             .iter()
-            .any(|message| message.client == "pi" && message.session_id == "pi_ses_001"));
+            .any(|message| message.client.as_ref() == "pi"
+                && message.session_id.as_ref() == "pi_ses_001"));
         assert!(parsed.messages.iter().any(|message| {
-            message.client == "omp"
-                && message.session_id == "child-session"
+            message.client.as_ref() == "omp"
+                && message.session_id.as_ref() == "child-session"
                 && message.agent.as_deref() == Some("OMP Reviewer")
         }));
     }
@@ -6723,7 +6534,7 @@ model = "gpt-5.5"
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(Vec::new()),
@@ -6740,14 +6551,14 @@ model = "gpt-5.5"
             parsed
                 .messages
                 .iter()
-                .filter(|message| message.client == "zed")
+                .filter(|message| message.client.as_ref() == "zed")
                 .count(),
             1
         );
     }
 
     #[test]
-    fn test_parse_local_clients_dedups_hermes_sessions_across_default_and_extra_dbs() {
+    fn test_local_message_loader_dedups_hermes_sessions_across_default_and_extra_dbs() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
         let default_dir = temp_dir.path().join(".hermes");
@@ -6782,7 +6593,7 @@ model = "gpt-5.5"
 
         let mut extra_scan_paths = std::collections::BTreeMap::new();
         extra_scan_paths.insert("hermes".to_string(), vec![profile_db]);
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["hermes".to_string()]),
@@ -6798,13 +6609,16 @@ model = "gpt-5.5"
 
         assert_eq!(parsed.counts.get(ClientId::Hermes), 2);
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].session_id, "shared-hermes-session");
-        assert_eq!(parsed.messages[0].input, 100);
-        assert_eq!(parsed.messages[0].output, 25);
+        assert_eq!(
+            parsed.messages[0].session_id.as_ref(),
+            "shared-hermes-session"
+        );
+        assert_eq!(parsed.messages[0].tokens.input, 100);
+        assert_eq!(parsed.messages[0].tokens.output, 25);
     }
 
     #[test]
-    fn test_parse_local_clients_claude_filter_ignores_scanner_settings_opencode_db_paths() {
+    fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_paths() {
         // Regression guard for the scanner client-filter bypass: even
         // when `scanner.opencodeDbPaths` pins an external opencode db,
         // a `--clients claude` request must NOT pull in OpenCode rows.
@@ -6859,7 +6673,7 @@ model = "gpt-5.5"
         .unwrap();
         drop(conn);
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["claude".to_string()]),
@@ -6885,16 +6699,19 @@ model = "gpt-5.5"
             "Claude message must still be counted"
         );
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].client, "claude");
+        assert_eq!(parsed.messages[0].client.as_ref(), "claude");
         assert!(
-            parsed.messages.iter().all(|m| m.client != "opencode"),
+            parsed
+                .messages
+                .iter()
+                .all(|m| m.client.as_ref() != "opencode"),
             "no OpenCode messages may leak into a Claude-only result, got {:?}",
             parsed.messages
         );
     }
 
     #[test]
-    fn test_parse_local_clients_claude_transcripts_count_only_usage_metadata() {
+    fn test_local_message_loader_claude_transcripts_count_only_usage_metadata() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let transcripts_dir = temp_dir.path().join(".claude/transcripts");
         std::fs::create_dir_all(&transcripts_dir).unwrap();
@@ -6914,7 +6731,7 @@ model = "gpt-5.5"
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["claude".to_string()]),
@@ -6927,20 +6744,20 @@ model = "gpt-5.5"
 
         assert_eq!(parsed.counts.get(ClientId::Claude), 1);
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].client, "claude");
+        assert_eq!(parsed.messages[0].client.as_ref(), "claude");
         assert_eq!(
-            parsed.messages[0].session_id,
+            parsed.messages[0].session_id.as_ref(),
             "ses_123456789012345678901234567"
         );
-        assert_eq!(parsed.messages[0].model_id, "claude-sonnet-4");
-        assert_eq!(parsed.messages[0].input, 123);
-        assert_eq!(parsed.messages[0].output, 45);
-        assert_eq!(parsed.messages[0].cache_read, 67);
-        assert_eq!(parsed.messages[0].cache_write, 8);
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-sonnet-4");
+        assert_eq!(parsed.messages[0].tokens.input, 123);
+        assert_eq!(parsed.messages[0].tokens.output, 45);
+        assert_eq!(parsed.messages[0].tokens.cache_read, 67);
+        assert_eq!(parsed.messages[0].tokens.cache_write, 8);
     }
 
     #[test]
-    fn test_parse_local_clients_amp_reads_upstream_thread_files() {
+    fn test_local_message_loader_amp_reads_upstream_thread_files() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let amp_dir = temp_dir.path().join(".local/share/amp/threads");
         std::fs::create_dir_all(&amp_dir).unwrap();
@@ -6964,7 +6781,7 @@ model = "gpt-5.5"
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["amp".to_string()]),
@@ -6977,15 +6794,15 @@ model = "gpt-5.5"
 
         assert_eq!(parsed.counts.get(ClientId::Amp), 1);
         assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].client, "amp");
-        assert_eq!(parsed.messages[0].model_id, "claude-opus-4.7");
-        assert_eq!(parsed.messages[0].provider_id, "anthropic");
-        assert_eq!(parsed.messages[0].input, 10);
-        assert_eq!(parsed.messages[0].output, 2);
+        assert_eq!(parsed.messages[0].client.as_ref(), "amp");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-opus-4.7");
+        assert_eq!(parsed.messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(parsed.messages[0].tokens.input, 10);
+        assert_eq!(parsed.messages[0].tokens.output, 2);
     }
 
     #[test]
-    fn test_parse_local_clients_default_keeps_cursor_out_of_local_count() {
+    fn test_local_message_loader_default_keeps_cursor_out_of_local_count() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
         std::fs::create_dir_all(&cursor_cache_dir).unwrap();
@@ -6996,7 +6813,7 @@ model = "gpt-5.5"
         )
         .unwrap();
 
-        let parsed = parse_local_clients(LocalParseOptions {
+        let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: None,
@@ -7012,8 +6829,8 @@ model = "gpt-5.5"
             parsed
                 .messages
                 .iter()
-                .all(|message| message.client != "cursor"),
-            "Cursor cache rows must not enter the default parse_local_clients result"
+                .all(|message| message.client.as_ref() != "cursor"),
+            "Cursor cache rows must not enter the default local message loading result"
         );
     }
 }

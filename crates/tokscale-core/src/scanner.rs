@@ -2016,7 +2016,7 @@ mod tests {
         // merged `scanner.opencodeDbPaths` after the inner scan, which
         // bypassed the existing `enabled.contains(&ClientId::OpenCode)`
         // guard. A request like `tokscale --client claude` would still pull
-        // in user-pinned OpenCode dbs and inflate `parse_local_clients`
+        // in user-pinned OpenCode dbs and inflate local message loading
         // counts plus waste SQLite parsing work.
         //
         // The fix moves the merge inside the OpenCode-enabled block, so
