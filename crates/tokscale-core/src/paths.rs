@@ -4,8 +4,8 @@
 //! and message/pricing caches read from related directories), so the
 //! resolver lives here and is re-exported from tokscale-cli for callers
 //! that already imported it from there. macOS users following the docs
-//! expect `~/.config/tokscale/` because that is what `auth.rs`,
-//! `cursor.rs`, and `antigravity.rs` already write to.
+//! expect `~/.config/tokscale/` because that is what the local credential
+//! and cache helpers already write to.
 //! `dirs::config_dir()` would instead return `~/Library/Application Support/`
 //! on macOS, splitting state across two roots and silently ignoring
 //! settings.json edits the user made via the documented path. This module
