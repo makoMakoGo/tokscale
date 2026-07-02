@@ -1,8 +1,8 @@
 # Supported clients and data locations
 
 The canonical identity list is `crates/tokscale-core/client-catalog.json`. It is
-used to generate Rust client identity data and the frontend registry. This page
-summarizes scan sources and semantic boundaries for users.
+used to generate Rust client identity data. This page summarizes scan sources
+and semantic boundaries for users.
 
 Run this command from a built checkout to inspect what Tokscale sees on the
 current machine:
@@ -45,7 +45,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `junie` | Junie | `~/.junie/sessions/**/events.jsonl` | Reads JetBrains Junie session events. |
 | `trae` | Trae | `~/.config/tokscale/trae-cache/sessions/*.json` | Requires `tokscale trae login` and `tokscale trae sync`. China variants are not supported. |
 | `cline` | Cline | VS Code globalStorage `saoudrizwan.claude-dev/tasks/**/ui_messages.json` | Same task-log family as Roo Code and KiloCode. |
-| `commandcode` | Command Code | `~/.commandcode/projects/**/*.jsonl` | Estimated from transcripts; excluded from default submit data. |
+| `commandcode` | Command Code | `~/.commandcode/projects/**/*.jsonl` | Estimated from transcripts. |
 | `grok` | Grok Build | `$GROK_HOME/sessions/**/updates.jsonl`, fallback `~/.grok/sessions/` | Reads Grok session update logs. |
 | `crush` | Crush | `~/.local/share/crush/projects.json` identity only | Disabled for normal local token reports; no accepted token-level source. |
 | `warp` | Warp/Oz | `~/.config/tokscale/warp-cache/usage*.json` | Subscription aggregate surface only; not normal local token reports. |

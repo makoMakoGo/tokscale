@@ -429,13 +429,13 @@ mod tests {
                 AgentColumn::Instances,
             ]
         );
-        assert_eq!(length_at(&widths, 0), 3);
-        assert_eq!(length_at(&widths, 1), 22);
-        assert_eq!(length_at(&widths, 2), 24);
-        assert_eq!(length_at(&widths, 3), TOKENS_WIDTH);
-        assert_eq!(length_at(&widths, 4), COST_WIDTH);
-        assert_eq!(length_at(&widths, 5), MSGS_WIDTH);
-        assert_eq!(length_at(&widths, 6), INSTANCES_WIDTH);
+        assert_eq!(length_at(widths, 0), 3);
+        assert_eq!(length_at(widths, 1), 22);
+        assert_eq!(length_at(widths, 2), 24);
+        assert_eq!(length_at(widths, 3), TOKENS_WIDTH);
+        assert_eq!(length_at(widths, 4), COST_WIDTH);
+        assert_eq!(length_at(widths, 5), MSGS_WIDTH);
+        assert_eq!(length_at(widths, 6), INSTANCES_WIDTH);
     }
 
     #[test]
@@ -443,8 +443,8 @@ mod tests {
         let layout = agents_table_layout(200, 80, 80);
         let widths = &layout.widths;
 
-        assert_eq!(length_at(&widths, 1), AGENT_MAX_WIDTH);
-        assert_eq!(length_at(&widths, 2), SOURCE_MAX_WIDTH);
+        assert_eq!(length_at(widths, 1), AGENT_MAX_WIDTH);
+        assert_eq!(length_at(widths, 2), SOURCE_MAX_WIDTH);
     }
 
     #[test]

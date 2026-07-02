@@ -33,8 +33,8 @@ The active maintained branch is `personal/local-clients`.
 - **Explicit behavior.** Parser failures, missing data, unknown clients, and
   unmatched pricing stay visible instead of being hidden behind guessed aliases
   or fake success paths.
-- **Stable client identity.** Client ids, display facts, and frontend registry
-  data come from `crates/tokscale-core/client-catalog.json`.
+- **Stable client identity.** Client ids, display facts, and generated Rust
+  identity data come from `crates/tokscale-core/client-catalog.json`.
 - **Shared aggregation semantics.** CLI and TUI reports should describe the
   same local usage, not separate interpretations of the same transcript set.
 - **Lower memory overhead.** The message pipeline avoids unnecessary clones and

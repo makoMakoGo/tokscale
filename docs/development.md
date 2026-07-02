@@ -12,7 +12,6 @@ crates/
 packages/
   cli/                  TypeScript binary dispatcher
   tokscale/             npm wrapper package
-  frontend/             Next.js hosted/social frontend
   cli-*/                platform package manifests
 
 docs/
@@ -49,23 +48,18 @@ bun run cli -- --no-spinner --light
 cargo test
 cargo test -p tokscale-core
 cargo test -p tokscale-cli
-bun run --cwd packages/frontend lint
 ```
 
 When running Tokscale itself from automated scripts, pass `--no-spinner` unless
 spinner behavior is what you are testing.
 
-## Client registry
+## Client identity
 
 Client identity is catalog-driven:
 
-```bash
-bun run generate:client-registry
-bun run check:client-registry
-```
-
 Update `crates/tokscale-core/client-catalog.json` when adding or renaming a
-client identity, then regenerate the frontend registry.
+client identity. The Rust build script validates the catalog and generates the
+compiled client identity data.
 
 ## Upstream ports
 

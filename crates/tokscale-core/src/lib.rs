@@ -6332,23 +6332,18 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn test_submit_default_graph_includes_antigravity_cache_rows() {
+    fn test_default_graph_includes_antigravity_cache_rows() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let sessions_dir = temp_dir
             .path()
             .join(".config/tokscale/antigravity-cache/sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         std::fs::write(
-            sessions_dir.join("ag-submit.jsonl"),
+            sessions_dir.join("ag-local.jsonl"),
             r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
 "#,
         )
         .unwrap();
-
-        let clients: Vec<String> = ClientId::iter()
-            .filter(|client| client.submit_default())
-            .map(|client| client.as_str().to_string())
-            .collect();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let graph = rt
@@ -6356,7 +6351,7 @@ model = "gpt-5.5"
                 ReportOptions {
                     home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
                     use_env_roots: false,
-                    clients: Some(clients),
+                    clients: None,
                     since: None,
                     until: None,
                     year: None,

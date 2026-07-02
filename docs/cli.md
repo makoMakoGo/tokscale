@@ -184,19 +184,8 @@ codex exec --json "review this change" \
 
 Set `TOKSCALE_HEADLESS_DIR` to customize the headless log root.
 
-## Submission commands
+## Local-only surface
 
-These commands talk to the hosted Tokscale service configured by the codebase:
-
-```bash
-tokscale login
-tokscale login --token tt_xxx
-tokscale whoami
-tokscale submit --dry-run
-tokscale submit --client opencode,claude --since 2026-01-01
-tokscale delete-submitted-data
-tokscale logout
-```
-
-Use them only when you intend to interact with that service. They are not needed
-for local reports.
+This fork does not expose hosted Tokscale account or submission commands. The
+CLI surface is limited to local reports, cache-backed local integrations,
+subscription usage helpers, and source-build tooling for this fork.

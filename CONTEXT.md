@@ -27,7 +27,7 @@ file take precedence when upstream semantics conflict with local needs.
 - Keep Claude Code handling for `model = "<synthetic>"` placeholder records.
   That placeholder is malformed input cleanup, not a real source or client.
 - Remove upstream `synthetic.new` as a source/client concept. It does not belong
-  in filters, scanner defaults, TUI source pickers, frontend logos, or docs.
+  in filters, scanner defaults, TUI source pickers, or docs.
 - Keep Pi and OMP as separate client/source identities. OMP usage must not be
   counted as Pi usage by display or aggregation code.
 - Treat `cwd` workspace attribution as branch behavior, not as caller folklore.
@@ -36,7 +36,10 @@ file take precedence when upstream semantics conflict with local needs.
 ## Architecture Direction
 
 - Client identity should come from a small catalog of display facts and stable
-  ids, not from repeated switch statements across core, CLI, TUI, and frontend.
+  ids, not from repeated switch statements across core, CLI, and TUI.
+- This fork's active product surface is local Rust CLI/TUI. Hosted account
+  auth, hosted data submission, and the Next.js social frontend were removed
+  by ADR 0015.
 - Local parsing policy should move behind client adapters one client at a time.
   Do not design a large framework before a tracer-bullet migration proves the
   interface.

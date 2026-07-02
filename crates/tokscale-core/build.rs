@@ -12,7 +12,6 @@ struct CatalogEntry {
     display_name: String,
     short_name: String,
     hotkey: String,
-    submit_default: bool,
     logo: String,
     color: String,
     text_color: Option<String>,
@@ -132,12 +131,11 @@ fn generate_rust(entries: &[CatalogEntry]) -> String {
         .iter()
         .map(|entry| {
             format!(
-                "    ClientIdentity {{ id: {}, display_name: {}, short_name: {}, hotkey: {}, submit_default: {}, logo_url: {}, color: {}, text_color: {} }},\n",
+                "    ClientIdentity {{ id: {}, display_name: {}, short_name: {}, hotkey: {}, logo_url: {}, color: {}, text_color: {} }},\n",
                 rust_string(&entry.id),
                 rust_string(&entry.display_name),
                 rust_string(&entry.short_name),
                 rust_hotkey(&entry.hotkey),
-                entry.submit_default,
                 rust_string(&entry.logo),
                 rust_string(&entry.color),
                 rust_option_string(entry.text_color.as_deref()),
@@ -157,7 +155,6 @@ pub struct ClientIdentity {{
     pub display_name: &'static str,
     pub short_name: &'static str,
     pub hotkey: Option<char>,
-    pub submit_default: bool,
     pub logo_url: &'static str,
     pub color: &'static str,
     pub text_color: Option<&'static str>,
@@ -189,10 +186,6 @@ impl ClientId {{
 
     pub fn hotkey(self) -> Option<char> {{
         self.identity().hotkey
-    }}
-
-    pub fn submit_default(self) -> bool {{
-        self.identity().submit_default
     }}
 
     pub fn color(self) -> &'static str {{

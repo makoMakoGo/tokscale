@@ -11,18 +11,18 @@ database can be read.
 Some clients expose usage through surfaces that are not aligned with this
 branch's product boundary, are not personally used, or are explicitly unwanted.
 Keeping those clients creates maintenance load in the catalog, adapter
-registry, cache schema, generated frontend registry, docs, and tests.
+registry, cache schema, docs, and tests.
 
 ## Decision
 
 - A local client is included only when it is wanted for this fork and can be
   represented by the current adapter/cache/aggregation architecture.
 - MiMo Code/MiCode is not included. Do not register a `micode` client, local
-  scan definition, adapter, parser module, frontend registry entry, README
-  support row, or submit policy.
+  scan definition, adapter, parser module, README support row, or legacy submit
+  policy.
 - GJC/gajae-code is not included. Do not register a `gjc` client, local scan
-  definition, adapter, parser module, frontend registry entry, README support
-  row, or submit policy.
+  definition, adapter, parser module, README support row, or legacy submit
+  policy.
 - Jcode is not included. Upstream Jcode fixes are not portable leaf fixes unless
   this fork first accepts a complete Jcode adapter.
 - Upstream fixes targeting excluded clients are recorded as `abort` in the
