@@ -1,17 +1,17 @@
 //! Per-view accumulators derived from the old fold sites
 //! (`aggregate_model_usage_entries`, `MonthAggregator`/month fold,
-//! `HourAggregator`/hour fold). The graph/session/time-metrics views are
-//! inherently two-pass; the engine buffers messages and replays the existing
-//! `aggregator::`/`sessionize::` functions (see `engine.rs`).
+//! `HourAggregator`/hour fold, and the daily graph fold). Session and
+//! time-metrics views still need their existing two-pass projection.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::{
     aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
     aggregator, normalize_provider_for_grouping, ordered_clients_by_token_contribution,
-    positive_token_total, ClientContributionOrder, DailyContribution, GraphResult, GroupBy,
-    HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
-    TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
+    positive_token_total, ClientContribution, ClientContributionOrder, DailyContribution,
+    DailyTotals, DataSummary, GraphMeta, GraphResult, GroupBy, HourlyUsage, ModelPerformance,
+    ModelUsage, MonthlyUsage, SessionContribution, TimeMetricsReport, TokenBreakdown,
+    UnifiedMessage, ViewSet, YearSummary,
 };
 
 use super::views::AgentUsage;
@@ -316,6 +316,308 @@ pub(super) fn finish_hour_map(hour_map: HashMap<String, HourAcc>) -> Vec<HourlyU
 }
 
 #[derive(Default)]
+pub(super) struct DailyAcc {
+    totals: DailyTotals,
+    token_breakdown: TokenBreakdown,
+    clients: HashMap<String, ClientContribution>,
+}
+
+impl DailyAcc {
+    pub(super) fn push(&mut self, msg: &UnifiedMessage) {
+        let total_tokens = msg
+            .tokens
+            .input
+            .saturating_add(msg.tokens.output)
+            .saturating_add(msg.tokens.cache_read)
+            .saturating_add(msg.tokens.cache_write)
+            .saturating_add(msg.tokens.reasoning);
+
+        self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
+        self.totals.cost += msg.cost;
+        self.totals.messages = self
+            .totals
+            .messages
+            .saturating_add(msg.message_count.max(0));
+
+        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
+        self.token_breakdown.output = self
+            .token_breakdown
+            .output
+            .saturating_add(msg.tokens.output);
+        self.token_breakdown.cache_read = self
+            .token_breakdown
+            .cache_read
+            .saturating_add(msg.tokens.cache_read);
+        self.token_breakdown.cache_write = self
+            .token_breakdown
+            .cache_write
+            .saturating_add(msg.tokens.cache_write);
+        self.token_breakdown.reasoning = self
+            .token_breakdown
+            .reasoning
+            .saturating_add(msg.tokens.reasoning);
+
+        let model_id = msg.model_id.as_ref();
+        let key = format!("{}:{}", msg.client, model_id);
+        let provider_id = normalize_provider_for_grouping(&msg.provider_id);
+        let client_entry = self
+            .clients
+            .entry(key)
+            .or_insert_with(|| ClientContribution {
+                client: msg.client.to_string(),
+                model_id: model_id.to_string(),
+                provider_id: provider_id.clone(),
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                messages: 0,
+            });
+
+        if !client_entry
+            .provider_id
+            .split(", ")
+            .any(|p| p == provider_id)
+        {
+            client_entry.provider_id = format!("{}, {}", client_entry.provider_id, provider_id);
+        }
+
+        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
+        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
+        client_entry.tokens.cache_read = client_entry
+            .tokens
+            .cache_read
+            .saturating_add(msg.tokens.cache_read);
+        client_entry.tokens.cache_write = client_entry
+            .tokens
+            .cache_write
+            .saturating_add(msg.tokens.cache_write);
+        client_entry.tokens.reasoning = client_entry
+            .tokens
+            .reasoning
+            .saturating_add(msg.tokens.reasoning);
+        client_entry.cost += msg.cost;
+        client_entry.messages = client_entry
+            .messages
+            .saturating_add(msg.message_count.max(0));
+
+        let mut providers: Vec<&str> = client_entry.provider_id.split(", ").collect();
+        providers.sort_unstable();
+        providers.dedup();
+        client_entry.provider_id = providers.join(", ");
+    }
+
+    fn into_contribution(self, date: String) -> DailyContribution {
+        let token_breakdown = TokenBreakdown {
+            input: self.token_breakdown.input.max(0),
+            output: self.token_breakdown.output.max(0),
+            cache_read: self.token_breakdown.cache_read.max(0),
+            cache_write: self.token_breakdown.cache_write.max(0),
+            reasoning: self.token_breakdown.reasoning.max(0),
+        };
+
+        let mut clients: Vec<ClientContribution> = self
+            .clients
+            .into_values()
+            .map(|mut contribution| {
+                contribution.tokens.input = contribution.tokens.input.max(0);
+                contribution.tokens.output = contribution.tokens.output.max(0);
+                contribution.tokens.cache_read = contribution.tokens.cache_read.max(0);
+                contribution.tokens.cache_write = contribution.tokens.cache_write.max(0);
+                contribution.tokens.reasoning = contribution.tokens.reasoning.max(0);
+                contribution.cost = contribution.cost.max(0.0);
+                contribution
+            })
+            .collect();
+        clients.sort_by(|a, b| {
+            a.client
+                .cmp(&b.client)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_id.cmp(&b.provider_id))
+        });
+
+        DailyContribution {
+            date,
+            totals: DailyTotals {
+                tokens: self.totals.tokens.max(0),
+                cost: self.totals.cost.max(0.0),
+                messages: self.totals.messages.max(0),
+            },
+            intensity: 0,
+            token_breakdown,
+            clients,
+            active_time_ms: None,
+        }
+    }
+}
+
+pub(super) fn finish_daily_map(daily_map: HashMap<String, DailyAcc>) -> Vec<DailyContribution> {
+    let mut contributions: Vec<DailyContribution> = daily_map
+        .into_iter()
+        .map(|(date, acc)| acc.into_contribution(date))
+        .collect();
+    contributions.sort_by(|a, b| a.date.cmp(&b.date));
+    calculate_intensities(&mut contributions);
+    contributions
+}
+
+fn calculate_intensities(contributions: &mut [DailyContribution]) {
+    let max_cost = contributions
+        .iter()
+        .map(|c| c.totals.cost)
+        .fold(0.0_f64, f64::max);
+
+    if max_cost == 0.0 {
+        return;
+    }
+
+    for contribution in contributions {
+        let ratio = contribution.totals.cost / max_cost;
+        contribution.intensity = if ratio >= 0.75 {
+            4
+        } else if ratio >= 0.5 {
+            3
+        } else if ratio >= 0.25 {
+            2
+        } else if ratio > 0.0 {
+            1
+        } else {
+            0
+        };
+    }
+}
+
+fn clean_total_cost(cost: f64) -> f64 {
+    if cost == 0.0 {
+        0.0
+    } else {
+        cost
+    }
+}
+
+fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
+    let total_tokens: i64 = contributions.iter().map(|c| c.totals.tokens).sum();
+    let total_cost = clean_total_cost(contributions.iter().map(|c| c.totals.cost).sum());
+    let active_days = contributions
+        .iter()
+        .filter(|c| c.totals.tokens > 0 || c.totals.cost > 0.0 || c.totals.messages > 0)
+        .count() as i32;
+    let max_cost = clean_total_cost(
+        contributions
+            .iter()
+            .map(|c| c.totals.cost)
+            .fold(0.0, f64::max),
+    );
+
+    let mut clients_set = HashSet::with_capacity(5);
+    let mut models_set = HashSet::with_capacity(20);
+
+    for contribution in contributions {
+        for source in &contribution.clients {
+            clients_set.insert(source.client.clone());
+            models_set.insert(source.model_id.clone());
+        }
+    }
+
+    DataSummary {
+        total_tokens,
+        total_cost,
+        total_days: contributions.len() as i32,
+        active_days,
+        average_per_day: if active_days > 0 {
+            total_cost / active_days as f64
+        } else {
+            0.0
+        },
+        max_cost_in_single_day: max_cost,
+        clients: {
+            let mut v: Vec<_> = clients_set.into_iter().collect();
+            v.sort();
+            v
+        },
+        models: {
+            let mut v: Vec<_> = models_set.into_iter().collect();
+            v.sort();
+            v
+        },
+    }
+}
+
+fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> {
+    #[derive(Default)]
+    struct YearAcc {
+        tokens: i64,
+        cost: f64,
+        start: String,
+        end: String,
+    }
+
+    let mut years_map: HashMap<String, YearAcc> = HashMap::with_capacity(5);
+
+    for contribution in contributions {
+        if contribution.date.len() < 4 {
+            eprintln!(
+                "Warning: Skipping contribution with invalid date '{}' ({} tokens, ${:.4} cost)",
+                contribution.date, contribution.totals.tokens, contribution.totals.cost
+            );
+            continue;
+        }
+        let year = &contribution.date[0..4];
+        let entry = years_map.entry(year.to_string()).or_default();
+        entry.tokens += contribution.totals.tokens;
+        entry.cost += contribution.totals.cost;
+
+        if entry.start.is_empty() || contribution.date < entry.start {
+            entry.start = contribution.date.clone();
+        }
+        if entry.end.is_empty() || contribution.date > entry.end {
+            entry.end = contribution.date.clone();
+        }
+    }
+
+    let mut years: Vec<YearSummary> = years_map
+        .into_iter()
+        .map(|(year, acc)| YearSummary {
+            year,
+            total_tokens: acc.tokens,
+            total_cost: acc.cost,
+            range_start: acc.start,
+            range_end: acc.end,
+        })
+        .collect();
+    years.sort_by(|a, b| a.year.cmp(&b.year));
+    years
+}
+
+fn finish_graph_result(
+    contributions: Vec<DailyContribution>,
+    processing_time_ms: u32,
+) -> GraphResult {
+    let summary = calculate_summary(&contributions);
+    let years = calculate_years(&contributions);
+    let date_range_start = contributions
+        .first()
+        .map(|c| c.date.clone())
+        .unwrap_or_default();
+    let date_range_end = contributions
+        .last()
+        .map(|c| c.date.clone())
+        .unwrap_or_default();
+
+    GraphResult {
+        meta: GraphMeta {
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            date_range_start,
+            date_range_end,
+            processing_time_ms,
+        },
+        summary,
+        years,
+        contributions,
+        time_metrics: None,
+    }
+}
+
+#[derive(Default)]
 pub(super) struct AgentEntries {
     agents: HashMap<(String, String), AgentUsage>,
 }
@@ -377,7 +679,11 @@ pub(super) struct BufferedViews {
 /// Materialize the buffered two-pass views. Sessionize-derived metrics are
 /// computed once and reused by graph + time-metrics outputs when both are
 /// requested.
-pub(super) fn finish_buffered_views(messages: &[UnifiedMessage], views: ViewSet) -> BufferedViews {
+pub(super) fn finish_buffered_views(
+    messages: &[UnifiedMessage],
+    views: ViewSet,
+    daily_contributions: Option<Vec<DailyContribution>>,
+) -> BufferedViews {
     let needs_session_metrics =
         views.contains(ViewSet::GRAPH) || views.contains(ViewSet::TIME_METRICS);
     let (time_metrics_value, daily_active_time) = if needs_session_metrics {
@@ -396,8 +702,8 @@ pub(super) fn finish_buffered_views(messages: &[UnifiedMessage], views: ViewSet)
     };
 
     let graph = views.contains(ViewSet::GRAPH).then(|| {
-        let contributions = aggregator::aggregate_by_date(messages);
-        let mut result = aggregator::generate_graph_result(contributions, 0);
+        let contributions = daily_contributions.expect("graph view requested");
+        let mut result = finish_graph_result(contributions, 0);
         result.time_metrics = time_metrics_value.clone();
         if let Some(daily_active_time) = &daily_active_time {
             for contribution in &mut result.contributions {

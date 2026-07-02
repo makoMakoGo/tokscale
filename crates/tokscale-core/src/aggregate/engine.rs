@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use crate::{
     aggregate::accumulators::{
-        finish_buffered_views, finish_hour_map, finish_month_map, hour_key, AgentEntries, HourAcc,
-        ModelEntries, MonthAcc,
+        finish_buffered_views, finish_daily_map, finish_hour_map, finish_month_map, hour_key,
+        AgentEntries, DailyAcc, HourAcc, ModelEntries, MonthAcc,
     },
     aggregate::tui::TuiAcc,
     AggregatedViews, AggregationConfig, ViewSet,
@@ -20,6 +20,7 @@ pub struct AggregationEngine {
     tui: Option<TuiAcc>,
     month_map: Option<HashMap<String, MonthAcc>>,
     hour_map: Option<HashMap<String, HourAcc>>,
+    daily_map: Option<HashMap<String, DailyAcc>>,
     agent_entries: Option<AgentEntries>,
     graph_buffer: Option<Vec<UnifiedMessage>>,
 }
@@ -39,6 +40,7 @@ impl AggregationEngine {
                 .then(|| TuiAcc::new(config.group_by.clone())),
             month_map: views.contains(ViewSet::MONTHLY).then(HashMap::new),
             hour_map: views.contains(ViewSet::HOURLY).then(HashMap::new),
+            daily_map: views.contains(ViewSet::GRAPH).then(HashMap::new),
             agent_entries: views.contains(ViewSet::AGENTS).then(AgentEntries::default),
             graph_buffer: graph_needed.then(Vec::new),
             config,
@@ -70,6 +72,9 @@ impl AggregationEngine {
             let key = hour_key(msg);
             hour_map.entry(key).or_default().push(msg);
         }
+        if let Some(daily_map) = &mut self.daily_map {
+            daily_map.entry(date).or_default().push(msg);
+        }
         if let Some(agent_entries) = &mut self.agent_entries {
             agent_entries.push(msg);
         }
@@ -85,6 +90,7 @@ impl AggregationEngine {
             tui,
             month_map,
             hour_map,
+            daily_map,
             agent_entries,
             graph_buffer,
         } = self;
@@ -116,13 +122,15 @@ impl AggregationEngine {
         });
 
         let agent_usage = agent_entries.map(AgentEntries::finish);
+        let daily_contributions_for_graph = daily_map.map(finish_daily_map);
 
         // Graph, sessions, and time-metrics share the same buffered projection.
         // `processing_time_ms` is the caller's responsibility (set after
         // `finish`); 0 here.
         let (graph, session_contributions, time_metrics, daily_contributions) = match graph_buffer {
             Some(messages) => {
-                let views = finish_buffered_views(&messages, config.views);
+                let views =
+                    finish_buffered_views(&messages, config.views, daily_contributions_for_graph);
                 (
                     views.graph,
                     views.session_contributions,
