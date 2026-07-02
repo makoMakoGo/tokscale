@@ -189,12 +189,11 @@ pub(super) struct MonthAcc {
 }
 
 impl MonthAcc {
-    /// `(month_key, Some(acc))` when the message has a usable month; `None`
-    /// when `date.len() < 7` (skipped, matching the old `continue`).
-    pub(super) fn try_key(msg: &UnifiedMessage) -> Option<String> {
-        let date = msg.date_string();
+    /// Month key when the message has a usable date; `None` when
+    /// `date.len() < 7` (skipped, matching the old `continue`).
+    pub(super) fn try_key_from_date(date: &str) -> Option<&str> {
         if date.len() >= 7 {
-            Some(date[..7].to_string())
+            Some(&date[..7])
         } else {
             None
         }
@@ -379,6 +378,11 @@ impl DailyAcc {
             .any(|p| p == provider_id)
         {
             client_entry.provider_id = format!("{}, {}", client_entry.provider_id, provider_id);
+
+            let mut providers: Vec<&str> = client_entry.provider_id.split(", ").collect();
+            providers.sort_unstable();
+            providers.dedup();
+            client_entry.provider_id = providers.join(", ");
         }
 
         client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
@@ -399,11 +403,6 @@ impl DailyAcc {
         client_entry.messages = client_entry
             .messages
             .saturating_add(msg.message_count.max(0));
-
-        let mut providers: Vec<&str> = client_entry.provider_id.split(", ").collect();
-        providers.sort_unstable();
-        providers.dedup();
-        client_entry.provider_id = providers.join(", ");
     }
 
     fn into_contribution(self, date: String) -> DailyContribution {
@@ -612,11 +611,17 @@ impl SessionAcc {
             .messages
             .saturating_add(msg.message_count.max(0));
 
+        let current_entry_is_top = self.top_client == client_entry.client
+            && self.top_provider == client_entry.provider_id
+            && self.top_model == client_entry.model_id;
+
         if client_entry.cost > self.top_cost {
             self.top_cost = client_entry.cost;
-            self.top_client = client_entry.client.clone();
-            self.top_provider = client_entry.provider_id.clone();
-            self.top_model = client_entry.model_id.clone();
+            if !current_entry_is_top {
+                self.top_client.clone_from(&client_entry.client);
+                self.top_provider.clone_from(&client_entry.provider_id);
+                self.top_model.clone_from(&client_entry.model_id);
+            }
         }
 
         let secs = if msg.timestamp.abs() > 1_000_000_000_000 {
@@ -775,17 +780,17 @@ pub(super) fn finish_time_buffered_views(
     let needs_session_metrics =
         views.contains(ViewSet::GRAPH) || views.contains(ViewSet::TIME_METRICS);
     let (time_metrics_value, daily_active_time) = if needs_session_metrics {
-        let intervals = crate::sessionize::sessionize_time_events(
+        let intervals = crate::sessionize::activity_intervals_from_time_events(
             events,
             crate::sessionize::DEFAULT_IDLE_GAP_MS,
         );
-        let metrics = crate::sessionize::compute_time_metrics(
+        let metrics = crate::sessionize::compute_time_metrics_for_activity(
             &intervals,
             crate::sessionize::DEFAULT_IDLE_GAP_MS,
         );
         let daily_active_time = views
             .contains(ViewSet::GRAPH)
-            .then(|| crate::sessionize::compute_daily_active_time(&intervals));
+            .then(|| crate::sessionize::compute_daily_active_time_for_activity(&intervals));
         (Some(metrics), daily_active_time)
     } else {
         (None, None)
