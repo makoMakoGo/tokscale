@@ -3,6 +3,7 @@
 use crate::sessions::UnifiedMessage;
 use crate::TokenBreakdown;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Default idle gap threshold: 3 minutes (ms).
 pub const DEFAULT_IDLE_GAP_MS: i64 = 3 * 60 * 1000;
@@ -40,9 +41,94 @@ pub struct TimeMetrics {
     pub session_count: u32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SessionTimeEvent {
+    client: Arc<str>,
+    session_id: Arc<str>,
+    timestamp: i64,
+    duration_ms: Option<i64>,
+}
+
+impl SessionTimeEvent {
+    pub(crate) fn from_message(msg: &UnifiedMessage) -> Self {
+        Self {
+            client: Arc::clone(&msg.client),
+            session_id: Arc::clone(&msg.session_id),
+            timestamp: msg.timestamp,
+            duration_ms: msg.duration_ms,
+        }
+    }
+}
+
+trait SessionizeRow {
+    fn client(&self) -> &str;
+    fn session_id(&self) -> &str;
+    fn timestamp(&self) -> i64;
+    fn duration_ms(&self) -> Option<i64>;
+    fn add_tokens_to(&self, _tokens: &mut TokenBreakdown) {}
+    fn cost(&self) -> f64 {
+        0.0
+    }
+    fn message_count(&self) -> i32 {
+        1
+    }
+}
+
+impl SessionizeRow for UnifiedMessage {
+    fn client(&self) -> &str {
+        &self.client
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+
+    fn duration_ms(&self) -> Option<i64> {
+        self.duration_ms
+    }
+
+    fn add_tokens_to(&self, tokens: &mut TokenBreakdown) {
+        tokens.input += self.tokens.input;
+        tokens.output += self.tokens.output;
+        tokens.cache_read += self.tokens.cache_read;
+        tokens.cache_write += self.tokens.cache_write;
+        tokens.reasoning += self.tokens.reasoning;
+    }
+
+    fn cost(&self) -> f64 {
+        self.cost
+    }
+
+    fn message_count(&self) -> i32 {
+        self.message_count
+    }
+}
+
+impl SessionizeRow for SessionTimeEvent {
+    fn client(&self) -> &str {
+        &self.client
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+
+    fn duration_ms(&self) -> Option<i64> {
+        self.duration_ms
+    }
+}
+
 #[derive(Debug)]
-struct SessionMessageSpan<'a> {
-    msg: &'a UnifiedMessage,
+struct SessionMessageSpan<'a, Row> {
+    row: &'a Row,
     start_ts: i64,
     end_ts: i64,
 }
@@ -57,7 +143,7 @@ struct SessionBlock {
 }
 
 impl SessionBlock {
-    fn new(span: &SessionMessageSpan<'_>) -> Self {
+    fn new<Row: SessionizeRow>(span: &SessionMessageSpan<'_, Row>) -> Self {
         let mut block = Self {
             start_ts: span.start_ts,
             end_ts: span.end_ts,
@@ -69,15 +155,11 @@ impl SessionBlock {
         block
     }
 
-    fn add(&mut self, span: &SessionMessageSpan<'_>) {
+    fn add<Row: SessionizeRow>(&mut self, span: &SessionMessageSpan<'_, Row>) {
         self.end_ts = self.end_ts.max(span.end_ts);
-        self.tokens.input += span.msg.tokens.input;
-        self.tokens.output += span.msg.tokens.output;
-        self.tokens.cache_read += span.msg.tokens.cache_read;
-        self.tokens.cache_write += span.msg.tokens.cache_write;
-        self.tokens.reasoning += span.msg.tokens.reasoning;
-        self.cost += span.msg.cost;
-        self.message_count += span.msg.message_count.max(1);
+        span.row.add_tokens_to(&mut self.tokens);
+        self.cost += span.row.cost();
+        self.message_count += span.row.message_count().max(1);
     }
 }
 
@@ -91,38 +173,49 @@ impl SessionBlock {
 /// `active_duration_ms` by splitting a source session into separate active
 /// intervals.
 pub fn sessionize(messages: &[UnifiedMessage], idle_gap_ms: i64) -> Vec<SessionInterval> {
-    if messages.is_empty() {
+    sessionize_rows(messages, idle_gap_ms)
+}
+
+pub(crate) fn sessionize_time_events(
+    events: &[SessionTimeEvent],
+    idle_gap_ms: i64,
+) -> Vec<SessionInterval> {
+    sessionize_rows(events, idle_gap_ms)
+}
+
+fn sessionize_rows<Row: SessionizeRow>(rows: &[Row], idle_gap_ms: i64) -> Vec<SessionInterval> {
+    if rows.is_empty() {
         return Vec::new();
     }
 
     // Group by (client, session_id)
-    let mut groups: HashMap<(&str, &str), Vec<&UnifiedMessage>> = HashMap::new();
-    for msg in messages {
-        if msg.timestamp <= 0 {
+    let mut groups: HashMap<(&str, &str), Vec<&Row>> = HashMap::new();
+    for row in rows {
+        if row.timestamp() <= 0 {
             continue;
         }
         groups
-            .entry((&msg.client, &msg.session_id))
+            .entry((row.client(), row.session_id()))
             .or_default()
-            .push(msg);
+            .push(row);
     }
 
     let mut intervals: Vec<SessionInterval> = Vec::with_capacity(groups.len());
 
-    for ((client, session_id), mut msgs) in groups {
-        msgs.sort_unstable_by_key(|m| m.timestamp);
+    for ((client, session_id), mut rows) in groups {
+        rows.sort_unstable_by_key(|row| row.timestamp());
 
-        let spans: Vec<SessionMessageSpan<'_>> = msgs
+        let spans: Vec<SessionMessageSpan<'_, Row>> = rows
             .into_iter()
-            .map(|msg| {
-                let duration_ms = msg
-                    .duration_ms
+            .map(|row| {
+                let duration_ms = row
+                    .duration_ms()
                     .filter(|duration| *duration > 0)
                     .unwrap_or(0);
                 SessionMessageSpan {
-                    msg,
-                    start_ts: msg.timestamp,
-                    end_ts: msg.timestamp.saturating_add(duration_ms),
+                    row,
+                    start_ts: row.timestamp(),
+                    end_ts: row.timestamp().saturating_add(duration_ms),
                 }
             })
             .collect();
