@@ -1,7 +1,6 @@
 #![deny(clippy::all)]
 
 mod adapters;
-mod aggregator;
 mod cc_mirror;
 mod client_catalog;
 pub mod clients;
