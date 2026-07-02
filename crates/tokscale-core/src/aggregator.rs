@@ -2,13 +2,15 @@
 //!
 //! Uses rayon for parallel map-reduce operations.
 
-use crate::sessions::UnifiedMessage;
-use crate::{
-    normalize_provider_for_grouping, ClientContribution, DailyContribution, DailyTotals,
-    DataSummary, SessionContribution, TokenBreakdown, YearSummary,
-};
 #[cfg(test)]
-use crate::{GraphMeta, GraphResult};
+use crate::sessions::UnifiedMessage;
+#[cfg(test)]
+use crate::{
+    normalize_provider_for_grouping, ClientContribution, DailyTotals, GraphMeta, GraphResult,
+    SessionContribution, TokenBreakdown,
+};
+use crate::{DailyContribution, DataSummary, YearSummary};
+#[cfg(test)]
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -66,6 +68,7 @@ pub(crate) fn aggregate_by_date(messages: &[UnifiedMessage]) -> Vec<DailyContrib
 /// single session and exposes the same client/model breakdown shape as
 /// [`aggregate_by_date`].  Sessions are sorted by `last_seen` descending so the
 /// most recently active sessions appear first.
+#[cfg(test)]
 pub(crate) fn aggregate_by_session(messages: &[UnifiedMessage]) -> Vec<SessionContribution> {
     if messages.is_empty() {
         return Vec::new();
@@ -468,6 +471,7 @@ impl DayAccumulator {
     }
 }
 
+#[cfg(test)]
 struct SessionAccumulator {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
@@ -482,6 +486,7 @@ struct SessionAccumulator {
     last_seen: i64,
 }
 
+#[cfg(test)]
 impl Default for SessionAccumulator {
     fn default() -> Self {
         Self {
@@ -498,6 +503,7 @@ impl Default for SessionAccumulator {
     }
 }
 
+#[cfg(test)]
 impl SessionAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
         let total_tokens = msg

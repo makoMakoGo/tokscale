@@ -6,8 +6,9 @@ use std::collections::HashMap;
 
 use crate::{
     aggregate::accumulators::{
-        finish_buffered_views, finish_daily_map, finish_hour_map, finish_month_map, hour_key,
-        AgentEntries, DailyAcc, HourAcc, ModelEntries, MonthAcc,
+        finish_buffered_views, finish_daily_map, finish_hour_map, finish_month_map,
+        finish_session_map, hour_key, AgentEntries, DailyAcc, HourAcc, ModelEntries, MonthAcc,
+        SessionAcc,
     },
     aggregate::tui::TuiAcc,
     AggregatedViews, AggregationConfig, ViewSet,
@@ -21,6 +22,7 @@ pub struct AggregationEngine {
     month_map: Option<HashMap<String, MonthAcc>>,
     hour_map: Option<HashMap<String, HourAcc>>,
     daily_map: Option<HashMap<String, DailyAcc>>,
+    session_map: Option<HashMap<String, SessionAcc>>,
     agent_entries: Option<AgentEntries>,
     graph_buffer: Option<Vec<UnifiedMessage>>,
 }
@@ -28,9 +30,7 @@ pub struct AggregationEngine {
 impl AggregationEngine {
     pub fn new(config: AggregationConfig) -> Self {
         let views = config.views;
-        let graph_needed = views.contains(ViewSet::GRAPH)
-            || views.contains(ViewSet::SESSIONS)
-            || views.contains(ViewSet::TIME_METRICS);
+        let graph_needed = views.contains(ViewSet::GRAPH) || views.contains(ViewSet::TIME_METRICS);
         Self {
             model_entries: views
                 .contains(ViewSet::MODEL)
@@ -41,6 +41,7 @@ impl AggregationEngine {
             month_map: views.contains(ViewSet::MONTHLY).then(HashMap::new),
             hour_map: views.contains(ViewSet::HOURLY).then(HashMap::new),
             daily_map: views.contains(ViewSet::GRAPH).then(HashMap::new),
+            session_map: views.contains(ViewSet::SESSIONS).then(HashMap::new),
             agent_entries: views.contains(ViewSet::AGENTS).then(AgentEntries::default),
             graph_buffer: graph_needed.then(Vec::new),
             config,
@@ -75,6 +76,12 @@ impl AggregationEngine {
         if let Some(daily_map) = &mut self.daily_map {
             daily_map.entry(date).or_default().push(msg);
         }
+        if let Some(session_map) = &mut self.session_map {
+            session_map
+                .entry(msg.session_id.to_string())
+                .or_default()
+                .push(msg);
+        }
         if let Some(agent_entries) = &mut self.agent_entries {
             agent_entries.push(msg);
         }
@@ -91,6 +98,7 @@ impl AggregationEngine {
             month_map,
             hour_map,
             daily_map,
+            session_map,
             agent_entries,
             graph_buffer,
         } = self;
@@ -123,22 +131,18 @@ impl AggregationEngine {
 
         let agent_usage = agent_entries.map(AgentEntries::finish);
         let daily_contributions_for_graph = daily_map.map(finish_daily_map);
+        let session_contributions = session_map.map(finish_session_map);
 
-        // Graph, sessions, and time-metrics share the same buffered projection.
+        // Graph and time-metrics share the same buffered projection.
         // `processing_time_ms` is the caller's responsibility (set after
         // `finish`); 0 here.
-        let (graph, session_contributions, time_metrics, daily_contributions) = match graph_buffer {
+        let (graph, time_metrics, daily_contributions) = match graph_buffer {
             Some(messages) => {
                 let views =
                     finish_buffered_views(&messages, config.views, daily_contributions_for_graph);
-                (
-                    views.graph,
-                    views.session_contributions,
-                    views.time_metrics,
-                    views.daily_contributions,
-                )
+                (views.graph, views.time_metrics, views.daily_contributions)
             }
-            None => (None, None, None, None),
+            None => (None, None, None),
         };
 
         AggregatedViews {
