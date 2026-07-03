@@ -64,6 +64,7 @@ impl ViewSet {
     pub const GRAPH: ViewSet = ViewSet(0b0001_0000);
     pub const SESSIONS: ViewSet = ViewSet(0b0010_0000);
     pub const TIME_METRICS: ViewSet = ViewSet(0b0100_0000);
+    pub const AGENTS: ViewSet = ViewSet(0b1000_0000);
 
     /// The empty set.
     pub const fn empty() -> ViewSet {

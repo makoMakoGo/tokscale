@@ -16,7 +16,7 @@ pub use tui::{
     build_contribution_graph_for_today, build_period_usage, calculate_streaks,
     calculate_streaks_for_today, find_peak_hour, PeriodBucket, WeekdayBucket,
 };
-pub use views::AggregatedViews;
+pub use views::{AgentUsage, AggregatedViews};
 
 #[cfg(test)]
 mod parity_tests;

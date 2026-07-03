@@ -3295,7 +3295,7 @@ fn formatted_unique_model_names(models: &[String]) -> Vec<String> {
 
 fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     use tokscale_core::{
-        built_in_extra_scan_paths_for, extra_scan_paths_for, parse_local_clients, ClientId,
+        built_in_extra_scan_paths_for, count_local_client_messages, extra_scan_paths_for, ClientId,
         LocalParseOptions,
     };
 
@@ -3308,7 +3308,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     let home_dir_str = home_dir.to_string_lossy().to_string();
 
-    let parsed = parse_local_clients(LocalParseOptions {
+    let client_counts = count_local_client_messages(LocalParseOptions {
         home_dir: Some(home_dir_str.clone()),
         use_env_roots,
         clients: Some(
@@ -3326,11 +3326,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
 
     let headless_roots =
         tokscale_core::scanner::headless_roots_with_env_strategy(&home_dir_str, use_env_roots);
-    let headless_codex_count = parsed
-        .messages
-        .iter()
-        .filter(|m| m.agent.as_deref() == Some("headless") && m.client == "codex")
-        .count() as i32;
+    let headless_codex_count = client_counts.headless_codex_count;
 
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -3538,7 +3534,7 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     sessions_path_exists,
                     additional_paths,
                     legacy_paths,
-                    message_count: parsed.counts.get(client),
+                    message_count: client_counts.counts.get(client),
                     headless_supported,
                     headless_paths,
                     headless_message_count,
