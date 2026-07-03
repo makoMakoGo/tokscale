@@ -53,6 +53,18 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
     model_aliases::canonicalize_model_id(model_id)
 }
 
+#[doc(hidden)]
+pub fn aggregate_unified_messages(
+    messages: &[UnifiedMessage],
+    config: AggregationConfig,
+) -> AggregatedViews {
+    let mut engine = aggregate::AggregationEngine::new(config);
+    for message in messages {
+        engine.push(message);
+    }
+    engine.finish()
+}
+
 fn retain_for_requested_clients(
     client: &str,
     _model_id: &str,
