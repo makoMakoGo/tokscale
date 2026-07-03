@@ -19,6 +19,10 @@ impl DateRange {
         Self::default()
     }
 
+    pub(crate) fn is_unfiltered(&self) -> bool {
+        self.year.is_none() && self.since.is_none() && self.until.is_none()
+    }
+
     /// Build from the raw `ReportOptions` date fields.
     pub fn from_options(opts: &crate::ReportOptions) -> Self {
         Self {
@@ -31,7 +35,7 @@ impl DateRange {
     /// True iff `date` (a `%Y-%m-%d` string from `date_string()`) passes the
     /// filter. Identical predicate to `retain_messages_in_date_range`.
     pub fn contains(&self, date: &str) -> bool {
-        if self.year.is_none() && self.since.is_none() && self.until.is_none() {
+        if self.is_unfiltered() {
             return true;
         }
         let year_ok = self

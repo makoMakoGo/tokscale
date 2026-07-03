@@ -191,12 +191,11 @@ pub(super) struct MonthAcc {
 }
 
 impl MonthAcc {
-    /// `(month_key, Some(acc))` when the message has a usable month; `None`
-    /// when `date.len() < 7` (skipped, matching the old `continue`).
-    pub(super) fn try_key(msg: &UnifiedMessage) -> Option<String> {
-        let date = msg.date_string();
+    /// Month key when the message has a usable date; `None` when
+    /// `date.len() < 7` (skipped, matching the old `continue`).
+    pub(super) fn try_key_from_date(date: &str) -> Option<&str> {
         if date.len() >= 7 {
-            Some(date[..7].to_string())
+            Some(&date[..7])
         } else {
             None
         }

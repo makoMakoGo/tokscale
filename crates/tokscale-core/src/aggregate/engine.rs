@@ -57,9 +57,14 @@ impl AggregationEngine {
     /// Applies the date filter once (mirroring `filter_messages_for_report`)
     /// before dispatching to enabled accumulators.
     pub fn push(&mut self, msg: &UnifiedMessage) {
-        let date = msg.date_string();
-        if !self.config.date_range.contains(&date) {
-            return;
+        let needs_date_key = !self.config.date_range.is_unfiltered()
+            || self.month_map.is_some()
+            || self.daily_map.is_some();
+        let date = needs_date_key.then(|| msg.date_string());
+        if let Some(date) = &date {
+            if !self.config.date_range.contains(date) {
+                return;
+            }
         }
         if let Some(entries) = &mut self.model_entries {
             entries.push(msg);
@@ -68,8 +73,9 @@ impl AggregationEngine {
             tui.push(msg);
         }
         if let Some(month_map) = &mut self.month_map {
-            if let Some(month) = MonthAcc::try_key(msg) {
-                month_map.entry(month).or_default().push(msg);
+            let date = date.as_ref().expect("monthly view date key computed");
+            if let Some(month) = MonthAcc::try_key_from_date(date) {
+                month_map.entry(month.to_string()).or_default().push(msg);
             }
         }
         if let Some(hour_map) = &mut self.hour_map {
@@ -77,7 +83,8 @@ impl AggregationEngine {
             hour_map.entry(key).or_default().push(msg);
         }
         if let Some(daily_map) = &mut self.daily_map {
-            daily_map.entry(date).or_default().push(msg);
+            let date = date.as_ref().expect("graph view date key computed");
+            daily_map.entry(date.clone()).or_default().push(msg);
         }
         if let Some(session_map) = &mut self.session_map {
             session_map
