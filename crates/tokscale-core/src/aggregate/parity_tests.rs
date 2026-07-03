@@ -172,23 +172,25 @@ fn engine_usage_data(msgs: &[UnifiedMessage], group_by: GroupBy) -> UsageData {
 #[test]
 fn agents_view_keeps_client_dimension() {
     let _tz = pin_tz();
+    let mut opencode = UnifiedMessage::new_with_agent(
+        "opencode",
+        "gpt-5",
+        "openai",
+        "s1",
+        ts("2024-06-10"),
+        TokenBreakdown {
+            input: 7,
+            output: 5,
+            cache_read: 3,
+            cache_write: 2,
+            reasoning: 1,
+        },
+        0.5,
+        Some("shared-agent".to_string()),
+    );
+    opencode.message_count = 3;
     let messages = vec![
-        UnifiedMessage::new_with_agent(
-            "opencode",
-            "gpt-5",
-            "openai",
-            "s1",
-            ts("2024-06-10"),
-            TokenBreakdown {
-                input: 7,
-                output: 5,
-                cache_read: 3,
-                cache_write: 2,
-                reasoning: 1,
-            },
-            0.5,
-            Some("shared-agent".to_string()),
-        ),
+        opencode,
         UnifiedMessage::new_with_agent(
             "codex",
             "gpt-5",
@@ -224,6 +226,7 @@ fn agents_view_keeps_client_dimension() {
     assert_eq!(agents[1].client, "opencode");
     assert_eq!(agents[1].agent, "Shared Agent");
     assert_eq!(agents[1].tokens.total(), 18);
+    assert_eq!(agents[1].message_count, 3);
 }
 
 // ---- Primitive parity and entrypoint consistency tests ----

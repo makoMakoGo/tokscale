@@ -351,7 +351,7 @@ impl AgentEntries {
         entry.tokens.cache_write += msg.tokens.cache_write;
         entry.tokens.reasoning += msg.tokens.reasoning;
         entry.cost += msg.cost;
-        entry.message_count += 1;
+        entry.message_count += msg.message_count.max(0);
     }
 
     pub(super) fn finish(self) -> Vec<AgentUsage> {
