@@ -171,7 +171,6 @@ fn engine_usage_data(msgs: &[UnifiedMessage], group_by: GroupBy) -> UsageData {
 
 #[test]
 fn agents_view_keeps_client_dimension() {
-    let _tz = pin_tz();
     let mut opencode = UnifiedMessage::new_with_agent(
         "opencode",
         "gpt-5",

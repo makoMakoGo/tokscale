@@ -355,7 +355,7 @@ fn build_top_agents(agent_usage: &[tokscale_core::AgentUsage]) -> Vec<WrappedAge
     let mut agent_map: HashMap<String, WrappedAgentEntry> = HashMap::new();
 
     for agent in agent_usage {
-        if agent.client != "opencode" {
+        if agent.client != ClientId::OpenCode.as_str() {
             continue;
         }
 

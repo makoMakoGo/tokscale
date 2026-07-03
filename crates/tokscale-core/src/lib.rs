@@ -597,7 +597,7 @@ impl adapters::MessageSink for ClientCountSink {
         }
 
         if message.client.as_ref() == "codex" && message.agent.as_deref() == Some("headless") {
-            self.headless_codex_count += 1;
+            self.headless_codex_count += message.message_count.max(0);
         }
 
         if let Some(client) = client_count_bucket(&message.client) {
@@ -3188,6 +3188,33 @@ mod tests {
         super::adapters::MessageSink::push_message(&mut sink, message);
 
         assert_eq!(sink.counts.get(ClientId::Claude), 3);
+    }
+
+    #[test]
+    fn test_client_count_sink_counts_folded_headless_codex_messages() {
+        let mut sink = super::ClientCountSink::new(DateRange::none());
+        let mut message = UnifiedMessage::new_with_agent(
+            "codex",
+            "gpt-5",
+            "openai",
+            "headless-session",
+            1_717_977_600_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.01,
+            Some("headless".to_string()),
+        );
+        message.message_count = 4;
+
+        super::adapters::MessageSink::push_message(&mut sink, message);
+
+        assert_eq!(sink.counts.get(ClientId::Codex), 4);
+        assert_eq!(sink.headless_codex_count, 4);
     }
 
     #[test]
