@@ -18,6 +18,10 @@ harness = false
 name = "core_benchmarks"
 harness = false
 
+[[bench]]
+name = "aggregation"
+harness = false
+
 [dependencies]
 rayon = { workspace = true }
 simd-json = { workspace = true }
