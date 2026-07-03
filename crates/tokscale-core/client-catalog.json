@@ -5,7 +5,6 @@
     "displayName": "OpenCode",
     "shortName": "OpenCode",
     "hotkey": "1",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-opencode.png",
     "color": "#00A8E8"
   },
@@ -15,7 +14,6 @@
     "displayName": "Claude Code",
     "shortName": "Claude",
     "hotkey": "2",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-claude.jpg",
     "color": "#f97316"
   },
@@ -25,7 +23,6 @@
     "displayName": "Codex CLI",
     "shortName": "Codex",
     "hotkey": "3",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-openai.jpg",
     "color": "#3b82f6"
   },
@@ -35,7 +32,6 @@
     "displayName": "Cursor",
     "shortName": "Cursor",
     "hotkey": "4",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-cursor.jpg",
     "color": "#22c55e"
   },
@@ -45,7 +41,6 @@
     "displayName": "Gemini CLI",
     "shortName": "Gemini",
     "hotkey": "5",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-gemini.png",
     "color": "#8b5cf6"
   },
@@ -55,7 +50,6 @@
     "displayName": "Amp",
     "shortName": "Amp",
     "hotkey": "6",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-amp.png",
     "color": "#EC4899"
   },
@@ -65,7 +59,6 @@
     "displayName": "Droid",
     "shortName": "Droid",
     "hotkey": "7",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-droid.png",
     "color": "#1F1D1C",
     "textColor": "#FFFFFF"
@@ -76,7 +69,6 @@
     "displayName": "OpenClaw",
     "shortName": "OpenClaw",
     "hotkey": "8",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-openclaw.jpg",
     "color": "#EF4444"
   },
@@ -86,7 +78,6 @@
     "displayName": "Pi",
     "shortName": "Pi",
     "hotkey": "9",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-pi.png",
     "color": "#6366F1"
   },
@@ -96,7 +87,6 @@
     "displayName": "OMP",
     "shortName": "OMP",
     "hotkey": "m",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-pi.png",
     "color": "#6366F1"
   },
@@ -106,7 +96,6 @@
     "displayName": "Kimi",
     "shortName": "Kimi",
     "hotkey": "0",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-kimi.png",
     "color": "#8B5CF6"
   },
@@ -116,7 +105,6 @@
     "displayName": "Qwen",
     "shortName": "Qwen",
     "hotkey": "w",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-qwen.png",
     "color": "#1A73E8"
   },
@@ -126,7 +114,6 @@
     "displayName": "Roo Code",
     "shortName": "Roo Code",
     "hotkey": "r",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-roocode.png",
     "color": "#10B981"
   },
@@ -136,7 +123,6 @@
     "displayName": "KiloCode",
     "shortName": "KiloCode",
     "hotkey": "k",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-kilocode.png",
     "color": "#F59E0B"
   },
@@ -146,7 +132,6 @@
     "displayName": "Mux",
     "shortName": "Mux",
     "hotkey": "x",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-mux.png",
     "color": "#171717"
   },
@@ -156,7 +141,6 @@
     "displayName": "Kilo CLI",
     "shortName": "Kilo CLI",
     "hotkey": "l",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-kilocode.png",
     "color": "#F59E0B"
   },
@@ -166,7 +150,6 @@
     "displayName": "Crush",
     "shortName": "Crush",
     "hotkey": "h",
-    "submitDefault": false,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png",
     "color": "#DC2626"
   },
@@ -176,7 +159,6 @@
     "displayName": "Hermes Agent",
     "shortName": "Hermes Agent",
     "hotkey": "e",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-hermes.png",
     "color": "#FFD700"
   },
@@ -186,7 +168,6 @@
     "displayName": "Copilot",
     "shortName": "Copilot",
     "hotkey": "c",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg",
     "color": "#24292F"
   },
@@ -196,7 +177,6 @@
     "displayName": "Goose",
     "shortName": "Goose",
     "hotkey": "o",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png",
     "color": "#64B4DC"
   },
@@ -206,7 +186,6 @@
     "displayName": "Codebuff",
     "shortName": "Codebuff",
     "hotkey": "b",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png",
     "color": "#7C3AED"
   },
@@ -216,7 +195,6 @@
     "displayName": "Antigravity",
     "shortName": "Antigravity",
     "hotkey": "a",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
     "color": "#6366F1"
   },
@@ -226,7 +204,6 @@
     "displayName": "Zed Agent",
     "shortName": "Zed Agent",
     "hotkey": "z",
-    "submitDefault": true,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
     "color": "#084CCF"
   },
@@ -236,7 +213,6 @@
     "displayName": "ZCode",
     "shortName": "ZCode",
     "hotkey": "q",
-    "submitDefault": true,
     "logo": "https://github.com/zai-org.png",
     "color": "#111827",
     "textColor": "#FFFFFF"
@@ -247,7 +223,6 @@
     "displayName": "Kiro",
     "shortName": "Kiro",
     "hotkey": "i",
-    "submitDefault": true,
     "logo": "https://github.com/kirodotdev.png",
     "color": "#00A67D"
   },
@@ -257,7 +232,6 @@
     "displayName": "Junie",
     "shortName": "Junie",
     "hotkey": "j",
-    "submitDefault": true,
     "logo": "https://github.com/JetBrains.png",
     "color": "#7B61FF"
   },
@@ -267,7 +241,6 @@
     "displayName": "Trae",
     "shortName": "Trae",
     "hotkey": "y",
-    "submitDefault": false,
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-trae.png",
     "color": "#00BFA5"
   },
@@ -277,7 +250,6 @@
     "displayName": "Warp",
     "shortName": "Warp",
     "hotkey": "v",
-    "submitDefault": false,
     "logo": "https://github.com/warpdotdev.png",
     "color": "#01A4A4"
   },
@@ -287,7 +259,6 @@
     "displayName": "Cline",
     "shortName": "Cline",
     "hotkey": "n",
-    "submitDefault": true,
     "logo": "https://github.com/cline.png",
     "color": "#5B8DEF"
   },
@@ -297,7 +268,6 @@
     "displayName": "Command Code",
     "shortName": "Command",
     "hotkey": "d",
-    "submitDefault": false,
     "logo": "https://github.com/CommandCodeAI.png",
     "color": "#111827"
   },
@@ -307,7 +277,6 @@
     "displayName": "Grok Build",
     "shortName": "Grok Build",
     "hotkey": "u",
-    "submitDefault": true,
     "logo": "https://github.com/xai-org.png",
     "color": "#171717"
   }

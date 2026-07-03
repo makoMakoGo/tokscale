@@ -8,7 +8,7 @@
 
 ## Project Structure & Module Organization
 
-Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing, scanning, aggregation, pricing, and session readers live in `crates/tokscale-core/src/`; CLI and TUI code live in `crates/tokscale-cli/src/`, with integration tests under `crates/tokscale-cli/tests/` and crate-level tests under `crates/tokscale-core/tests/`. npm-facing packages live in `packages/`: `packages/cli` is the TypeScript binary dispatcher, `packages/tokscale` is the wrapper package, `packages/frontend` is the Next.js app, and `packages/cli-*` contain platform package manifests.
+Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing, scanning, aggregation, pricing, and session readers live in `crates/tokscale-core/src/`; CLI and TUI code live in `crates/tokscale-cli/src/`, with integration tests under `crates/tokscale-cli/tests/` and crate-level tests under `crates/tokscale-core/tests/`. npm-facing packages live in `packages/`: `packages/cli` is the TypeScript binary dispatcher, `packages/tokscale` is the wrapper package, and `packages/cli-*` contain platform package manifests.
 
 ## Build, Test, and Development Commands
 
@@ -17,7 +17,6 @@ Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing,
 - `bun run build` — build the release Rust binary and TypeScript CLI package.
 - `bun run build:cli` — compile `packages/cli` with `tsc`.
 - `bun run cli -- --no-spinner ...` — run the local CLI wrapper; keep `--no-spinner` in automated runs unless spinner behavior is under test.
-- `bun run --cwd packages/frontend lint` — lint the frontend when changing Next.js code.
 
 ## Coding Style & Naming Conventions
 
@@ -116,17 +115,6 @@ fix: various improvements                      ❌
 fix(tui): harden unreleased changes — P0-P3    ❌  (PR title)
 fix: hardening wave 1 compliance fixes         ❌  (PR title)
 ```
-
-## Migration journal hygiene
-
-Never hand-edit `drizzle/meta/_journal.json` timestamps or sequence numbers. Always run `drizzle-kit generate` to claim a migration slot — the tool assigns the correct monotonic index and timestamp atomically.
-
-Migrations 0010 and 0011 have round-number hand-edited timestamps (`"when": 1780000000000` and `"when": 1780086400000`) as a one-time historical exception made during the 2026-05-25 schema audit. No future migration should follow this pattern; use `drizzle-kit generate` exclusively.
-
-
-If two branches generate migrations with the same index, resolve the conflict by re-running `drizzle-kit generate` on the branch that was merged later — do not manually renumber files or edit `_journal.json`.
-
-**Never edit the SQL of a migration file after it has been applied to any database.** drizzle stores the SHA256 of the migration content in `drizzle.__drizzle_migrations` on first apply. If the local file content changes (even just a comment), the local hash diverges from the stored hash and drizzle-kit migrate will treat the migration as missing and attempt to re-apply it — which fails on idempotent-unsafe DDL. If you need to document a migration after the fact (lock-window risk, rollback notes, anything), put the commentary in a sidecar `0NNN_*.md` next to the .sql, in `schema.ts`, or in this file — never as comments inside the applied .sql.
 
 ## Agent Command Execution
 

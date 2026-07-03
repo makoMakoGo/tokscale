@@ -20,7 +20,7 @@ Keep the Claude Code placeholder drop logic for `model = "<synthetic>"`.
 
 Remove upstream `synthetic.new` as a source/client concept. It should not appear
 in source filters, default source lists, scanner source injection, TUI source
-pickers, frontend source logos, README platform lists, or session readers.
+pickers, README platform lists, or session readers.
 
 ## Consequences
 

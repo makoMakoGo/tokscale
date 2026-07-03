@@ -41,13 +41,12 @@ impl CacheReportScope {
 /// Single source of truth for the `group_by` value used to key the TUI
 /// cache. The cache file's `groupBy` field is compared verbatim against
 /// this on load (`cache.rs::load_cache`), so any code path that writes
-/// the cache — most importantly the detached `warm-tui-cache` subprocess
-/// fired after `tokscale submit` — must use this exact value, NOT
-/// `GroupBy::default()`.
+/// the cache — including the detached `warm-tui-cache` subprocess — must
+/// use this exact value, NOT `GroupBy::default()`.
 ///
 /// Historical bug: the warm-tui-cache writer keyed on `GroupBy::default()`
 /// (= `ClientModel`) while the TUI loaded with the hard-coded
-/// `GroupBy::Model`, so every submit silently invalidated the next TUI
+/// `GroupBy::Model`, so every warm cache write silently invalidated the next TUI
 /// launch's cache and the "show cached data while refreshing" contract
 /// never triggered. Anchoring both ends on this constant prevents the
 /// two from drifting again — change here ⇒ change everywhere.
@@ -1668,13 +1667,12 @@ mod tests {
     /// existed and was well-formed.
     ///
     /// Root cause: the warm-tui-cache writer (`run_warm_tui_cache` in
-    /// `main.rs`, spawned as a detached subprocess after every successful
-    /// `tokscale submit`) saved the cache with `GroupBy::default()`
+    /// `main.rs`) saved the cache with `GroupBy::default()`
     /// (= `ClientModel`, serialized as `"client,model"`), while the TUI
     /// reader (`tui::run`) loaded with the hard-coded `GroupBy::Model`
     /// (serialized as `"model"`). `cache.rs::load_cache` does a strict
     /// inequality check on the cached vs. requested `group_by`, so the
-    /// two never matched and every submit silently invalidated the next
+    /// two never matched and every warm cache write silently invalidated the next
     /// TUI launch's cache.
     ///
     /// Fix: anchor both ends on `TUI_DEFAULT_GROUP_BY`. This test pins

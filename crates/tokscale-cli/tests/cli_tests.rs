@@ -713,16 +713,6 @@ fn write_fireworks_pricing_cache(base: &Path) {
     }
 }
 
-fn write_fake_credentials(base: &Path) {
-    let creds_dir = base.join(".config/tokscale");
-    fs::create_dir_all(&creds_dir).unwrap();
-    fs::write(
-        creds_dir.join("credentials.json"),
-        r#"{"token":"fake","username":"testuser","createdAt":"2024-01-01T00:00:00Z"}"#,
-    )
-    .unwrap();
-}
-
 fn write_settings_json(base: &Path, body: &str) {
     let path = settings_json_path(base);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -912,33 +902,18 @@ fn test_headless_command_help() {
 }
 
 #[test]
-fn test_login_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("login")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Login to Tokscale"));
-}
-
-#[test]
-fn test_logout_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("logout")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Logout from Tokscale"));
-}
-
-#[test]
-fn test_whoami_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("whoami")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Show current logged in user"));
+fn test_hosted_commands_are_not_registered() {
+    for command in [
+        "login",
+        "logout",
+        "whoami",
+        "qr",
+        "submit",
+        "delete-submitted-data",
+    ] {
+        let mut cmd = cargo_bin_cmd!("tokscale");
+        cmd.arg(command).arg("--help").assert().failure();
+    }
 }
 
 #[test]
@@ -1661,18 +1636,6 @@ fn test_graph_fresh_cursor_cache_skips_auto_sync_warning() {
         !stderr.contains("Cursor sync failed") && !stderr.contains("Cursor sync warning"),
         "fresh Cursor cache should skip implicit graph sync; stderr: {stderr}"
     );
-}
-
-#[test]
-fn test_submit_cursor_explicit_missing_cache_reports_setup_warning_text() {
-    let tmp = create_empty_fixture_dir();
-    cmd_with_home(tmp.path())
-        .env("TOKSCALE_API_TOKEN", "test-token")
-        .args(["submit", "--client", "cursor", "--dry-run"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Cursor usage requires"))
-        .stderr(predicate::str::contains("tokscale cursor login"));
 }
 
 #[test]
@@ -3167,30 +3130,4 @@ fn test_root_with_group_by() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["groupBy"].as_str().unwrap(), "model");
-}
-
-#[test]
-fn test_submit_offline_without_pricing_cache_fails() {
-    let tmp = create_temp_fixture_dir_without_pricing_cache();
-    write_fake_credentials(tmp.path());
-
-    let output = offline_cmd_with_home(tmp.path())
-        .args(["submit", "--client", "opencode", "--dry-run"])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "submit should fail when pricing is unavailable; stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    // Verify failure is from pricing fetch, not from auth or argument errors
-    assert!(
-        !stderr.contains("Not logged in"),
-        "submit failed due to auth, not pricing: {stderr}"
-    );
-    assert!(
-        stderr.contains("error") || stderr.contains("Error"),
-        "stderr should contain a pricing/network error: {stderr}"
-    );
 }

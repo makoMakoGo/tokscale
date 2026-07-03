@@ -137,7 +137,7 @@ impl Theme {
         color_mode: TerminalColorMode,
     ) -> Self {
         let colors = match name {
-            // Colors match frontend contribution graph palettes (higher grade = darker = more activity)
+            // Colors match contribution graph palettes (higher grade = darker = more activity)
             ThemeName::Green => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
                 Color::Rgb(155, 233, 168), // grade1: #9be9a8

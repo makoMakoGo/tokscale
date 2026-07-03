@@ -8,14 +8,12 @@ Tokscale stores most local settings under the platform config directory:
 
 Known exceptions that are not moved by `TOKSCALE_CONFIG_DIR` today:
 
-- Hosted-service credentials saved by `tokscale login`:
-  `$HOME/.config/tokscale/credentials.json`
 - Cursor integration state:
   `$HOME/.config/tokscale/cursor-credentials.json` and
   `$HOME/.config/tokscale/cursor-cache/`
 
-Setting `TOKSCALE_CONFIG_DIR` does not isolate those credentials or Cursor usage
-cache today.
+Setting `TOKSCALE_CONFIG_DIR` does not isolate Cursor credentials or Cursor
+usage cache today.
 
 ## Example
 
@@ -63,10 +61,9 @@ CLI flags override matching config values for a single invocation.
 
 | Variable | Meaning |
 | --- | --- |
-| `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. It does not currently move hosted-service credentials, Cursor credentials, or Cursor usage cache. |
+| `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. It does not currently move Cursor credentials or Cursor usage cache. |
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | Overrides `nativeTimeoutMs`. |
 | `TOKSCALE_EXTRA_DIRS` | One-off extra scan roots as `client:/abs/path,client:/abs/path`. |
-| `TOKSCALE_API_TOKEN` | Tokscale hosted-service API token for non-interactive submit/delete commands. |
 | `TOKSCALE_HEADLESS_DIR` | Overrides the headless capture root. |
 | `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY` | Z.ai/Zhipu GLM Coding Plan quota key. |
 | `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` | Kimi Code Console quota key. |
