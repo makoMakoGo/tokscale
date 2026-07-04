@@ -2,7 +2,7 @@
 //! message to every enabled accumulator (after the date filter); `finish`
 //! materializes [`AggregatedViews`].
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     aggregate::accumulators::{
@@ -22,7 +22,7 @@ pub struct AggregationEngine {
     month_map: Option<HashMap<String, MonthAcc>>,
     hour_map: Option<HashMap<String, HourAcc>>,
     daily_map: Option<HashMap<String, DailyAcc>>,
-    session_map: Option<HashMap<String, SessionAcc>>,
+    session_map: Option<HashMap<Arc<str>, SessionAcc>>,
     agent_entries: Option<AgentEntries>,
     graph_buffer: Option<Vec<UnifiedMessage>>,
 }
@@ -78,7 +78,7 @@ impl AggregationEngine {
         }
         if let Some(session_map) = &mut self.session_map {
             session_map
-                .entry(msg.session_id.to_string())
+                .entry(msg.session_id.clone())
                 .or_default()
                 .push(msg);
         }

@@ -3,7 +3,10 @@
 //! `HourAggregator`/hour fold, and the daily graph fold). Time-metrics views
 //! still need their existing two-pass projection.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
     aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
@@ -665,11 +668,11 @@ impl SessionAcc {
 }
 
 pub(super) fn finish_session_map(
-    session_map: HashMap<String, SessionAcc>,
+    session_map: HashMap<Arc<str>, SessionAcc>,
 ) -> Vec<SessionContribution> {
     let mut contributions: Vec<SessionContribution> = session_map
         .into_iter()
-        .map(|(session_id, acc)| acc.into_contribution(session_id))
+        .map(|(session_id, acc)| acc.into_contribution(session_id.to_string()))
         .collect();
     contributions.sort_by(|a, b| {
         b.last_seen
