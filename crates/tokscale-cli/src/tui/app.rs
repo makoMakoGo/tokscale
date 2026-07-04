@@ -858,7 +858,7 @@ impl App {
                     HourlyViewMode::Table => HourlyViewMode::Profile,
                     HourlyViewMode::Profile => HourlyViewMode::Table,
                 };
-                self.reset_selection();
+                self.reset_hourly_view_interaction();
             }
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
@@ -1152,17 +1152,9 @@ impl App {
         self.click_areas.push(ClickArea { rect, action });
     }
 
-    fn reset_selection(&mut self) {
-        self.scroll_offset = 0;
-        self.selected_index = 0;
-        self.list_interactions.clear();
-        self.usage_viewport.scroll = 0;
+    fn reset_hourly_view_interaction(&mut self) {
+        self.reset_current_list_interaction();
         self.hourly_profile_viewport.scroll = 0;
-        self.selected_daily_detail_date = None;
-        self.selected_period_detail = None;
-        self.detail_sort_contexts.clear();
-        self.selected_graph_cell = None;
-        self.stats_breakdown_total_lines = 0;
     }
 
     fn switch_tab(&mut self, target: Tab) {
@@ -2171,31 +2163,6 @@ mod tests {
         assert_eq!(Tab::Daily.short_name(), "Day");
         assert_eq!(Tab::Hourly.short_name(), "Hr");
         assert_eq!(Tab::Stats.short_name(), "Sta");
-    }
-
-    #[test]
-    fn test_reset_selection() {
-        let config = TuiConfig {
-            theme: "blue".to_string(),
-            refresh: 0,
-            sessions_path: None,
-            clients: None,
-            since: None,
-            until: None,
-            year: None,
-            initial_tab: None,
-        };
-        let mut app = App::new_with_cached_data(config, None).unwrap();
-
-        app.selected_index = 5;
-        app.scroll_offset = 3;
-        app.selected_graph_cell = Some((2, 4));
-
-        app.reset_selection();
-
-        assert_eq!(app.selected_index, 0);
-        assert_eq!(app.scroll_offset, 0);
-        assert_eq!(app.selected_graph_cell, None);
     }
 
     #[test]
@@ -4259,6 +4226,48 @@ mod tests {
         // Toggle back to Table
         app.handle_key_event(key(KeyCode::Char('v')));
         assert_eq!(app.hourly_view_mode, HourlyViewMode::Table);
+    }
+
+    #[test]
+    fn test_hourly_view_toggle_preserves_other_tab_interactions() {
+        let mut app = make_app_with_models(5);
+        app.data.daily = vec![
+            daily_usage("2026-05-10", 1.0, vec![("old-model", "anthropic", 1.0)]),
+            daily_usage("2026-05-17", 7.0, vec![("target", "openai", 7.0)]),
+            daily_usage("2026-05-18", 3.0, vec![("other", "google", 3.0)]),
+        ];
+
+        app.switch_tab(Tab::Models);
+        app.max_visible_items = 3;
+        app.selected_index = 4;
+        app.scroll_offset = 2;
+
+        app.switch_tab(Tab::Daily);
+        app.max_visible_items = 2;
+        app.selected_index = 1;
+        app.scroll_offset = 1;
+
+        app.switch_tab(Tab::Hourly);
+        app.selected_index = 3;
+        app.scroll_offset = 1;
+        app.hourly_profile_viewport.scroll = 4;
+
+        app.handle_key_event(key(KeyCode::Char('v')));
+
+        assert_eq!(app.hourly_view_mode, HourlyViewMode::Profile);
+        assert_eq!(app.selected_index, 0);
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.hourly_profile_viewport.scroll, 0);
+
+        app.switch_tab(Tab::Models);
+        assert_eq!(app.selected_index, 4);
+        assert_eq!(app.scroll_offset, 2);
+        assert_eq!(app.max_visible_items, 3);
+
+        app.switch_tab(Tab::Daily);
+        assert_eq!(app.selected_index, 1);
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.max_visible_items, 2);
     }
 
     #[test]
