@@ -239,23 +239,15 @@ pub(super) fn finish_month_map(month_map: HashMap<String, MonthAcc>) -> Vec<Mont
 }
 
 /// Hour bucket key — port of the `get_hourly_report` hour-key rule.
-pub(super) fn hour_key(msg: &UnifiedMessage, fallback_date: Option<&str>) -> String {
+pub(super) fn hour_key(msg: &UnifiedMessage) -> Option<String> {
     use chrono::{Local, TimeZone};
-    if msg.timestamp > 0 {
-        let ts_secs = msg.timestamp / 1000;
-        match Local.timestamp_opt(ts_secs, 0) {
-            chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
-            _ => fallback_hour_key(msg, fallback_date),
-        }
-    } else {
-        fallback_hour_key(msg, fallback_date)
+    if msg.timestamp <= 0 {
+        return None;
     }
-}
-
-fn fallback_hour_key(msg: &UnifiedMessage, fallback_date: Option<&str>) -> String {
-    match fallback_date {
-        Some(date) => format!("{date} 00:00"),
-        None => format!("{} 00:00", msg.date_string()),
+    let ts_secs = msg.timestamp / 1000;
+    match Local.timestamp_opt(ts_secs, 0) {
+        chrono::LocalResult::Single(dt) => Some(dt.format("%Y-%m-%d %H:00").to_string()),
+        _ => None,
     }
 }
 

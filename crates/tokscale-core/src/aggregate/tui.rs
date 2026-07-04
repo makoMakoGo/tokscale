@@ -105,19 +105,6 @@ fn timestamp_to_hour(timestamp_ms: i64) -> Option<NaiveDateTime> {
     }
 }
 
-/// Derive an hour-truncated NaiveDateTime from `msg.timestamp` when present,
-/// otherwise fall back to the message's local-date 00:00 bucket so messages
-/// with missing timestamps are not silently dropped from hourly aggregation.
-fn hour_bucket_with_fallback(
-    timestamp_ms: i64,
-    fallback_date: Option<NaiveDate>,
-) -> Option<NaiveDateTime> {
-    if let Some(dt) = timestamp_to_hour(timestamp_ms) {
-        return Some(dt);
-    }
-    fallback_date.and_then(|d| d.and_hms_opt(0, 0, 0))
-}
-
 // ---- period (monthly/weekly) view: folds the finished `daily` buckets ----
 
 struct PeriodDescriptor {
@@ -640,7 +627,7 @@ impl TuiAcc {
                 .saturating_add(msg.message_count.max(0) as u64);
         }
 
-        if let Some(bucket) = hour_bucket_with_fallback(msg.timestamp, msg.local_date()) {
+        if let Some(bucket) = timestamp_to_hour(msg.timestamp) {
             let hourly_entry = self
                 .hourly_map
                 .entry(bucket)
