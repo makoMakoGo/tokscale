@@ -747,13 +747,17 @@ pub(super) fn finish_graph_and_time_from_events(
     views: ViewSet,
     daily_contributions: Option<Vec<DailyContribution>>,
 ) -> TimeBufferedViews {
-    let intervals =
-        crate::sessionize::sessionize_time_events(events, crate::sessionize::DEFAULT_IDLE_GAP_MS);
-    let time_metrics_value =
-        crate::sessionize::compute_time_metrics(&intervals, crate::sessionize::DEFAULT_IDLE_GAP_MS);
+    let intervals = crate::sessionize::activity_intervals_from_time_events(
+        events,
+        crate::sessionize::DEFAULT_IDLE_GAP_MS,
+    );
+    let time_metrics_value = crate::sessionize::compute_time_metrics_for_activity(
+        &intervals,
+        crate::sessionize::DEFAULT_IDLE_GAP_MS,
+    );
     let daily_active_time = views
         .contains(ViewSet::GRAPH)
-        .then(|| crate::sessionize::compute_daily_active_time(&intervals));
+        .then(|| crate::sessionize::compute_daily_active_time_for_activity(&intervals));
 
     let graph = views.contains(ViewSet::GRAPH).then(|| {
         let contributions = daily_contributions.expect("graph view requested");
