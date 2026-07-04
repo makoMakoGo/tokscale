@@ -33,8 +33,6 @@ struct PiEntryKind {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OmpTitleSlot {
-    #[serde(rename = "type")]
-    entry_type: String,
     v: i64,
     #[allow(dead_code)]
     title: String,
@@ -262,26 +260,28 @@ enum PiHeaderParse {
     Invalid,
 }
 
-fn parse_pi_line_kind(trimmed: &str, buffer: &mut Vec<u8>) -> Option<PiEntryKind> {
+fn refill_json_buffer(trimmed: &str, buffer: &mut Vec<u8>) {
     buffer.clear();
     buffer.extend_from_slice(trimmed.as_bytes());
+}
+
+fn parse_pi_line_kind(trimmed: &str, buffer: &mut Vec<u8>) -> Option<PiEntryKind> {
+    refill_json_buffer(trimmed, buffer);
     simd_json::from_slice::<PiEntryKind>(buffer).ok()
 }
 
 fn parse_pi_session_header_line(trimmed: &str, buffer: &mut Vec<u8>) -> Option<PiSessionHeader> {
-    buffer.clear();
-    buffer.extend_from_slice(trimmed.as_bytes());
+    refill_json_buffer(trimmed, buffer);
     simd_json::from_slice::<PiSessionHeader>(buffer).ok()
 }
 
 fn parse_omp_title_slot_line(trimmed: &str, buffer: &mut Vec<u8>) -> bool {
-    buffer.clear();
-    buffer.extend_from_slice(trimmed.as_bytes());
+    refill_json_buffer(trimmed, buffer);
     let Ok(slot) = simd_json::from_slice::<OmpTitleSlot>(buffer) else {
         return false;
     };
 
-    slot.entry_type == "title" && slot.v == 1 && !slot.updated_at.trim().is_empty()
+    slot.v == 1 && !slot.updated_at.trim().is_empty()
 }
 
 fn parse_pi_header_line(
@@ -562,6 +562,19 @@ mod tests {
     fn test_parse_omp_rejects_invalid_title_slot() {
         let content = r#"{"type":"title","title":"Missing slot metadata"}
 {"type":"session","id":"omp_ses_bad_title","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"totalTokens":30}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_omp_file(file.path());
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_omp_rejects_duplicate_title_slot() {
+        let content = r#"{"type":"title","v":1,"title":"First","updatedAt":"2026-01-01T00:00:00.000Z","pad":" "}
+{"type":"title","v":1,"title":"Second","updatedAt":"2026-01-01T00:00:01.000Z","pad":" "}
+{"type":"session","id":"omp_ses_duplicate_title","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"totalTokens":30}}}"#;
         let file = create_test_file(content);
 

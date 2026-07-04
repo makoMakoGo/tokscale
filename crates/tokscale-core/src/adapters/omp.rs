@@ -156,6 +156,9 @@ mod tests {
         assert!(units
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::PlainFile));
+        assert!(units.iter().all(|unit| {
+            unit.parser_version == ParserVersion::new(ParserId::Omp, OMP_TITLE_SLOT_REVISION)
+        }));
     }
 
     #[test]
