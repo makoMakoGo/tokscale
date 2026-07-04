@@ -914,6 +914,13 @@ fn contract_tui_hourly_invalid_timestamp_is_not_bucketed() {
     let data = engine_usage_data(&[zero], GroupBy::Model);
 
     assert!(data.hourly.is_empty());
+    assert_eq!(data.total_tokens, 168);
+    assert_eq!(data.total_cost, 1.0);
+    assert_eq!(data.models.len(), 1);
+    assert_eq!(data.models[0].tokens.total(), 168);
+    assert_eq!(data.daily.len(), 1);
+    assert_eq!(data.daily[0].tokens.total(), 168);
+    assert_eq!(data.daily[0].message_count, 1);
 }
 
 // ===========================================================================
