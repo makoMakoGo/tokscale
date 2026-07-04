@@ -79,8 +79,9 @@ impl AggregationEngine {
             }
         }
         if let Some(hour_map) = &mut self.hour_map {
-            let key = hour_key(msg, date.as_deref());
-            hour_map.entry(key).or_default().push(msg);
+            if let Some(key) = hour_key(msg) {
+                hour_map.entry(key).or_default().push(msg);
+            }
         }
         if let Some(daily_map) = &mut self.daily_map {
             let date = date.as_ref().expect("graph view date key computed");

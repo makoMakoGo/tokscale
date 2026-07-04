@@ -6,7 +6,6 @@
 
 use std::ffi::OsString;
 
-use super::accumulators::hour_key;
 use crate::aggregate::{AggregationConfig, AggregationEngine, DateRange, ViewSet};
 use crate::sessions::UnifiedMessage;
 use crate::usage_views::UsageData;
@@ -94,7 +93,7 @@ fn session_msg(
 /// Corpus exercising every order-/tie-break-/drop-sensitive path the maps
 /// flagged: >=2 equal-cost models; >=2 clients in a merged bucket with distinct
 /// arrival order; same client:model across two providers (provider merge);
-/// timestamp<=0 row (hourly fallback); date.len()<7 drop; NaN cost (sanitation).
+/// timestamp<=0 row (hourly skip); date.len()<7 drop; NaN cost (sanitation).
 fn corpus() -> Vec<UnifiedMessage> {
     let mut msgs = vec![
         // Two equal-cost distinct models (model-entry NaN-last sort, no tie-break leg).
@@ -137,8 +136,8 @@ fn corpus() -> Vec<UnifiedMessage> {
         ),
     ];
 
-    // A timestamp<=0 row (hourly fallback bucket) with a valid date derived from
-    // the timestamp epoch fallback. Build with new() then clear the timestamp.
+    // A timestamp<=0 row is kept for non-hourly views, but skipped by hourly
+    // distribution because it has no valid hour bucket.
     let mut zero_ts = msg(
         "claude",
         "claude-sonnet-4",
@@ -900,7 +899,7 @@ fn contract_tui_workspace_provider_daily_and_streaks() {
 
 #[test]
 #[serial]
-fn contract_tui_hourly_timestamp_zero_fallback_bucket() {
+fn contract_tui_hourly_invalid_timestamp_is_not_bucketed() {
     let _tz = pin_tz();
     let mut zero = msg(
         "claude",
@@ -914,19 +913,14 @@ fn contract_tui_hourly_timestamp_zero_fallback_bucket() {
 
     let data = engine_usage_data(&[zero], GroupBy::Model);
 
-    assert_eq!(data.hourly.len(), 1);
-    assert_eq!(
-        data.hourly[0].datetime,
-        chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-    );
-    assert_eq!(
-        data.hourly[0].clients.iter().collect::<Vec<_>>(),
-        vec!["claude"]
-    );
-    assert_eq!(data.hourly[0].message_count, 1);
+    assert!(data.hourly.is_empty());
+    assert_eq!(data.total_tokens, 168);
+    assert_eq!(data.total_cost, 1.0);
+    assert_eq!(data.models.len(), 1);
+    assert_eq!(data.models[0].tokens.total(), 168);
+    assert_eq!(data.daily.len(), 1);
+    assert_eq!(data.daily[0].tokens.total(), 168);
+    assert_eq!(data.daily[0].message_count, 1);
 }
 
 // ===========================================================================
@@ -1092,8 +1086,8 @@ fn contract_hourly_full_key_asc() {
 
 #[test]
 #[serial]
-fn contract_hourly_timestamp_zero_fallback_bucket() {
-    // lib.rs:2321 — a timestamp<=0 message lands in "{date} 00:00".
+fn contract_hourly_invalid_timestamp_is_not_bucketed() {
+    // Hourly distribution only uses valid timestamp-derived hour buckets.
     let _tz = pin_tz();
     let mut zero = UnifiedMessage::new(
         "c",
@@ -1112,29 +1106,7 @@ fn contract_hourly_timestamp_zero_fallback_bucket() {
     );
     zero.timestamp = 0;
     let report = crate::hourly_report_from_messages_pub(vec![zero]);
-    assert_eq!(report.entries.len(), 1);
-    assert!(report.entries[0].hour.ends_with("00:00"));
-}
-
-#[test]
-fn contract_hour_key_fallback_uses_precomputed_date_key() {
-    let msg = UnifiedMessage::new(
-        "c",
-        "m",
-        "p",
-        "s",
-        0,
-        TokenBreakdown {
-            input: 1,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        },
-        1.0,
-    );
-
-    assert_eq!(hour_key(&msg, Some("2099-01-02")), "2099-01-02 00:00");
+    assert!(report.entries.is_empty());
 }
 
 #[test]

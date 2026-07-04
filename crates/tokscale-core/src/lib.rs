@@ -881,8 +881,8 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
 
 /// Generate hourly usage report with hour labels formatted as "MM-DD HH:00".
 ///
-/// Derives the hour slot from `UnifiedMessage.timestamp` (Unix ms).
-/// Falls back to date + "00:00" when timestamp is zero or missing.
+/// Derives the hour slot from `UnifiedMessage.timestamp` (Unix ms). Messages
+/// without a valid timestamp are not included in the hourly distribution.
 pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, String> {
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
