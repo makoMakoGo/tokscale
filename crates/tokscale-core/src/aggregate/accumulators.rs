@@ -318,7 +318,7 @@ pub(super) fn finish_hour_map(hour_map: HashMap<String, HourAcc>) -> Vec<HourlyU
 pub(super) struct DailyAcc {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
-    clients: HashMap<String, ClientContribution>,
+    clients: HashMap<(String, String), ClientContribution>,
 }
 
 impl DailyAcc {
@@ -357,14 +357,16 @@ impl DailyAcc {
             .saturating_add(msg.tokens.reasoning);
 
         let model_id = msg.model_id.as_ref();
-        let key = format!("{}:{}", msg.client, model_id);
+        let client = msg.client.to_string();
+        let model = model_id.to_string();
+        let key = (client.clone(), model.clone());
         let provider_id = normalize_provider_for_grouping(&msg.provider_id);
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
-                client: msg.client.to_string(),
-                model_id: model_id.to_string(),
+                client,
+                model_id: model,
                 provider_id: provider_id.clone(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,

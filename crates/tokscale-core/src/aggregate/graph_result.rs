@@ -13,7 +13,10 @@ fn clean_total_cost(cost: f64) -> f64 {
 
 /// Calculate summary statistics for contribution graph output.
 pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
-    let total_tokens: i64 = contributions.iter().map(|c| c.totals.tokens).sum();
+    let total_tokens = contributions
+        .iter()
+        .map(|c| c.totals.tokens)
+        .fold(0_i64, i64::saturating_add);
     let total_cost = clean_total_cost(contributions.iter().map(|c| c.totals.cost).sum());
     let active_days = contributions
         .iter()
@@ -82,7 +85,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         }
         let year = &contribution.date[0..4];
         let entry = years_map.entry(year.to_string()).or_default();
-        entry.tokens += contribution.totals.tokens;
+        entry.tokens = entry.tokens.saturating_add(contribution.totals.tokens);
         entry.cost += contribution.totals.cost;
 
         if entry.start.is_empty() || contribution.date < entry.start {
@@ -98,7 +101,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         .map(|(year, acc)| YearSummary {
             year,
             total_tokens: acc.tokens,
-            total_cost: acc.cost,
+            total_cost: clean_total_cost(acc.cost),
             range_start: acc.start,
             range_end: acc.end,
         })
@@ -264,6 +267,17 @@ mod tests {
     }
 
     #[test]
+    fn test_calculate_summary_saturates_total_tokens() {
+        let contributions = vec![
+            contribution("2024-01-01", i64::MAX, 0.05, 1),
+            contribution("2024-01-02", 1, 0.10, 1),
+        ];
+
+        let summary = calculate_summary(&contributions);
+        assert_eq!(summary.total_tokens, i64::MAX);
+    }
+
+    #[test]
     fn test_calculate_years_empty() {
         let contributions = Vec::new();
         let years = calculate_years(&contributions);
@@ -328,6 +342,20 @@ mod tests {
 
         let years = calculate_years(&contributions);
         assert_eq!(years.len(), 0);
+    }
+
+    #[test]
+    fn test_calculate_years_saturates_tokens_and_cleans_negative_zero_cost() {
+        let contributions = vec![
+            contribution("2024-01-01", i64::MAX, -0.0, 1),
+            contribution("2024-01-02", 1, 0.0, 1),
+        ];
+
+        let years = calculate_years(&contributions);
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0].total_tokens, i64::MAX);
+        assert_eq!(clean_total_cost(-0.0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(years[0].total_cost.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]
