@@ -6,6 +6,7 @@
 
 use std::ffi::OsString;
 
+use super::accumulators::hour_key;
 use crate::aggregate::{AggregationConfig, AggregationEngine, DateRange, ViewSet};
 use crate::sessions::UnifiedMessage;
 use crate::usage_views::UsageData;
@@ -1113,6 +1114,27 @@ fn contract_hourly_timestamp_zero_fallback_bucket() {
     let report = crate::hourly_report_from_messages_pub(vec![zero]);
     assert_eq!(report.entries.len(), 1);
     assert!(report.entries[0].hour.ends_with("00:00"));
+}
+
+#[test]
+fn contract_hour_key_fallback_uses_precomputed_date_key() {
+    let msg = UnifiedMessage::new(
+        "c",
+        "m",
+        "p",
+        "s",
+        0,
+        TokenBreakdown {
+            input: 1,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        1.0,
+    );
+
+    assert_eq!(hour_key(&msg, Some("2099-01-02")), "2099-01-02 00:00");
 }
 
 #[test]

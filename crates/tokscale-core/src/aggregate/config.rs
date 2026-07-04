@@ -1,11 +1,11 @@
 //! Configuration for the aggregation engine: the date filter, the view
 //! selector, and the combined [`AggregationConfig`].
 
-/// Date filter applied to every `push`ed message via
-/// `UnifiedMessage::date_string()`. Mirrors `retain_messages_in_date_range`
-/// (lib.rs) byte-for-byte: a `year` prefix match plus inclusive `since`/`until`
-/// string comparisons on the `%Y-%m-%d` date string. A fully-empty range is a
-/// no-op that keeps every message.
+/// Date filter evaluated via `UnifiedMessage::date_string()` when active.
+/// Mirrors `retain_messages_in_date_range` (lib.rs) byte-for-byte: a `year`
+/// prefix match plus inclusive `since`/`until` string comparisons on the
+/// `%Y-%m-%d` date string. A fully-empty range is a no-op that keeps every
+/// message.
 #[derive(Debug, Clone, Default)]
 pub struct DateRange {
     pub since: Option<String>,
@@ -17,6 +17,10 @@ impl DateRange {
     /// An inactive filter — keeps every message.
     pub fn none() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn is_unfiltered(&self) -> bool {
+        self.year.is_none() && self.since.is_none() && self.until.is_none()
     }
 
     /// Build from the raw `ReportOptions` date fields.
@@ -31,7 +35,7 @@ impl DateRange {
     /// True iff `date` (a `%Y-%m-%d` string from `date_string()`) passes the
     /// filter. Identical predicate to `retain_messages_in_date_range`.
     pub fn contains(&self, date: &str) -> bool {
-        if self.year.is_none() && self.since.is_none() && self.until.is_none() {
+        if self.is_unfiltered() {
             return true;
         }
         let year_ok = self
