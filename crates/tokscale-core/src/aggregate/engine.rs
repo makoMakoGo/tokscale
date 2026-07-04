@@ -6,9 +6,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     aggregate::accumulators::{
-        finish_daily_map, finish_hour_map, finish_month_map, finish_session_map,
-        finish_time_buffered_views, hour_key, AgentEntries, DailyAcc, HourAcc, ModelEntries,
-        MonthAcc, SessionAcc,
+        finish_daily_map, finish_graph_and_time_from_events, finish_hour_map, finish_month_map,
+        finish_session_map, hour_key, AgentEntries, DailyAcc, HourAcc, ModelEntries, MonthAcc,
+        SessionAcc,
     },
     aggregate::tui::TuiAcc,
     AggregatedViews, AggregationConfig, ViewSet,
@@ -141,7 +141,7 @@ impl AggregationEngine {
         // `finish`); 0 here.
         let (graph, time_metrics, daily_contributions) = match time_events {
             Some(events) => {
-                let views = finish_time_buffered_views(
+                let views = finish_graph_and_time_from_events(
                     &events,
                     config.views,
                     daily_contributions_for_graph,
