@@ -281,6 +281,34 @@ fn parity_graph_result() {
 
 #[test]
 #[serial]
+fn graph_daily_accumulator_keeps_client_model_tuple_keys_distinct() {
+    let _tz = pin_tz();
+    let msgs = vec![
+        msg("a", "b:c", "test-provider", "s1", "2024-06-10", 1.0),
+        msg("a:b", "c", "test-provider", "s2", "2024-06-10", 2.0),
+    ];
+
+    let mut engine = AggregationEngine::new(AggregationConfig {
+        group_by: GroupBy::ClientModel,
+        date_range: DateRange::none(),
+        views: ViewSet::GRAPH,
+    });
+    for message in &msgs {
+        engine.push(message);
+    }
+
+    let graph = engine.finish().graph.expect("graph view requested");
+    assert_eq!(graph.contributions.len(), 1);
+    let clients = &graph.contributions[0].clients;
+    assert_eq!(clients.len(), 2);
+    assert_eq!(clients[0].client, "a");
+    assert_eq!(clients[0].model_id, "b:c");
+    assert_eq!(clients[1].client, "a:b");
+    assert_eq!(clients[1].model_id, "c");
+}
+
+#[test]
+#[serial]
 fn entrypoint_model_report_matches_engine_all_group_by() {
     let _tz = pin_tz();
     let msgs = corpus();

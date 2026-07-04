@@ -24,10 +24,10 @@ pub mod usage_views;
 pub use aggregate::{
     aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
     build_contribution_graph_for_today, build_period_usage, calculate_streaks,
-    calculate_streaks_for_today, find_peak_hour, AgentUsage, AggregatedViews, AggregationConfig,
-    DateRange, PeriodBucket, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
+    calculate_streaks_for_today, calculate_summary, calculate_years, find_peak_hour, AgentUsage,
+    AggregatedViews, AggregationConfig, DateRange, PeriodBucket, ViewSet, WeekdayBucket,
+    UNKNOWN_WORKSPACE_LABEL,
 };
-pub use aggregator::{calculate_summary, calculate_years};
 pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
 pub use parser::*;
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
