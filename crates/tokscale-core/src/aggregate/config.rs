@@ -1,11 +1,11 @@
 //! Configuration for the aggregation engine: the date filter, the view
 //! selector, and the combined [`AggregationConfig`].
 
-/// Date filter applied to every `push`ed message via
-/// `UnifiedMessage::date_string()`. Mirrors `retain_messages_in_date_range`
-/// (lib.rs) byte-for-byte: a `year` prefix match plus inclusive `since`/`until`
-/// string comparisons on the `%Y-%m-%d` date string. A fully-empty range is a
-/// no-op that keeps every message.
+/// Date filter evaluated via `UnifiedMessage::date_string()` when active.
+/// Mirrors `retain_messages_in_date_range` (lib.rs) byte-for-byte: a `year`
+/// prefix match plus inclusive `since`/`until` string comparisons on the
+/// `%Y-%m-%d` date string. A fully-empty range is a no-op that keeps every
+/// message.
 #[derive(Debug, Clone, Default)]
 pub struct DateRange {
     pub since: Option<String>,
