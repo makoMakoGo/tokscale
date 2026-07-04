@@ -11,6 +11,7 @@ use std::{
 use crate::{
     aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
     normalize_provider_for_grouping, ordered_clients_by_token_contribution, positive_token_total,
+    sessionize::SessionTimeEvent,
     ClientContribution, ClientContributionOrder, DailyContribution, DailyTotals, GraphResult,
     GroupBy, HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
     TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
@@ -743,16 +744,18 @@ pub(super) struct BufferedViews {
 /// Materialize the buffered two-pass views. Sessionize-derived metrics are
 /// computed once and reused by graph + time-metrics outputs when both are
 /// requested.
-pub(super) fn finish_buffered_views(
-    messages: &[UnifiedMessage],
+pub(super) fn finish_time_buffered_views(
+    events: &[SessionTimeEvent],
     views: ViewSet,
     daily_contributions: Option<Vec<DailyContribution>>,
 ) -> BufferedViews {
     let needs_session_metrics =
         views.contains(ViewSet::GRAPH) || views.contains(ViewSet::TIME_METRICS);
     let (time_metrics_value, daily_active_time) = if needs_session_metrics {
-        let intervals =
-            crate::sessionize::sessionize(messages, crate::sessionize::DEFAULT_IDLE_GAP_MS);
+        let intervals = crate::sessionize::sessionize_time_events(
+            events,
+            crate::sessionize::DEFAULT_IDLE_GAP_MS,
+        );
         let metrics = crate::sessionize::compute_time_metrics(
             &intervals,
             crate::sessionize::DEFAULT_IDLE_GAP_MS,
