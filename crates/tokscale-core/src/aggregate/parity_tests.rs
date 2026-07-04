@@ -239,7 +239,8 @@ fn parity_graph_result() {
     // Primitive composition — exactly the graph assembly the engine must
     // preserve while hiding it behind `push`/`finish`.
     let mut expected = {
-        let intervals = sessionize::sessionize(&msgs, sessionize::DEFAULT_IDLE_GAP_MS);
+        let intervals =
+            sessionize::sessionize_time_intervals(&msgs, sessionize::DEFAULT_IDLE_GAP_MS);
         let tm = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
         let dat = sessionize::compute_daily_active_time(&intervals);
         let contribs = aggregator::aggregate_by_date(&msgs);
@@ -398,7 +399,7 @@ fn parity_time_metrics() {
     let _tz = pin_tz();
     let msgs = corpus();
 
-    let intervals = sessionize::sessionize(&msgs, sessionize::DEFAULT_IDLE_GAP_MS);
+    let intervals = sessionize::sessionize_time_intervals(&msgs, sessionize::DEFAULT_IDLE_GAP_MS);
     let metrics = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
     let old = crate::TimeMetricsReport {
         metrics,

@@ -735,43 +735,32 @@ impl AgentEntries {
     }
 }
 
-pub(super) struct BufferedViews {
+pub(super) struct TimeBufferedViews {
     pub(super) graph: Option<GraphResult>,
     pub(super) time_metrics: Option<TimeMetricsReport>,
     pub(super) daily_contributions: Option<Vec<DailyContribution>>,
 }
 
-/// Materialize the buffered two-pass views. Sessionize-derived metrics are
-/// computed once and reused by graph + time-metrics outputs when both are
-/// requested.
-pub(super) fn finish_time_buffered_views(
+/// Materialize graph/time outputs from the buffered temporal projection.
+/// Sessionize-derived metrics are computed once and reused by graph +
+/// time-metrics outputs when both are requested.
+pub(super) fn finish_graph_and_time_from_events(
     events: &[SessionTimeEvent],
     views: ViewSet,
     daily_contributions: Option<Vec<DailyContribution>>,
-) -> BufferedViews {
-    let needs_session_metrics =
-        views.contains(ViewSet::GRAPH) || views.contains(ViewSet::TIME_METRICS);
-    let (time_metrics_value, daily_active_time) = if needs_session_metrics {
-        let intervals = crate::sessionize::sessionize_time_events(
-            events,
-            crate::sessionize::DEFAULT_IDLE_GAP_MS,
-        );
-        let metrics = crate::sessionize::compute_time_metrics(
-            &intervals,
-            crate::sessionize::DEFAULT_IDLE_GAP_MS,
-        );
-        let daily_active_time = views
-            .contains(ViewSet::GRAPH)
-            .then(|| crate::sessionize::compute_daily_active_time(&intervals));
-        (Some(metrics), daily_active_time)
-    } else {
-        (None, None)
-    };
+) -> TimeBufferedViews {
+    let intervals =
+        crate::sessionize::sessionize_time_events(events, crate::sessionize::DEFAULT_IDLE_GAP_MS);
+    let time_metrics_value =
+        crate::sessionize::compute_time_metrics(&intervals, crate::sessionize::DEFAULT_IDLE_GAP_MS);
+    let daily_active_time = views
+        .contains(ViewSet::GRAPH)
+        .then(|| crate::sessionize::compute_daily_active_time(&intervals));
 
     let graph = views.contains(ViewSet::GRAPH).then(|| {
         let contributions = daily_contributions.expect("graph view requested");
         let mut result = finish_graph_result(contributions, 0);
-        result.time_metrics = time_metrics_value.clone();
+        result.time_metrics = Some(time_metrics_value.clone());
         if let Some(daily_active_time) = &daily_active_time {
             for contribution in &mut result.contributions {
                 if let Some(&ms) = daily_active_time.get(&contribution.date) {
@@ -785,12 +774,12 @@ pub(super) fn finish_time_buffered_views(
     let daily_contributions = graph.as_ref().map(|graph| graph.contributions.clone());
     let time_metrics = views
         .contains(ViewSet::TIME_METRICS)
-        .then(|| TimeMetricsReport {
-            metrics: time_metrics_value.expect("time metrics requested"),
+        .then_some(TimeMetricsReport {
+            metrics: time_metrics_value,
             processing_time_ms: 0,
         });
 
-    BufferedViews {
+    TimeBufferedViews {
         graph,
         time_metrics,
         daily_contributions,
