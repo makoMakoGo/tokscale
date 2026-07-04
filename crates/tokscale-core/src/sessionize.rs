@@ -337,7 +337,7 @@ where
 /// - `longest_continuous_ms`: longest merged activity window across ALL sessions
 ///   (using the idle gap threshold to merge overlapping/adjacent activity)
 /// - `max_concurrent_sessions`: peak overlap of session wall-clock intervals
-pub fn compute_time_metrics(intervals: &[TimeSessionInterval], _idle_gap_ms: i64) -> TimeMetrics {
+pub fn compute_time_metrics(intervals: &[TimeSessionInterval], idle_gap_ms: i64) -> TimeMetrics {
     if intervals.is_empty() {
         return TimeMetrics {
             total_active_time_ms: 0,
@@ -371,7 +371,7 @@ pub fn compute_time_metrics(intervals: &[TimeSessionInterval], _idle_gap_ms: i64
             let mut merged_end = first.1;
 
             for &(start, end) in &windows[1..] {
-                if start <= merged_end + _idle_gap_ms {
+                if start <= merged_end + idle_gap_ms {
                     // Overlapping or within idle gap tolerance — extend
                     merged_end = merged_end.max(end);
                 } else {
@@ -849,9 +849,25 @@ mod tests {
         let events: Vec<SessionTimeEvent> =
             msgs.iter().map(SessionTimeEvent::from_message).collect();
 
-        let full_time = sessionize_time_intervals(&msgs, DEFAULT_IDLE_GAP_MS);
-        let event_time = sessionize_time_events(&events, DEFAULT_IDLE_GAP_MS);
+        let accounting_time: Vec<TimeSessionInterval> = sessionize(&msgs, DEFAULT_IDLE_GAP_MS)
+            .into_iter()
+            .map(|interval| TimeSessionInterval {
+                client: interval.client,
+                session_id: interval.session_id,
+                start_ts: interval.start_ts,
+                end_ts: interval.end_ts,
+                wall_duration_ms: interval.wall_duration_ms,
+                active_duration_ms: interval.active_duration_ms,
+            })
+            .collect();
 
-        assert_eq!(event_time, full_time);
+        assert_eq!(
+            sessionize_time_intervals(&msgs, DEFAULT_IDLE_GAP_MS),
+            accounting_time
+        );
+        assert_eq!(
+            sessionize_time_events(&events, DEFAULT_IDLE_GAP_MS),
+            accounting_time
+        );
     }
 }
