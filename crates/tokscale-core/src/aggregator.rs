@@ -2,14 +2,18 @@
 //!
 //! Uses rayon for parallel map-reduce operations.
 
+#[cfg(test)]
 use crate::sessions::UnifiedMessage;
+#[cfg(test)]
 use crate::{
     normalize_provider_for_grouping, ClientContribution, DailyTotals, SessionContribution,
     TokenBreakdown,
 };
 #[cfg(test)]
 use crate::{DailyContribution, GraphResult};
+#[cfg(test)]
 use rayon::prelude::*;
+#[cfg(test)]
 use std::collections::HashMap;
 
 /// Aggregate messages into daily contributions
@@ -62,10 +66,12 @@ pub(crate) fn aggregate_by_date(messages: &[UnifiedMessage]) -> Vec<DailyContrib
 
 /// Aggregate messages into per-session contributions, keyed on `session_id`.
 ///
-/// Each returned [`SessionContribution`] sums all token buckets and cost for a
-/// single session and exposes the same client/model breakdown shape as
-/// [`aggregate_by_date`].  Sessions are sorted by `last_seen` descending so the
-/// most recently active sessions appear first.
+/// Test oracle for the streaming session accumulator. Each returned
+/// [`SessionContribution`] sums all token buckets and cost for a single session
+/// and exposes the same client/model breakdown shape as [`aggregate_by_date`].
+/// Sessions are sorted by `last_seen` descending so the most recently active
+/// sessions appear first.
+#[cfg(test)]
 pub(crate) fn aggregate_by_session(messages: &[UnifiedMessage]) -> Vec<SessionContribution> {
     if messages.is_empty() {
         return Vec::new();
@@ -347,6 +353,7 @@ impl DayAccumulator {
     }
 }
 
+#[cfg(test)]
 struct SessionAccumulator {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
@@ -361,6 +368,7 @@ struct SessionAccumulator {
     last_seen: i64,
 }
 
+#[cfg(test)]
 impl Default for SessionAccumulator {
     fn default() -> Self {
         Self {
@@ -377,6 +385,7 @@ impl Default for SessionAccumulator {
     }
 }
 
+#[cfg(test)]
 impl SessionAccumulator {
     fn add_message(&mut self, msg: &UnifiedMessage) {
         let total_tokens = msg
