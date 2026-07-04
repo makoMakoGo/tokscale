@@ -1,16 +1,19 @@
 //! Per-view accumulators derived from the old fold sites
 //! (`aggregate_model_usage_entries`, `MonthAggregator`/month fold,
-//! `HourAggregator`/hour fold, and the daily graph fold). Session and
-//! time-metrics views still need their existing two-pass projection.
+//! `HourAggregator`/hour fold, and the daily graph fold). Time-metrics views
+//! still need their existing two-pass projection.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
     aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
-    aggregator, normalize_provider_for_grouping, ordered_clients_by_token_contribution,
-    positive_token_total, ClientContribution, ClientContributionOrder, DailyContribution,
-    DailyTotals, GraphResult, GroupBy, HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage,
-    SessionContribution, TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
+    normalize_provider_for_grouping, ordered_clients_by_token_contribution, positive_token_total,
+    ClientContribution, ClientContributionOrder, DailyContribution, DailyTotals, GraphResult,
+    GroupBy, HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
+    TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
 };
 
 use super::{finish_graph_result, views::AgentUsage};
@@ -486,6 +489,199 @@ fn calculate_intensities(contributions: &mut [DailyContribution]) {
     }
 }
 
+pub(super) struct SessionAcc {
+    totals: DailyTotals,
+    token_breakdown: TokenBreakdown,
+    clients: HashMap<(String, String, String), ClientContribution>,
+    top_client: String,
+    top_provider: String,
+    top_model: String,
+    top_cost: f64,
+    first_seen: i64,
+    last_seen: i64,
+}
+
+impl Default for SessionAcc {
+    fn default() -> Self {
+        Self {
+            totals: DailyTotals::default(),
+            token_breakdown: TokenBreakdown::default(),
+            clients: HashMap::with_capacity(2),
+            top_client: String::new(),
+            top_provider: String::new(),
+            top_model: String::new(),
+            top_cost: f64::NEG_INFINITY,
+            first_seen: i64::MAX,
+            last_seen: i64::MIN,
+        }
+    }
+}
+
+impl SessionAcc {
+    pub(super) fn push(&mut self, msg: &UnifiedMessage) {
+        let total_tokens = msg
+            .tokens
+            .input
+            .saturating_add(msg.tokens.output)
+            .saturating_add(msg.tokens.cache_read)
+            .saturating_add(msg.tokens.cache_write)
+            .saturating_add(msg.tokens.reasoning);
+
+        self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
+        self.totals.cost += msg.cost;
+        self.totals.messages = self
+            .totals
+            .messages
+            .saturating_add(msg.message_count.max(0));
+
+        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
+        self.token_breakdown.output = self
+            .token_breakdown
+            .output
+            .saturating_add(msg.tokens.output);
+        self.token_breakdown.cache_read = self
+            .token_breakdown
+            .cache_read
+            .saturating_add(msg.tokens.cache_read);
+        self.token_breakdown.cache_write = self
+            .token_breakdown
+            .cache_write
+            .saturating_add(msg.tokens.cache_write);
+        self.token_breakdown.reasoning = self
+            .token_breakdown
+            .reasoning
+            .saturating_add(msg.tokens.reasoning);
+
+        let client = msg.client.to_string();
+        let provider_id = normalize_provider_for_grouping(&msg.provider_id);
+        let model_id = msg.model_id.to_string();
+        let key = (client.clone(), provider_id.clone(), model_id.clone());
+        let client_entry = self
+            .clients
+            .entry(key)
+            .or_insert_with(|| ClientContribution {
+                client,
+                model_id,
+                provider_id: provider_id.clone(),
+                tokens: TokenBreakdown::default(),
+                cost: 0.0,
+                messages: 0,
+            });
+
+        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
+        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
+        client_entry.tokens.cache_read = client_entry
+            .tokens
+            .cache_read
+            .saturating_add(msg.tokens.cache_read);
+        client_entry.tokens.cache_write = client_entry
+            .tokens
+            .cache_write
+            .saturating_add(msg.tokens.cache_write);
+        client_entry.tokens.reasoning = client_entry
+            .tokens
+            .reasoning
+            .saturating_add(msg.tokens.reasoning);
+        client_entry.cost += msg.cost;
+        client_entry.messages = client_entry
+            .messages
+            .saturating_add(msg.message_count.max(0));
+
+        if client_entry.cost > self.top_cost {
+            self.top_cost = client_entry.cost;
+            self.top_client = client_entry.client.clone();
+            self.top_provider = client_entry.provider_id.clone();
+            self.top_model = client_entry.model_id.clone();
+        }
+
+        let secs = if msg.timestamp.abs() > 1_000_000_000_000 {
+            msg.timestamp / 1000
+        } else {
+            msg.timestamp
+        };
+        if secs < self.first_seen {
+            self.first_seen = secs;
+        }
+        if secs > self.last_seen {
+            self.last_seen = secs;
+        }
+    }
+
+    fn into_contribution(self, session_id: String) -> SessionContribution {
+        let token_breakdown = TokenBreakdown {
+            input: self.token_breakdown.input.max(0),
+            output: self.token_breakdown.output.max(0),
+            cache_read: self.token_breakdown.cache_read.max(0),
+            cache_write: self.token_breakdown.cache_write.max(0),
+            reasoning: self.token_breakdown.reasoning.max(0),
+        };
+
+        let mut clients: Vec<ClientContribution> = self
+            .clients
+            .into_values()
+            .map(|mut contribution| {
+                contribution.tokens.input = contribution.tokens.input.max(0);
+                contribution.tokens.output = contribution.tokens.output.max(0);
+                contribution.tokens.cache_read = contribution.tokens.cache_read.max(0);
+                contribution.tokens.cache_write = contribution.tokens.cache_write.max(0);
+                contribution.tokens.reasoning = contribution.tokens.reasoning.max(0);
+                contribution.cost = contribution.cost.max(0.0);
+                contribution
+            })
+            .collect();
+        clients.sort_by(|a, b| {
+            b.cost
+                .partial_cmp(&a.cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.client.cmp(&b.client))
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_id.cmp(&b.provider_id))
+        });
+
+        let first_seen = if self.first_seen == i64::MAX {
+            0
+        } else {
+            self.first_seen
+        };
+        let last_seen = if self.last_seen == i64::MIN {
+            0
+        } else {
+            self.last_seen
+        };
+
+        SessionContribution {
+            session_id,
+            client: self.top_client,
+            provider: self.top_provider,
+            model: self.top_model,
+            totals: DailyTotals {
+                tokens: self.totals.tokens.max(0),
+                cost: self.totals.cost.max(0.0),
+                messages: self.totals.messages.max(0),
+            },
+            token_breakdown,
+            clients,
+            first_seen,
+            last_seen,
+        }
+    }
+}
+
+pub(super) fn finish_session_map(
+    session_map: HashMap<Arc<str>, SessionAcc>,
+) -> Vec<SessionContribution> {
+    let mut contributions: Vec<SessionContribution> = session_map
+        .into_iter()
+        .map(|(session_id, acc)| acc.into_contribution(session_id.to_string()))
+        .collect();
+    contributions.sort_by(|a, b| {
+        b.last_seen
+            .cmp(&a.last_seen)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    contributions
+}
+
 #[derive(Default)]
 pub(super) struct AgentEntries {
     agents: HashMap<(String, String), AgentUsage>,
@@ -540,7 +736,6 @@ impl AgentEntries {
 
 pub(super) struct BufferedViews {
     pub(super) graph: Option<GraphResult>,
-    pub(super) session_contributions: Option<Vec<SessionContribution>>,
     pub(super) time_metrics: Option<TimeMetricsReport>,
     pub(super) daily_contributions: Option<Vec<DailyContribution>>,
 }
@@ -585,9 +780,6 @@ pub(super) fn finish_buffered_views(
     });
 
     let daily_contributions = graph.as_ref().map(|graph| graph.contributions.clone());
-    let session_contributions = views
-        .contains(ViewSet::SESSIONS)
-        .then(|| aggregator::aggregate_by_session(messages));
     let time_metrics = views
         .contains(ViewSet::TIME_METRICS)
         .then(|| TimeMetricsReport {
@@ -597,7 +789,6 @@ pub(super) fn finish_buffered_views(
 
     BufferedViews {
         graph,
-        session_contributions,
         time_metrics,
         daily_contributions,
     }

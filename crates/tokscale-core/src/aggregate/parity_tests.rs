@@ -448,6 +448,46 @@ fn parity_session_contributions() {
 
 #[test]
 #[serial]
+fn session_accumulator_keeps_client_provider_model_tuple_keys_distinct() {
+    let _tz = pin_tz();
+    let msgs = vec![
+        msg("a", "d", "b:c", "shared-session", "2024-06-10", 1.0),
+        msg("a:b", "d", "c", "shared-session", "2024-06-10", 2.0),
+    ];
+
+    let mut engine = AggregationEngine::new(AggregationConfig {
+        group_by: GroupBy::ClientModel,
+        date_range: DateRange::none(),
+        views: ViewSet::SESSIONS,
+    });
+    for message in &msgs {
+        engine.push(message);
+    }
+
+    let sessions = engine
+        .finish()
+        .session_contributions
+        .expect("sessions view requested");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].clients.len(), 2);
+
+    let mut entries: Vec<_> = sessions[0]
+        .clients
+        .iter()
+        .map(|entry| {
+            (
+                entry.client.as_str(),
+                entry.provider_id.as_str(),
+                entry.model_id.as_str(),
+            )
+        })
+        .collect();
+    entries.sort();
+    assert_eq!(entries, vec![("a", "b:c", "d"), ("a:b", "c", "d")]);
+}
+
+#[test]
+#[serial]
 fn contract_tui_view_materializes_usage_data() {
     let _tz = pin_tz();
     let msgs = corpus();
