@@ -254,7 +254,8 @@ fn agents_view_keeps_client_dimension() {
 #[serial]
 fn contract_graph_result() {
     let _tz = pin_tz();
-    let msgs = corpus();
+    let mut msgs = corpus();
+    msgs[0].duration_ms = Some(60_000);
 
     let mut actual = {
         let mut e = AggregationEngine::new(AggregationConfig {
@@ -287,7 +288,12 @@ fn contract_graph_result() {
         actual.meta.date_range_end,
         actual.contributions.last().unwrap().date
     );
-    assert!(actual.time_metrics.is_some());
+    let time_metrics = actual.time_metrics.as_ref().expect("graph time metrics");
+    assert_eq!(time_metrics.total_active_time_ms, 60_000);
+    assert_eq!(time_metrics.total_wall_time_ms, 60_000);
+    assert_eq!(time_metrics.longest_continuous_ms, 60_000);
+    assert_eq!(time_metrics.max_concurrent_sessions, 2);
+    assert_eq!(time_metrics.session_count, 5);
 
     let june_10 = actual
         .contributions
@@ -295,8 +301,26 @@ fn contract_graph_result() {
         .find(|day| day.date == "2024-06-10")
         .expect("June 10 contribution");
     assert_eq!(june_10.totals.tokens, 336);
+    assert!((june_10.totals.cost - 10.0).abs() < 0.0001);
     assert_eq!(june_10.totals.messages, 2);
+    assert_eq!(june_10.intensity, 4);
+    assert_eq!(june_10.active_time_ms, Some(60_000));
+    assert_eq!(june_10.token_breakdown.input, 200);
+    assert_eq!(june_10.token_breakdown.output, 100);
+    assert_eq!(june_10.token_breakdown.cache_read, 20);
+    assert_eq!(june_10.token_breakdown.cache_write, 10);
+    assert_eq!(june_10.token_breakdown.reasoning, 6);
     assert_eq!(june_10.clients.len(), 2);
+    assert_eq!(june_10.clients[0].client, "claude");
+    assert_eq!(june_10.clients[0].model_id, "claude-opus-4");
+    assert_eq!(june_10.clients[0].provider_id, "anthropic");
+    assert_eq!(june_10.clients[0].tokens.total(), 168);
+    assert_eq!(june_10.clients[0].messages, 1);
+    assert_eq!(june_10.clients[1].client, "claude");
+    assert_eq!(june_10.clients[1].model_id, "claude-sonnet-4");
+    assert_eq!(june_10.clients[1].provider_id, "anthropic");
+    assert_eq!(june_10.clients[1].tokens.total(), 168);
+    assert_eq!(june_10.clients[1].messages, 1);
 
     let total_tokens: i64 = actual
         .contributions
@@ -312,6 +336,27 @@ fn contract_graph_result() {
         (actual.summary.total_cost - total_cost).abs() < 0.0001,
         "graph summary cost should derive from contributions",
     );
+    assert_eq!(actual.summary.total_days, 5);
+    assert_eq!(actual.summary.active_days, 5);
+    assert!((actual.summary.average_per_day - 4.3).abs() < 0.0001);
+    assert!((actual.summary.max_cost_in_single_day - 10.0).abs() < 0.0001);
+    assert_eq!(actual.summary.clients, vec!["claude", "codex", "gemini"]);
+    assert_eq!(
+        actual.summary.models,
+        vec!["claude-opus-4", "claude-sonnet-4", "gpt-5"]
+    );
+
+    assert_eq!(actual.years.len(), 2);
+    assert_eq!(actual.years[0].year, "1970");
+    assert_eq!(actual.years[0].total_tokens, 168);
+    assert!((actual.years[0].total_cost - 0.5).abs() < 0.0001);
+    assert_eq!(actual.years[0].range_start, "1970-01-01");
+    assert_eq!(actual.years[0].range_end, "1970-01-01");
+    assert_eq!(actual.years[1].year, "2024");
+    assert_eq!(actual.years[1].total_tokens, 1008);
+    assert!((actual.years[1].total_cost - 21.0).abs() < 0.0001);
+    assert_eq!(actual.years[1].range_start, "2024-05-01");
+    assert_eq!(actual.years[1].range_end, "2024-06-12");
 }
 
 #[test]
@@ -340,6 +385,50 @@ fn graph_daily_accumulator_keeps_client_model_tuple_keys_distinct() {
     assert_eq!(clients[0].model_id, "b:c");
     assert_eq!(clients[1].client, "a:b");
     assert_eq!(clients[1].model_id, "c");
+}
+
+#[test]
+#[serial]
+fn graph_daily_accumulator_merges_provider_ids_for_same_client_model() {
+    let _tz = pin_tz();
+    let msgs = vec![
+        msg(
+            "claude",
+            "claude-sonnet-4",
+            "anthropic-bedrock",
+            "s1",
+            "2024-06-10",
+            1.0,
+        ),
+        msg(
+            "claude",
+            "claude-sonnet-4",
+            "anthropic",
+            "s1",
+            "2024-06-10",
+            2.0,
+        ),
+    ];
+
+    let mut engine = AggregationEngine::new(AggregationConfig {
+        group_by: GroupBy::ClientModel,
+        date_range: DateRange::none(),
+        views: ViewSet::GRAPH,
+    });
+    for message in &msgs {
+        engine.push(message);
+    }
+
+    let graph = engine.finish().graph.expect("graph view requested");
+    assert_eq!(graph.contributions.len(), 1);
+    let clients = &graph.contributions[0].clients;
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].client, "claude");
+    assert_eq!(clients[0].model_id, "claude-sonnet-4");
+    assert_eq!(clients[0].provider_id, "anthropic, anthropic-bedrock");
+    assert_eq!(clients[0].messages, 2);
+    assert_eq!(clients[0].tokens.total(), 336);
+    assert!((clients[0].cost - 3.0).abs() < 0.0001);
 }
 
 #[test]
@@ -583,8 +672,21 @@ fn contract_session_contributions() {
     assert_eq!(s_a.totals.messages, 2);
     assert_eq!(s_a.totals.tokens, 300);
     assert!((s_a.totals.cost - 0.02).abs() < 1e-9);
+    assert_eq!(s_a.token_breakdown.input, 200);
+    assert_eq!(s_a.token_breakdown.output, 100);
+    assert_eq!(s_a.token_breakdown.cache_read, 0);
+    assert_eq!(s_a.token_breakdown.cache_write, 0);
+    assert_eq!(s_a.token_breakdown.reasoning, 0);
     assert_eq!(s_a.first_seen, 1_700_000_001);
     assert_eq!(s_a.last_seen, 1_700_000_002);
+    assert_eq!(s_a.clients.len(), 1);
+    assert_eq!(s_a.clients[0].client, "codex");
+    assert_eq!(s_a.clients[0].provider_id, "openai");
+    assert_eq!(s_a.clients[0].model_id, "gpt-5");
+    assert_eq!(s_a.clients[0].tokens.input, 200);
+    assert_eq!(s_a.clients[0].tokens.output, 100);
+    assert_eq!(s_a.clients[0].messages, 2);
+    assert!((s_a.clients[0].cost - 0.02).abs() < 1e-9);
 
     let shared = sessions
         .iter()
@@ -593,8 +695,30 @@ fn contract_session_contributions() {
     assert_eq!(shared.client, "codex");
     assert_eq!(shared.provider, "openai");
     assert_eq!(shared.model, "gpt-5");
+    assert_eq!(shared.totals.messages, 2);
+    assert_eq!(shared.totals.tokens, 1520);
+    assert_eq!(shared.token_breakdown.input, 1010);
+    assert_eq!(shared.token_breakdown.output, 510);
+    assert_eq!(shared.token_breakdown.cache_read, 0);
+    assert_eq!(shared.token_breakdown.cache_write, 0);
+    assert_eq!(shared.token_breakdown.reasoning, 0);
+    assert_eq!(shared.first_seen, 1_700_000_110);
+    assert_eq!(shared.last_seen, 1_700_000_111);
     assert_eq!(shared.clients.len(), 2);
     assert_eq!(shared.clients[0].client, "codex");
+    assert_eq!(shared.clients[0].provider_id, "openai");
+    assert_eq!(shared.clients[0].model_id, "gpt-5");
+    assert_eq!(shared.clients[0].tokens.input, 1000);
+    assert_eq!(shared.clients[0].tokens.output, 500);
+    assert_eq!(shared.clients[0].messages, 1);
+    assert!((shared.clients[0].cost - 0.50).abs() < 1e-9);
+    assert_eq!(shared.clients[1].client, "amp");
+    assert_eq!(shared.clients[1].provider_id, "anthropic");
+    assert_eq!(shared.clients[1].model_id, "claude-haiku-4.5");
+    assert_eq!(shared.clients[1].tokens.input, 10);
+    assert_eq!(shared.clients[1].tokens.output, 10);
+    assert_eq!(shared.clients[1].messages, 1);
+    assert!((shared.clients[1].cost - 0.001).abs() < 1e-9);
     assert!((shared.totals.cost - 0.501).abs() < 1e-9);
 }
 
