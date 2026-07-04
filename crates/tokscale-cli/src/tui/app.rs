@@ -1575,17 +1575,20 @@ impl App {
             .position(|day| day.date == detail_date)
             .unwrap_or_else(|| self.stored_list_interaction(Tab::Daily).selected);
 
-        self.selected_index = restored_index;
-
         let daily_interaction = self.stored_list_interaction(Tab::Daily);
-        let max_visible = self.max_visible_items.max(1);
+        let max_visible = daily_interaction.visible.max(1);
         let viewport_still_holds = restored_index >= daily_interaction.scroll
             && restored_index < daily_interaction.scroll + max_visible;
-        self.scroll_offset = if viewport_still_holds {
+        let scroll = if viewport_still_holds {
             daily_interaction.scroll
         } else {
             restored_index.saturating_sub(max_visible / 2)
         };
+        self.set_current_list_interaction(ListInteraction {
+            selected: restored_index,
+            scroll,
+            visible: daily_interaction.visible,
+        });
 
         self.set_local_report_status("Returned to daily usage");
         self.clamp_selection();
@@ -1640,17 +1643,20 @@ impl App {
                     .selected
             });
 
-        self.selected_index = restored_index;
-
         let period_interaction = self.stored_list_interaction(Self::period_tab(selection.kind));
-        let max_visible = self.max_visible_items.max(1);
+        let max_visible = period_interaction.visible.max(1);
         let viewport_still_holds = restored_index >= period_interaction.scroll
             && restored_index < period_interaction.scroll + max_visible;
-        self.scroll_offset = if viewport_still_holds {
+        let scroll = if viewport_still_holds {
             period_interaction.scroll
         } else {
             restored_index.saturating_sub(max_visible / 2)
         };
+        self.set_current_list_interaction(ListInteraction {
+            selected: restored_index,
+            scroll,
+            visible: period_interaction.visible,
+        });
 
         self.set_local_report_status(match selection.kind {
             PeriodKind::Monthly => "Returned to monthly usage",
@@ -2931,6 +2937,7 @@ mod tests {
         assert_eq!(app.selected_index, 1);
         assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
+        app.max_visible_items = 5;
 
         app.handle_key_event(key(KeyCode::Esc));
 
@@ -2939,6 +2946,8 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Descending);
         assert_eq!(app.selected_index, 1);
         assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.max_visible_items, 2);
+        assert_eq!(app.stored_list_interaction(Tab::Daily).visible, 2);
         assert_eq!(app.get_current_list_len(), 3);
     }
 
@@ -3182,6 +3191,7 @@ mod tests {
         app.handle_key_event(key(KeyCode::Down));
         assert!(app.is_period_detail_active_for_kind(PeriodKind::Weekly));
         assert_eq!(app.selected_index, 1);
+        app.max_visible_items = 5;
 
         app.handle_key_event(key(KeyCode::Esc));
 
@@ -3191,6 +3201,8 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Descending);
         assert_eq!(app.selected_index, 2);
         assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.max_visible_items, 2);
+        assert_eq!(app.stored_list_interaction(Tab::Weekly).visible, 2);
         assert_eq!(
             app.get_sorted_periods(PeriodKind::Weekly)[app.selected_index].start_date,
             selected_period
