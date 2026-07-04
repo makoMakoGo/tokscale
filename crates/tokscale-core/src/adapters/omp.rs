@@ -9,11 +9,14 @@ use crate::adapters::{
     ParseContext, ParsedUnit, SourceUnit,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
 pub(crate) struct OmpAdapter;
 
 pub(crate) static OMP_ADAPTER: OmpAdapter = OmpAdapter;
+
+const OMP_TITLE_SLOT_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 impl LocalSourceAdapter for OmpAdapter {
     fn client(&self) -> ClientId {
@@ -26,6 +29,11 @@ impl LocalSourceAdapter for OmpAdapter {
             ctx,
             FingerprintPolicy::PlainFile,
         )
+        .into_iter()
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(ParserId::Omp, OMP_TITLE_SLOT_REVISION))
+        })
+        .collect()
     }
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {

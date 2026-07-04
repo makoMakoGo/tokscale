@@ -24,6 +24,25 @@ pub struct PiSessionHeader {
     pub cwd: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PiEntryKind {
+    #[serde(rename = "type")]
+    entry_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OmpTitleSlot {
+    #[serde(rename = "type")]
+    entry_type: String,
+    v: i64,
+    #[allow(dead_code)]
+    title: String,
+    updated_at: String,
+    #[allow(dead_code)]
+    pad: String,
+}
+
 /// Pi session entry (subsequent lines of JSONL)
 #[derive(Debug, Deserialize)]
 pub struct PiSessionEntry {
@@ -89,6 +108,18 @@ fn normalize_omp_agent_label(agent: &str) -> Option<String> {
     };
 
     Some(label.to_string())
+}
+
+fn normalize_omp_advisor_label(child_stem: &str) -> Option<String> {
+    if child_stem == "__advisor"
+        || child_stem
+            .strip_prefix("__advisor.")
+            .is_some_and(|slug| !slug.is_empty())
+    {
+        return Some("OMP Advisor".to_string());
+    }
+
+    None
 }
 
 fn omp_parent_session_path(path: &Path) -> Option<PathBuf> {
@@ -225,6 +256,60 @@ fn omp_subagent_label_from_map(
         .cloned()
 }
 
+enum PiHeaderParse {
+    Session(PiSessionHeader),
+    TitleSlot,
+    Invalid,
+}
+
+fn parse_pi_line_kind(trimmed: &str, buffer: &mut Vec<u8>) -> Option<PiEntryKind> {
+    buffer.clear();
+    buffer.extend_from_slice(trimmed.as_bytes());
+    simd_json::from_slice::<PiEntryKind>(buffer).ok()
+}
+
+fn parse_pi_session_header_line(trimmed: &str, buffer: &mut Vec<u8>) -> Option<PiSessionHeader> {
+    buffer.clear();
+    buffer.extend_from_slice(trimmed.as_bytes());
+    simd_json::from_slice::<PiSessionHeader>(buffer).ok()
+}
+
+fn parse_omp_title_slot_line(trimmed: &str, buffer: &mut Vec<u8>) -> bool {
+    buffer.clear();
+    buffer.extend_from_slice(trimmed.as_bytes());
+    let Ok(slot) = simd_json::from_slice::<OmpTitleSlot>(buffer) else {
+        return false;
+    };
+
+    slot.entry_type == "title" && slot.v == 1 && !slot.updated_at.trim().is_empty()
+}
+
+fn parse_pi_header_line(
+    trimmed: &str,
+    buffer: &mut Vec<u8>,
+    allow_omp_title_slot: bool,
+) -> PiHeaderParse {
+    let Some(kind) = parse_pi_line_kind(trimmed, buffer) else {
+        return PiHeaderParse::Invalid;
+    };
+
+    if allow_omp_title_slot && kind.entry_type == "title" {
+        return if parse_omp_title_slot_line(trimmed, buffer) {
+            PiHeaderParse::TitleSlot
+        } else {
+            PiHeaderParse::Invalid
+        };
+    }
+
+    if kind.entry_type != "session" {
+        return PiHeaderParse::Invalid;
+    }
+
+    parse_pi_session_header_line(trimmed, buffer)
+        .map(PiHeaderParse::Session)
+        .unwrap_or(PiHeaderParse::Invalid)
+}
+
 fn parse_pi_format_file(
     path: &Path,
     client: &'static str,
@@ -246,6 +331,10 @@ fn parse_pi_format_file(
         .map(str::to_string);
     let omp_subagent_label = if client == "omp" {
         child_stem.as_deref().and_then(|stem| {
+            if let Some(label) = normalize_omp_advisor_label(stem) {
+                return Some(label);
+            }
+
             let parent = omp_parent_session_path(path)?;
             match omp_parent_task_agent_index {
                 Some(index) => index
@@ -261,6 +350,7 @@ fn parse_pi_format_file(
     let mut session_id: Option<String> = None;
     let mut workspace_key: Option<String> = None;
     let mut workspace_label: Option<String> = None;
+    let mut saw_omp_title_slot = false;
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -273,16 +363,19 @@ fn parse_pi_format_file(
         }
 
         if session_id.is_none() {
-            buffer.clear();
-            buffer.extend_from_slice(trimmed.as_bytes());
-            let header = match simd_json::from_slice::<PiSessionHeader>(&mut buffer) {
-                Ok(h) => h,
-                Err(_) => return Vec::new(),
+            let header = match parse_pi_header_line(
+                trimmed,
+                &mut buffer,
+                client == "omp" && !saw_omp_title_slot,
+            ) {
+                PiHeaderParse::Session(header) => header,
+                PiHeaderParse::TitleSlot => {
+                    saw_omp_title_slot = true;
+                    continue;
+                }
+                PiHeaderParse::Invalid => return Vec::new(),
             };
 
-            if header.entry_type != "session" {
-                return Vec::new();
-            }
             session_id = Some(header.id);
             workspace_key = header.cwd.as_deref().and_then(normalize_workspace_key);
             workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
@@ -448,6 +541,52 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].provider_id.as_ref(), "openai");
         assert_eq!(messages[0].tokens.total(), 30);
+    }
+
+    #[test]
+    fn test_parse_omp_jsonl_skips_title_slot() {
+        let content = r#"{"type":"title","v":1,"title":"Test title","source":"auto","updatedAt":"2026-01-01T00:00:00.000Z","pad":" "}
+{"type":"session","id":"omp_ses_title","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":5,"cacheWrite":0,"reasoningTokens":2,"totalTokens":37}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_omp_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client.as_ref(), "omp");
+        assert_eq!(messages[0].session_id.as_ref(), "omp_ses_title");
+        assert_eq!(messages[0].tokens.total(), 37);
+    }
+
+    #[test]
+    fn test_parse_omp_rejects_invalid_title_slot() {
+        let content = r#"{"type":"title","title":"Missing slot metadata"}
+{"type":"session","id":"omp_ses_bad_title","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"totalTokens":30}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_omp_file(file.path());
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_omp_advisor_transcript_sets_agent_label() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("__advisor.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"title","v":1,"title":"","updatedAt":"2026-01-01T00:00:00.000Z","pad":" "}
+{"type":"session","id":"advisor-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"advisor_msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_omp_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("OMP Advisor"));
+        assert_eq!(messages[0].agent_instance.as_deref(), Some("__advisor"));
     }
 
     #[test]
