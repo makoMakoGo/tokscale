@@ -6,9 +6,9 @@ use super::{
     parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
     parse_local_unified_messages_resolved, positive_token_total, pricing,
     retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
-    AggregationConfig, ClientCounts, ClientId, DateRange, GraphResult, GroupBy, LocalParseOptions,
-    ReportOptions, TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
-    UNKNOWN_WORKSPACE_LABEL,
+    AggregationConfig, ClientContribution, ClientCounts, ClientId, DailyTotals, DateRange,
+    GraphResult, GroupBy, LocalParseOptions, ReportOptions, SessionContribution, TimeMetricsReport,
+    TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -79,6 +79,51 @@ fn make_workspace_message(
         workspace_label.map(str::to_string),
     );
     msg
+}
+
+#[test]
+fn test_session_contribution_serde_round_trip() {
+    let contribution = SessionContribution {
+        session_id: "019e1e27-af49-7cd1-89b7-7bad1c3f3be2".into(),
+        client: "codex".into(),
+        provider: "openai".into(),
+        model: "gpt-5".into(),
+        totals: DailyTotals {
+            tokens: 25_298,
+            cost: 0.0123,
+            messages: 12,
+        },
+        token_breakdown: TokenBreakdown {
+            input: 12_000,
+            output: 8_000,
+            cache_read: 5_000,
+            cache_write: 258,
+            reasoning: 40,
+        },
+        clients: vec![ClientContribution {
+            client: "codex".into(),
+            model_id: "gpt-5".into(),
+            provider_id: "openai".into(),
+            tokens: TokenBreakdown {
+                input: 12_000,
+                output: 8_000,
+                cache_read: 5_000,
+                cache_write: 258,
+                reasoning: 40,
+            },
+            cost: 0.0123,
+            messages: 12,
+        }],
+        first_seen: 1_715_551_577,
+        last_seen: 1_715_551_612,
+    };
+
+    let json = serde_json::to_string(&contribution).expect("serialize session contribution");
+    let parsed: SessionContribution =
+        serde_json::from_str(&json).expect("deserialize session contribution");
+
+    assert_eq!(parsed, contribution);
+    assert!(json.contains("\"session_id\":\"019e1e27"));
 }
 
 fn make_trae_message(
