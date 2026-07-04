@@ -79,7 +79,7 @@ impl AggregationEngine {
             }
         }
         if let Some(hour_map) = &mut self.hour_map {
-            let key = hour_key(msg);
+            let key = hour_key(msg, date.as_deref());
             hour_map.entry(key).or_default().push(msg);
         }
         if let Some(daily_map) = &mut self.daily_map {
