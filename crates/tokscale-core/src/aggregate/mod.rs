@@ -4,13 +4,14 @@
 mod accumulators;
 mod config;
 mod engine;
-pub(crate) mod graph_result;
+mod graph_result;
 pub(crate) mod keys;
 pub(crate) mod tui;
 mod views;
 
 pub use config::{AggregationConfig, DateRange, ViewSet};
 pub(crate) use engine::AggregationEngine;
+pub(crate) use graph_result::finish_graph_result;
 pub use graph_result::{calculate_summary, calculate_years};
 pub use keys::UNKNOWN_WORKSPACE_LABEL;
 pub use tui::{

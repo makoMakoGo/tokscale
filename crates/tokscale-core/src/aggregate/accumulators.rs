@@ -13,7 +13,7 @@ use crate::{
     SessionContribution, TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
 };
 
-use super::{graph_result::finish_graph_result, views::AgentUsage};
+use super::{finish_graph_result, views::AgentUsage};
 
 fn hourly_label(hour_key: &str) -> String {
     // `hourly_report_label` returns `key[5..]` ("MM-DD HH:00"). Kept inline to

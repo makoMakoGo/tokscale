@@ -136,3 +136,227 @@ pub(crate) fn finish_graph_result(
         time_metrics: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ClientContribution, DailyTotals, TokenBreakdown};
+
+    fn contribution(date: &str, tokens: i64, cost: f64, messages: i32) -> DailyContribution {
+        DailyContribution {
+            date: date.to_string(),
+            totals: DailyTotals {
+                tokens,
+                cost,
+                messages,
+            },
+            intensity: 0,
+            token_breakdown: TokenBreakdown::default(),
+            clients: Vec::new(),
+            active_time_ms: None,
+        }
+    }
+
+    fn contribution_with_client(
+        date: &str,
+        tokens: i64,
+        cost: f64,
+        model_id: &str,
+        client: &str,
+    ) -> DailyContribution {
+        let mut contribution = contribution(date, tokens, cost, 1);
+        contribution.token_breakdown = TokenBreakdown {
+            input: tokens / 2,
+            output: tokens / 2,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        contribution.clients.push(ClientContribution {
+            client: client.to_string(),
+            model_id: model_id.to_string(),
+            provider_id: "test-provider".to_string(),
+            tokens: contribution.token_breakdown.clone(),
+            cost,
+            messages: 1,
+        });
+        contribution
+    }
+
+    #[test]
+    fn test_calculate_summary_empty() {
+        let contributions = Vec::new();
+        let summary = calculate_summary(&contributions);
+
+        assert_eq!(summary.total_tokens, 0);
+        assert_eq!(summary.total_cost, 0.0);
+        assert_eq!(summary.total_days, 0);
+        assert_eq!(summary.active_days, 0);
+        assert_eq!(summary.average_per_day, 0.0);
+        assert_eq!(summary.max_cost_in_single_day, 0.0);
+    }
+
+    #[test]
+    fn test_calculate_summary_single_day() {
+        let contributions = vec![contribution_with_client(
+            "2024-01-01",
+            1000,
+            0.05,
+            "claude-sonnet-4.6",
+            "opencode",
+        )];
+        let summary = calculate_summary(&contributions);
+
+        assert_eq!(summary.total_tokens, 1000);
+        assert_eq!(summary.total_cost, 0.05);
+        assert_eq!(summary.total_days, 1);
+        assert_eq!(summary.active_days, 1);
+        assert_eq!(summary.average_per_day, 0.05);
+        assert_eq!(summary.max_cost_in_single_day, 0.05);
+        assert_eq!(summary.clients, vec!["opencode"]);
+        assert_eq!(summary.models, vec!["claude-sonnet-4.6"]);
+    }
+
+    #[test]
+    fn test_calculate_summary_multiple_days() {
+        let contributions = vec![
+            contribution_with_client("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
+            contribution_with_client("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
+            contribution_with_client("2024-01-03", 1500, 0.08, "claude-sonnet-4.6", "opencode"),
+        ];
+        let summary = calculate_summary(&contributions);
+
+        assert_eq!(summary.total_tokens, 4500);
+        assert!((summary.total_cost - 0.23).abs() < 0.0001);
+        assert_eq!(summary.total_days, 3);
+        assert_eq!(summary.active_days, 3);
+        assert!((summary.average_per_day - 0.23 / 3.0).abs() < 0.0001);
+        assert!((summary.max_cost_in_single_day - 0.10).abs() < 0.0001);
+        assert_eq!(summary.clients, vec!["claude", "opencode"]);
+        assert_eq!(summary.models, vec!["claude-sonnet-4.6", "gpt-4"]);
+    }
+
+    #[test]
+    fn test_calculate_summary_with_zero_token_days() {
+        let contributions = vec![
+            contribution("2024-01-01", 1000, 0.05, 1),
+            contribution("2024-01-02", 0, 0.0, 0),
+        ];
+
+        let summary = calculate_summary(&contributions);
+        assert_eq!(summary.total_days, 2);
+        assert_eq!(summary.active_days, 1);
+        assert!((summary.average_per_day - 0.05).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_calculate_summary_counts_cost_only_days_as_active() {
+        let contributions = vec![
+            contribution("2024-01-01", 1000, 0.05, 1),
+            contribution("2024-01-02", 0, 1.25, 0),
+            contribution("2024-01-03", 0, 0.0, 0),
+        ];
+
+        let summary = calculate_summary(&contributions);
+        assert_eq!(summary.total_days, 3);
+        assert_eq!(summary.active_days, 2);
+        assert!((summary.average_per_day - 0.65).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_calculate_years_empty() {
+        let contributions = Vec::new();
+        let years = calculate_years(&contributions);
+        assert_eq!(years.len(), 0);
+    }
+
+    #[test]
+    fn test_calculate_years_single_year() {
+        let contributions = vec![
+            contribution("2024-01-01", 1000, 0.05, 1),
+            contribution("2024-06-15", 2000, 0.10, 1),
+            contribution("2024-12-31", 1500, 0.08, 1),
+        ];
+        let years = calculate_years(&contributions);
+
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0].year, "2024");
+        assert_eq!(years[0].total_tokens, 4500);
+        assert!((years[0].total_cost - 0.23).abs() < 0.0001);
+        assert_eq!(years[0].range_start, "2024-01-01");
+        assert_eq!(years[0].range_end, "2024-12-31");
+    }
+
+    #[test]
+    fn test_calculate_years_multiple_years() {
+        let contributions = vec![
+            contribution("2023-12-31", 1000, 0.05, 1),
+            contribution("2024-01-01", 2000, 0.10, 1),
+            contribution("2024-06-15", 1500, 0.08, 1),
+            contribution("2025-01-01", 3000, 0.15, 1),
+        ];
+        let years = calculate_years(&contributions);
+
+        assert_eq!(years.len(), 3);
+        assert_eq!(years[0].year, "2023");
+        assert_eq!(years[1].year, "2024");
+        assert_eq!(years[2].year, "2025");
+        assert_eq!(years[1].total_tokens, 3500);
+        assert!((years[1].total_cost - 0.18).abs() < 0.0001);
+        assert_eq!(years[1].range_start, "2024-01-01");
+        assert_eq!(years[1].range_end, "2024-06-15");
+    }
+
+    #[test]
+    fn test_calculate_years_year_boundary() {
+        let contributions = vec![
+            contribution("2024-12-31", 1000, 0.05, 1),
+            contribution("2025-01-01", 2000, 0.10, 1),
+        ];
+        let years = calculate_years(&contributions);
+
+        assert_eq!(years.len(), 2);
+        assert_eq!(years[0].year, "2024");
+        assert_eq!(years[0].total_tokens, 1000);
+        assert_eq!(years[1].year, "2025");
+        assert_eq!(years[1].total_tokens, 2000);
+    }
+
+    #[test]
+    fn test_calculate_years_invalid_date() {
+        let contributions = vec![contribution("abc", 1000, 0.05, 1)];
+
+        let years = calculate_years(&contributions);
+        assert_eq!(years.len(), 0);
+    }
+
+    #[test]
+    fn test_finish_graph_result_empty() {
+        let contributions = Vec::new();
+        let result = finish_graph_result(contributions, 100);
+
+        assert_eq!(result.contributions.len(), 0);
+        assert_eq!(result.summary.total_tokens, 0);
+        assert_eq!(result.years.len(), 0);
+        assert_eq!(result.meta.processing_time_ms, 100);
+        assert_eq!(result.meta.date_range_start, "");
+        assert_eq!(result.meta.date_range_end, "");
+    }
+
+    #[test]
+    fn test_finish_graph_result_with_data() {
+        let contributions = vec![
+            contribution_with_client("2024-01-01", 1000, 0.05, "claude-sonnet-4.6", "opencode"),
+            contribution_with_client("2024-01-02", 2000, 0.10, "gpt-4", "claude"),
+        ];
+        let result = finish_graph_result(contributions, 150);
+
+        assert_eq!(result.contributions.len(), 2);
+        assert_eq!(result.summary.total_tokens, 3000);
+        assert_eq!(result.years.len(), 1);
+        assert_eq!(result.meta.processing_time_ms, 150);
+        assert_eq!(result.meta.date_range_start, "2024-01-01");
+        assert_eq!(result.meta.date_range_end, "2024-01-02");
+        assert_eq!(result.meta.version, env!("CARGO_PKG_VERSION"));
+    }
+}
