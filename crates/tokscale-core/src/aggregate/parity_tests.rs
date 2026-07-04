@@ -1,7 +1,6 @@
-//! Aggregation engine contract tests. The graph/session legs still compare the
-//! engine against the existing primitive composition; reports whose old folds
-//! have been deleted now exercise the message-list entrypoints and the engine
-//! interface to keep ordering and serialization contracts pinned.
+//! Aggregation engine contract tests. Reports whose old folds have been deleted
+//! exercise the message-list entrypoints and the engine interface to keep
+//! ordering and serialization contracts pinned.
 
 #![cfg(test)]
 
@@ -10,7 +9,7 @@ use std::ffi::OsString;
 use crate::aggregate::{AggregationConfig, AggregationEngine, DateRange, ViewSet};
 use crate::sessions::UnifiedMessage;
 use crate::usage_views::UsageData;
-use crate::{aggregator, sessionize, GroupBy, ModelReport, TokenBreakdown};
+use crate::{sessionize, GroupBy, ModelReport, TokenBreakdown};
 use serial_test::serial;
 
 /// Pin `TZ=UTC` for date/hour bucketing that reads `chrono::Local`.
@@ -66,6 +65,27 @@ fn msg(
             cache_write: 5,
             reasoning: 3,
         },
+        cost,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn session_msg(
+    session_id: &str,
+    client: &str,
+    provider: &str,
+    model: &str,
+    timestamp_ms: i64,
+    tokens: TokenBreakdown,
+    cost: f64,
+) -> UnifiedMessage {
+    UnifiedMessage::new(
+        client,
+        model,
+        provider,
+        session_id,
+        timestamp_ms,
+        tokens,
         cost,
     )
 }
@@ -228,33 +248,15 @@ fn agents_view_keeps_client_dimension() {
     assert_eq!(agents[1].message_count, 3);
 }
 
-// ---- Primitive parity and entrypoint consistency tests ----
+// ---- Entrypoint consistency and engine contract tests ----
 
 #[test]
 #[serial]
-fn parity_graph_result() {
+fn contract_graph_result() {
     let _tz = pin_tz();
-    let msgs = corpus();
+    let mut msgs = corpus();
+    msgs[0].duration_ms = Some(60_000);
 
-    // Primitive composition — exactly the graph assembly the engine must
-    // preserve while hiding it behind `push`/`finish`.
-    let mut expected = {
-        let intervals =
-            sessionize::sessionize_time_intervals(&msgs, sessionize::DEFAULT_IDLE_GAP_MS);
-        let tm = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
-        let dat = sessionize::compute_daily_active_time(&intervals);
-        let contribs = aggregator::aggregate_by_date(&msgs);
-        let mut r = aggregator::generate_graph_result(contribs, 0);
-        r.time_metrics = Some(tm);
-        for c in &mut r.contributions {
-            if let Some(&ms) = dat.get(&c.date) {
-                c.active_time_ms = Some(ms);
-            }
-        }
-        r
-    };
-
-    // Engine view.
     let mut actual = {
         let mut e = AggregationEngine::new(AggregationConfig {
             group_by: GroupBy::ClientModel,
@@ -267,17 +269,94 @@ fn parity_graph_result() {
         e.finish().graph.expect("graph view requested")
     };
 
-    // Neutralize non-deterministic meta.
-    expected.meta.generated_at.clear();
     actual.meta.generated_at.clear();
-    expected.meta.processing_time_ms = 0;
     actual.meta.processing_time_ms = 0;
 
-    assert_eq!(
-        serde_json::to_string(&expected).unwrap(),
-        serde_json::to_string(&actual).unwrap(),
-        "GraphResult byte parity failed",
+    assert_eq!(actual.contributions.len(), 5);
+    assert!(
+        actual
+            .contributions
+            .windows(2)
+            .all(|days| days[0].date <= days[1].date),
+        "graph contributions should be date-sorted",
     );
+    assert_eq!(
+        actual.meta.date_range_start,
+        actual.contributions.first().unwrap().date
+    );
+    assert_eq!(
+        actual.meta.date_range_end,
+        actual.contributions.last().unwrap().date
+    );
+    let time_metrics = actual.time_metrics.as_ref().expect("graph time metrics");
+    assert_eq!(time_metrics.total_active_time_ms, 60_000);
+    assert_eq!(time_metrics.total_wall_time_ms, 60_000);
+    assert_eq!(time_metrics.longest_continuous_ms, 60_000);
+    assert_eq!(time_metrics.max_concurrent_sessions, 2);
+    assert_eq!(time_metrics.session_count, 5);
+
+    let june_10 = actual
+        .contributions
+        .iter()
+        .find(|day| day.date == "2024-06-10")
+        .expect("June 10 contribution");
+    assert_eq!(june_10.totals.tokens, 336);
+    assert!((june_10.totals.cost - 10.0).abs() < 0.0001);
+    assert_eq!(june_10.totals.messages, 2);
+    assert_eq!(june_10.intensity, 4);
+    assert_eq!(june_10.active_time_ms, Some(60_000));
+    assert_eq!(june_10.token_breakdown.input, 200);
+    assert_eq!(june_10.token_breakdown.output, 100);
+    assert_eq!(june_10.token_breakdown.cache_read, 20);
+    assert_eq!(june_10.token_breakdown.cache_write, 10);
+    assert_eq!(june_10.token_breakdown.reasoning, 6);
+    assert_eq!(june_10.clients.len(), 2);
+    assert_eq!(june_10.clients[0].client, "claude");
+    assert_eq!(june_10.clients[0].model_id, "claude-opus-4");
+    assert_eq!(june_10.clients[0].provider_id, "anthropic");
+    assert_eq!(june_10.clients[0].tokens.total(), 168);
+    assert_eq!(june_10.clients[0].messages, 1);
+    assert_eq!(june_10.clients[1].client, "claude");
+    assert_eq!(june_10.clients[1].model_id, "claude-sonnet-4");
+    assert_eq!(june_10.clients[1].provider_id, "anthropic");
+    assert_eq!(june_10.clients[1].tokens.total(), 168);
+    assert_eq!(june_10.clients[1].messages, 1);
+
+    let total_tokens: i64 = actual
+        .contributions
+        .iter()
+        .map(|day| day.totals.tokens)
+        .sum();
+    let total_cost: f64 = actual.contributions.iter().map(|day| day.totals.cost).sum();
+    assert_eq!(
+        actual.summary.total_tokens, total_tokens,
+        "graph summary tokens should derive from contributions",
+    );
+    assert!(
+        (actual.summary.total_cost - total_cost).abs() < 0.0001,
+        "graph summary cost should derive from contributions",
+    );
+    assert_eq!(actual.summary.total_days, 5);
+    assert_eq!(actual.summary.active_days, 5);
+    assert!((actual.summary.average_per_day - 4.3).abs() < 0.0001);
+    assert!((actual.summary.max_cost_in_single_day - 10.0).abs() < 0.0001);
+    assert_eq!(actual.summary.clients, vec!["claude", "codex", "gemini"]);
+    assert_eq!(
+        actual.summary.models,
+        vec!["claude-opus-4", "claude-sonnet-4", "gpt-5"]
+    );
+
+    assert_eq!(actual.years.len(), 2);
+    assert_eq!(actual.years[0].year, "1970");
+    assert_eq!(actual.years[0].total_tokens, 168);
+    assert!((actual.years[0].total_cost - 0.5).abs() < 0.0001);
+    assert_eq!(actual.years[0].range_start, "1970-01-01");
+    assert_eq!(actual.years[0].range_end, "1970-01-01");
+    assert_eq!(actual.years[1].year, "2024");
+    assert_eq!(actual.years[1].total_tokens, 1008);
+    assert!((actual.years[1].total_cost - 21.0).abs() < 0.0001);
+    assert_eq!(actual.years[1].range_start, "2024-05-01");
+    assert_eq!(actual.years[1].range_end, "2024-06-12");
 }
 
 #[test]
@@ -306,6 +385,50 @@ fn graph_daily_accumulator_keeps_client_model_tuple_keys_distinct() {
     assert_eq!(clients[0].model_id, "b:c");
     assert_eq!(clients[1].client, "a:b");
     assert_eq!(clients[1].model_id, "c");
+}
+
+#[test]
+#[serial]
+fn graph_daily_accumulator_merges_provider_ids_for_same_client_model() {
+    let _tz = pin_tz();
+    let msgs = vec![
+        msg(
+            "claude",
+            "claude-sonnet-4",
+            "anthropic-bedrock",
+            "s1",
+            "2024-06-10",
+            1.0,
+        ),
+        msg(
+            "claude",
+            "claude-sonnet-4",
+            "anthropic",
+            "s1",
+            "2024-06-10",
+            2.0,
+        ),
+    ];
+
+    let mut engine = AggregationEngine::new(AggregationConfig {
+        group_by: GroupBy::ClientModel,
+        date_range: DateRange::none(),
+        views: ViewSet::GRAPH,
+    });
+    for message in &msgs {
+        engine.push(message);
+    }
+
+    let graph = engine.finish().graph.expect("graph view requested");
+    assert_eq!(graph.contributions.len(), 1);
+    let clients = &graph.contributions[0].clients;
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].client, "claude");
+    assert_eq!(clients[0].model_id, "claude-sonnet-4");
+    assert_eq!(clients[0].provider_id, "anthropic, anthropic-bedrock");
+    assert_eq!(clients[0].messages, 2);
+    assert_eq!(clients[0].tokens.total(), 336);
+    assert!((clients[0].cost - 3.0).abs() < 0.0001);
 }
 
 #[test]
@@ -427,10 +550,102 @@ fn parity_time_metrics() {
 
 #[test]
 #[serial]
-fn parity_session_contributions() {
-    let msgs = corpus();
-    let old = aggregator::aggregate_by_session(&msgs);
-    let new = {
+fn contract_session_contributions() {
+    let t = TokenBreakdown {
+        input: 100,
+        output: 50,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+    };
+    let msgs = vec![
+        session_msg(
+            "s-a",
+            "codex",
+            "openai",
+            "gpt-5",
+            1_700_000_001_000,
+            t.clone(),
+            0.01,
+        ),
+        session_msg(
+            "s-a",
+            "codex",
+            "openai",
+            "gpt-5",
+            1_700_000_002_000,
+            t.clone(),
+            0.01,
+        ),
+        session_msg(
+            "s-b",
+            "amp",
+            "anthropic",
+            "claude-haiku-4.5",
+            1_700_000_005_000,
+            t.clone(),
+            0.02,
+        ),
+        session_msg(
+            "s-b",
+            "amp",
+            "anthropic",
+            "claude-haiku-4.5",
+            1_700_000_006_000,
+            t.clone(),
+            0.02,
+        ),
+        session_msg(
+            "s-c",
+            "claude",
+            "anthropic",
+            "claude-sonnet-4.5",
+            1_700_000_100_000,
+            t.clone(),
+            0.05,
+        ),
+        session_msg(
+            "s-c",
+            "claude",
+            "anthropic",
+            "claude-sonnet-4.5",
+            1_700_000_101_000,
+            t.clone(),
+            0.05,
+        ),
+        session_msg(
+            "shared",
+            "amp",
+            "anthropic",
+            "claude-haiku-4.5",
+            1_700_000_110_000,
+            TokenBreakdown {
+                input: 10,
+                output: 10,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.001,
+        ),
+        session_msg(
+            "shared",
+            "codex",
+            "openai",
+            "gpt-5",
+            1_700_000_111_000,
+            TokenBreakdown {
+                input: 1000,
+                output: 500,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.50,
+        ),
+    ];
+
+    let sessions = {
         let mut e = AggregationEngine::new(AggregationConfig {
             group_by: GroupBy::ClientModel,
             date_range: DateRange::none(),
@@ -443,8 +658,68 @@ fn parity_session_contributions() {
             .session_contributions
             .expect("sessions view requested")
     };
-    // SessionContribution derives PartialEq.
-    assert_eq!(old, new, "SessionContribution parity failed");
+
+    assert_eq!(sessions.len(), 4);
+    assert_eq!(sessions[0].session_id, "shared");
+    assert_eq!(sessions[1].session_id, "s-c");
+    assert_eq!(sessions[2].session_id, "s-b");
+    assert_eq!(sessions[3].session_id, "s-a");
+
+    let s_a = sessions
+        .iter()
+        .find(|session| session.session_id == "s-a")
+        .unwrap();
+    assert_eq!(s_a.totals.messages, 2);
+    assert_eq!(s_a.totals.tokens, 300);
+    assert!((s_a.totals.cost - 0.02).abs() < 1e-9);
+    assert_eq!(s_a.token_breakdown.input, 200);
+    assert_eq!(s_a.token_breakdown.output, 100);
+    assert_eq!(s_a.token_breakdown.cache_read, 0);
+    assert_eq!(s_a.token_breakdown.cache_write, 0);
+    assert_eq!(s_a.token_breakdown.reasoning, 0);
+    assert_eq!(s_a.first_seen, 1_700_000_001);
+    assert_eq!(s_a.last_seen, 1_700_000_002);
+    assert_eq!(s_a.clients.len(), 1);
+    assert_eq!(s_a.clients[0].client, "codex");
+    assert_eq!(s_a.clients[0].provider_id, "openai");
+    assert_eq!(s_a.clients[0].model_id, "gpt-5");
+    assert_eq!(s_a.clients[0].tokens.input, 200);
+    assert_eq!(s_a.clients[0].tokens.output, 100);
+    assert_eq!(s_a.clients[0].messages, 2);
+    assert!((s_a.clients[0].cost - 0.02).abs() < 1e-9);
+
+    let shared = sessions
+        .iter()
+        .find(|session| session.session_id == "shared")
+        .unwrap();
+    assert_eq!(shared.client, "codex");
+    assert_eq!(shared.provider, "openai");
+    assert_eq!(shared.model, "gpt-5");
+    assert_eq!(shared.totals.messages, 2);
+    assert_eq!(shared.totals.tokens, 1520);
+    assert_eq!(shared.token_breakdown.input, 1010);
+    assert_eq!(shared.token_breakdown.output, 510);
+    assert_eq!(shared.token_breakdown.cache_read, 0);
+    assert_eq!(shared.token_breakdown.cache_write, 0);
+    assert_eq!(shared.token_breakdown.reasoning, 0);
+    assert_eq!(shared.first_seen, 1_700_000_110);
+    assert_eq!(shared.last_seen, 1_700_000_111);
+    assert_eq!(shared.clients.len(), 2);
+    assert_eq!(shared.clients[0].client, "codex");
+    assert_eq!(shared.clients[0].provider_id, "openai");
+    assert_eq!(shared.clients[0].model_id, "gpt-5");
+    assert_eq!(shared.clients[0].tokens.input, 1000);
+    assert_eq!(shared.clients[0].tokens.output, 500);
+    assert_eq!(shared.clients[0].messages, 1);
+    assert!((shared.clients[0].cost - 0.50).abs() < 1e-9);
+    assert_eq!(shared.clients[1].client, "amp");
+    assert_eq!(shared.clients[1].provider_id, "anthropic");
+    assert_eq!(shared.clients[1].model_id, "claude-haiku-4.5");
+    assert_eq!(shared.clients[1].tokens.input, 10);
+    assert_eq!(shared.clients[1].tokens.output, 10);
+    assert_eq!(shared.clients[1].messages, 1);
+    assert!((shared.clients[1].cost - 0.001).abs() < 1e-9);
+    assert!((shared.totals.cost - 0.501).abs() < 1e-9);
 }
 
 #[test]
