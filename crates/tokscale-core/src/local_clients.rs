@@ -326,6 +326,16 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
     LocalClientEntry {
+        client: ClientId::CodeBuddy,
+        def: LocalClientDef {
+            root: PathRoot::Home,
+            relative_path: ".codebuddy/projects",
+            pattern: "*.jsonl",
+            headless: false,
+            parse_local: true,
+        },
+    },
+    LocalClientEntry {
         client: ClientId::Antigravity,
         def: LocalClientDef {
             root: PathRoot::Config,

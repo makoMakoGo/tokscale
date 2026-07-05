@@ -190,6 +190,15 @@
     "color": "#7C3AED"
   },
   {
+    "variant": "CodeBuddy",
+    "id": "codebuddy",
+    "displayName": "CodeBuddy",
+    "shortName": "CodeBuddy",
+    "hotkey": "f",
+    "logo": "https://pc3.gtimg.com/softmgr/logo/48/43068_48_1764842447.png",
+    "color": "#00A4FF"
+  },
+  {
     "variant": "Antigravity",
     "id": "antigravity",
     "displayName": "Antigravity",
