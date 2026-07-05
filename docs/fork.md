@@ -62,12 +62,18 @@ See [ADR 0009](adr/0009-ahead-only-upstream-policy.md) for the full policy.
 ## Package and release status
 
 The public npm package named `tokscale` and the `@tokscale/*` packages belong to
-the upstream distribution. This fork currently documents source builds as the
-only unambiguous way to run fork-specific behavior.
+the upstream distribution.
 
-Before publishing fork binaries or packages, package names, repository metadata,
-release workflow behavior, and version labels need a deliberate review so fork
-releases cannot be mistaken for upstream releases.
+Fork npm releases use the `@juya-ai` organization:
+
+- `@juya-ai/tokscale` is the user-facing wrapper package.
+- `@juya-ai/tokscale-cli` is the JavaScript dispatcher package.
+- `@juya-ai/tokscale-cli-*` packages carry native platform binaries.
+- The installed command remains `tokscale`.
+
+See [ADR 0016](adr/0016-juya-ai-npm-release-identity.md) for the release
+identity decision. Source builds remain the safest validation path until a fork
+release is explicitly published.
 
 ## Non-goals
 

@@ -23,17 +23,17 @@ write_release_package_manifests() {
 
   cat > packages/cli/package.json <<EOF_MANIFEST
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "${version}",
   "optionalDependencies": {
-    "@tokscale/cli-darwin-arm64": "${version}",
-    "@tokscale/cli-darwin-x64": "${version}",
-    "@tokscale/cli-linux-x64-gnu": "${version}",
-    "@tokscale/cli-linux-x64-musl": "${version}",
-    "@tokscale/cli-linux-arm64-gnu": "${version}",
-    "@tokscale/cli-linux-arm64-musl": "${version}",
-    "@tokscale/cli-win32-x64-msvc": "${version}",
-    "@tokscale/cli-win32-arm64-msvc": "${version}"
+    "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
+    "@juya-ai/tokscale-cli-darwin-x64": "${version}",
+    "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
+    "@juya-ai/tokscale-cli-linux-x64-musl": "${version}",
+    "@juya-ai/tokscale-cli-linux-arm64-gnu": "${version}",
+    "@juya-ai/tokscale-cli-linux-arm64-musl": "${version}",
+    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}",
+    "@juya-ai/tokscale-cli-win32-arm64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
@@ -49,7 +49,7 @@ EOF_MANIFEST
     cli-win32-arm64-msvc; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
-  "name": "@tokscale/${pkg}",
+  "name": "@juya-ai/tokscale-${pkg}",
   "version": "${version}"
 }
 EOF_MANIFEST
@@ -57,10 +57,10 @@ EOF_MANIFEST
 
   cat > packages/tokscale/package.json <<EOF_MANIFEST
 {
-  "name": "tokscale",
+  "name": "@juya-ai/tokscale",
   "version": "${version}",
   "dependencies": {
-    "@tokscale/cli": "${version}"
+    "@juya-ai/tokscale-cli": "${version}"
   }
 }
 EOF_MANIFEST
@@ -86,6 +86,10 @@ fi
 
 if [[ "${1:-}" == "view" ]]; then
   spec="${2:-}"
+  if [[ "${FAKE_NPM_ALL_MISSING:-}" == "1" ]]; then
+    echo "npm ERR! code E404" >&2
+    exit 1
+  fi
   if [[ -n "${FAKE_NPM_TRANSIENT_SPEC:-}" && "${spec}" == "${FAKE_NPM_TRANSIENT_SPEC}" ]]; then
     echo "npm ERR! code E500" >&2
     echo "npm ERR! registry temporarily unavailable" >&2
@@ -98,7 +102,7 @@ if [[ "${1:-}" == "view" ]]; then
       ;;
     *@3.0.0)
       case "${spec}" in
-        @tokscale/cli-darwin-x64@3.0.0|@tokscale/cli@3.0.0)
+        @juya-ai/tokscale-cli-darwin-x64@3.0.0|@juya-ai/tokscale-cli@3.0.0)
           echo '"3.0.0"'
           exit 0
           ;;
@@ -110,7 +114,7 @@ if [[ "${1:-}" == "view" ]]; then
       echo "npm ERR! code E404" >&2
       exit 1
       ;;
-    @tokscale/*|tokscale)
+    @juya-ai/tokscale*)
       echo '"2.1.3"'
       exit 0
       ;;
@@ -145,7 +149,33 @@ test_refuses_repo_version_ahead_of_npm_without_recovery() {
       return 1
     fi
 
-    grep -q "Repository version 3.0.0 is ahead of npm latest 2.1.3 for @tokscale/cli" "${output}"
+    grep -q "Repository version 3.0.0 is ahead of npm latest 2.1.3 for @juya-ai/tokscale-cli" "${output}"
+  )
+}
+
+test_allows_first_publish_when_packages_are_not_visible_yet() {
+  local work="${TMP_DIR}/first-publish"
+  mkdir -p "${work}/scripts"
+  cp "${CHECK_SCRIPT}" "${work}/scripts/check-npm-release-state.sh"
+  (
+    cd "${work}"
+    write_release_package_manifests "3.0.0"
+    local fake_npm="${TMP_DIR}/fake-npm-first-publish"
+    write_fake_npm "${fake_npm}"
+
+    local output="${TMP_DIR}/first-publish-output.txt"
+    FAKE_NPM_LOG="${TMP_DIR}/first-publish-npm.log" \
+      FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/first-publish-publish.log" \
+      FAKE_NPM_ALL_MISSING=1 \
+      NPM_CMD="${fake_npm}" \
+      NPM_CHECK_AUTH=0 \
+      NEW_VERSION="3.0.0" \
+      RELEASE_BASE_VERSION="3.0.0" \
+      bash scripts/check-npm-release-state.sh >"${output}" 2>&1
+
+    grep -q "@juya-ai/tokscale-cli: not visible on npm yet" "${output}"
+    grep -q "@juya-ai/tokscale: not visible on npm yet" "${output}"
+    grep -q "npm release-state OK for 3.0.0" "${output}"
   )
 }
 
@@ -169,7 +199,7 @@ test_recovery_allows_existing_target_versions_for_partial_retry() {
       RELEASE_RECOVERY=true \
       bash scripts/check-npm-release-state.sh >"${output}" 2>&1
 
-    grep -q "@tokscale/cli-darwin-x64@3.0.0 already exists; recovery publish will skip it" "${output}"
+    grep -q "@juya-ai/tokscale-cli-darwin-x64@3.0.0 already exists; recovery publish will skip it" "${output}"
     grep -q "npm release-state OK for 3.0.0" "${output}"
   )
 }
@@ -213,7 +243,7 @@ test_precheck_fails_on_non_404_npm_lookup_errors() {
     local output="${TMP_DIR}/lookup-error-output.txt"
     if FAKE_NPM_LOG="${TMP_DIR}/lookup-error-npm.log" \
       FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/lookup-error-publish.log" \
-      FAKE_NPM_TRANSIENT_SPEC="@tokscale/cli@3.0.1" \
+      FAKE_NPM_TRANSIENT_SPEC="@juya-ai/tokscale-cli@3.0.1" \
       NPM_CMD="${fake_npm}" \
       NPM_CHECK_AUTH=0 \
       NEW_VERSION="3.0.1" \
@@ -223,8 +253,8 @@ test_precheck_fails_on_non_404_npm_lookup_errors() {
       return 1
     fi
 
-    grep -q "npm view @tokscale/cli@3.0.1 failed" "${output}"
-    grep -q "@tokscale/cli@3.0.1: npm lookup failed" "${output}"
+    grep -q "npm view @juya-ai/tokscale-cli@3.0.1 failed" "${output}"
+    grep -q "@juya-ai/tokscale-cli@3.0.1: npm lookup failed" "${output}"
   )
 }
 
@@ -236,7 +266,7 @@ test_publish_skips_existing_target_version_during_recovery() {
     cd "${work}"
     cat > packages/cli/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "3.0.0"
 }
 EOF_MANIFEST
@@ -251,7 +281,7 @@ EOF_MANIFEST
       bash scripts/publish-npm-package.sh packages/cli >"${TMP_DIR}/publish-skip-output.txt" 2>&1
 
     test ! -e "${publish_log}"
-    grep -q "Skipping @tokscale/cli@3.0.0 because it already exists on npm" "${TMP_DIR}/publish-skip-output.txt"
+    grep -q "Skipping @juya-ai/tokscale-cli@3.0.0 because it already exists on npm" "${TMP_DIR}/publish-skip-output.txt"
   )
 }
 
@@ -263,7 +293,7 @@ test_refuses_to_publish_existing_target_without_recovery() {
     cd "${work}"
     cat > packages/cli/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "3.0.0"
 }
 EOF_MANIFEST
@@ -279,7 +309,7 @@ EOF_MANIFEST
       return 1
     fi
 
-    grep -q "@tokscale/cli@3.0.0 already exists on npm; set RELEASE_RECOVERY=true to skip already-published packages" "${output}"
+    grep -q "@juya-ai/tokscale-cli@3.0.0 already exists on npm; set RELEASE_RECOVERY=true to skip already-published packages" "${output}"
   )
 }
 
@@ -291,7 +321,7 @@ test_publish_fails_on_non_404_npm_lookup_errors() {
     cd "${work}"
     cat > packages/cli/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "3.0.1"
 }
 EOF_MANIFEST
@@ -301,15 +331,15 @@ EOF_MANIFEST
     local output="${TMP_DIR}/publish-lookup-error-output.txt"
     if FAKE_NPM_LOG="${TMP_DIR}/publish-lookup-error-npm.log" \
       FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/publish-lookup-error.log" \
-      FAKE_NPM_TRANSIENT_SPEC="@tokscale/cli@3.0.1" \
+      FAKE_NPM_TRANSIENT_SPEC="@juya-ai/tokscale-cli@3.0.1" \
       NPM_CMD="${fake_npm}" \
       bash scripts/publish-npm-package.sh packages/cli >"${output}" 2>&1; then
       echo "Expected publish helper to fail on non-404 npm lookup errors" >&2
       return 1
     fi
 
-    grep -q "npm view @tokscale/cli@3.0.1 failed" "${output}"
-    grep -q "Unable to verify @tokscale/cli@3.0.1 on npm" "${output}"
+    grep -q "npm view @juya-ai/tokscale-cli@3.0.1 failed" "${output}"
+    grep -q "Unable to verify @juya-ai/tokscale-cli@3.0.1 on npm" "${output}"
   )
 }
 
@@ -321,7 +351,7 @@ test_prerelease_publish_uses_prerelease_dist_tag() {
     cd "${work}"
     cat > packages/cli/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "3.1.0-beta.1"
 }
 EOF_MANIFEST
@@ -345,7 +375,7 @@ test_prerelease_publish_rejects_explicit_latest_dist_tag() {
     cd "${work}"
     cat > packages/cli/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "3.1.0-beta.1"
 }
 EOF_MANIFEST
@@ -362,7 +392,7 @@ EOF_MANIFEST
       return 1
     fi
 
-    grep -q "Refusing to publish prerelease @tokscale/cli@3.1.0-beta.1 with npm dist-tag latest" "${output}"
+    grep -q "Refusing to publish prerelease @juya-ai/tokscale-cli@3.1.0-beta.1 with npm dist-tag latest" "${output}"
     if [[ -s "${TMP_DIR}/publish-prerelease-latest-tag-npm.log" ]]; then
       ! grep -q '^publish ' "${TMP_DIR}/publish-prerelease-latest-tag-npm.log"
     fi
@@ -377,7 +407,7 @@ test_stable_publish_uses_latest_dist_tag() {
     cd "${work}"
     cat > packages/cli/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "3.1.0"
 }
 EOF_MANIFEST
@@ -401,7 +431,7 @@ test_stable_build_metadata_publish_uses_latest_dist_tag() {
     cd "${work}"
     cat > packages/cli/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "3.1.0+build-1"
 }
 EOF_MANIFEST
@@ -425,7 +455,7 @@ test_stable_build_metadata_allows_explicit_latest_dist_tag() {
     cd "${work}"
     cat > packages/cli/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "3.1.0+build-2"
 }
 EOF_MANIFEST
@@ -443,6 +473,7 @@ EOF_MANIFEST
 }
 
 test_refuses_repo_version_ahead_of_npm_without_recovery
+test_allows_first_publish_when_packages_are_not_visible_yet
 test_recovery_allows_existing_target_versions_for_partial_retry
 test_recovery_requires_base_version
 test_precheck_fails_on_non_404_npm_lookup_errors

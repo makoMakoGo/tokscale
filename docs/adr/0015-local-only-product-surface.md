@@ -36,8 +36,7 @@ This decision supersedes ADR 0007's frontend registry generation step. ADR 0007
 still owns the Rust client catalog and generated `ClientId`/identity facts.
 
 This decision also narrows ADR 0009: `packages/` stays close to upstream only
-for the npm launcher surface that remains under separate decision. Npm
-distribution is intentionally left undecided here and tracked separately.
+for the npm launcher surface. ADR 0016 owns the fork npm release identity.
 
 ## Consequences
 

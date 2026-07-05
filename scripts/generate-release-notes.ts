@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
 /**
  * Usage: bun scripts/generate-release-notes.ts <version>
- * Env: GITHUB_REPOSITORY (default: junhoyeo/tokscale)
+ * Env: GITHUB_REPOSITORY (default: makoMakoGo/tokscale)
  */
 export {};
 
 import { execFileSync } from "node:child_process";
 
-const REPO = process.env.GITHUB_REPOSITORY || "junhoyeo/tokscale";
+const REPO = process.env.GITHUB_REPOSITORY || "makoMakoGo/tokscale";
 
 interface Commit {
   hash: string;

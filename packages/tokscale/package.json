@@ -1,7 +1,7 @@
 {
-  "name": "tokscale",
+  "name": "@juya-ai/tokscale",
   "version": "4.0.4",
-  "description": "Alias for @tokscale/cli — A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
+  "description": "Wrapper for @juya-ai/tokscale-cli — a local CLI and TUI for tracking AI coding assistant token usage and costs.",
   "type": "module",
   "main": "index.js",
   "bin": {
@@ -10,12 +10,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/junhoyeo/tokscale.git"
+    "url": "git+https://github.com/makoMakoGo/tokscale.git"
   },
   "bugs": {
-    "url": "https://github.com/junhoyeo/tokscale/issues"
+    "url": "https://github.com/makoMakoGo/tokscale/issues"
   },
-  "homepage": "https://github.com/junhoyeo/tokscale#readme",
+  "homepage": "https://github.com/makoMakoGo/tokscale#readme",
   "keywords": [
     "token",
     "tracker",
@@ -27,7 +27,7 @@
     "cli"
   ],
   "dependencies": {
-    "@tokscale/cli": "4.0.4"
+    "@juya-ai/tokscale-cli": "4.0.4"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",

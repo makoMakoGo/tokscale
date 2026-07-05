@@ -11,7 +11,7 @@ write_good_workflows() {
   mkdir -p "${work}/.github/workflows" "${work}/packages/cli-linux-x64-gnu"
   cat > "${work}/packages/cli-linux-x64-gnu/package.json" <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli-linux-x64-gnu",
+  "name": "@juya-ai/tokscale-cli-linux-x64-gnu",
   "version": "3.0.0"
 }
 EOF_MANIFEST
@@ -58,7 +58,7 @@ jobs:
     strategy:
       matrix:
         settings:
-          - package_name: '@tokscale/cli-linux-x64-gnu'
+          - package_name: '@juya-ai/tokscale-cli-linux-x64-gnu'
             package_dir: cli-linux-x64-gnu
             artifact_name: cli-binary-x86_64-unknown-linux-gnu
             binary_name: tokscale

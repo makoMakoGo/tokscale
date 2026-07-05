@@ -1,5 +1,5 @@
 {
-  "name": "@tokscale/benchmarks",
+  "name": "@juya-ai/tokscale-benchmarks",
   "version": "0.1.0",
   "private": true,
   "description": "Benchmark scripts for tokscale CLI",

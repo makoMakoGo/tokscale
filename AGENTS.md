@@ -123,18 +123,16 @@ fix: hardening wave 1 compliance fixes         ❌  (PR title)
 
 ## Release & Deployment
 
-This fork does not currently have an unambiguous public release channel.
-
 The public npm packages `tokscale` and `@tokscale/*` belong to the upstream
-distribution. Do not run `.github/workflows/publish-cli.yml`, publish npm
+distribution. Fork npm releases use `@juya-ai/tokscale`,
+`@juya-ai/tokscale-cli`, and `@juya-ai/tokscale-cli-*`; the installed command is
+still `tokscale`. Do not run `.github/workflows/publish-cli.yml`, publish npm
 packages, create tags, or create GitHub Releases for this fork unless the user
-explicitly asks for a fork release and the package names, repository metadata,
-workflow behavior, and version labels have been reviewed first.
+explicitly asks for that publish operation.
 
 For the current package status, see `docs/fork.md`.
 
-When a fork release plan is accepted, document the release identity before
-publishing:
+Before publishing, verify the release identity and recovery plan:
 
 - package name or distribution channel;
 - version/tag format;
@@ -142,7 +140,7 @@ publishing:
 - whether upstream package names are intentionally reused or replaced;
 - validation commands and rollback/recovery steps.
 
-Until then, prefer source-build validation:
+For ordinary validation, prefer source-build checks:
 
 ```bash
 bun install

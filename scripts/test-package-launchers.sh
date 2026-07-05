@@ -178,7 +178,7 @@ BUN_ONLY_PATH="${BUN_ONLY_DIR}"
 NODE_ONLY_PATH="${NODE_ONLY_DIR}"
 
 PLATFORM_TGZ="$(cd "${PLATFORM_STAGE}" && NPM_CONFIG_CACHE="${NPM_CACHE}" npm pack --silent)"
-node --input-type=module - "${CLI_STAGE}/package.json" "@tokscale/${PLATFORM_PACKAGE}" "file:${PLATFORM_STAGE}/${PLATFORM_TGZ}" <<'NODE'
+node --input-type=module - "${CLI_STAGE}/package.json" "@juya-ai/tokscale-${PLATFORM_PACKAGE}" "file:${PLATFORM_STAGE}/${PLATFORM_TGZ}" <<'NODE'
 import fs from "node:fs";
 
 const [manifestPath, packageName, packageSpec] = process.argv.slice(2);
@@ -194,7 +194,7 @@ const [manifestPath, cliSpec] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 manifest.dependencies = {
   ...manifest.dependencies,
-  "@tokscale/cli": cliSpec,
+  "@juya-ai/tokscale-cli": cliSpec,
 };
 fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
@@ -211,9 +211,9 @@ if [[ ! -e "${INSTALLED_BIN}" ]]; then
   echo "Installed tokscale launcher not found at ${INSTALLED_BIN}" >&2
   exit 1
 fi
-WRAPPER_PACKAGE_DIR="${INSTALL_DIR}/node_modules/tokscale"
-CLI_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@tokscale/cli"
-PLATFORM_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@tokscale/${PLATFORM_PACKAGE}"
+WRAPPER_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@juya-ai/tokscale"
+CLI_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@juya-ai/tokscale-cli"
+PLATFORM_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}"
 WRAPPER_BIN="${WRAPPER_PACKAGE_DIR}/bin.js"
 for expected in \
   "${WRAPPER_BIN}" \
@@ -224,8 +224,8 @@ for expected in \
     exit 1
   fi
 done
-grep -q 'await import("@tokscale/cli")' "${WRAPPER_PACKAGE_DIR}/bin.js" || {
-  echo "Installed tokscale wrapper does not import @tokscale/cli" >&2
+grep -q 'await import("@juya-ai/tokscale-cli")' "${WRAPPER_PACKAGE_DIR}/bin.js" || {
+  echo "Installed tokscale wrapper does not import @juya-ai/tokscale-cli" >&2
   exit 1
 }
 if [[ -L "${INSTALLED_BIN}" ]]; then
@@ -262,13 +262,13 @@ INSTALLED_VERSION_NODE="$(env PATH="${NODE_ONLY_PATH}" "${INSTALLED_BIN}" --vers
 }
 
 echo "Checking missing platform binary does not fall back to stale PATH tokscale..."
-rm -f "${INSTALL_DIR}/node_modules/@tokscale/${PLATFORM_PACKAGE}/bin/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/@tokscale/cli/node_modules/@tokscale/${PLATFORM_PACKAGE}/bin/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/@tokscale/node_modules/@tokscale/${PLATFORM_PACKAGE}/bin/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/node_modules/@tokscale/${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/@juya-ai/tokscale-cli/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/@juya-ai/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}/bin/tokscale"
 rm -f "${INSTALL_DIR}/node_modules/packages/${PLATFORM_PACKAGE}/bin/tokscale"
 rm -f "${INSTALL_DIR}/node_modules/target/release/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/@tokscale/cli/bin/tokscale"
+rm -f "${INSTALL_DIR}/node_modules/@juya-ai/tokscale-cli/bin/tokscale"
 set +e
 STALE_OUTPUT="$(env PATH="${STALE_PATH_DIR}:${NODE_ONLY_PATH}" "${WRAPPER_BIN}" --version 2>&1)"
 STALE_CODE=$?

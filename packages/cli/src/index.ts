@@ -8,9 +8,9 @@ const binaryName = process.platform === "win32" ? "tokscale.exe" : "tokscale";
 
 const currentDir = fileURLToPath(new URL(".", import.meta.url));
 const dirName = basename(currentDir);
-// In npm install: currentDir = .../node_modules/@tokscale/cli/dist/
-//   cliDir = .../node_modules/@tokscale/cli/
-//   scopeDir = .../node_modules/@tokscale/
+// In npm install: currentDir = .../node_modules/@juya-ai/tokscale-cli/dist/
+//   cliDir = .../node_modules/@juya-ai/tokscale-cli/
+//   scopeDir = .../node_modules/@juya-ai/
 // In monorepo dev (dist): currentDir = .../packages/cli/dist/
 //   cliDir = .../packages/cli/
 //   scopeDir = .../packages/
@@ -167,14 +167,15 @@ const targetPackage = resolveTargetPackageName();
 const searchPaths: string[] = [];
 
 if (targetPackage) {
+  const scopedPlatformPackage = `tokscale-${targetPackage}`;
   searchPaths.push(
-    // npm/bun install: sibling scoped package (node_modules/@tokscale/cli-<platform>/bin/...)
-    join(scopeDir, targetPackage, "bin", binaryName),
-    // Nested node_modules: non-hoisted / pnpm (node_modules/@tokscale/cli/node_modules/@tokscale/cli-<platform>/bin/...)
-    join(cliDir, "node_modules", "@tokscale", targetPackage, "bin", binaryName),
-    // Hoisted edge case (node_modules/@tokscale/node_modules/@tokscale/cli-<platform>/bin/...)
-    join(scopeDir, "node_modules", "@tokscale", targetPackage, "bin", binaryName),
-    join(workspaceRoot, "node_modules", "@tokscale", targetPackage, "bin", binaryName),
+    // npm/bun install: sibling scoped package (node_modules/@juya-ai/tokscale-cli-<platform>/bin/...)
+    join(scopeDir, scopedPlatformPackage, "bin", binaryName),
+    // Nested node_modules: non-hoisted / pnpm (node_modules/@juya-ai/tokscale-cli/node_modules/@juya-ai/tokscale-cli-<platform>/bin/...)
+    join(cliDir, "node_modules", "@juya-ai", scopedPlatformPackage, "bin", binaryName),
+    // Hoisted edge case (node_modules/@juya-ai/node_modules/@juya-ai/tokscale-cli-<platform>/bin/...)
+    join(scopeDir, "node_modules", "@juya-ai", scopedPlatformPackage, "bin", binaryName),
+    join(workspaceRoot, "node_modules", "@juya-ai", scopedPlatformPackage, "bin", binaryName),
     // Monorepo development
     join(workspaceRoot, "packages", targetPackage, "bin", binaryName),
   );
@@ -219,7 +220,7 @@ if (!binary) {
   console.error("Error: tokscale binary not found");
   console.error("Build from source: cargo build --release -p tokscale-cli");
   if (targetPackage) {
-    console.error(`Expected optional package: @tokscale/${targetPackage}`);
+    console.error(`Expected optional package: @juya-ai/tokscale-${targetPackage}`);
   }
   process.exit(1);
 }

@@ -10,9 +10,9 @@ crates/
   tokscale-cli/         CLI, TUI, integration commands, integration tests
 
 packages/
-  cli/                  TypeScript binary dispatcher
-  tokscale/             npm wrapper package
-  cli-*/                platform package manifests
+  cli/                  @juya-ai/tokscale-cli TypeScript dispatcher
+  tokscale/             @juya-ai/tokscale npm wrapper package
+  cli-*/                @juya-ai/tokscale-cli-* platform manifests
 
 docs/
   adr/                  architecture decisions
