@@ -130,11 +130,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                         .expect("client diagnostics require local scan policy")
                         .resolve_path_with_env_strategy(&home_dir_str, use_env_roots)
                 };
-                let sessions_path_exists = if client == ClientId::Warp {
-                    warp_default_roots.iter().any(|path| path.exists())
-                } else {
-                    Path::new(&sessions_path).exists()
-                };
+                let sessions_path_exists = Path::new(&sessions_path).exists();
                 let mut additional_paths: Vec<AdditionalPath> = built_in_extra_paths
                     .iter()
                     .filter(|(c, _)| *c == client)
