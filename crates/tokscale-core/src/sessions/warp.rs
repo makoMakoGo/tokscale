@@ -20,7 +20,7 @@ const UNKNOWN_MODEL: &str = "warp-unknown";
 
 #[derive(Debug, Clone, Default)]
 struct ConversationMeta {
-    timestamp: Option<i64>,
+    latest_query_timestamp: Option<i64>,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
 }
@@ -115,9 +115,10 @@ pub fn parse_warp_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         };
 
         let meta = query_metadata.get(&conversation_id);
-        let timestamp = meta
-            .and_then(|meta| meta.timestamp)
-            .or_else(|| last_modified_at.as_deref().and_then(parse_warp_timestamp))
+        let timestamp = last_modified_at
+            .as_deref()
+            .and_then(parse_warp_timestamp)
+            .or_else(|| meta.and_then(|meta| meta.latest_query_timestamp))
             .unwrap_or(fallback_timestamp);
 
         for (index, item) in token_usage.iter().enumerate() {
@@ -132,7 +133,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 .map(str::trim)
                 .filter(|model| !model.is_empty())
                 .unwrap_or(UNKNOWN_MODEL);
-            let provider_id = provider_identity::inferred_provider_from_model(&model_id)
+            let provider_id = provider_identity::inferred_provider_from_model(model_id)
                 .unwrap_or("unknown")
                 .to_string();
             let dedup_key =
@@ -171,7 +172,6 @@ pub fn parse_warp_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 Some(pending.dedup_key),
             );
             message.set_workspace(pending.workspace_key, pending.workspace_label);
-            message.is_turn_start = true;
             message
         })
         .collect()
@@ -220,8 +220,11 @@ fn load_query_metadata(conn: &Connection) -> HashMap<String, ConversationMeta> {
         let entry: &mut ConversationMeta = metadata.entry(conversation_id).or_default();
 
         if let Some(timestamp) = start_ts.as_deref().and_then(parse_warp_timestamp) {
-            if entry.timestamp.is_none_or(|current| timestamp < current) {
-                entry.timestamp = Some(timestamp);
+            if entry
+                .latest_query_timestamp
+                .is_none_or(|current| timestamp > current)
+            {
+                entry.latest_query_timestamp = Some(timestamp);
             }
         }
 
@@ -337,7 +340,7 @@ mod tests {
         conn.execute(
             "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at)
              VALUES (?1, ?2, ?3)",
-            params!["conversation-1", conversation_data, "2026-07-04 10:20:30"],
+            params!["conversation-1", conversation_data, "2026-07-04T10:20:30Z"],
         )
         .unwrap();
         conn.execute(
@@ -365,12 +368,13 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].tokens.total(), 1050);
+        assert_eq!(messages[0].timestamp, 1_783_160_430_000);
         assert_eq!(
             messages[0].workspace_key.as_deref(),
             Some("/home/travis/project")
         );
         assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
-        assert!(messages[0].is_turn_start);
+        assert!(!messages[0].is_turn_start);
 
         assert_eq!(messages[1].model_id.as_ref(), "gpt-5-nano");
         assert_eq!(messages[1].provider_id.as_ref(), "openai");

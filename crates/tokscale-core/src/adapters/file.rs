@@ -12,6 +12,8 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{scanner, sessions, UnifiedMessage};
 
+const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+
 pub(crate) struct ParsedFileWithCachePolicy {
     messages: Vec<UnifiedMessage>,
     cacheable: bool,
@@ -203,7 +205,7 @@ pub(crate) static GEMINI_ADAPTER: PolicyFileAdapter = PolicyFileAdapter::new(
 pub(crate) static GROK_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Grok,
     ParserId::Grok,
-    MODEL_ID_CANONICALIZATION_REVISION,
+    GROK_TOTAL_ONLY_IMPUTATION_REVISION,
     sessions::grok::parse_grok_updates_file,
 );
 pub(crate) static AMP_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
@@ -390,6 +392,29 @@ mod tests {
         assert_eq!(paths, vec![default_path]);
         assert!(units.iter().all(|unit| unit.parser_version
             == ParserVersion::new(ParserId::Zcode, MODEL_ID_CANONICALIZATION_REVISION)));
+    }
+
+    #[test]
+    fn grok_adapter_uses_total_only_imputation_revision() {
+        let home = tempfile::TempDir::new().unwrap();
+        let path = home
+            .path()
+            .join(".grok/sessions/%2Ftmp%2Fproject/session-1/updates.jsonl");
+        write_file(&path, "");
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+
+        let units = GROK_ADAPTER.discover(&ctx);
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(
+            units[0].parser_version,
+            ParserVersion::new(ParserId::Grok, GROK_TOTAL_ONLY_IMPUTATION_REVISION)
+        );
+        assert_ne!(
+            units[0].parser_version,
+            ParserVersion::new(ParserId::Grok, MODEL_ID_CANONICALIZATION_REVISION)
+        );
     }
 
     #[test]

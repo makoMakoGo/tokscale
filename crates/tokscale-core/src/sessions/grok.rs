@@ -38,6 +38,14 @@ struct ActiveTurn {
     turn_index: usize,
 }
 
+#[derive(Debug, Clone)]
+struct PendingGrokMessage {
+    model_id: String,
+    timestamp: i64,
+    turn_index: usize,
+    token_delta: i64,
+}
+
 impl ActiveTurn {
     fn new(baseline_total: i64, timestamp: i64, model_id: String, turn_index: usize) -> Self {
         Self {
@@ -56,7 +64,7 @@ impl ActiveTurn {
         }
     }
 
-    fn into_message(self, metadata: &GrokMetadata) -> Option<UnifiedMessage> {
+    fn into_pending_message(self) -> Option<PendingGrokMessage> {
         let token_delta = self.max_total.saturating_sub(self.baseline_total);
         if token_delta <= 0 {
             return None;
@@ -68,25 +76,12 @@ impl ActiveTurn {
             self.model_id
         };
 
-        let mut message = UnifiedMessage::new_with_dedup(
-            CLIENT_ID,
+        Some(PendingGrokMessage {
             model_id,
-            PROVIDER_ID,
-            metadata.session_id.clone(),
-            self.timestamp,
-            token_imputation::impute_total_only_token_breakdown(token_delta),
-            0.0,
-            Some(crate::sessions::dedup_hash_str(&format!(
-                "grok:{}:{}",
-                metadata.session_id, self.turn_index
-            ))),
-        );
-        message.set_workspace(
-            metadata.workspace_key.clone(),
-            metadata.workspace_label.clone(),
-        );
-        message.is_turn_start = true;
-        Some(message)
+            timestamp: self.timestamp,
+            turn_index: self.turn_index,
+            token_delta,
+        })
     }
 }
 
@@ -101,7 +96,7 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
         Err(_) => return Vec::new(),
     };
 
-    let mut messages = Vec::new();
+    let mut pending_messages = Vec::new();
     let mut current_model = metadata
         .model_id
         .clone()
@@ -132,8 +127,8 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
         let timestamp = extract_timestamp_ms(&value).unwrap_or(metadata.timestamp);
         if is_user_message_chunk(&value) {
             if let Some(turn) = active_turn.take() {
-                if let Some(message) = turn.into_message(&metadata) {
-                    messages.push(message);
+                if let Some(message) = turn.into_pending_message() {
+                    pending_messages.push(message);
                 }
             }
 
@@ -189,12 +184,12 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
     }
 
     if let Some(turn) = active_turn {
-        if let Some(message) = turn.into_message(&metadata) {
-            messages.push(message);
+        if let Some(message) = turn.into_pending_message() {
+            pending_messages.push(message);
         }
     }
 
-    if messages.is_empty() {
+    if pending_messages.is_empty() {
         if let Some(total_tokens) = last_total.filter(|tokens| *tokens > 0) {
             let aggregate_turn = ActiveTurn {
                 baseline_total: 0,
@@ -203,13 +198,50 @@ pub fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
                 model_id: current_model,
                 turn_index: 0,
             };
-            if let Some(message) = aggregate_turn.into_message(&metadata) {
-                messages.push(message);
+            if let Some(message) = aggregate_turn.into_pending_message() {
+                pending_messages.push(message);
             }
         }
     }
 
-    messages
+    build_messages(metadata, pending_messages)
+}
+
+fn build_messages(
+    metadata: GrokMetadata,
+    pending_messages: Vec<PendingGrokMessage>,
+) -> Vec<UnifiedMessage> {
+    let totals: Vec<i64> = pending_messages
+        .iter()
+        .map(|message| message.token_delta)
+        .collect();
+    let token_rows = token_imputation::impute_total_only_token_breakdowns(&totals);
+
+    pending_messages
+        .into_iter()
+        .zip(token_rows)
+        .map(|(pending, tokens)| {
+            let mut message = UnifiedMessage::new_with_dedup(
+                CLIENT_ID,
+                pending.model_id,
+                PROVIDER_ID,
+                metadata.session_id.clone(),
+                pending.timestamp,
+                tokens,
+                0.0,
+                Some(crate::sessions::dedup_hash_str(&format!(
+                    "grok:{}:{}",
+                    metadata.session_id, pending.turn_index
+                ))),
+            );
+            message.set_workspace(
+                metadata.workspace_key.clone(),
+                metadata.workspace_label.clone(),
+            );
+            message.is_turn_start = true;
+            message
+        })
+        .collect()
 }
 
 fn read_metadata(path: &Path) -> GrokMetadata {
@@ -437,23 +469,53 @@ mod tests {
         );
 
         let messages = parse_grok_updates_file(&path);
+        let expected_tokens =
+            crate::token_imputation::impute_total_only_token_breakdowns(&[200, 150]);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].client.as_ref(), "grok");
         assert_eq!(messages[0].model_id.as_ref(), "composer-2.5-fast");
         assert_eq!(messages[0].provider_id.as_ref(), "xai");
         assert_eq!(messages[0].session_id.as_ref(), "session-1");
-        assert_eq!(
-            messages[0].tokens,
-            crate::token_imputation::impute_total_only_token_breakdown(200)
-        );
+        assert_eq!(messages[0].tokens, expected_tokens[0]);
         assert_eq!(messages[0].timestamp, 1700000003000);
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/tmp/project"));
         assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
-        assert_eq!(
-            messages[1].tokens,
-            crate::token_imputation::impute_total_only_token_breakdown(150)
-        );
+        assert_eq!(messages[1].tokens, expected_tokens[1]);
         assert_eq!(messages[1].timestamp, 1700000005000);
+    }
+
+    #[test]
+    fn batch_imputes_grok_turns_with_source_file_aggregate_rounding() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-composer-2.5-fast"}},"_meta":{"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":1,"agentTimestampMs":1700000001000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-composer-2.5-fast"}},"_meta":{"agentTimestampMs":1700000002000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":6,"agentTimestampMs":1700000003000}}}"#,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+        let expected_tokens = crate::token_imputation::impute_total_only_token_breakdowns(&[1, 5]);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens, expected_tokens[0]);
+        assert_eq!(messages[1].tokens, expected_tokens[1]);
+
+        let aggregate =
+            messages
+                .iter()
+                .fold(crate::TokenBreakdown::default(), |mut acc, message| {
+                    acc.input += message.tokens.input;
+                    acc.output += message.tokens.output;
+                    acc.cache_read += message.tokens.cache_read;
+                    acc.cache_write += message.tokens.cache_write;
+                    acc.reasoning += message.tokens.reasoning;
+                    acc
+                });
+        assert_eq!(
+            aggregate,
+            crate::token_imputation::impute_total_only_token_breakdown(6)
+        );
     }
 
     #[test]
