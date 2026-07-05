@@ -1273,7 +1273,7 @@ fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
 }
 
 #[test]
-fn test_model_grouping_normalizes_provider_display_aliases() {
+fn test_model_grouping_uses_finalized_provider_ids() {
     let entries = aggregate_finalized_model_usage_entries(
         vec![
             make_workspace_message(
@@ -1288,7 +1288,7 @@ fn test_model_grouping_normalizes_provider_display_aliases() {
             make_workspace_message(
                 "opencode",
                 "xiaomi/mimo-v2.5-pro",
-                "xiaomi-token-plan-cn",
+                "xiaomi",
                 "session-2",
                 2.0,
                 None,
@@ -1306,7 +1306,7 @@ fn test_model_grouping_normalizes_provider_display_aliases() {
 }
 
 #[test]
-fn test_client_provider_model_grouping_normalizes_provider_display_aliases() {
+fn test_client_provider_model_grouping_uses_finalized_provider_ids() {
     let entries = aggregate_finalized_model_usage_entries(
         vec![
             make_workspace_message(
@@ -1321,7 +1321,7 @@ fn test_client_provider_model_grouping_normalizes_provider_display_aliases() {
             make_workspace_message(
                 "opencode",
                 "xiaomi/mimo-v2.5-pro",
-                "xiaomi-token-plan-cn",
+                "xiaomi",
                 "session-2",
                 2.0,
                 None,
@@ -3746,12 +3746,190 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             },
             0.0,
         ),
+        UnifiedMessage::new(
+            "opencode",
+            "grok-code-fast-1",
+            "xai-oauth",
+            "xai-oauth-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        UnifiedMessage::new(
+            "opencode",
+            "grok-code-fast-1",
+            "grok-oauth",
+            "grok-oauth-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        UnifiedMessage::new(
+            "claude",
+            "kimi-for-coding",
+            "moonshotai",
+            "moonshot-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        UnifiedMessage::new(
+            "copilot",
+            "claude-sonnet-4.5",
+            "github-copilot",
+            "copilot-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        UnifiedMessage::new(
+            "codex",
+            "gpt-5.2",
+            "azure",
+            "azure-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        UnifiedMessage::new(
+            "google-antigravity",
+            "gemini-2.5-pro",
+            "vertex",
+            "vertex-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        UnifiedMessage::new(
+            "opencode",
+            "glm-5.1",
+            "open.bigmodel.cn",
+            "bigmodel-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
     ];
 
     finalize_token_priced_messages(&mut messages, None);
 
     assert_eq!(messages[0].provider_id.as_ref(), "openai");
-    assert_eq!(messages[1].provider_id.as_ref(), "fireworks_ai");
+    assert_eq!(messages[1].provider_id.as_ref(), "fireworks");
+    assert_eq!(messages[2].provider_id.as_ref(), "xai");
+    assert_eq!(messages[3].provider_id.as_ref(), "xai");
+    assert_eq!(messages[4].provider_id.as_ref(), "kimi");
+    assert_eq!(messages[5].provider_id.as_ref(), "microsoft");
+    assert_eq!(messages[6].provider_id.as_ref(), "microsoft");
+    assert_eq!(messages[7].provider_id.as_ref(), "google");
+    assert_eq!(messages[8].provider_id.as_ref(), "zai");
+}
+
+#[test]
+fn test_finalize_token_priced_messages_preserves_custom_provider_literal_tag() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "venice/claude-sonnet-4.5".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    litellm.insert(
+        "anthropic/claude-sonnet-4.5".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(1.0),
+            output_cost_per_token: Some(2.0),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut messages = vec![UnifiedMessage::new(
+        "claude",
+        "claude-sonnet-4.5",
+        "venice",
+        "custom-provider",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    )];
+
+    finalize_token_priced_messages(&mut messages, Some(&pricing));
+
+    assert_eq!(messages[0].provider_id.as_ref(), "venice");
+    assert_eq!(messages[0].cost, 0.2);
+}
+
+#[test]
+fn test_finalize_token_priced_messages_preserves_owl_provider_identity() {
+    let mut messages = vec![UnifiedMessage::new(
+        "opencode",
+        "gpt-5.2",
+        "openai-owl",
+        "owl-provider",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    )];
+
+    finalize_token_priced_messages(&mut messages, None);
+
+    assert_eq!(messages[0].provider_id.as_ref(), "owl");
 }
 
 #[test]
@@ -4590,7 +4768,7 @@ fn test_apply_token_pricing_prices_canonical_kimi_k2_6() {
     let mut msg = UnifiedMessage::new(
         "kimi",
         "kimi-k2.6",
-        "moonshotai",
+        "kimi",
         "session-1",
         1_776_000_000_000,
         TokenBreakdown {
@@ -4817,7 +4995,7 @@ fn test_local_message_loader_preserves_gateway_message_client_counts() {
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(parsed.messages[0].client.as_ref(), "opencode");
     assert_eq!(parsed.messages[0].model_id.as_ref(), "deepseek-v3");
-    assert_eq!(parsed.messages[0].provider_id.as_ref(), "fireworks_ai");
+    assert_eq!(parsed.messages[0].provider_id.as_ref(), "fireworks");
 }
 
 #[test]

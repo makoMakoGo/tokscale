@@ -707,7 +707,7 @@ fn test_opencode_zen_grok_code() {
 fn test_provider_hint_prefers_matching_pricing_source() {
     let lookup = create_lookup();
     let result = lookup
-        .lookup_with_provider("grok-code", Some("azure"))
+        .lookup_with_provider("grok-code", Some("microsoft"))
         .unwrap();
     assert_eq!(result.matched_key, "azure_ai/grok-code-fast-1");
     assert_eq!(result.source, "LiteLLM");
@@ -734,7 +734,9 @@ fn test_provider_hint_matches_nested_reseller_exact_key() {
     );
 
     let lookup = PricingLookup::new(litellm, HashMap::new());
-    let result = lookup.lookup_with_provider("gpt-4", Some("azure")).unwrap();
+    let result = lookup
+        .lookup_with_provider("gpt-4", Some("microsoft"))
+        .unwrap();
     assert_eq!(result.matched_key, "azure/openai/gpt-4");
     assert_eq!(result.source, "LiteLLM");
 }
@@ -3216,12 +3218,12 @@ fn test_prefixed_model_with_conflicting_provider_uses_provider_aware_path() {
 
     let lookup = PricingLookup::new(litellm, HashMap::new());
 
-    let r_azure = lookup
-        .lookup_with_provider("openai/gpt-4", Some("azure"))
+    let r_microsoft = lookup
+        .lookup_with_provider("openai/gpt-4", Some("microsoft"))
         .unwrap();
     assert_eq!(
-        r_azure.matched_key, "azure/openai/gpt-4",
-        "should prefer azure key when provider_id=azure"
+        r_microsoft.matched_key, "azure/openai/gpt-4",
+        "should prefer the Microsoft-scoped key when provider_id=microsoft"
     );
 
     let r_openai = lookup
@@ -3260,16 +3262,16 @@ fn test_prefixed_model_conflicting_provider_falls_back_to_stripped() {
     let lookup = PricingLookup::new(litellm, HashMap::new());
 
     let r = lookup
-        .lookup_with_provider("openai/gpt-4", Some("azure"))
+        .lookup_with_provider("openai/gpt-4", Some("microsoft"))
         .unwrap();
     assert_eq!(
         r.matched_key, "gpt-4",
-        "with no azure-specific key, should fall back to stripped generic"
+        "with no Microsoft-scoped key, should fall back to stripped generic"
     );
 }
 
 #[test]
-fn test_compound_provider_hint_prefers_reseller_over_prefix() {
+fn test_compound_microsoft_hint_keeps_original_provider_preference() {
     let mut litellm = HashMap::new();
     litellm.insert(
         "openai/gpt-4".into(),
@@ -3288,11 +3290,11 @@ fn test_compound_provider_hint_prefers_reseller_over_prefix() {
 
     let lookup = PricingLookup::new(litellm, HashMap::new());
     let r = lookup
-        .lookup_with_provider("openai/gpt-4", Some("azure/openai"))
+        .lookup_with_provider("openai/gpt-4", Some("microsoft/openai"))
         .unwrap();
     assert_eq!(
-        r.matched_key, "azure/openai/gpt-4",
-        "compound hint azure/openai should prefer azure-specific key over openai/ prefix"
+        r.matched_key, "openai/gpt-4",
+        "compound hint microsoft/openai should not force an Azure-scoped key over the original provider"
     );
 }
 

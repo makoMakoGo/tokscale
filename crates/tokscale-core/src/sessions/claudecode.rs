@@ -2255,7 +2255,7 @@ mod tests {
         assert_eq!(messages[3].provider_id.as_ref(), "minimax");
         assert_eq!(messages[4].provider_id.as_ref(), "zai");
         assert_eq!(messages[5].provider_id.as_ref(), "xiaomi");
-        assert_eq!(messages[6].provider_id.as_ref(), "moonshotai");
+        assert_eq!(messages[6].provider_id.as_ref(), "kimi");
         assert_eq!(messages[7].provider_id.as_ref(), "meituan");
         assert!(!messages
             .iter()
@@ -2295,7 +2295,7 @@ mod tests {
         assert_eq!(messages[0].provider_id.as_ref(), "openai");
         assert_eq!(messages[1].provider_id.as_ref(), "zai");
         assert_eq!(messages[2].provider_id.as_ref(), "xiaomi");
-        assert_eq!(messages[3].provider_id.as_ref(), "moonshotai");
+        assert_eq!(messages[3].provider_id.as_ref(), "kimi");
         assert_eq!(messages[4].provider_id.as_ref(), "meituan");
         assert_eq!(messages[5].provider_id.as_ref(), "deepseek");
         assert_eq!(messages[6].provider_id.as_ref(), "deepseek");

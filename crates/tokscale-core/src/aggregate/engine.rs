@@ -53,7 +53,8 @@ impl AggregationEngine {
 
     /// The per-message fold. `AggregationEngine` consumes finalized local-report
     /// messages. Callers must run `finalize_token_priced_messages` before
-    /// pushing; this layer deliberately does not re-canonicalize model ids.
+    /// pushing; this layer deliberately does not re-canonicalize model or
+    /// provider ids.
     /// Applies the date filter once (mirroring `filter_messages_for_report`)
     /// before dispatching to enabled accumulators.
     pub fn push(&mut self, msg: &UnifiedMessage) {

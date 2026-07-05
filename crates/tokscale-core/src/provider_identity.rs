@@ -1,113 +1,279 @@
 fn canonicalize_provider_segment(segment: &str) -> Option<String> {
-    let lower = segment.trim().trim_end_matches('/').to_lowercase();
-    let normalized = lower.replace('-', "_");
-    if lower.starts_with('<') && lower.ends_with('>') {
+    let trimmed = segment.trim().trim_end_matches('/');
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        return None;
+    }
+
+    if let Some(canonical) = exact_canonical_provider(trimmed) {
+        return Some(canonical.into());
+    }
+
+    let normalized = normalized_provider_key(trimmed);
+
+    if let Some(canonical) = exact_canonical_provider(normalized.as_str()) {
+        return Some(canonical.into());
+    }
+
+    // For unknown segments, reject if they contain digits — those are almost
+    // certainly model-name fragments (e.g., "gpt-4", "claude-3") rather than
+    // provider identifiers.
+    if normalized.chars().any(|ch| ch.is_ascii_digit()) {
         return None;
     }
 
     let canonical = match normalized.as_str() {
         "" | "unknown" => return None,
-        "x_ai" | "xai" => "xai",
-        "z_ai" | "zai" | "zhipu" | "zhipuai" => "zai",
-        "moonshot" | "moonshotai" | "kimi" | "kimi_for_coding" => "moonshotai",
-        "xiaomi" | "mimo" => "xiaomi",
-        "meituan" | "longcat" => "meituan",
-        "meta" | "meta_llama" => "meta_llama",
-        "azure" | "azure_ai" => "azure_ai",
-        "anthropic" | "vertex" | "vertex_ai" => "anthropic",
-        "together" | "together_ai" => "together_ai",
-        "fireworks" | "fireworks_ai" => "fireworks_ai",
-        "google" | "gemini" => "google",
-        "openai" | "openai_codex" | "openai_pro" => "openai",
-        "github_copilot" => "github-copilot",
-        "commandcode" | "command_code" => "commandcode",
-        "unisound" | "uni_sound" | "yunzhisheng" | "yun_zhi_sheng" => "unisound",
-        s if s == "opencode" || s.starts_with("opencode_") => "opencode",
-        "minimax" | "minimaxai" | "minimax_ai" => "minimax",
-        "mistral" | "mistralai" => "mistralai",
-        "pandora_deepseek" | "deepseek_ai" => "deepseek",
+        s if s.starts_with("xai") || s.starts_with("grok") || s == "supergrok" => "xai",
+        s if s.starts_with("zai")
+            || s.starts_with("z_ai")
+            || s.starts_with("zhipu")
+            || s.starts_with("bigmodel")
+            || s.starts_with("open_bigmodel") =>
+        {
+            "zai"
+        }
+        s if s.starts_with("xiaomi") => "xiaomi",
+        s if s.starts_with("minimax") => "minimax",
+        s if s.starts_with("moonshot") => "kimi",
+        s if s.starts_with("qwen") => "qwen",
+        s if s.starts_with("meituan") || s.starts_with("longcat") => "meituan",
         s if s.contains("stepfun") => "stepfun",
-        "ai21" => "ai21",
-        // For unknown segments, reject if they contain digits — those are
-        // almost certainly model-name fragments (e.g., "gpt-4", "claude-3")
-        // rather than provider identifiers.
-        other if other.chars().any(|ch| ch.is_ascii_digit()) => return None,
-        _ => lower.as_str(),
+        s if s.starts_with("doubao") => "doubao",
+        s if s.starts_with("alibaba") => "alibaba",
+        s if s.starts_with("tencent") || s.starts_with("tecent") => "tencent",
+        s if s == "opencode" || s.starts_with("opencode_") => "opencode",
+        s if s.starts_with("github_cop") || s.contains("copilot") => "microsoft",
+        s if s.starts_with("unisound")
+            || s.starts_with("uni_sound")
+            || s.starts_with("yunzhisheng")
+            || s.starts_with("yun_zhi_sheng") =>
+        {
+            "unisound"
+        }
+        _ => return None,
     };
 
     Some(canonical.into())
 }
 
 pub fn canonical_provider(raw: &str) -> Option<String> {
-    provider_tags(raw).into_iter().next()
+    for segment in raw.trim().trim_end_matches('/').split('/') {
+        let segment = segment.trim().trim_end_matches('/');
+        if let Some(tag) = canonicalize_provider_segment(segment) {
+            return Some(tag);
+        }
+
+        if segment.contains('.') {
+            for dotted in segment.split('.') {
+                if let Some(tag) = canonicalize_provider_segment(dotted) {
+                    return Some(tag);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 pub fn normalize_provider_for_grouping(raw: &str) -> String {
     let trimmed = raw.trim();
-    let normalized = trimmed.to_lowercase().replace('-', "_");
-
-    match normalized.as_str() {
-        s if is_owl_usage_provider(s) => "owl".to_string(),
-        s if s.starts_with("zai") || s.starts_with("zhipu") => "zai".to_string(),
-        s if s.starts_with("xiaomi") => "xiaomi".to_string(),
-        s if s.starts_with("minimax") => "minimax".to_string(),
-        s if s.starts_with("moonshot") => "kimi".to_string(),
-        "kimi_code" | "kimi_for_coding" | "kimi" => "kimi".to_string(),
-        "pandora_deepseek" | "deepseek_ai" => "deepseek".to_string(),
-        s if s.starts_with("qwen") => "qwen".to_string(),
-        s if s.starts_with("meituan") || s.starts_with("longcat") => "meituan".to_string(),
-        s if s.contains("stepfun") => "stepfun".to_string(),
-        s if s.starts_with("doubao") => "doubao".to_string(),
-        s if s.starts_with("alibaba") => "alibaba".to_string(),
-        s if s.starts_with("tencent") || s.starts_with("tecent") => "tencent".to_string(),
-        s if s == "opencode" || s.starts_with("opencode_") => "opencode".to_string(),
-        s if s.starts_with("github_cop") || s.contains("copilot") => "github-copilot".to_string(),
-        s if s.starts_with("unisound")
-            || s.starts_with("uni_sound")
-            || s.starts_with("yunzhisheng")
-            || s.starts_with("yun_zhi_sheng") =>
-        {
-            "unisound".to_string()
-        }
-        _ => canonical_provider(trimmed)
-            .map(|provider| provider_group_from_canonical(&provider).to_string())
-            .unwrap_or(normalized),
+    if is_owl_usage_provider(trimmed) {
+        return "owl".to_string();
     }
+
+    match canonical_provider(trimmed) {
+        Some(provider) => provider,
+        None => literal_provider_key(trimmed),
+    }
+}
+
+pub(crate) fn finalized_provider_id(raw_provider: &str, model_id: &str) -> String {
+    let raw_provider = raw_provider.trim();
+    if is_owl_usage_provider(raw_provider) {
+        return "owl".to_string();
+    }
+
+    canonical_provider(raw_provider)
+        .or_else(|| first_literal_provider_tag(raw_provider))
+        .or_else(|| inferred_provider_from_model(model_id).map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn normalized_provider_key(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_ascii() {
+        let bytes = trimmed.as_bytes();
+        let needs_normalization = bytes.iter().any(|byte| {
+            byte.is_ascii_uppercase()
+                || *byte == b'-'
+                || *byte == b'.'
+                || byte.is_ascii_whitespace()
+        });
+        if !needs_normalization {
+            return trimmed.to_string();
+        }
+
+        let mut normalized = String::with_capacity(trimmed.len());
+        for byte in bytes {
+            let mapped = if *byte == b'-' || *byte == b'.' || byte.is_ascii_whitespace() {
+                b'_'
+            } else {
+                byte.to_ascii_lowercase()
+            };
+            normalized.push(mapped as char);
+        }
+        return normalized;
+    }
+
+    trimmed
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch == '-' || ch == '.' || ch.is_ascii_whitespace() {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn exact_canonical_provider(normalized: &str) -> Option<&'static str> {
+    let canonical = match normalized {
+        "" | "unknown" => return None,
+        "x_ai" | "xai" | "xai_oauth" | "grok" | "grok_oauth" | "grok_cli" | "supergrok" => "xai",
+        "z_ai" | "zai" | "zhipu" | "zhipuai" | "zhipu_ai" | "zhipu_coding_plan" | "bigmodel"
+        | "bigmodel_cn" | "open_bigmodel_cn" => "zai",
+        "moonshot"
+        | "moonshotai"
+        | "moonshot_ai"
+        | "moonshot_coding_plan"
+        | "kimi"
+        | "kimi_code"
+        | "kimi_for_coding"
+        | "kimi_coding_plan" => "kimi",
+        "xiaomi" | "mimo" => "xiaomi",
+        "meituan" | "longcat" => "meituan",
+        "meta" | "meta_llama" => "meta",
+        "microsoft" => "microsoft",
+        "azure" | "azure_ai" => "microsoft",
+        "anthropic" => "anthropic",
+        "together" | "together_ai" => "together",
+        "fireworks" | "fireworks_ai" => "fireworks",
+        "google" | "gemini" | "vertex" | "vertex_ai" | "google_vertex" | "google_gemini_cli"
+        | "google_antigravity" => "google",
+        "openai" | "openai_codex" | "openai_pro" | "chatgpt" => "openai",
+        "opencode" => "opencode",
+        "openrouter" => "openrouter",
+        "bedrock" => "bedrock",
+        "aws" | "amazon" => "aws",
+        "groq" => "groq",
+        "cohere" => "cohere",
+        "perplexity" => "perplexity",
+        "github_copilot" | "copilot_chat" => "microsoft",
+        "commandcode" | "command_code" => "commandcode",
+        "unisound" | "uni_sound" | "yunzhisheng" | "yun_zhi_sheng" => "unisound",
+        "minimax" | "minimaxai" | "minimax_ai" => "minimax",
+        "mistral" | "mistralai" => "mistral",
+        "pandora_deepseek" | "deepseek_ai" => "deepseek",
+        "qwen" | "qwen_portal" => "qwen",
+        "ai21" => "ai21",
+        _ => return None,
+    };
+
+    Some(canonical)
+}
+
+fn literal_provider_key(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_ascii() {
+        let bytes = trimmed.as_bytes();
+        if !bytes.iter().any(|byte| byte.is_ascii_uppercase()) {
+            return trimmed.to_string();
+        }
+
+        let mut lowered = String::with_capacity(trimmed.len());
+        for byte in bytes {
+            lowered.push(byte.to_ascii_lowercase() as char);
+        }
+        return lowered;
+    }
+
+    trimmed.to_lowercase()
+}
+
+fn literal_provider_tag(segment: &str) -> Option<String> {
+    let trimmed = segment.trim().trim_end_matches('/');
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("unknown")
+        || (trimmed.starts_with('<') && trimmed.ends_with('>'))
+        || trimmed.chars().any(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+
+    Some(literal_provider_key(trimmed))
+}
+
+fn first_literal_provider_tag(raw: &str) -> Option<String> {
+    for segment in raw.trim().trim_end_matches('/').split('/') {
+        let segment = segment.trim().trim_end_matches('/');
+        if canonicalize_provider_segment(segment).is_some() {
+            continue;
+        }
+
+        if segment.contains('.')
+            && segment
+                .split('.')
+                .any(|dotted| canonicalize_provider_segment(dotted).is_some())
+        {
+            continue;
+        }
+
+        if let Some(tag) = literal_provider_tag(segment) {
+            return Some(tag);
+        }
+    }
+
+    None
 }
 
 pub(crate) fn is_owl_usage_provider(raw: &str) -> bool {
-    let lower = raw.trim().to_lowercase();
-    contains_delimited(&lower, "owl") || contains_delimited(&lower, "owlc")
-}
-
-fn provider_group_from_canonical(provider: &str) -> &str {
-    match provider {
-        "moonshotai" => "kimi",
-        "mistralai" => "mistral",
-        "meta_llama" => "meta",
-        "fireworks_ai" => "fireworks",
-        "together_ai" => "together",
-        "azure_ai" => "azure",
-        other => other,
-    }
+    let trimmed = raw.trim();
+    contains_delimited_ignore_ascii_case(trimmed, "owl")
+        || contains_delimited_ignore_ascii_case(trimmed, "owlc")
 }
 
 pub fn provider_tags(raw: &str) -> Vec<String> {
     let mut tags = Vec::new();
-    let mut push = |segment: &str| {
-        if let Some(tag) = canonicalize_provider_segment(segment) {
-            if !tags.iter().any(|existing| existing == &tag) {
-                tags.push(tag);
-            }
+    let mut push_tag = |tag: String| {
+        if !tags.iter().any(|existing| existing == &tag) {
+            tags.push(tag);
         }
     };
 
     for segment in raw.trim().trim_end_matches('/').split('/') {
-        push(segment);
+        let segment = segment.trim().trim_end_matches('/');
+        if let Some(tag) = canonicalize_provider_segment(segment) {
+            push_tag(tag);
+            continue;
+        }
+
         if segment.contains('.') {
+            let mut found_dotted_tag = false;
             for dotted in segment.split('.') {
-                push(dotted);
+                if let Some(tag) = canonicalize_provider_segment(dotted) {
+                    push_tag(tag);
+                    found_dotted_tag = true;
+                }
             }
+            if found_dotted_tag {
+                continue;
+            }
+        }
+
+        if let Some(tag) = literal_provider_tag(segment) {
+            push_tag(tag);
         }
     }
 
@@ -176,6 +342,29 @@ fn contains_delimited(haystack: &str, needle: &str) -> bool {
     false
 }
 
+fn contains_delimited_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+
+    for pos in 0..=haystack.len() - needle.len() {
+        if !haystack[pos..pos + needle.len()].eq_ignore_ascii_case(needle) {
+            continue;
+        }
+
+        let before_ok = pos == 0 || !haystack[pos - 1].is_ascii_alphanumeric();
+        let after_pos = pos + needle.len();
+        let after_ok = after_pos == haystack.len() || !haystack[after_pos].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub(crate) fn provider_override_from_model(model: &str) -> Option<&'static str> {
     if crate::model_aliases::is_deepseek_v4_beta_alias(model) {
         Some("deepseek")
@@ -234,7 +423,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     }
 
     if lower.contains("kimi") || lower.contains("moonshot") {
-        return Some("moonshotai");
+        return Some("kimi");
     }
 
     if lower.contains("longcat") || lower.contains("meituan") {
@@ -322,14 +511,33 @@ mod tests {
         let cases = [
             ("openai-codex", vec!["openai"]),
             ("gemini", vec!["google"]),
-            ("vertex", vec!["anthropic"]),
-            ("azure", vec!["azure_ai"]),
-            ("fireworks", vec!["fireworks_ai"]),
+            ("vertex", vec!["google"]),
+            ("vertex-ai", vec!["google"]),
+            ("google-gemini-cli", vec!["google"]),
+            ("google-antigravity", vec!["google"]),
+            ("azure", vec!["microsoft"]),
+            ("azure-ai", vec!["microsoft"]),
+            ("azure_ai", vec!["microsoft"]),
+            ("microsoft", vec!["microsoft"]),
+            ("fireworks", vec!["fireworks"]),
+            ("fireworks-ai", vec!["fireworks"]),
+            ("together", vec!["together"]),
+            ("together-ai", vec!["together"]),
+            ("Meta-Llama", vec!["meta"]),
+            ("MistralAI", vec!["mistral"]),
             ("MiniMax", vec!["minimax"]),
-            ("Kimi", vec!["moonshotai"]),
-            ("kimi-for-coding", vec!["moonshotai"]),
+            ("Kimi", vec!["kimi"]),
+            ("kimi-for-coding", vec!["kimi"]),
+            ("moonshotai", vec!["kimi"]),
+            ("moonshot-ai", vec!["kimi"]),
             ("Xiaomi", vec!["xiaomi"]),
             ("LongCat", vec!["meituan"]),
+            ("xai-oauth", vec!["xai"]),
+            ("grok", vec!["xai"]),
+            ("grok oauth", vec!["xai"]),
+            ("z.ai", vec!["zai"]),
+            ("bigmodel.cn", vec!["zai"]),
+            ("open.bigmodel.cn", vec!["zai"]),
             ("stepfun_ai", vec!["stepfun"]),
             ("stepfun-coding-plan", vec!["stepfun"]),
             ("opencode-go", vec!["opencode"]),
@@ -341,6 +549,8 @@ mod tests {
             ("yunzhisheng", vec!["unisound"]),
             ("openrouter/google", vec!["openrouter", "google"]),
             ("bedrock/anthropic", vec!["bedrock", "anthropic"]),
+            ("venice", vec!["venice"]),
+            ("anthropic-bedrock", vec!["anthropic-bedrock"]),
         ];
 
         for (raw, expected) in cases {
@@ -375,10 +585,18 @@ mod tests {
             ("minimax-code-cn", "minimax"),
             ("moonshotai", "kimi"),
             ("moonshot-coding-plan", "kimi"),
+            ("moonshot-ai", "kimi"),
             ("kimi-for-coding", "kimi"),
+            ("xai-oauth", "xai"),
+            ("grok", "xai"),
+            ("grok-oauth", "xai"),
+            ("z.ai", "zai"),
+            ("bigmodel.cn", "zai"),
+            ("open.bigmodel.cn", "zai"),
             ("pandora-deepseek", "deepseek"),
             ("deepseek-ai", "deepseek"),
             ("deepseek_ai", "deepseek"),
+            ("qwen-portal", "qwen"),
             ("qwen-coding-plan", "qwen"),
             ("meituan", "meituan"),
             ("longcat-coding-plan", "meituan"),
@@ -387,7 +605,16 @@ mod tests {
             ("doubao-coding-plan", "doubao"),
             ("alibaba-coding-plan-cn", "alibaba"),
             ("tecent-coding-plan", "tencent"),
-            ("copilot-chat", "github-copilot"),
+            ("vertex", "google"),
+            ("vertex-ai", "google"),
+            ("google-gemini-cli", "google"),
+            ("google-antigravity", "google"),
+            ("azure", "microsoft"),
+            ("azure-ai", "microsoft"),
+            ("azure_ai", "microsoft"),
+            ("microsoft", "microsoft"),
+            ("github-copilot", "microsoft"),
+            ("copilot-chat", "microsoft"),
             ("Anthropic", "anthropic"),
             ("OpenAI-Codex", "openai"),
             ("Gemini", "google"),
@@ -412,6 +639,7 @@ mod tests {
             ("command_code", "commandcode"),
             ("UniSound", "unisound"),
             ("yunzhisheng", "unisound"),
+            ("Anthropic-Bedrock", "anthropic-bedrock"),
         ];
 
         for (raw, expected) in cases {
@@ -441,7 +669,10 @@ mod tests {
             "openrouter/google/gemini-3-pro-preview",
             Some("google")
         ));
-        assert!(matches_provider_hint("azure/openai/gpt-4", Some("azure")));
+        assert!(matches_provider_hint(
+            "azure/openai/gpt-4",
+            Some("microsoft")
+        ));
         assert!(matches_provider_hint(
             "fireworks_ai/deepseek-v3-0324",
             Some("fireworks")
@@ -502,7 +733,7 @@ mod tests {
         );
         assert_eq!(
             inferred_provider_from_model("kimi-for-coding"),
-            Some("moonshotai")
+            Some("kimi")
         );
         assert_eq!(
             inferred_provider_from_model("longcat-flash-thinking"),
@@ -634,8 +865,8 @@ mod tests {
 
     #[test]
     fn test_provider_tags_mistral_alias() {
-        assert_eq!(provider_tags("mistral"), vec!["mistralai"]);
-        assert_eq!(provider_tags("mistralai"), vec!["mistralai"]);
+        assert_eq!(provider_tags("mistral"), vec!["mistral"]);
+        assert_eq!(provider_tags("mistralai"), vec!["mistral"]);
     }
 
     #[test]
@@ -663,25 +894,40 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_provider_passthrough() {
+    fn test_custom_provider_tags_are_literal_without_canonical_identity() {
         // Common provider labels canonicalize as usual.
         assert_eq!(canonical_provider("anthropic"), Some("anthropic".into()));
         assert_eq!(canonical_provider("openai"), Some("openai".into()));
         assert_eq!(canonical_provider("openai-codex"), Some("openai".into()));
         assert_eq!(canonical_provider("google"), Some("google".into()));
+        assert_eq!(canonical_provider("microsoft"), Some("microsoft".into()));
+        assert_eq!(canonical_provider("azure"), Some("microsoft".into()));
+        assert_eq!(canonical_provider("azure_ai"), Some("microsoft".into()));
+        assert_eq!(canonical_provider("fireworks_ai"), Some("fireworks".into()));
+        assert_eq!(canonical_provider("together_ai"), Some("together".into()));
+        assert_eq!(canonical_provider("meta_llama"), Some("meta".into()));
+        assert_eq!(canonical_provider("mistralai"), Some("mistral".into()));
         assert_eq!(
             canonical_provider("github-copilot"),
-            Some("github-copilot".into())
+            Some("microsoft".into())
         );
         assert_eq!(
             canonical_provider("github_copilot"),
-            Some("github-copilot".into())
+            Some("microsoft".into())
+        );
+
+        assert_eq!(canonical_provider("venice"), None);
+        assert_eq!(provider_tags("venice"), vec!["venice"]);
+        assert_eq!(
+            provider_tags("Anthropic-Bedrock"),
+            vec!["anthropic-bedrock"]
         );
 
         // A provider value that looks like a model fragment (contains digits)
-        // or a placeholder is not treated as a provider. This guards the
-        // unknown-provider passthrough path.
+        // or a placeholder is not treated as a provider.
         assert_eq!(canonical_provider("tool-local-model-4o"), None);
+        assert!(provider_tags("tool-local-model-4o").is_empty());
         assert_eq!(canonical_provider("<unset>"), None);
+        assert!(provider_tags("<unset>").is_empty());
     }
 }

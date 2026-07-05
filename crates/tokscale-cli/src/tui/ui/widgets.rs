@@ -207,9 +207,9 @@ fn get_single_provider_display_name(provider: &str) -> String {
         "meta" => "Meta".to_string(),
         "mistral" => "Mistral".to_string(),
         "cohere" => "Cohere".to_string(),
+        "microsoft" => "Microsoft".to_string(),
         "opencode" => "OpenCode".to_string(),
         "owl" => "Owl".to_string(),
-        "github-copilot" => "GitHub Copilot".to_string(),
         "commandcode" => "Command".to_string(),
         "unisound" => "UniSound".to_string(),
         _ => provider.to_string(),
@@ -321,6 +321,9 @@ mod tests {
             ("zai", "Z.AI"),
             ("zai-coding-plan", "Z.AI"),
             ("zai-coding-pln", "Z.AI"),
+            ("z.ai", "Z.AI"),
+            ("bigmodel.cn", "Z.AI"),
+            ("open.bigmodel.cn", "Z.AI"),
             ("zhipuai-coding-plan", "Z.AI"),
             ("zhipu", "Z.AI"),
             ("xiaomi-token-plan-cn", "XiaoMi"),
@@ -329,10 +332,12 @@ mod tests {
             ("minimax-cn-coding-plan", "MiniMax"),
             ("moonshotai", "Kimi"),
             ("moonshot-coding-plan", "Kimi"),
+            ("moonshot-ai", "Kimi"),
             ("kimi", "Kimi"),
             ("kimi-code", "Kimi"),
             ("kimi-for-coding", "Kimi"),
             ("qwen", "Qwen"),
+            ("qwen-portal", "Qwen"),
             ("qwen-coding-plan", "Qwen"),
             ("meituan", "Meituan"),
             ("longcat-coding-plan", "Meituan"),
@@ -343,6 +348,18 @@ mod tests {
             ("alibaba-coding-plan-cn", "Alibaba"),
             ("tencent-coding-plan", "Tencent"),
             ("tecent-coding-plan", "Tencent"),
+            ("xai-oauth", "xAI"),
+            ("grok", "xAI"),
+            ("grok-oauth", "xAI"),
+            ("vertex", "Google"),
+            ("vertex-ai", "Google"),
+            ("google-gemini-cli", "Google"),
+            ("google-antigravity", "Google"),
+            ("azure", "Microsoft"),
+            ("azure-ai", "Microsoft"),
+            ("azure_ai", "Microsoft"),
+            ("github-copilot", "Microsoft"),
+            ("copilot-chat", "Microsoft"),
             ("openai-pro", "OpenAI"),
             ("openai-owl", "Owl"),
             ("openai-owlc", "Owl"),
@@ -383,6 +400,18 @@ mod tests {
         assert_eq!(
             get_provider_display_name("moonshotai, kimi-for-coding"),
             "Kimi"
+        );
+        assert_eq!(
+            get_provider_display_name("github-copilot, copilot-chat"),
+            "Microsoft"
+        );
+        assert_eq!(
+            get_provider_display_name("azure, azure-ai, azure_ai, github-copilot"),
+            "Microsoft"
+        );
+        assert_eq!(
+            get_provider_display_name("xai-oauth, grok, grok-oauth"),
+            "xAI"
         );
         assert_eq!(
             get_provider_display_name("opencode, opencode-go, opencode-zen"),
