@@ -26,10 +26,10 @@ pub(crate) fn impute_total_only_token_breakdown(total: i64) -> TokenBreakdown {
         let product = u128::from(total_u) * u128::from(numerator);
         values[idx] = (product / u128::from(DENOMINATOR)) as u64;
         remainders[idx] = (product % u128::from(DENOMINATOR)) as u64;
-        allocated = allocated.saturating_add(values[idx]);
+        allocated += values[idx];
     }
 
-    let remaining = total_u.saturating_sub(allocated) as usize;
+    let remaining = (total_u - allocated) as usize;
     let mut order = [0_usize, 1, 2, 3, 4];
     order.sort_by(|left, right| {
         remainders[*right]
@@ -86,21 +86,18 @@ pub(crate) fn impute_total_only_token_breakdowns(totals: &[i64]) -> Vec<TokenBre
             let product = u128::from(total_u) * u128::from(numerator);
             values[bucket_idx] = (product / u128::from(DENOMINATOR)) as u64;
             remainders[bucket_idx] = (product % u128::from(DENOMINATOR)) as u64;
-            allocated = allocated.saturating_add(values[bucket_idx]);
-            column_values[bucket_idx] =
-                column_values[bucket_idx].saturating_add(values[bucket_idx]);
+            allocated += values[bucket_idx];
+            column_values[bucket_idx] += values[bucket_idx];
         }
 
-        rows.push((
-            values,
-            remainders,
-            total_u.saturating_sub(allocated) as usize,
-        ));
+        rows.push((values, remainders, (total_u - allocated) as usize));
     }
 
     let mut bucket_remaining = [0_u64; 5];
     for (bucket_idx, target) in target_values.iter().copied().enumerate() {
-        bucket_remaining[bucket_idx] = target.saturating_sub(column_values[bucket_idx]);
+        bucket_remaining[bucket_idx] = target
+            .checked_sub(column_values[bucket_idx])
+            .expect("total-only token imputation column floor exceeded batch target");
     }
 
     let mut row_order: Vec<usize> = (0..rows.len()).collect();
@@ -125,21 +122,27 @@ pub(crate) fn impute_total_only_token_breakdowns(totals: &[i64]) -> Vec<TokenBre
                 .then_with(|| left.cmp(right))
         });
 
-        let selected_buckets: Vec<usize> = buckets
-            .into_iter()
-            .filter(|bucket_idx| bucket_remaining[*bucket_idx] > 0)
-            .take(needed)
-            .collect();
-
-        for bucket_idx in selected_buckets {
+        for bucket_idx in buckets {
+            if rows[row_idx].2 == 0 {
+                break;
+            }
+            if bucket_remaining[bucket_idx] == 0 {
+                continue;
+            }
             rows[row_idx].0[bucket_idx] += 1;
             rows[row_idx].2 -= 1;
             bucket_remaining[bucket_idx] -= 1;
         }
     }
 
-    debug_assert!(rows.iter().all(|row| row.2 == 0));
-    debug_assert!(bucket_remaining.iter().all(|remaining| *remaining == 0));
+    assert!(
+        rows.iter().all(|row| row.2 == 0),
+        "token imputation failed to distribute all row remainders"
+    );
+    assert!(
+        bucket_remaining.iter().all(|remaining| *remaining == 0),
+        "token imputation left residual bucket capacity"
+    );
 
     rows.into_iter()
         .map(|(values, _, _)| TokenBreakdown {

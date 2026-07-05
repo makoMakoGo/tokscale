@@ -457,6 +457,9 @@ pub fn warp_sqlite_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) 
 
     #[cfg(target_os = "macos")]
     {
+        // macOS Warp state paths are derived from the application container
+        // layout; there is no XDG/LOCALAPPDATA-style override to honor here.
+        let _ = use_env_roots;
         let app_group_support = home
             .join("Library/Group Containers/2BBY89MBSN.dev.warp")
             .join("Library/Application Support");
@@ -567,13 +570,40 @@ mod tests {
 
     #[test]
     fn warp_sqlite_roots_follow_official_state_directories() {
+        #[cfg(not(target_os = "windows"))]
         let roots = warp_sqlite_roots_with_env_strategy("/home/alice", false);
+        #[cfg(target_os = "windows")]
+        let roots = warp_sqlite_roots_with_env_strategy(r"C:\Users\alice", false);
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         assert_eq!(
             roots[0],
             PathBuf::from("/home/alice/.local/state/warp-terminal")
         );
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            roots[0],
+            PathBuf::from(
+                "/home/alice/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable"
+            )
+        );
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            roots[0],
+            PathBuf::from(r"C:\Users\alice\AppData\Local\warp\Warp\data")
+        );
+    }
+
+    #[test]
+    fn all_clients_have_diagnostics_scan_policy() {
+        for client in ClientId::iter() {
+            assert!(
+                client.local_def().is_some(),
+                "{client:?} must have a local scan policy for clients diagnostics"
+            );
+        }
     }
 
     #[test]
