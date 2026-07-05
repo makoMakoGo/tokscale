@@ -166,7 +166,30 @@ function isFirstContributionAfter(login: string, thresholdDate: string): Contrib
 function generateReleaseNotes(version: string): string {
   const prevTag = getPreviousTag();
   if (!prevTag) {
-    throw new Error("No previous tag found. Aborting release-note generation.");
+    return [
+      '<div align="center">',
+      "",
+      `[![Tokscale](https://github.com/${REPO}/raw/main/.github/assets/hero-v2.png)](https://github.com/${REPO})`,
+      "",
+      `# \`@juya-ai/tokscale@v${version}\` is here!`,
+      "</div>",
+      "",
+      "## What's Changed",
+      "* First public npm release of the local-only Tokscale fork.",
+      "",
+      "## Published Packages",
+      "* `@juya-ai/tokscale`",
+      "* `@juya-ai/tokscale-cli`",
+      "* `@juya-ai/tokscale-cli-darwin-arm64`",
+      "* `@juya-ai/tokscale-cli-linux-x64-gnu`",
+      "* `@juya-ai/tokscale-cli-win32-x64-msvc`",
+      "",
+      "## Install",
+      "```bash",
+      "npm install -g @juya-ai/tokscale",
+      "npx @juya-ai/tokscale --help",
+      "```",
+    ].join("\n");
   }
 
   const prevTagDate = getTagDate(prevTag);
