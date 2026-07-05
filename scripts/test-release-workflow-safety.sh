@@ -113,6 +113,44 @@ PY
   grep -q "build-native matrix contains targets missing from publish" "${output}"
 }
 
+test_rejects_publish_matrix_target_without_native_coverage() {
+  local work="${TMP_DIR}/unverified-publish-target"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+insert = """          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            package_dir: cli-win32-x64-msvc
+            artifact_name: cli-binary-x86_64-pc-windows-msvc
+            bin_name: tokscale.exe
+            build: cargo build --release -p tokscale-cli --target x86_64-pc-windows-msvc
+            strip: \"\"
+"""
+text = text.replace("  publish-platform-packages:\n", insert + "  publish-platform-packages:\n")
+path.write_text(text)
+PY
+
+  mkdir -p "${work}/packages/cli-win32-x64-msvc"
+  cat > "${work}/packages/cli-win32-x64-msvc/package.json" <<'EOF_MANIFEST'
+{
+  "name": "@juya-ai/tokscale-cli-win32-x64-msvc",
+  "version": "3.0.0"
+}
+EOF_MANIFEST
+
+  local output="${TMP_DIR}/unverified-publish-target-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject unverified publish target" >&2
+    return 1
+  fi
+
+  grep -q "publish build matrix contains targets missing from build-native" "${output}"
+}
+
 test_rejects_release_env_drift() {
   local work="${TMP_DIR}/env-drift"
   write_good_workflows "${work}"
@@ -183,6 +221,7 @@ PY
 test_accepts_matching_publish_and_native_workflows
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
+test_rejects_publish_matrix_target_without_native_coverage
 test_rejects_release_env_drift
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift

@@ -26,12 +26,7 @@
       },
       "optionalDependencies": {
         "@juya-ai/tokscale-cli-darwin-arm64": "4.0.4",
-        "@juya-ai/tokscale-cli-darwin-x64": "4.0.4",
-        "@juya-ai/tokscale-cli-linux-arm64-gnu": "4.0.4",
-        "@juya-ai/tokscale-cli-linux-arm64-musl": "4.0.4",
         "@juya-ai/tokscale-cli-linux-x64-gnu": "4.0.4",
-        "@juya-ai/tokscale-cli-linux-x64-musl": "4.0.4",
-        "@juya-ai/tokscale-cli-win32-arm64-msvc": "4.0.4",
         "@juya-ai/tokscale-cli-win32-x64-msvc": "4.0.4",
       },
     },
@@ -39,28 +34,8 @@
       "name": "@juya-ai/tokscale-cli-darwin-arm64",
       "version": "4.0.4",
     },
-    "packages/cli-darwin-x64": {
-      "name": "@juya-ai/tokscale-cli-darwin-x64",
-      "version": "4.0.4",
-    },
-    "packages/cli-linux-arm64-gnu": {
-      "name": "@juya-ai/tokscale-cli-linux-arm64-gnu",
-      "version": "4.0.4",
-    },
-    "packages/cli-linux-arm64-musl": {
-      "name": "@juya-ai/tokscale-cli-linux-arm64-musl",
-      "version": "4.0.4",
-    },
     "packages/cli-linux-x64-gnu": {
       "name": "@juya-ai/tokscale-cli-linux-x64-gnu",
-      "version": "4.0.4",
-    },
-    "packages/cli-linux-x64-musl": {
-      "name": "@juya-ai/tokscale-cli-linux-x64-musl",
-      "version": "4.0.4",
-    },
-    "packages/cli-win32-arm64-msvc": {
-      "name": "@juya-ai/tokscale-cli-win32-arm64-msvc",
       "version": "4.0.4",
     },
     "packages/cli-win32-x64-msvc": {
@@ -87,17 +62,7 @@
 
     "@juya-ai/tokscale-cli-darwin-arm64": ["@juya-ai/tokscale-cli-darwin-arm64@workspace:packages/cli-darwin-arm64"],
 
-    "@juya-ai/tokscale-cli-darwin-x64": ["@juya-ai/tokscale-cli-darwin-x64@workspace:packages/cli-darwin-x64"],
-
-    "@juya-ai/tokscale-cli-linux-arm64-gnu": ["@juya-ai/tokscale-cli-linux-arm64-gnu@workspace:packages/cli-linux-arm64-gnu"],
-
-    "@juya-ai/tokscale-cli-linux-arm64-musl": ["@juya-ai/tokscale-cli-linux-arm64-musl@workspace:packages/cli-linux-arm64-musl"],
-
     "@juya-ai/tokscale-cli-linux-x64-gnu": ["@juya-ai/tokscale-cli-linux-x64-gnu@workspace:packages/cli-linux-x64-gnu"],
-
-    "@juya-ai/tokscale-cli-linux-x64-musl": ["@juya-ai/tokscale-cli-linux-x64-musl@workspace:packages/cli-linux-x64-musl"],
-
-    "@juya-ai/tokscale-cli-win32-arm64-msvc": ["@juya-ai/tokscale-cli-win32-arm64-msvc@workspace:packages/cli-win32-arm64-msvc"],
 
     "@juya-ai/tokscale-cli-win32-x64-msvc": ["@juya-ai/tokscale-cli-win32-x64-msvc@workspace:packages/cli-win32-x64-msvc"],
 

@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - ".github/workflows/build-native.yml"
+      - ".github/workflows/publish-cli.yml"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "packages/cli/package.json"
+      - "packages/cli-*/package.json"
+      - "scripts/check-release-workflow-safety.py"
 
 env:
   MACOSX_DEPLOYMENT_TARGET: "10.13"
@@ -31,6 +36,11 @@ jobs:
             build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
             strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
             bin_name: tokscale
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: cargo build --release -p tokscale-cli --target x86_64-pc-windows-msvc
+            strip: ""
+            bin_name: tokscale.exe
 
     steps:
       - uses: actions/checkout@v5

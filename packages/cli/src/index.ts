@@ -24,7 +24,7 @@ const workspaceRoot = resolve(scopeDir, "..");
 
 type LibcKind = "gnu" | "musl";
 
-function detectLibcKind(): LibcKind {
+function detectLibcKind(): LibcKind | null {
   const override = process.env.TOKSCALE_LIBC?.trim().toLowerCase();
   if (override === "musl") return "musl";
   if (override === "gnu" || override === "glibc") return "gnu";
@@ -83,7 +83,7 @@ function detectLibcKind(): LibcKind {
     return existsSync("/etc/alpine-release") ? "musl" : "gnu";
   }
 
-  return "gnu";
+  return null;
 }
 
 // Glibc ships ld-linux-*.so.* in /lib64 (or /lib on some arches); musl
@@ -106,23 +106,16 @@ function resolveTargetPackageName(): string | null {
 
   if (process.platform === "darwin") {
     if (arch === "arm64") return "cli-darwin-arm64";
-    if (arch === "x64") return "cli-darwin-x64";
     return null;
   }
 
   if (process.platform === "linux") {
     const libc = detectLibcKind();
-    if (arch === "arm64") {
-      return libc === "musl" ? "cli-linux-arm64-musl" : "cli-linux-arm64-gnu";
-    }
-    if (arch === "x64") {
-      return libc === "musl" ? "cli-linux-x64-musl" : "cli-linux-x64-gnu";
-    }
+    if (arch === "x64" && libc === "gnu") return "cli-linux-x64-gnu";
     return null;
   }
 
   if (process.platform === "win32") {
-    if (arch === "arm64") return "cli-win32-arm64-msvc";
     if (arch === "x64") return "cli-win32-x64-msvc";
     return null;
   }
@@ -135,27 +128,16 @@ function resolveRustTargetTriple(): string | null {
 
   if (process.platform === "darwin") {
     if (arch === "arm64") return "aarch64-apple-darwin";
-    if (arch === "x64") return "x86_64-apple-darwin";
     return null;
   }
 
   if (process.platform === "linux") {
     const libc = detectLibcKind();
-    if (arch === "arm64") {
-      return libc === "musl"
-        ? "aarch64-unknown-linux-musl"
-        : "aarch64-unknown-linux-gnu";
-    }
-    if (arch === "x64") {
-      return libc === "musl"
-        ? "x86_64-unknown-linux-musl"
-        : "x86_64-unknown-linux-gnu";
-    }
+    if (arch === "x64" && libc === "gnu") return "x86_64-unknown-linux-gnu";
     return null;
   }
 
   if (process.platform === "win32") {
-    if (arch === "arm64") return "aarch64-pc-windows-msvc";
     if (arch === "x64") return "x86_64-pc-windows-msvc";
     return null;
   }

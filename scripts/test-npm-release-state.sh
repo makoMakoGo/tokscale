@@ -12,13 +12,8 @@ write_release_package_manifests() {
   mkdir -p \
     packages/cli \
     packages/cli-darwin-arm64 \
-    packages/cli-darwin-x64 \
     packages/cli-linux-x64-gnu \
-    packages/cli-linux-x64-musl \
-    packages/cli-linux-arm64-gnu \
-    packages/cli-linux-arm64-musl \
     packages/cli-win32-x64-msvc \
-    packages/cli-win32-arm64-msvc \
     packages/tokscale
 
   cat > packages/cli/package.json <<EOF_MANIFEST
@@ -27,26 +22,16 @@ write_release_package_manifests() {
   "version": "${version}",
   "optionalDependencies": {
     "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
-    "@juya-ai/tokscale-cli-darwin-x64": "${version}",
     "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-linux-x64-musl": "${version}",
-    "@juya-ai/tokscale-cli-linux-arm64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-linux-arm64-musl": "${version}",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}",
-    "@juya-ai/tokscale-cli-win32-arm64-msvc": "${version}"
+    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
 
   for pkg in \
     cli-darwin-arm64 \
-    cli-darwin-x64 \
     cli-linux-x64-gnu \
-    cli-linux-x64-musl \
-    cli-linux-arm64-gnu \
-    cli-linux-arm64-musl \
-    cli-win32-x64-msvc \
-    cli-win32-arm64-msvc; do
+    cli-win32-x64-msvc; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
   "name": "@juya-ai/tokscale-${pkg}",
@@ -106,7 +91,7 @@ if [[ "${1:-}" == "view" ]]; then
       ;;
     *@3.0.0)
       case "${spec}" in
-        @juya-ai/tokscale-cli-darwin-x64@3.0.0|@juya-ai/tokscale-cli@3.0.0)
+        @juya-ai/tokscale-cli-darwin-arm64@3.0.0|@juya-ai/tokscale-cli@3.0.0)
           echo '"3.0.0"'
           exit 0
           ;;
@@ -230,7 +215,7 @@ test_recovery_allows_existing_target_versions_for_partial_retry() {
       RELEASE_RECOVERY=true \
       bash scripts/check-npm-release-state.sh >"${output}" 2>&1
 
-    grep -q "@juya-ai/tokscale-cli-darwin-x64@3.0.0 already exists; recovery publish will skip it" "${output}"
+    grep -q "@juya-ai/tokscale-cli-darwin-arm64@3.0.0 already exists; recovery publish will skip it" "${output}"
     grep -q "npm release-state OK for 3.0.0" "${output}"
   )
 }

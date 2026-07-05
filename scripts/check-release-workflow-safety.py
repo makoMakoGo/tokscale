@@ -11,14 +11,9 @@ BUILD_NATIVE_WORKFLOW = ROOT / ".github/workflows/build-native.yml"
 REQUIRED_ENV_KEYS = ("MACOSX_DEPLOYMENT_TARGET", "CARGO_TERM_COLOR", "CARGO_INCREMENTAL")
 COMMON_BUILD_FIELDS = ("host", "target", "build", "strip", "bin_name")
 TARGET_PACKAGES = {
-    "x86_64-apple-darwin": "cli-darwin-x64",
     "aarch64-apple-darwin": "cli-darwin-arm64",
     "x86_64-unknown-linux-gnu": "cli-linux-x64-gnu",
-    "x86_64-unknown-linux-musl": "cli-linux-x64-musl",
-    "aarch64-unknown-linux-gnu": "cli-linux-arm64-gnu",
-    "aarch64-unknown-linux-musl": "cli-linux-arm64-musl",
     "x86_64-pc-windows-msvc": "cli-win32-x64-msvc",
-    "aarch64-pc-windows-msvc": "cli-win32-arm64-msvc",
 }
 
 
@@ -166,9 +161,16 @@ def main() -> None:
     unexpected_native_targets = [
         target for target in native_build if target not in publish_build
     ]
+    unverified_publish_targets = [
+        target for target in publish_build if target not in native_build
+    ]
     if unexpected_native_targets:
         errors.append(
             f"build-native matrix contains targets missing from publish: {unexpected_native_targets}"
+        )
+    if unverified_publish_targets:
+        errors.append(
+            f"publish build matrix contains targets missing from build-native: {unverified_publish_targets}"
         )
 
     for target, native_entry in native_build.items():

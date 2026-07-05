@@ -68,7 +68,10 @@ Fork npm releases use the `@juya-ai` organization:
 
 - `@juya-ai/tokscale` is the user-facing wrapper package.
 - `@juya-ai/tokscale-cli` is the JavaScript dispatcher package.
-- `@juya-ai/tokscale-cli-*` packages carry native platform binaries.
+- `@juya-ai/tokscale-cli-darwin-arm64`,
+  `@juya-ai/tokscale-cli-linux-x64-gnu`, and
+  `@juya-ai/tokscale-cli-win32-x64-msvc` carry the supported native platform
+  binaries.
 - The installed command remains `tokscale`.
 
 See [ADR 0016](adr/0016-juya-ai-npm-release-identity.md) for the release
