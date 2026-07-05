@@ -46,9 +46,9 @@ When using an installed binary, use `tokscale clients` instead.
 | `trae` | Trae | `~/.config/tokscale/trae-cache/sessions/*.json` | Requires `tokscale trae login` and `tokscale trae sync`. China variants are not supported. |
 | `cline` | Cline | VS Code globalStorage `saoudrizwan.claude-dev/tasks/**/ui_messages.json` | Same task-log family as Roo Code and KiloCode. |
 | `commandcode` | Command Code | `~/.commandcode/projects/**/*.jsonl` | Estimated from transcripts. |
-| `grok` | Grok Build | `$GROK_HOME/sessions/**/updates.jsonl`, fallback `~/.grok/sessions/` | Reads Grok session update logs. |
+| `grok` | Grok Build | `$GROK_HOME/sessions/**/updates.jsonl`, fallback `~/.grok/sessions/` | Reads total-token deltas and applies the fixed total-only bucket allocation from ADR 0017. |
 | `crush` | Crush | `~/.local/share/crush/projects.json` identity only | Disabled for normal local token reports; no accepted token-level source. |
-| `warp` | Warp/Oz | `~/.config/tokscale/warp-cache/usage*.json` | Subscription aggregate surface only; not normal local token reports. |
+| `warp` | Warp/Oz | `~/.local/state/warp-terminal/warp.sqlite` on Linux, Warp App Group/Application Support on macOS, `%LOCALAPPDATA%\warp\Warp\data\warp.sqlite` on Windows | Reads local per-conversation, per-model token totals and applies the fixed total-only bucket allocation from ADR 0017. |
 
 ## Extra scan roots
 
@@ -69,6 +69,9 @@ Use `scanner.extraScanPaths` in `settings.json` for persistent extra roots:
       ],
       "zed": [
         "/mnt/c/Users/me/AppData/Local/Zed/threads"
+      ],
+      "warp": [
+        "/mnt/c/Users/me/AppData/Local/warp/Warp/data"
       ]
     }
   }
@@ -114,8 +117,13 @@ tokscale trae login
 tokscale trae sync --since 30
 ```
 
-`warp` is also sync-backed, but its data belongs to subscription usage rather
-than normal local token reports:
+`warp` has two separate surfaces. Local reports read `warp.sqlite` when it is
+available. Those local rows are per-conversation/per-model aggregates, not
+turns; they are timestamped with the conversation `last_modified_at` value
+when present, then the latest query timestamp, then file mtime. Warp's naive
+SQLite timestamps are interpreted as UTC. The
+`tokscale warp ...` commands still manage subscription aggregate usage cache
+and credentials:
 
 ```bash
 tokscale warp login

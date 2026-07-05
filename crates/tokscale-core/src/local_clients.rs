@@ -1,4 +1,5 @@
 use crate::client_catalog::ClientId;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathRoot {
@@ -387,11 +388,11 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
     LocalClientEntry {
         client: ClientId::Warp,
         def: LocalClientDef {
-            root: PathRoot::Config,
-            relative_path: "warp-cache",
-            pattern: "usage*.json",
+            root: PathRoot::Home,
+            relative_path: ".local/state/warp-terminal",
+            pattern: "warp.sqlite",
             headless: false,
-            parse_local: false,
+            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -428,6 +429,72 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
 ];
+
+pub fn warp_sqlite_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let home = PathBuf::from(home_dir);
+    let mut roots = Vec::new();
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let state_root = if use_env_roots {
+            std::env::var_os("XDG_STATE_HOME")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".local/state"))
+        } else {
+            home.join(".local/state")
+        };
+        for project_path in [
+            "warp-terminal",
+            "warp-terminal-preview",
+            "warp-terminal-dev",
+            "warp-terminal-local",
+            "warp-oss",
+        ] {
+            roots.push(state_root.join(project_path));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS Warp state paths are derived from the application container
+        // layout; there is no XDG/LOCALAPPDATA-style override to honor here.
+        let _ = use_env_roots;
+        let app_group_support = home
+            .join("Library/Group Containers/2BBY89MBSN.dev.warp")
+            .join("Library/Application Support");
+        let app_support = home.join("Library/Application Support");
+        for base in [app_group_support, app_support] {
+            for project_path in [
+                "dev.warp.Warp-Stable",
+                "dev.warp.Warp",
+                "dev.warp.Warp-Preview",
+                "dev.warp.Warp-Dev",
+                "dev.warp.Warp-Local",
+                "dev.warp.WarpOss",
+            ] {
+                roots.push(base.join(project_path));
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let local_app_data = if use_env_roots {
+            std::env::var_os("LOCALAPPDATA")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("AppData/Local"))
+        } else {
+            home.join("AppData/Local")
+        };
+        for app_name in ["Warp", "WarpPreview", "WarpDev", "WarpLocal", "WarpOss"] {
+            roots.push(local_app_data.join("warp").join(app_name).join("data"));
+        }
+    }
+
+    roots
+}
 
 impl ClientId {
     pub fn local_def(self) -> Option<&'static LocalClientDef> {
@@ -488,14 +555,55 @@ mod tests {
     }
 
     #[test]
-    fn cost_only_clients_are_registered_but_not_locally_parsed() {
+    fn crush_is_registered_but_not_locally_parsed() {
         let crush = ClientId::Crush.local_def().expect("crush has scan policy");
         assert_eq!(crush.relative_path, "crush/projects.json");
         assert!(!ClientId::Crush.parse_local());
+    }
 
+    #[test]
+    fn warp_reads_local_sqlite_usage() {
         let warp = ClientId::Warp.local_def().expect("warp has scan policy");
-        assert_eq!(warp.relative_path, "warp-cache");
-        assert!(!ClientId::Warp.parse_local());
+        assert_eq!(warp.pattern, "warp.sqlite");
+        assert!(ClientId::Warp.parse_local());
+    }
+
+    #[test]
+    fn warp_sqlite_roots_follow_official_state_directories() {
+        #[cfg(not(target_os = "windows"))]
+        let roots = warp_sqlite_roots_with_env_strategy("/home/alice", false);
+        #[cfg(target_os = "windows")]
+        let roots = warp_sqlite_roots_with_env_strategy(r"C:\Users\alice", false);
+
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        assert_eq!(
+            roots[0],
+            PathBuf::from("/home/alice/.local/state/warp-terminal")
+        );
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            roots[0],
+            PathBuf::from(
+                "/home/alice/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable"
+            )
+        );
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            roots[0],
+            PathBuf::from(r"C:\Users\alice\AppData\Local\warp\Warp\data")
+        );
+    }
+
+    #[test]
+    fn all_clients_have_diagnostics_scan_policy() {
+        for client in ClientId::iter() {
+            assert!(
+                client.local_def().is_some(),
+                "{client:?} must have a local scan policy for clients diagnostics"
+            );
+        }
     }
 
     #[test]

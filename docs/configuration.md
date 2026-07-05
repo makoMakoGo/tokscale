@@ -34,6 +34,9 @@ usage cache today.
       ],
       "zed": [
         "/mnt/c/Users/me/AppData/Local/Zed/threads"
+      ],
+      "warp": [
+        "/mnt/c/Users/me/AppData/Local/warp/Warp/data"
       ]
     }
   }

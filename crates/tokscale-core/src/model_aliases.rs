@@ -66,6 +66,17 @@ fn strip_custom_model_prefix(model_id: &str) -> &str {
 }
 
 fn canonicalize_source_specific_model_id(model: &str) -> Option<String> {
+    if let Some(display_slug) = normalized_human_display_model_slug(model) {
+        if display_slug != model {
+            if let Some(canonical) = canonicalize_source_specific_model_id(&display_slug) {
+                return Some(canonical);
+            }
+            if is_openai_gpt_source_base_model(&display_slug) {
+                return Some(display_slug);
+            }
+        }
+    }
+
     if is_claude_source_candidate(model) {
         if let Some(canonical) = canonicalize_modern_claude_source_model(model) {
             return Some(canonical);
@@ -112,6 +123,41 @@ fn canonicalize_source_specific_model_id(model: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn normalized_human_display_model_slug(model: &str) -> Option<String> {
+    if !model
+        .chars()
+        .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '(' | ')'))
+    {
+        return None;
+    }
+
+    let normalized = model
+        .replace("extra high reasoning", "xhigh")
+        .replace("high reasoning", "high")
+        .replace("medium reasoning", "medium")
+        .replace("low reasoning", "low")
+        .replace("minimal reasoning", "minimal");
+    let mut slug = String::new();
+    let mut previous_was_separator = true;
+
+    for ch in normalized.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' {
+            slug.push(ch);
+            previous_was_separator = false;
+        } else if !previous_was_separator {
+            slug.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.to_string())
+    }
 }
 
 fn strip_global_suffixes_to_stable(mut model: String) -> String {
@@ -399,7 +445,8 @@ fn canonicalize_modern_claude_source_model(model: &str) -> Option<String> {
             .filter(|part| is_modern_claude_major(part))
         {
             let next_part = parts.get(idx + 2).copied();
-            if next_part.is_none_or(is_compact_date) {
+            if next_part.is_none_or(|part| is_compact_date(part) || is_claude_tier_qualifier(part))
+            {
                 return Some(format!("claude-{part}-{major}"));
             }
         }
@@ -424,6 +471,10 @@ fn is_single_digit_minor(value: &str) -> bool {
 
 fn is_compact_date(value: &str) -> bool {
     value.len() == 8 && value.starts_with("20") && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_claude_tier_qualifier(value: &str) -> bool {
+    matches!(value, "max")
 }
 
 fn strip_release_suffix(model: &str) -> Option<&str> {
@@ -510,6 +561,23 @@ mod tests {
         for (raw, expected) in cases {
             assert_eq!(canonicalize_source_model_id(raw).as_deref(), expected);
         }
+    }
+
+    #[test]
+    fn canonicalizes_human_display_model_names() {
+        assert_eq!(
+            canonicalize_model_id("Claude Opus 4.6 (max)"),
+            "claude-opus-4.6"
+        );
+        assert_eq!(
+            canonicalize_model_id("Claude Fable 5 (max)"),
+            "claude-fable-5"
+        );
+        assert_eq!(canonicalize_model_id("GPT-5 Nano"), "gpt-5-nano");
+        assert_eq!(
+            canonicalize_model_id("GPT-5.4 (extra high reasoning)"),
+            "gpt-5.4"
+        );
     }
 
     #[test]

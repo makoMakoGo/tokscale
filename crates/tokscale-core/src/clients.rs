@@ -1,5 +1,7 @@
 pub use crate::client_catalog::{ClientId, ClientIdentity, CLIENT_IDENTITIES};
-pub use crate::local_clients::{LocalClientDef, PathRoot, LOCAL_CLIENTS};
+pub use crate::local_clients::{
+    warp_sqlite_roots_with_env_strategy, LocalClientDef, PathRoot, LOCAL_CLIENTS,
+};
 
 #[derive(Debug)]
 pub struct ClientCounts {

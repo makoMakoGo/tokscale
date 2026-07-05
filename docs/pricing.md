@@ -22,6 +22,11 @@ Rows without positive token buckets are not usage rows. Cost-only or
 credits-only records are dropped instead of being converted into local token
 cost.
 
+Total-only token sources with accepted local attribution use the fixed bucket
+allocation from [ADR 0017](adr/0017-fixed-token-bucket-imputation.md). Their
+derived cost is approximate because the source total is projected into buckets
+before pricing.
+
 See [ADR 0011](adr/0011-token-derived-local-cost.md).
 
 ## Pricing source authority

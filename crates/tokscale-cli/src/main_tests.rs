@@ -822,15 +822,6 @@ fn parse_legacy_antigravity_cli_extra_dirs_accepts_only_legacy_key() {
 }
 
 #[test]
-fn warp_setup_warning_explains_aggregate_cache_is_not_reported() {
-    let warnings = warp_setup_warnings_for_report(&Some(vec!["warp".to_string()]));
-
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("not included in local reports"));
-    assert!(warnings[0].contains("no token buckets"));
-}
-
-#[test]
 fn cursor_auto_sync_enabled_for_default_report() {
     assert!(should_auto_sync_cursor_for_local_report(&None, &None));
 }

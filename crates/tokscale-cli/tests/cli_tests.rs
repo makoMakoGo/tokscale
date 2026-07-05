@@ -2675,6 +2675,39 @@ fn test_clients_json() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn test_clients_json_warp_sessions_path_exists_tracks_selected_root() {
+    let tmp = create_empty_fixture_dir();
+    let preview_root = tmp.path().join(".local/state/warp-terminal-preview");
+    fs::create_dir_all(&preview_root).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warp = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "warp")
+        .unwrap();
+
+    assert_eq!(
+        warp["sessionsPath"],
+        serde_json::json!(tmp.path().join(".local/state/warp-terminal"))
+    );
+    assert_eq!(warp["sessionsPathExists"], false);
+
+    let additional_paths = warp["additionalPaths"].as_array().unwrap();
+    assert!(additional_paths
+        .iter()
+        .any(|path| { path["path"] == serde_json::json!(preview_root) && path["exists"] == true }));
+}
+
 #[test]
 fn test_clients_json_includes_claude_transcripts_path() {
     let tmp = create_empty_fixture_dir();

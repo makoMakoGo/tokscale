@@ -16,6 +16,7 @@ mod provider_identity;
 pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
+mod token_imputation;
 
 mod aggregate;
 pub mod usage_views;
@@ -27,7 +28,10 @@ pub use aggregate::{
     AggregatedViews, AggregationConfig, DateRange, PeriodBucket, ViewSet, WeekdayBucket,
     UNKNOWN_WORKSPACE_LABEL,
 };
-pub use clients::{ClientCounts, ClientId, ClientIdentity, LocalClientDef, PathRoot};
+pub use clients::{
+    warp_sqlite_roots_with_env_strategy, ClientCounts, ClientId, ClientIdentity, LocalClientDef,
+    PathRoot,
+};
 pub use parser::*;
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
 pub use scanner::*;

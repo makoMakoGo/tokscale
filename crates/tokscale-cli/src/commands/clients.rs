@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     use tokscale_core::{
-        built_in_extra_scan_paths_for, count_local_client_messages, extra_scan_paths_for, ClientId,
-        LocalParseOptions,
+        built_in_extra_scan_paths_for, count_local_client_messages, extra_scan_paths_for,
+        warp_sqlite_roots_with_env_strategy, ClientId, LocalParseOptions,
     };
 
     let explicit_home_dir = home_dir;
@@ -117,10 +117,19 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     let clients: Vec<ClientRow> =
         ClientId::iter()
             .map(|client| {
-                let sessions_path = client
-                    .local_def()
-                    .expect("client diagnostics require local scan policy")
-                    .resolve_path_with_env_strategy(&home_dir_str, use_env_roots);
+                let warp_default_roots = if client == ClientId::Warp {
+                    warp_sqlite_roots_with_env_strategy(&home_dir_str, use_env_roots)
+                } else {
+                    Vec::new()
+                };
+                let sessions_path = if let Some(path) = warp_default_roots.first() {
+                    path.to_string_lossy().to_string()
+                } else {
+                    client
+                        .local_def()
+                        .expect("client diagnostics require local scan policy")
+                        .resolve_path_with_env_strategy(&home_dir_str, use_env_roots)
+                };
                 let sessions_path_exists = Path::new(&sessions_path).exists();
                 let mut additional_paths: Vec<AdditionalPath> = built_in_extra_paths
                     .iter()
@@ -130,6 +139,14 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                         exists: path.exists(),
                     })
                     .collect();
+                if client == ClientId::Warp {
+                    additional_paths.extend(warp_default_roots.iter().skip(1).map(|path| {
+                        AdditionalPath {
+                            path: path.to_string_lossy().to_string(),
+                            exists: path.exists(),
+                        }
+                    }));
+                }
                 if client == ClientId::Antigravity {
                     let path = antigravity_cli_conversations_path(&home_dir_str, use_env_roots);
                     additional_paths.push(AdditionalPath {

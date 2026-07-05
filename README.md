@@ -126,8 +126,10 @@ Junie, Trae, Warp, Cline, Command Code, and Grok Build.
 
 Some catalog entries have explicit boundaries:
 
-- `crush` and `warp` do not contribute normal local token-report rows because
-  they do not expose a token-level source accepted by this fork.
+- `crush` does not contribute normal local token-report rows because it does
+  not expose a token-level source accepted by this fork.
+- `grok` and local `warp.sqlite` expose token totals without bucket splits, so
+  Tokscale applies the fixed total-only bucket allocation from ADR 0017.
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
   accounting.
 - `cursor` reads a local API cache. Logged-in local reports and the TUI can
