@@ -13,8 +13,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "codebuddy";
-const DEFAULT_MODEL: &str = "codebuddy";
-const DEFAULT_PROVIDER: &str = "tencent";
+const DEFAULT_MODEL: &str = "unknown";
+const DEFAULT_PROVIDER: &str = "unknown";
 
 #[derive(Debug, Deserialize)]
 struct CodeBuddyLine {
@@ -130,21 +130,7 @@ impl CodeBuddyUsage {
     }
 }
 
-pub fn parse_codebuddy_file(path: &Path) -> Vec<UnifiedMessage> {
-    if is_extension_log_source(path) {
-        parse_extension_log_file(path)
-    } else {
-        parse_jsonl_file(path)
-    }
-}
-
-pub(crate) fn is_extension_log_source(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("log"))
-}
-
-fn parse_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
+pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(_) => return Vec::new(),
@@ -155,7 +141,6 @@ fn parse_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
         .and_then(|name| name.to_str())
         .unwrap_or("unknown")
         .to_string();
-    let fallback_timestamp = super::utils::file_modified_timestamp_ms(path);
     let mut keyed_indices: HashMap<u64, usize> = HashMap::new();
     let mut messages: Vec<UnifiedMessage> = Vec::new();
 
@@ -225,7 +210,9 @@ fn parse_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
         let session_id = item
             .session_id
             .unwrap_or_else(|| fallback_session_id.clone());
-        let timestamp = item.timestamp.unwrap_or(fallback_timestamp);
+        let Some(timestamp) = item.timestamp else {
+            continue;
+        };
 
         let dedup_key = provider_data
             .and_then(|provider| provider.message_id.as_deref())
@@ -265,13 +252,12 @@ fn parse_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
     messages
 }
 
-fn parse_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
+pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(_) => return Vec::new(),
     };
 
-    let fallback_timestamp = super::utils::file_modified_timestamp_ms(path);
     let mut models_by_agent: HashMap<String, String> = HashMap::new();
     let mut messages = Vec::new();
 
@@ -312,7 +298,9 @@ fn parse_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         };
 
-        let timestamp = parse_log_timestamp_ms(&line).unwrap_or(fallback_timestamp);
+        let Some(timestamp) = parse_log_timestamp_ms(&line) else {
+            continue;
+        };
         let model_id = models_by_agent
             .get(&agent_id)
             .cloned()
@@ -320,12 +308,6 @@ fn parse_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
         let provider_id = provider_identity::inferred_provider_from_model(&model_id)
             .unwrap_or(DEFAULT_PROVIDER)
             .to_string();
-        let dedup_second = timestamp.div_euclid(1000);
-        let dedup_key = dedup_hash_str(&format!(
-            "{CLIENT_ID}:extension-log:{agent_id}:{dedup_second}:{}:{}:{}:{}:{}",
-            tokens.input, tokens.output, tokens.cache_read, tokens.cache_write, tokens.reasoning
-        ));
-
         let mut message = UnifiedMessage::new_with_dedup(
             CLIENT_ID,
             model_id,
@@ -334,7 +316,7 @@ fn parse_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
             timestamp,
             tokens,
             0.0,
-            Some(dedup_key),
+            None,
         );
 
         if let Some(workspace_key) = workspace_from_log_path(path) {
@@ -425,7 +407,7 @@ fn parse_local_naive_timestamp_ms(value: &str) -> Option<i64> {
 
 fn workspace_from_log_path(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
-    let workspace = stem.split("__").next().unwrap_or(stem);
+    let (workspace, _) = stem.split_once("__")?;
     normalize_workspace_key(workspace)
 }
 
@@ -434,7 +416,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_codebuddy_file_reads_message_usage() {
+    fn parse_codebuddy_jsonl_file_reads_message_usage() {
         let dir = tempfile::tempdir().unwrap();
         let project_dir = dir.path().join("projects").join("c-Users-alice-repo");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -445,7 +427,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_codebuddy_file(&path);
+        let messages = parse_codebuddy_jsonl_file(&path);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "codebuddy");
@@ -461,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_codebuddy_file_reads_function_call_usage() {
+    fn parse_codebuddy_jsonl_file_reads_function_call_usage() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-2.jsonl");
         std::fs::write(
@@ -470,7 +452,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_codebuddy_file(&path);
+        let messages = parse_codebuddy_jsonl_file(&path);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "minimax-m3-pay");
@@ -479,9 +461,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_codebuddy_file_reads_extension_log_usage() {
+    fn parse_codebuddy_extension_log_file_reads_usage() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ide-extension.log");
+        let path = dir.path().join("repo__ide-extension.log");
         std::fs::write(
             &path,
             r#"[2026/7/1 16:56:01.100] [Info] [CraftInvokableAgent] [agent-1]  Model prepared: Kimi-K2.7-Code (kimi-k2.7)
@@ -489,7 +471,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_codebuddy_file(&path);
+        let messages = parse_codebuddy_extension_log_file(&path);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "kimi-k2.7");
@@ -497,16 +479,13 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 635);
         assert_eq!(messages[0].tokens.cache_read, 76032);
         assert_eq!(messages[0].tokens.total(), 141367);
-        assert_eq!(
-            messages[0].workspace_label.as_deref(),
-            Some("ide-extension")
-        );
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("repo"));
     }
 
     #[test]
-    fn parse_codebuddy_file_reads_vscode_extension_host_log_usage() {
+    fn parse_codebuddy_extension_log_file_does_not_guess_workspace_from_output_log() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vscode-extension.log");
+        let path = dir.path().join("output.log");
         std::fs::write(
             &path,
             r#"2026-07-01 17:00:31.780 [info] [CraftInvokableAgent] [agent-2] Model prepared: GLM-5v-Turbo (glm-5v-turbo)
@@ -514,7 +493,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_codebuddy_file(&path);
+        let messages = parse_codebuddy_extension_log_file(&path);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "glm-5v-turbo");
@@ -522,10 +501,11 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 557);
         assert_eq!(messages[0].tokens.cache_read, 20841);
         assert_eq!(messages[0].tokens.total(), 33161);
+        assert_eq!(messages[0].workspace_label, None);
     }
 
     #[test]
-    fn extension_log_mirrored_sinks_share_dedup_key_despite_ms_skew() {
+    fn extension_log_usage_does_not_assign_parser_dedup_key() {
         let dir = tempfile::tempdir().unwrap();
 
         let extension_sink = dir.path().join("proj__session.log");
@@ -535,19 +515,10 @@ mod tests {
         )
         .unwrap();
 
-        let host_sink = dir.path().join("proj__host.log");
-        std::fs::write(
-            &host_sink,
-            r#"2026-07-01 16:56:02.201 [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":140732,"outputTokens":635,"totalTokens":141367}"#,
-        )
-        .unwrap();
+        let messages = parse_codebuddy_extension_log_file(&extension_sink);
 
-        let from_extension = parse_codebuddy_file(&extension_sink);
-        let from_host = parse_codebuddy_file(&host_sink);
-
-        assert_eq!(from_extension.len(), 1);
-        assert_eq!(from_host.len(), 1);
-        assert_eq!(from_extension[0].dedup_key, from_host[0].dedup_key);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].dedup_key, None);
     }
 
     #[test]
@@ -562,9 +533,40 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_codebuddy_file(&path);
+        let messages = parse_codebuddy_extension_log_file(&path);
 
         assert_eq!(messages.len(), 2);
-        assert_ne!(messages[0].dedup_key, messages[1].dedup_key);
+        assert_eq!(messages[0].dedup_key, None);
+        assert_eq!(messages[1].dedup_key, None);
+    }
+
+    #[test]
+    fn jsonl_rows_without_timestamp_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"assistant-1","type":"message","role":"assistant","status":"completed","sessionId":"session-1","providerData":{"model":"glm-5.2","messageId":"msg-1"},"message":{"usage":{"input_tokens":10,"output_tokens":3}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_codebuddy_jsonl_file(&path);
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn extension_log_rows_without_timestamp_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.log");
+        std::fs::write(
+            &path,
+            r#"[info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+        )
+        .unwrap();
+
+        let messages = parse_codebuddy_extension_log_file(&path);
+
+        assert!(messages.is_empty());
     }
 }

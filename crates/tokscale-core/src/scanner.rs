@@ -261,15 +261,6 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
                 "*.log" => file_name.ends_with(".log"),
-                "codebuddy-extension-log" => {
-                    file_name.ends_with(".log")
-                        && path.components().any(|component| {
-                            component
-                                .as_os_str()
-                                .to_string_lossy()
-                                .eq_ignore_ascii_case("Tencent-Cloud.coding-copilot")
-                        })
-                }
                 // OpenClaw: also match archived transcripts
                 // (<uuid>.jsonl.deleted.<ts>, <uuid>.jsonl.reset.<ts>)
                 "*.jsonl*" => {

@@ -169,7 +169,7 @@ impl SourceUnit {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SourceUnitMeta {
     #[default]
     None,
@@ -180,9 +180,19 @@ pub(crate) enum SourceUnitMeta {
     KiroFile,
     KiroSqlite,
     KiroGlobalStorage,
+    CodeBuddyJsonl,
+    CodeBuddyExtensionLog {
+        source: CodeBuddyLogSource,
+    },
     Codex {
         is_headless: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodeBuddyLogSource {
+    Extension,
+    Host,
 }
 
 impl SourceUnitMeta {
@@ -216,6 +226,9 @@ impl SourceUnitMeta {
                 ParserId::KiroGlobalStorage,
                 MODEL_ID_CANONICALIZATION_REVISION,
             ),
+            Self::CodeBuddyJsonl | Self::CodeBuddyExtensionLog { .. } => {
+                ParserVersion::new(ParserId::CodeBuddy, MODEL_ID_CANONICALIZATION_REVISION)
+            }
             Self::Codex { .. } => {
                 ParserVersion::new(ParserId::Codex, MODEL_ID_CANONICALIZATION_REVISION)
             }

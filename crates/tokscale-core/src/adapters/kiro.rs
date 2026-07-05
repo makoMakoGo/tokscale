@@ -80,6 +80,8 @@ impl LocalSourceAdapter for KiroAdapter {
                 | SourceUnitMeta::AntigravityCliSqlite
                 | SourceUnitMeta::OpenCodeSqlite
                 | SourceUnitMeta::OpenCodeJson
+                | SourceUnitMeta::CodeBuddyJsonl
+                | SourceUnitMeta::CodeBuddyExtensionLog { .. }
                 | SourceUnitMeta::Codex { .. } => unreachable!("unexpected Kiro source unit meta"),
             })
             .collect()

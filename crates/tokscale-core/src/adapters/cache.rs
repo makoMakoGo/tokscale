@@ -102,17 +102,30 @@ pub(crate) fn fold_units(
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
 ) {
+    fold_units_with_filter(parsed, ctx, sink, |_, messages| messages);
+}
+
+pub(crate) fn fold_units_with_filter<F>(
+    parsed: Vec<ParsedUnit>,
+    ctx: &mut FoldContext<'_>,
+    sink: &mut dyn MessageSink,
+    mut filter: F,
+) where
+    F: FnMut(&SourceUnit, Vec<UnifiedMessage>) -> Vec<UnifiedMessage>,
+{
     for unit in parsed {
         debug_assert!(unit.unit.client.local_def().is_some());
         let path = unit.unit.path.clone();
+        let parser_version = unit.unit.parser_version;
         let cache_write = unit.cache_write;
         let has_cache_write = cache_write.is_some();
         let messages = resolve_messages(unit.messages, ctx);
         write_cache(cache_write, ctx, &messages);
+        let messages = filter(&unit.unit, messages);
         sink.extend_messages(messages);
 
         if !has_cache_write && unit.invalidate_cache {
-            ctx.source_cache.remove(&path, unit.unit.parser_version);
+            ctx.source_cache.remove(&path, parser_version);
         }
     }
 }
