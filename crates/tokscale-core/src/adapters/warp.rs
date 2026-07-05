@@ -6,6 +6,7 @@ use crate::adapters::{
     ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
+use crate::local_clients;
 use crate::sessions;
 
 pub(crate) struct WarpAdapter;
@@ -19,11 +20,11 @@ impl LocalSourceAdapter for WarpAdapter {
         let def = ClientId::Warp
             .local_def()
             .expect("Warp adapter must have local scan policy");
-        let default_root = std::path::PathBuf::from(
-            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
-        );
 
-        let mut paths = adapter_discover::scan_roots([default_root], def.pattern);
+        let mut paths = adapter_discover::scan_roots(
+            local_clients::warp_sqlite_roots_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
+            def.pattern,
+        );
         paths.extend(adapter_discover::scan_roots(
             adapter_discover::extra_roots_for_client(ClientId::Warp, ctx),
             def.pattern,
@@ -75,7 +76,7 @@ mod tests {
     #[test]
     fn warp_adapter_discovers_default_and_extra_sqlite_databases() {
         let home = tempfile::TempDir::new().unwrap();
-        let default_db = home.path().join(".local/share/warp/Warp/data/warp.sqlite");
+        let default_db = home.path().join(".local/state/warp-terminal/warp.sqlite");
         let extra_root = home.path().join("extra-warp-data");
         let extra_db = extra_root.join("warp.sqlite");
         for path in [&default_db, &extra_db] {

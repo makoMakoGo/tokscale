@@ -48,7 +48,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `commandcode` | Command Code | `~/.commandcode/projects/**/*.jsonl` | Estimated from transcripts. |
 | `grok` | Grok Build | `$GROK_HOME/sessions/**/updates.jsonl`, fallback `~/.grok/sessions/` | Reads total-token deltas and applies the fixed total-only bucket allocation from ADR 0017. |
 | `crush` | Crush | `~/.local/share/crush/projects.json` identity only | Disabled for normal local token reports; no accepted token-level source. |
-| `warp` | Warp/Oz | `~/.local/share/warp/Warp/data/warp.sqlite` | Reads local per-conversation, per-model token totals and applies the fixed total-only bucket allocation from ADR 0017. |
+| `warp` | Warp/Oz | `~/.local/state/warp-terminal/warp.sqlite` on Linux, Warp App Group/Application Support on macOS, `%LOCALAPPDATA%\warp\Warp\data\warp.sqlite` on Windows | Reads local per-conversation, per-model token totals and applies the fixed total-only bucket allocation from ADR 0017. |
 
 ## Extra scan roots
 

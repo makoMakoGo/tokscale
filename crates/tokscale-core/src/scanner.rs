@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::clients::ClientId;
+use crate::local_clients;
 use crate::LocalClientDef;
 use serde::{Deserialize, Serialize};
 
@@ -658,6 +659,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Zed
                 | ClientId::Codebuff
                 | ClientId::Kimi
+                | ClientId::Warp
         ) {
             continue;
         }
@@ -665,6 +667,12 @@ fn scan_all_clients_with_env_strategy_inner(
         let def = local_def(*client_id);
         let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
+    }
+
+    if enabled.contains(&ClientId::Warp) {
+        for path in local_clients::warp_sqlite_roots_with_env_strategy(home_dir, use_env_roots) {
+            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Warp, path);
+        }
     }
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
@@ -2457,7 +2465,7 @@ mod tests {
             ..Default::default()
         };
 
-        let default_warp_db = home.join(".local/share/warp/Warp/data/warp.sqlite");
+        let default_warp_db = home.join(".local/state/warp-terminal/warp.sqlite");
         fs::create_dir_all(default_warp_db.parent().unwrap()).unwrap();
         File::create(&default_warp_db).unwrap();
         let extra_warp_db = home.join("extra-warp-data/warp.sqlite");
