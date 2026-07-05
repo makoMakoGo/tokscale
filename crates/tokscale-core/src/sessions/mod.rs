@@ -31,6 +31,7 @@ pub mod qwen;
 pub mod roocode;
 pub mod trae;
 pub(crate) mod utils;
+pub mod warp;
 pub mod zcode;
 pub mod zed;
 

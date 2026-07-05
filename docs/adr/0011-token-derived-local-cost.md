@@ -33,8 +33,10 @@ reports look precise while measuring different things.
   credits-only records are dropped instead of being converted into zero-token
   cost.
 - Aggregate-only clients without a token-level source do not contribute usage
-  rows. Crush and Warp are disabled under this rule; Warp BYOK support can be
-  added later only if a token-level source is found.
+  rows. Crush remains disabled under this rule.
+- Total-only token sources with accepted local attribution may contribute usage
+  rows by applying the fixed bucket allocation from ADR 0017. These rows still
+  ignore app-reported spend and credits.
 - Cache serialization layout changes bump `CACHE_FORMAT_VERSION`. Parser or
   source semantic changes, including model canonicalization, bump the relevant
   `SourceUnit` parser revision so stale source-message cache shards are
@@ -48,6 +50,7 @@ reports look precise while measuring different things.
   subscriptions, credits, bundled pricing, reseller markup, rounding,
   service-tier pricing, or route-specific pricing.
 - Clients that only expose spend cannot be added as normal usage sources until
-  a token-level source is found.
+  a token-level source is found. Sources that expose only token totals must use
+  the explicit fixed allocation decision in ADR 0017.
 - First run after parser or source semantic changes may rebuild the affected
   source-message cache shards.

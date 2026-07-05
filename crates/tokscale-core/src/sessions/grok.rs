@@ -4,14 +4,14 @@
 //! `~/.grok/sessions/<urlencoded-workspace>/<session-id>/updates.jsonl`.
 //! Current logs expose cumulative `totalTokens` counters without a stable
 //! input/output split, so this parser records per-turn positive total-token
-//! deltas as input tokens.
+//! deltas with the fixed local-history token bucket allocation.
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
     read_file_or_none,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::{model_aliases, TokenBreakdown};
+use crate::{model_aliases, token_imputation};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -74,13 +74,7 @@ impl ActiveTurn {
             PROVIDER_ID,
             metadata.session_id.clone(),
             self.timestamp,
-            TokenBreakdown {
-                input: token_delta,
-                output: 0,
-                cache_read: 0,
-                cache_write: 0,
-                reasoning: 0,
-            },
+            token_imputation::impute_total_only_token_breakdown(token_delta),
             0.0,
             Some(crate::sessions::dedup_hash_str(&format!(
                 "grok:{}:{}",
@@ -448,12 +442,17 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "composer-2.5-fast");
         assert_eq!(messages[0].provider_id.as_ref(), "xai");
         assert_eq!(messages[0].session_id.as_ref(), "session-1");
-        assert_eq!(messages[0].tokens.input, 200);
-        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(
+            messages[0].tokens,
+            crate::token_imputation::impute_total_only_token_breakdown(200)
+        );
         assert_eq!(messages[0].timestamp, 1700000003000);
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/tmp/project"));
         assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
-        assert_eq!(messages[1].tokens.input, 150);
+        assert_eq!(
+            messages[1].tokens,
+            crate::token_imputation::impute_total_only_token_breakdown(150)
+        );
         assert_eq!(messages[1].timestamp, 1700000005000);
     }
 
@@ -470,7 +469,10 @@ mod tests {
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "composer-2.5-fast");
-        assert_eq!(messages[0].tokens.input, 220);
+        assert_eq!(
+            messages[0].tokens,
+            crate::token_imputation::impute_total_only_token_breakdown(220)
+        );
     }
 
     #[test]
@@ -487,7 +489,10 @@ mod tests {
 
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(
+            messages[0].tokens,
+            crate::token_imputation::impute_total_only_token_breakdown(100)
+        );
         assert_eq!(messages[0].timestamp, 1700000005000);
     }
 
@@ -501,7 +506,10 @@ mod tests {
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), UNKNOWN_MODEL);
-        assert_eq!(messages[0].tokens.input, 120);
+        assert_eq!(
+            messages[0].tokens,
+            crate::token_imputation::impute_total_only_token_breakdown(120)
+        );
         assert_eq!(messages[0].timestamp, 1700000000000);
     }
 
@@ -516,7 +524,10 @@ mod tests {
         let messages = parse_grok_updates_file(&path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), UNKNOWN_MODEL);
-        assert_eq!(messages[0].tokens.input, 150);
+        assert_eq!(
+            messages[0].tokens,
+            crate::token_imputation::impute_total_only_token_breakdown(150)
+        );
         assert_eq!(messages[0].timestamp, 1700000002000);
     }
 }

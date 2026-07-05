@@ -124,12 +124,6 @@ pub(crate) fn client_filter_explicitly_requests_cursor(clients: &Option<Vec<Stri
         .is_some_and(|sources| sources.iter().any(|source| source == "cursor"))
 }
 
-pub(crate) fn client_filter_explicitly_requests_warp(clients: &Option<Vec<String>>) -> bool {
-    clients
-        .as_ref()
-        .is_some_and(|sources| sources.iter().any(|source| source == "warp"))
-}
-
 #[derive(Debug)]
 pub(crate) struct CursorSetupState {
     has_credentials: bool,
@@ -212,23 +206,11 @@ pub(crate) fn emit_cursor_setup_warnings(warnings: &[String]) {
     }
 }
 
-pub(crate) fn warp_setup_warnings_for_report(clients: &Option<Vec<String>>) -> Vec<String> {
-    if !client_filter_explicitly_requests_warp(clients) {
-        return Vec::new();
-    }
-
-    vec![
-        "Warp aggregate request/spend data is not included in local reports because it has no token buckets. Tokscale does not parse local Warp/Oz session transcripts; add Warp again only when a token-level source is available.".to_string(),
-    ]
-}
-
 pub(crate) fn setup_warnings_for_report(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
 ) -> Vec<String> {
-    let mut warnings = cursor_setup_warnings_for_report(home_dir, clients);
-    warnings.extend(warp_setup_warnings_for_report(clients));
-    warnings
+    cursor_setup_warnings_for_report(home_dir, clients)
 }
 
 pub(crate) fn should_auto_sync_cursor_for_local_report(

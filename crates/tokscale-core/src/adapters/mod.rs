@@ -17,6 +17,7 @@ mod omp;
 mod pi;
 mod trae;
 mod vscode_tasks;
+mod warp;
 mod zed;
 
 use std::collections::HashSet;
@@ -252,7 +253,8 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::Cline => ParserId::Cline,
         ClientId::CommandCode => ParserId::CommandCode,
         ClientId::Grok => ParserId::Grok,
-        ClientId::Crush | ClientId::Warp => {
+        ClientId::Warp => ParserId::Warp,
+        ClientId::Crush => {
             unreachable!("excluded clients do not create local source units")
         }
     }
@@ -291,7 +293,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 30] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -321,6 +323,7 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &kiro::KIRO_ADAPTER,
     &junie::JUNIE_ADAPTER,
     &file::COMMANDCODE_ADAPTER,
+    &warp::WARP_ADAPTER,
 ];
 
 pub(crate) fn local_source_adapters() -> &'static [&'static dyn LocalSourceAdapter] {
@@ -387,11 +390,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disabled_cost_only_clients_are_not_registered_as_local_adapters() {
-        assert!(adapter_for(ClientId::Warp).is_none());
+    fn crush_is_not_registered_as_local_adapter() {
         assert!(adapter_for(ClientId::Crush).is_none());
-        assert!(selected_adapters(&["warp".to_string()]).is_empty());
         assert!(selected_adapters(&["crush".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn warp_is_registered_as_local_sqlite_adapter() {
+        assert_eq!(
+            adapter_for(ClientId::Warp).map(|adapter| adapter.client()),
+            Some(ClientId::Warp)
+        );
+        assert_eq!(selected_adapters(&["warp".to_string()]).len(), 1);
     }
 
     #[test]

@@ -33,7 +33,7 @@ fn local_def(client_id: ClientId) -> &'static LocalClientDef {
 }
 
 fn scanner_enabled_client(client: ClientId) -> bool {
-    !matches!(client, ClientId::Crush | ClientId::Warp)
+    !matches!(client, ClientId::Crush)
 }
 
 /// User-controlled scanner settings loaded from a config file.
@@ -326,6 +326,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "chat-messages.json" => file_name == "chat-messages.json",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
+                "warp.sqlite" => file_name == "warp.sqlite",
                 "*.db" => file_name.ends_with(".db"),
                 _ => false,
             }
@@ -2445,23 +2446,23 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_all_clients_skips_cost_only_clients() {
+    fn test_scan_all_clients_skips_crush_but_scans_warp_sqlite() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         let settings = ScannerSettings {
             extra_scan_paths: BTreeMap::from([
-                (
-                    "warp".to_string(),
-                    vec![home.join(".config/tokscale/warp-cache")],
-                ),
+                ("warp".to_string(), vec![home.join("extra-warp-data")]),
                 ("crush".to_string(), vec![home.join(".local/share/crush")]),
             ]),
             ..Default::default()
         };
 
-        let warp_file = home.join(".config/tokscale/warp-cache/usage.json");
-        fs::create_dir_all(warp_file.parent().unwrap()).unwrap();
-        fs::write(&warp_file, "{}").unwrap();
+        let default_warp_db = home.join(".local/share/warp/Warp/data/warp.sqlite");
+        fs::create_dir_all(default_warp_db.parent().unwrap()).unwrap();
+        File::create(&default_warp_db).unwrap();
+        let extra_warp_db = home.join("extra-warp-data/warp.sqlite");
+        fs::create_dir_all(extra_warp_db.parent().unwrap()).unwrap();
+        File::create(&extra_warp_db).unwrap();
 
         let crush_db = home.join(".local/share/crush/project/crush.db");
         fs::create_dir_all(crush_db.parent().unwrap()).unwrap();
@@ -2482,9 +2483,15 @@ mod tests {
             &settings,
         );
 
-        assert!(all_clients.get(ClientId::Warp).is_empty());
+        assert_eq!(
+            all_clients.get(ClientId::Warp),
+            &vec![default_warp_db.clone(), extra_warp_db.clone()]
+        );
         assert!(all_clients.get(ClientId::Crush).is_empty());
-        assert_eq!(explicit_warp.total_files(), 0);
+        assert_eq!(
+            explicit_warp.get(ClientId::Warp),
+            &vec![default_warp_db, extra_warp_db]
+        );
         assert_eq!(explicit_crush.total_files(), 0);
     }
 

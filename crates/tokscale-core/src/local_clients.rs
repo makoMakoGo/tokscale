@@ -387,11 +387,11 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
     LocalClientEntry {
         client: ClientId::Warp,
         def: LocalClientDef {
-            root: PathRoot::Config,
-            relative_path: "warp-cache",
-            pattern: "usage*.json",
+            root: PathRoot::XdgData,
+            relative_path: "warp/Warp/data",
+            pattern: "warp.sqlite",
             headless: false,
-            parse_local: false,
+            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -488,14 +488,18 @@ mod tests {
     }
 
     #[test]
-    fn cost_only_clients_are_registered_but_not_locally_parsed() {
+    fn crush_is_registered_but_not_locally_parsed() {
         let crush = ClientId::Crush.local_def().expect("crush has scan policy");
         assert_eq!(crush.relative_path, "crush/projects.json");
         assert!(!ClientId::Crush.parse_local());
+    }
 
+    #[test]
+    fn warp_reads_local_sqlite_usage() {
         let warp = ClientId::Warp.local_def().expect("warp has scan policy");
-        assert_eq!(warp.relative_path, "warp-cache");
-        assert!(!ClientId::Warp.parse_local());
+        assert_eq!(warp.relative_path, "warp/Warp/data");
+        assert_eq!(warp.pattern, "warp.sqlite");
+        assert!(ClientId::Warp.parse_local());
     }
 
     #[test]

@@ -31,8 +31,10 @@ The most important behavioral differences are:
 - Claude placeholder cleanup is not represented as a synthetic client/source.
 - Client identity is catalog-based instead of being repeated through scattered
   switch statements.
-- `Crush` and `Warp` do not contribute normal local token report rows because
-  they do not expose an accepted token-level local source.
+- `Crush` does not contribute normal local token report rows because it does
+  not expose an accepted token-level local source.
+- Total-only token sources with accepted local attribution, such as Grok and
+  local Warp SQLite usage, use the fixed bucket allocation from ADR 0017.
 - Subscription quota data is a separate explicit surface, not part of local
   token reports.
 
