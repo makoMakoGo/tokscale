@@ -260,6 +260,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "*.log" => file_name.ends_with(".log"),
                 // OpenClaw: also match archived transcripts
                 // (<uuid>.jsonl.deleted.<ts>, <uuid>.jsonl.reset.<ts>)
                 "*.jsonl*" => {

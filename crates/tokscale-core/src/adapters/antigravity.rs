@@ -83,6 +83,8 @@ impl LocalSourceAdapter for AntigravityAdapter {
                 | SourceUnitMeta::KiroFile
                 | SourceUnitMeta::KiroSqlite
                 | SourceUnitMeta::KiroGlobalStorage
+                | SourceUnitMeta::CodeBuddyJsonl
+                | SourceUnitMeta::CodeBuddyExtensionLog { .. }
                 | SourceUnitMeta::Codex { .. } => {
                     unreachable!("unexpected Antigravity source unit meta")
                 }

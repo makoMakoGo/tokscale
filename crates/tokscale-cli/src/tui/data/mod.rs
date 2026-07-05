@@ -291,6 +291,11 @@ mod tests {
             .unwrap();
         assert_eq!(clients[pi_index + 1], ClientId::Omp);
         assert_eq!(clients[pi_index + 2], ClientId::Kimi);
+        let codebuff_index = clients
+            .iter()
+            .position(|client| *client == ClientId::Codebuff)
+            .unwrap();
+        assert_eq!(clients[codebuff_index + 1], ClientId::CodeBuddy);
         let zed_index = clients
             .iter()
             .position(|client| *client == ClientId::Zed)
@@ -366,6 +371,10 @@ mod tests {
             "Codebuff"
         );
         assert_eq!(
+            crate::tui::client_ui::display_name(ClientId::CodeBuddy),
+            "CodeBuddy"
+        );
+        assert_eq!(
             crate::tui::client_ui::display_name(ClientId::Antigravity),
             "Antigravity"
         );
@@ -407,6 +416,10 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), Some('h'));
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hermes), Some('e'));
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codebuff), Some('b'));
+        assert_eq!(
+            crate::tui::client_ui::hotkey(ClientId::CodeBuddy),
+            Some('f')
+        );
         assert_eq!(
             crate::tui::client_ui::hotkey(ClientId::Antigravity),
             Some('a')
@@ -487,6 +500,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('b'),
             Some(ClientId::Codebuff)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('f'),
+            Some(ClientId::CodeBuddy)
         );
         assert_eq!(
             crate::tui::client_ui::from_hotkey('a'),

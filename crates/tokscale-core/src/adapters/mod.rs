@@ -1,6 +1,7 @@
 mod antigravity;
 pub(crate) mod cache;
 mod claude;
+mod codebuddy;
 mod codebuff;
 mod codex;
 pub(crate) mod discover;
@@ -168,7 +169,7 @@ impl SourceUnit {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SourceUnitMeta {
     #[default]
     None,
@@ -179,9 +180,19 @@ pub(crate) enum SourceUnitMeta {
     KiroFile,
     KiroSqlite,
     KiroGlobalStorage,
+    CodeBuddyJsonl,
+    CodeBuddyExtensionLog {
+        source: CodeBuddyLogSource,
+    },
     Codex {
         is_headless: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodeBuddyLogSource {
+    Extension,
+    Host,
 }
 
 impl SourceUnitMeta {
@@ -215,6 +226,9 @@ impl SourceUnitMeta {
                 ParserId::KiroGlobalStorage,
                 MODEL_ID_CANONICALIZATION_REVISION,
             ),
+            Self::CodeBuddyJsonl | Self::CodeBuddyExtensionLog { .. } => {
+                ParserVersion::new(ParserId::CodeBuddy, MODEL_ID_CANONICALIZATION_REVISION)
+            }
             Self::Codex { .. } => {
                 ParserVersion::new(ParserId::Codex, MODEL_ID_CANONICALIZATION_REVISION)
             }
@@ -244,6 +258,7 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::Copilot => ParserId::Copilot,
         ClientId::Goose => ParserId::Goose,
         ClientId::Codebuff => ParserId::Codebuff,
+        ClientId::CodeBuddy => ParserId::CodeBuddy,
         ClientId::Antigravity => ParserId::Antigravity,
         ClientId::Zed => ParserId::Zed,
         ClientId::Zcode => ParserId::Zcode,
@@ -293,7 +308,7 @@ pub(crate) struct ParsedUnit {
     pub invalidate_cache: bool,
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 30] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 31] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -310,6 +325,7 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 30] = [
     &file::QWEN_ADAPTER,
     &file::MUX_ADAPTER,
     &codebuff::CODEBUFF_ADAPTER,
+    &codebuddy::CODEBUDDY_ADAPTER,
     &openclaw::OPENCLAW_ADAPTER,
     &vscode_tasks::ROOCODE_ADAPTER,
     &vscode_tasks::KILOCODE_ADAPTER,

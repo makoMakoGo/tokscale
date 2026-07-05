@@ -38,6 +38,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `copilot` | Copilot | `~/.copilot/otel/*.jsonl` or `COPILOT_OTEL_FILE_EXPORTER_PATH` | Requires Copilot OTEL file export. |
 | `goose` | Goose | `~/.local/share/goose/sessions/sessions.db` and platform legacy roots | `GOOSE_PATH_ROOT` can point at an alternate root. |
 | `codebuff` | Codebuff | `$CODEBUFF_DATA_DIR/projects/**/chat-messages.json`, fallback `~/.config/manicode/projects/` | Also scans dev/staging Manicode roots. |
+| `codebuddy` | CodeBuddy | `~/.codebuddy/projects/**/*.jsonl` and local CodeBuddy/VS Code extension logs | Reads assistant/function-call usage and final agent usage from local CodeBuddy records. |
 | `antigravity` | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` and Antigravity CLI conversation databases | IDE data requires `tokscale antigravity sync`; CLI databases are read directly. |
 | `zed` | Zed Agent | `~/.local/share/zed/threads/threads.db` | Hosted Zed model usage only; external ACP agents are not included. |
 | `zcode` | ZCode | `~/.zcode/projects/**/*.jsonl` | Reads Z.ai ADE JSONL sessions. |
