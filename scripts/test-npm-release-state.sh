@@ -95,6 +95,10 @@ if [[ "${1:-}" == "view" ]]; then
     echo "npm ERR! registry temporarily unavailable" >&2
     exit 1
   fi
+  if [[ -n "${FAKE_NPM_MISSING_SPEC:-}" && "${spec}" == "${FAKE_NPM_MISSING_SPEC}" ]]; then
+    echo "npm ERR! code E404" >&2
+    exit 1
+  fi
   case "${spec}" in
     *@3.1.0|*@3.1.0-beta.1|*@3.1.0+build-1|*@3.1.0+build-2)
       echo "npm ERR! code E404" >&2
@@ -176,6 +180,33 @@ test_allows_first_publish_when_packages_are_not_visible_yet() {
     grep -q "@juya-ai/tokscale-cli: not visible on npm yet" "${output}"
     grep -q "@juya-ai/tokscale: not visible on npm yet" "${output}"
     grep -q "npm release-state OK for 3.0.0" "${output}"
+  )
+}
+
+test_rejects_mixed_visibility_without_recovery() {
+  local work="${TMP_DIR}/mixed-visibility"
+  mkdir -p "${work}/scripts"
+  cp "${CHECK_SCRIPT}" "${work}/scripts/check-npm-release-state.sh"
+  (
+    cd "${work}"
+    write_release_package_manifests "3.0.1"
+    local fake_npm="${TMP_DIR}/fake-npm-mixed-visibility"
+    write_fake_npm "${fake_npm}"
+
+    local output="${TMP_DIR}/mixed-visibility-output.txt"
+    if FAKE_NPM_LOG="${TMP_DIR}/mixed-visibility-npm.log" \
+      FAKE_NPM_PUBLISH_LOG="${TMP_DIR}/mixed-visibility-publish.log" \
+      FAKE_NPM_MISSING_SPEC="@juya-ai/tokscale" \
+      NPM_CMD="${fake_npm}" \
+      NPM_CHECK_AUTH=0 \
+      NEW_VERSION="3.0.1" \
+      RELEASE_BASE_VERSION="2.1.3" \
+      bash scripts/check-npm-release-state.sh >"${output}" 2>&1; then
+      echo "Expected mixed npm visibility to fail without recovery" >&2
+      return 1
+    fi
+
+    grep -q "@juya-ai/tokscale: package is not visible on npm, but other release packages are visible" "${output}"
   )
 }
 
@@ -474,6 +505,7 @@ EOF_MANIFEST
 
 test_refuses_repo_version_ahead_of_npm_without_recovery
 test_allows_first_publish_when_packages_are_not_visible_yet
+test_rejects_mixed_visibility_without_recovery
 test_recovery_allows_existing_target_versions_for_partial_retry
 test_recovery_requires_base_version
 test_precheck_fails_on_non_404_npm_lookup_errors

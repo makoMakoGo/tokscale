@@ -213,7 +213,7 @@ function generateReleaseNotes(version: string): string {
     "",
     `[![Tokscale](https://github.com/${REPO}/raw/main/.github/assets/hero-v2.png)](https://github.com/${REPO})`,
     "",
-    `# \`tokscale@v${version}\` is here!`,
+    `# \`@juya-ai/tokscale@v${version}\` is here!`,
     "</div>",
     "",
     "## What's Changed",

@@ -155,6 +155,8 @@ primary_packages=("@juya-ai/tokscale-cli" "@juya-ai/tokscale")
 errors=()
 checked=0
 existing_targets=0
+visible_current_packages=0
+missing_current_packages=()
 
 while IFS=$'\t' read -r path package_name manifest_version; do
   [[ -n "${package_name}" ]] || continue
@@ -165,10 +167,17 @@ while IFS=$'\t' read -r path package_name manifest_version; do
   fi
 
   current_version=""
-  if npm_view_optional_version current_version "${package_name}" "${package_name}"; then
+  if npm_view_version_status current_version "${package_name}"; then
+    visible_current_packages=$((visible_current_packages + 1))
     echo "${package_name}: npm latest ${current_version}"
   else
-    echo "${package_name}: not visible on npm yet"
+    status=$?
+    if [[ ${status} -eq 1 ]]; then
+      missing_current_packages+=("${package_name}")
+      echo "${package_name}: not visible on npm yet"
+    else
+      errors+=("${package_name}: npm lookup failed")
+    fi
   fi
 
   if npm_view_optional_version target_version "${package_name}@${NEW_VERSION}" "${package_name}@${NEW_VERSION}"; then
@@ -191,6 +200,16 @@ done < <(release_packages)
 
 if [[ ${checked} -eq 0 ]]; then
   errors+=("No release packages found")
+fi
+
+if [[ ${#missing_current_packages[@]} -gt 0 ]]; then
+  if [[ ${visible_current_packages} -eq 0 ]]; then
+    echo "All release packages are not visible on npm yet; treating this as the first fork publish"
+  elif [[ "${RELEASE_RECOVERY}" != "true" ]]; then
+    for package_name in "${missing_current_packages[@]}"; do
+      errors+=("${package_name}: package is not visible on npm, but other release packages are visible")
+    done
+  fi
 fi
 
 if [[ "${RELEASE_RECOVERY}" == "true" ]]; then
