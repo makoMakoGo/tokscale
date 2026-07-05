@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
@@ -48,6 +48,7 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
             ctx.home_dir,
             ctx.use_env_roots,
         ));
+        dedup_units_by_canonical_path(&mut units);
         units.sort_by(|left, right| left.path.cmp(&right.path));
         units
     }
@@ -148,6 +149,15 @@ fn codebuddy_extension_log_units(home_dir: &str, use_env_roots: bool) -> Vec<Sou
         );
     }
     units
+}
+
+fn dedup_units_by_canonical_path(units: &mut Vec<SourceUnit>) {
+    let mut seen = HashSet::new();
+    units.retain(|unit| seen.insert(canonical_path_key(&unit.path)));
+}
+
+fn canonical_path_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn has_codebuddy_extension_component(path: &std::path::Path) -> bool {
@@ -343,6 +353,30 @@ mod tests {
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, wanted);
+    }
+
+    #[test]
+    fn codebuddy_discovery_dedups_duplicate_log_units_by_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.log");
+        write_file(&path, "");
+        let mut units = vec![
+            SourceUnit::plain_file(ClientId::CodeBuddy, path.clone()).with_meta(
+                SourceUnitMeta::CodeBuddyExtensionLog {
+                    source: CodeBuddyLogSource::Extension,
+                },
+            ),
+            SourceUnit::plain_file(ClientId::CodeBuddy, path.clone()).with_meta(
+                SourceUnitMeta::CodeBuddyExtensionLog {
+                    source: CodeBuddyLogSource::Extension,
+                },
+            ),
+        ];
+
+        dedup_units_by_canonical_path(&mut units);
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].path, path);
     }
 
     #[test]

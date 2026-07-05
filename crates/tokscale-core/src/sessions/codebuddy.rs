@@ -286,10 +286,10 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMess
             continue;
         };
         let usage_json = usage_json.trim();
-        let Some(json_end) = usage_json.rfind('}') else {
+        let Some(usage_json) = first_json_object(usage_json) else {
             continue;
         };
-        let mut bytes = usage_json.as_bytes()[..=json_end].to_vec();
+        let mut bytes = usage_json.as_bytes().to_vec();
         let usage = match simd_json::from_slice::<CodeBuddyUsage>(&mut bytes) {
             Ok(usage) => usage,
             Err(_) => continue,
@@ -328,6 +328,43 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMess
     }
 
     messages
+}
+
+fn first_json_object(value: &str) -> Option<&str> {
+    let start = value.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (offset, ch) in value[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    let end = start + offset + ch.len_utf8();
+                    return Some(&value[start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn first_present(values: &[Option<i64>]) -> i64 {
@@ -502,6 +539,24 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_read, 20841);
         assert_eq!(messages[0].tokens.total(), 33161);
         assert_eq!(messages[0].workspace_label, None);
+    }
+
+    #[test]
+    fn extension_log_extracts_usage_json_from_prefixed_and_suffixed_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.log");
+        std::fs::write(
+            &path,
+            r#"[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: [info] {"inputTokens":10,"outputTokens":2,"totalTokens":12,"label":"keeps } in strings"} trailing } text"#,
+        )
+        .unwrap();
+
+        let messages = parse_codebuddy_extension_log_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 2);
+        assert_eq!(messages[0].tokens.total(), 12);
     }
 
     #[test]
