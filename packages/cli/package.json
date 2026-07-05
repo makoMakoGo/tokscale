@@ -30,13 +30,8 @@
   "dependencies": {},
   "optionalDependencies": {
     "@juya-ai/tokscale-cli-darwin-arm64": "4.0.4",
-    "@juya-ai/tokscale-cli-darwin-x64": "4.0.4",
     "@juya-ai/tokscale-cli-linux-x64-gnu": "4.0.4",
-    "@juya-ai/tokscale-cli-linux-x64-musl": "4.0.4",
-    "@juya-ai/tokscale-cli-linux-arm64-gnu": "4.0.4",
-    "@juya-ai/tokscale-cli-linux-arm64-musl": "4.0.4",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "4.0.4",
-    "@juya-ai/tokscale-cli-win32-arm64-msvc": "4.0.4"
+    "@juya-ai/tokscale-cli-win32-x64-msvc": "4.0.4"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

@@ -17,13 +17,8 @@ git_add_release_files() {
     packages/cli/package.json \
     Cargo.lock \
     packages/cli-darwin-arm64/package.json \
-    packages/cli-darwin-x64/package.json \
     packages/cli-linux-x64-gnu/package.json \
-    packages/cli-linux-x64-musl/package.json \
-    packages/cli-linux-arm64-gnu/package.json \
-    packages/cli-linux-arm64-musl/package.json \
     packages/cli-win32-x64-msvc/package.json \
-    packages/cli-win32-arm64-msvc/package.json \
     packages/tokscale/package.json \
     scripts/check-version-coherence.sh \
     scripts/prepare-release-provenance.sh
@@ -34,13 +29,8 @@ write_manifests() {
   mkdir -p \
     packages/cli \
     packages/cli-darwin-arm64 \
-    packages/cli-darwin-x64 \
     packages/cli-linux-x64-gnu \
-    packages/cli-linux-x64-musl \
-    packages/cli-linux-arm64-gnu \
-    packages/cli-linux-arm64-musl \
     packages/cli-win32-x64-msvc \
-    packages/cli-win32-arm64-msvc \
     packages/tokscale
 
   cat > Cargo.toml <<EOF_MANIFEST
@@ -70,26 +60,16 @@ EOF_LOCK
   "version": "${version}",
   "optionalDependencies": {
     "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
-    "@juya-ai/tokscale-cli-darwin-x64": "${version}",
     "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-linux-x64-musl": "${version}",
-    "@juya-ai/tokscale-cli-linux-arm64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-linux-arm64-musl": "${version}",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}",
-    "@juya-ai/tokscale-cli-win32-arm64-msvc": "${version}"
+    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
 
   for pkg in \
     cli-darwin-arm64 \
-    cli-darwin-x64 \
     cli-linux-x64-gnu \
-    cli-linux-x64-musl \
-    cli-linux-arm64-gnu \
-    cli-linux-arm64-musl \
-    cli-win32-x64-msvc \
-    cli-win32-arm64-msvc; do
+    cli-win32-x64-msvc; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
   "name": "@juya-ai/tokscale-${pkg}",

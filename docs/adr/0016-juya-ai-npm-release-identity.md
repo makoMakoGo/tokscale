@@ -23,6 +23,15 @@ Use the `@juya-ai` npm organization for fork releases:
 - native platform packages: `@juya-ai/tokscale-cli-*`;
 - installed binary command: `tokscale`.
 
+The initial fork release only publishes native packages for the maintainer's
+supported environments:
+
+- `@juya-ai/tokscale-cli-darwin-arm64` for Apple Silicon macOS;
+- `@juya-ai/tokscale-cli-linux-x64-gnu` for x86_64 glibc Linux / WSL;
+- `@juya-ai/tokscale-cli-win32-x64-msvc` for x86_64 Windows.
+
+Unsupported platform packages are not published.
+
 The fork does not reuse the upstream npm names `tokscale` or `@tokscale/*`.
 
 Use GitHub repository metadata for `makoMakoGo/tokscale` in npm manifests and

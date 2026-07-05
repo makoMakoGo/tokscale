@@ -44,7 +44,7 @@ fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
 /// otherwise keeps the high-water mark resident in arena free lists, which
 /// is most of the TUI's idle RSS (ADR 0008).
 fn trim_allocator() {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {
         libc::malloc_trim(0);
     }

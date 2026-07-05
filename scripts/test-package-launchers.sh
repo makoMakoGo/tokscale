@@ -98,19 +98,20 @@ function detectLibcKind() {
     return existsSync("/etc/alpine-release") ? "musl" : "gnu";
   }
 
-  return "gnu";
+  return null;
 }
 
 const arch = process.arch;
 
 if (process.platform === "darwin") {
   if (arch === "arm64") console.log("cli-darwin-arm64");
-  else if (arch === "x64") console.log("cli-darwin-x64");
   else process.exit(1);
 } else if (process.platform === "linux") {
   const libc = detectLibcKind();
-  if (arch === "arm64") console.log(libc === "musl" ? "cli-linux-arm64-musl" : "cli-linux-arm64-gnu");
-  else if (arch === "x64") console.log(libc === "musl" ? "cli-linux-x64-musl" : "cli-linux-x64-gnu");
+  if (arch === "x64" && libc === "gnu") console.log("cli-linux-x64-gnu");
+  else process.exit(1);
+} else if (process.platform === "win32") {
+  if (arch === "x64") console.log("cli-win32-x64-msvc");
   else process.exit(1);
 } else {
   process.exit(1);

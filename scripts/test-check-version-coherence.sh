@@ -13,13 +13,8 @@ write_release_manifests() {
   mkdir -p \
     packages/cli \
     packages/cli-darwin-arm64 \
-    packages/cli-darwin-x64 \
     packages/cli-linux-x64-gnu \
-    packages/cli-linux-x64-musl \
-    packages/cli-linux-arm64-gnu \
-    packages/cli-linux-arm64-musl \
     packages/cli-win32-x64-msvc \
-    packages/cli-win32-arm64-msvc \
     packages/tokscale
 
   cat > Cargo.toml <<EOF_MANIFEST
@@ -55,26 +50,16 @@ EOF_LOCK
   "version": "${version}",
   "optionalDependencies": {
     "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
-    "@juya-ai/tokscale-cli-darwin-x64": "${version}",
     "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-linux-x64-musl": "${version}",
-    "@juya-ai/tokscale-cli-linux-arm64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-linux-arm64-musl": "${version}",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}",
-    "@juya-ai/tokscale-cli-win32-arm64-msvc": "${version}"
+    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
 
   for pkg in \
     cli-darwin-arm64 \
-    cli-darwin-x64 \
     cli-linux-x64-gnu \
-    cli-linux-x64-musl \
-    cli-linux-arm64-gnu \
-    cli-linux-arm64-musl \
-    cli-win32-x64-msvc \
-    cli-win32-arm64-msvc; do
+    cli-win32-x64-msvc; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
   "name": "@juya-ai/tokscale-${pkg}",
@@ -143,8 +128,8 @@ EOF_LOCK
   )
 }
 
-test_accepts_new_platform_package_when_manifest_and_optional_dependency_match() {
-  local work="${TMP_DIR}/new-platform-package"
+test_rejects_unsupported_platform_package_when_manifest_and_optional_dependency_match() {
+  local work="${TMP_DIR}/unsupported-platform-package"
   mkdir -p "${work}/scripts"
   cp "${SCRIPT_UNDER_TEST}" "${work}/scripts/check-version-coherence.sh"
   (
@@ -167,7 +152,14 @@ manifest["optionalDependencies"]["@juya-ai/tokscale-cli-linux-riscv64-gnu"] = "3
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
-    bash scripts/check-version-coherence.sh --expect-version "3.0.0" >"${TMP_DIR}/new-platform-package-output.txt" 2>&1
+    local output="${TMP_DIR}/unsupported-platform-package-output.txt"
+    if bash scripts/check-version-coherence.sh --expect-version "3.0.0" >"${output}" 2>&1; then
+      echo "Expected unsupported platform package to fail" >&2
+      return 1
+    fi
+
+    grep -q "Unsupported platform package manifests: \\['@juya-ai/tokscale-cli-linux-riscv64-gnu'\\]" "${output}"
+    grep -q "Unsupported platform optionalDependencies: \\['@juya-ai/tokscale-cli-linux-riscv64-gnu'\\]" "${output}"
   )
 }
 
@@ -178,14 +170,14 @@ test_rejects_missing_canonical_platform_when_manifest_and_optional_dependency_ar
   (
     cd "${work}"
     write_release_manifests "3.0.0"
-    rm -rf packages/cli-win32-arm64-msvc
+    rm -rf packages/cli-win32-x64-msvc
     python3 - <<'PY'
 import json
 import pathlib
 
 path = pathlib.Path("packages/cli/package.json")
 manifest = json.loads(path.read_text())
-manifest["optionalDependencies"].pop("@juya-ai/tokscale-cli-win32-arm64-msvc")
+manifest["optionalDependencies"].pop("@juya-ai/tokscale-cli-win32-x64-msvc")
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
@@ -195,15 +187,15 @@ PY
       return 1
     fi
 
-    grep -q "Missing required platform package manifests: \\['@juya-ai/tokscale-cli-win32-arm64-msvc'\\]" "${output}"
-    grep -q "Missing required platform optionalDependencies: \\['@juya-ai/tokscale-cli-win32-arm64-msvc'\\]" "${output}"
+    grep -q "Missing required platform package manifests: \\['@juya-ai/tokscale-cli-win32-x64-msvc'\\]" "${output}"
+    grep -q "Missing required platform optionalDependencies: \\['@juya-ai/tokscale-cli-win32-x64-msvc'\\]" "${output}"
   )
 }
 
 test_rejects_stale_workspace_versions_in_cargo_lock
 test_accepts_matching_workspace_versions_in_cargo_lock
 test_ignores_registry_duplicate_names_in_cargo_lock
-test_accepts_new_platform_package_when_manifest_and_optional_dependency_match
+test_rejects_unsupported_platform_package_when_manifest_and_optional_dependency_match
 test_rejects_missing_canonical_platform_when_manifest_and_optional_dependency_are_removed
 
 echo "check-version-coherence tests passed"

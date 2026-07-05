@@ -58,12 +58,7 @@ errors: list[str] = []
 
 required_platform_names = {
     "@juya-ai/tokscale-cli-darwin-arm64",
-    "@juya-ai/tokscale-cli-darwin-x64",
-    "@juya-ai/tokscale-cli-linux-arm64-gnu",
-    "@juya-ai/tokscale-cli-linux-arm64-musl",
     "@juya-ai/tokscale-cli-linux-x64-gnu",
-    "@juya-ai/tokscale-cli-linux-x64-musl",
-    "@juya-ai/tokscale-cli-win32-arm64-msvc",
     "@juya-ai/tokscale-cli-win32-x64-msvc",
 }
 
@@ -102,12 +97,24 @@ if missing_required_manifests:
         "Missing required platform package manifests: "
         f"{sorted(missing_required_manifests)}"
     )
+unsupported_manifests = platform_names - required_platform_names
+if unsupported_manifests:
+    errors.append(
+        "Unsupported platform package manifests: "
+        f"{sorted(unsupported_manifests)}"
+    )
 
 missing_required_optional = required_platform_names - actual_optional
 if missing_required_optional:
     errors.append(
         "Missing required platform optionalDependencies: "
         f"{sorted(missing_required_optional)}"
+    )
+unsupported_optional = actual_optional - required_platform_names
+if unsupported_optional:
+    errors.append(
+        "Unsupported platform optionalDependencies: "
+        f"{sorted(unsupported_optional)}"
     )
 
 if actual_optional != expected_optional:
