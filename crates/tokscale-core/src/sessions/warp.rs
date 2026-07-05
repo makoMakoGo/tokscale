@@ -269,9 +269,7 @@ fn parse_warp_timestamp(value: &str) -> Option<i64> {
 
     for format in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S"] {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, format) {
-            if let Some(local) = chrono::Local.from_local_datetime(&naive).single() {
-                return Some(local.timestamp_millis());
-            }
+            return Some(chrono::Utc.from_utc_datetime(&naive).timestamp_millis());
         }
     }
 
@@ -394,6 +392,18 @@ mod tests {
         assert_eq!(
             aggregate,
             token_imputation::impute_total_only_token_breakdown(1250)
+        );
+    }
+
+    #[test]
+    fn parses_naive_warp_timestamps_as_utc() {
+        assert_eq!(
+            parse_warp_timestamp("2026-07-04 15:34:55"),
+            Some(1_783_179_295_000)
+        );
+        assert_eq!(
+            parse_warp_timestamp("2026-07-04 15:33:07.822302200"),
+            Some(1_783_179_187_822)
         );
     }
 }

@@ -119,8 +119,9 @@ tokscale trae sync --since 30
 
 `warp` has two separate surfaces. Local reports read `warp.sqlite` when it is
 available. Those local rows are per-conversation/per-model aggregates, not
-turns; they are timestamped with the conversation `last_modified_at` value when
-present, then the latest query timestamp, then file mtime. The
+turns; they are timestamped with the conversation `last_modified_at` value
+when present, then the latest query timestamp, then file mtime. Warp's naive
+SQLite timestamps are interpreted as UTC. The
 `tokscale warp ...` commands still manage subscription aggregate usage cache
 and credentials:
 

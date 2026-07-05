@@ -8,6 +8,7 @@ const NUMERATORS: [u64; 5] = [
     104_142_575,
     35_553_511,
 ];
+const TOTAL_OVERFLOW_MESSAGE: &str = "total-only token imputation totals exceed i64::MAX";
 
 pub(crate) fn impute_total_only_token_breakdown(total: i64) -> TokenBreakdown {
     if total <= 0 {
@@ -57,7 +58,8 @@ pub(crate) fn impute_total_only_token_breakdowns(totals: &[i64]) -> Vec<TokenBre
         .iter()
         .copied()
         .filter(|total| *total > 0)
-        .fold(0_i64, i64::saturating_add);
+        .try_fold(0_i64, |acc, total| acc.checked_add(total))
+        .expect(TOTAL_OVERFLOW_MESSAGE);
     let target = impute_total_only_token_breakdown(total_sum);
     let target_values = [
         target.input as u64,
@@ -247,5 +249,11 @@ mod tests {
             impute_total_only_token_breakdown(-1),
             TokenBreakdown::default()
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "total-only token imputation totals exceed i64::MAX")]
+    fn batch_imputation_panics_on_total_sum_overflow() {
+        let _ = impute_total_only_token_breakdowns(&[i64::MAX, 1]);
     }
 }
