@@ -12,7 +12,7 @@ write_cli_manifest() {
   mkdir -p "${work}/packages/cli"
   cat > "${work}/packages/cli/package.json" <<EOF_MANIFEST
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "${version}"
 }
 EOF_MANIFEST

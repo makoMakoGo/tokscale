@@ -57,14 +57,14 @@ if not platform_packages:
 errors: list[str] = []
 
 required_platform_names = {
-    "@tokscale/cli-darwin-arm64",
-    "@tokscale/cli-darwin-x64",
-    "@tokscale/cli-linux-arm64-gnu",
-    "@tokscale/cli-linux-arm64-musl",
-    "@tokscale/cli-linux-x64-gnu",
-    "@tokscale/cli-linux-x64-musl",
-    "@tokscale/cli-win32-arm64-msvc",
-    "@tokscale/cli-win32-x64-msvc",
+    "@juya-ai/tokscale-cli-darwin-arm64",
+    "@juya-ai/tokscale-cli-darwin-x64",
+    "@juya-ai/tokscale-cli-linux-arm64-gnu",
+    "@juya-ai/tokscale-cli-linux-arm64-musl",
+    "@juya-ai/tokscale-cli-linux-x64-gnu",
+    "@juya-ai/tokscale-cli-linux-x64-musl",
+    "@juya-ai/tokscale-cli-win32-arm64-msvc",
+    "@juya-ai/tokscale-cli-win32-x64-msvc",
 }
 
 def expect_equal(label: str, actual: str, expected: str) -> None:
@@ -72,10 +72,12 @@ def expect_equal(label: str, actual: str, expected: str) -> None:
         errors.append(f"{label}: expected {expected}, found {actual}")
 
 expect_equal("packages/cli/package.json version", cli_package["version"], workspace_version)
+expect_equal("packages/cli/package.json name", cli_package["name"], "@juya-ai/tokscale-cli")
 expect_equal("packages/tokscale/package.json version", wrapper_package["version"], workspace_version)
+expect_equal("packages/tokscale/package.json name", wrapper_package["name"], "@juya-ai/tokscale")
 expect_equal(
-    "packages/tokscale dependency on @tokscale/cli",
-    wrapper_package["dependencies"]["@tokscale/cli"],
+    "packages/tokscale dependency on @juya-ai/tokscale-cli",
+    wrapper_package["dependencies"]["@juya-ai/tokscale-cli"],
     workspace_version,
 )
 
@@ -86,8 +88,8 @@ for path in platform_packages:
     if not name:
         errors.append(f"{path} missing package name")
         continue
-    if not name.startswith("@tokscale/cli-"):
-        errors.append(f"{path} package name must start with @tokscale/cli-")
+    if not name.startswith("@juya-ai/tokscale-cli-"):
+        errors.append(f"{path} package name must start with @juya-ai/tokscale-cli-")
         continue
     platform_names.add(name)
     expect_equal(f"{path} version", manifest["version"], workspace_version)

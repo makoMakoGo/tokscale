@@ -51,17 +51,17 @@ EOF_LOCK
 
   cat > packages/cli/package.json <<EOF_MANIFEST
 {
-  "name": "@tokscale/cli",
+  "name": "@juya-ai/tokscale-cli",
   "version": "${version}",
   "optionalDependencies": {
-    "@tokscale/cli-darwin-arm64": "${version}",
-    "@tokscale/cli-darwin-x64": "${version}",
-    "@tokscale/cli-linux-x64-gnu": "${version}",
-    "@tokscale/cli-linux-x64-musl": "${version}",
-    "@tokscale/cli-linux-arm64-gnu": "${version}",
-    "@tokscale/cli-linux-arm64-musl": "${version}",
-    "@tokscale/cli-win32-x64-msvc": "${version}",
-    "@tokscale/cli-win32-arm64-msvc": "${version}"
+    "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
+    "@juya-ai/tokscale-cli-darwin-x64": "${version}",
+    "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
+    "@juya-ai/tokscale-cli-linux-x64-musl": "${version}",
+    "@juya-ai/tokscale-cli-linux-arm64-gnu": "${version}",
+    "@juya-ai/tokscale-cli-linux-arm64-musl": "${version}",
+    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}",
+    "@juya-ai/tokscale-cli-win32-arm64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
@@ -77,7 +77,7 @@ EOF_MANIFEST
     cli-win32-arm64-msvc; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
-  "name": "@tokscale/${pkg}",
+  "name": "@juya-ai/tokscale-${pkg}",
   "version": "${version}"
 }
 EOF_MANIFEST
@@ -85,10 +85,10 @@ EOF_MANIFEST
 
   cat > packages/tokscale/package.json <<EOF_MANIFEST
 {
-  "name": "tokscale",
+  "name": "@juya-ai/tokscale",
   "version": "${version}",
   "dependencies": {
-    "@tokscale/cli": "${version}"
+    "@juya-ai/tokscale-cli": "${version}"
   }
 }
 EOF_MANIFEST
@@ -153,7 +153,7 @@ test_accepts_new_platform_package_when_manifest_and_optional_dependency_match() 
     mkdir -p packages/cli-linux-riscv64-gnu
     cat > packages/cli-linux-riscv64-gnu/package.json <<'EOF_MANIFEST'
 {
-  "name": "@tokscale/cli-linux-riscv64-gnu",
+  "name": "@juya-ai/tokscale-cli-linux-riscv64-gnu",
   "version": "3.0.0"
 }
 EOF_MANIFEST
@@ -163,7 +163,7 @@ import pathlib
 
 path = pathlib.Path("packages/cli/package.json")
 manifest = json.loads(path.read_text())
-manifest["optionalDependencies"]["@tokscale/cli-linux-riscv64-gnu"] = "3.0.0"
+manifest["optionalDependencies"]["@juya-ai/tokscale-cli-linux-riscv64-gnu"] = "3.0.0"
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
@@ -185,7 +185,7 @@ import pathlib
 
 path = pathlib.Path("packages/cli/package.json")
 manifest = json.loads(path.read_text())
-manifest["optionalDependencies"].pop("@tokscale/cli-win32-arm64-msvc")
+manifest["optionalDependencies"].pop("@juya-ai/tokscale-cli-win32-arm64-msvc")
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
@@ -195,8 +195,8 @@ PY
       return 1
     fi
 
-    grep -q "Missing required platform package manifests: \\['@tokscale/cli-win32-arm64-msvc'\\]" "${output}"
-    grep -q "Missing required platform optionalDependencies: \\['@tokscale/cli-win32-arm64-msvc'\\]" "${output}"
+    grep -q "Missing required platform package manifests: \\['@juya-ai/tokscale-cli-win32-arm64-msvc'\\]" "${output}"
+    grep -q "Missing required platform optionalDependencies: \\['@juya-ai/tokscale-cli-win32-arm64-msvc'\\]" "${output}"
   )
 }
 

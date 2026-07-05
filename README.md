@@ -11,8 +11,9 @@
 > intentionally differ from upstream.
 >
 > `npx tokscale@latest`, `bunx tokscale@latest`, and the public `tokscale` npm
-> package install the upstream distribution, not the code on this branch. Use
-> the source-build flow below when validating behavior specific to this fork.
+> package install the upstream distribution, not the code on this branch. Fork
+> npm releases use `@juya-ai/tokscale`; use the source-build flow below when
+> validating behavior specific to this fork.
 
 ![Tokscale TUI overview](.github/assets/tui-overview.png)
 
@@ -76,7 +77,12 @@ bun run cli -- clients
 ```
 
 `bun run cli` executes the code in this checkout through `packages/cli`. The
-public npm package named `tokscale` is still the upstream package.
+public npm package named `tokscale` is still the upstream package. Once a fork
+release is published, install this fork with:
+
+```bash
+npm install -g @juya-ai/tokscale
+```
 
 ## Common commands
 

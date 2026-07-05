@@ -76,24 +76,6 @@ npm_view_version_status() {
   return "${status}"
 }
 
-npm_view_required_version() {
-  local __result_var="$1"
-  local spec="$2"
-  local package_label="$3"
-  local status
-  npm_view_version_status "${__result_var}" "${spec}"
-  status=$?
-  if [[ ${status} -eq 0 ]]; then
-    return 0
-  fi
-  if [[ ${status} -eq 1 ]]; then
-    errors+=("${package_label}: package is not visible on npm")
-  else
-    errors+=("${package_label}: npm lookup failed")
-  fi
-  return "${status}"
-}
-
 npm_view_optional_version() {
   local __result_var="$1"
   local spec="$2"
@@ -146,9 +128,9 @@ root = pathlib.Path(".")
 paths = [root / "packages/cli/package.json"]
 cli = json.loads(paths[0].read_text())
 for package_name in cli.get("optionalDependencies", {}):
-    if not package_name.startswith("@tokscale/cli-"):
+    if not package_name.startswith("@juya-ai/tokscale-cli-"):
         raise SystemExit(f"Unexpected optional dependency package name: {package_name}")
-    paths.append(root / "packages" / package_name.removeprefix("@tokscale/") / "package.json")
+    paths.append(root / "packages" / package_name.removeprefix("@juya-ai/tokscale-") / "package.json")
 paths.append(root / "packages/tokscale/package.json")
 
 seen = set()
@@ -169,10 +151,12 @@ if [[ "${NPM_CHECK_AUTH}" != "0" ]]; then
   "${NPM_CMD}" whoami >/dev/null
 fi
 
-primary_packages=("@tokscale/cli" "tokscale")
+primary_packages=("@juya-ai/tokscale-cli" "@juya-ai/tokscale")
 errors=()
 checked=0
 existing_targets=0
+visible_current_packages=0
+missing_current_packages=()
 
 while IFS=$'\t' read -r path package_name manifest_version; do
   [[ -n "${package_name}" ]] || continue
@@ -182,10 +166,19 @@ while IFS=$'\t' read -r path package_name manifest_version; do
     errors+=("${path}: expected version ${NEW_VERSION}, found ${manifest_version}")
   fi
 
-  if ! npm_view_required_version current_version "${package_name}" "${package_name}"; then
-    continue
+  current_version=""
+  if npm_view_version_status current_version "${package_name}"; then
+    visible_current_packages=$((visible_current_packages + 1))
+    echo "${package_name}: npm latest ${current_version}"
+  else
+    status=$?
+    if [[ ${status} -eq 1 ]]; then
+      missing_current_packages+=("${package_name}")
+      echo "${package_name}: not visible on npm yet"
+    else
+      errors+=("${package_name}: npm lookup failed")
+    fi
   fi
-  echo "${package_name}: npm latest ${current_version}"
 
   if npm_view_optional_version target_version "${package_name}@${NEW_VERSION}" "${package_name}@${NEW_VERSION}"; then
     existing_targets=$((existing_targets + 1))
@@ -198,7 +191,7 @@ while IFS=$'\t' read -r path package_name manifest_version; do
 
   for primary in "${primary_packages[@]}"; do
     if [[ "${package_name}" == "${primary}" && -n "${RELEASE_BASE_VERSION}" && "${RELEASE_RECOVERY}" != "true" ]]; then
-      if semver_gt "${RELEASE_BASE_VERSION}" "${current_version}"; then
+      if [[ -n "${current_version}" ]] && semver_gt "${RELEASE_BASE_VERSION}" "${current_version}"; then
         errors+=("Repository version ${RELEASE_BASE_VERSION} is ahead of npm latest ${current_version} for ${package_name}; set RELEASE_RECOVERY=true and target ${RELEASE_BASE_VERSION} when retrying the failed publish")
       fi
     fi
@@ -207,6 +200,16 @@ done < <(release_packages)
 
 if [[ ${checked} -eq 0 ]]; then
   errors+=("No release packages found")
+fi
+
+if [[ ${#missing_current_packages[@]} -gt 0 ]]; then
+  if [[ ${visible_current_packages} -eq 0 ]]; then
+    echo "All release packages are not visible on npm yet; treating this as the first fork publish"
+  elif [[ "${RELEASE_RECOVERY}" != "true" ]]; then
+    for package_name in "${missing_current_packages[@]}"; do
+      errors+=("${package_name}: package is not visible on npm, but other release packages are visible")
+    done
+  fi
 fi
 
 if [[ "${RELEASE_RECOVERY}" == "true" ]]; then
