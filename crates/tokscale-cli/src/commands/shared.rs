@@ -583,7 +583,7 @@ pub(crate) fn get_headless_roots(home_dir: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     match std::env::var("TOKSCALE_HEADLESS_DIR") {
-        Ok(env_dir) if !env_dir.trim().is_empty() => roots.push(PathBuf::from(env_dir)),
+        Ok(env_dir) if !env_dir.trim().is_empty() => roots.push(PathBuf::from(env_dir.trim())),
         _ => {
             roots.push(home_dir.join(".config/tokscale/headless"));
 

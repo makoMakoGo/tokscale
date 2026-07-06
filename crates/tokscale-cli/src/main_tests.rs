@@ -812,6 +812,22 @@ fn headless_roots_ignore_blank_env_override() {
 }
 
 #[test]
+#[serial_test::serial]
+fn headless_roots_trim_env_override() {
+    let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
+    unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "  /tmp/custom-headless  ") };
+
+    let roots = get_headless_roots(Path::new("/tmp/tokscale-home"));
+
+    assert_eq!(roots, vec![PathBuf::from("/tmp/custom-headless")]);
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", value) },
+        None => unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") },
+    }
+}
+
+#[test]
 fn parse_legacy_antigravity_cli_extra_dirs_accepts_only_legacy_key() {
     assert_eq!(
         parse_legacy_antigravity_cli_extra_dirs(
