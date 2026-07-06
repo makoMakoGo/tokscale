@@ -20,8 +20,13 @@ const IMAGE_WIDTH: i32 = 1200 * SCALE;
 const IMAGE_HEIGHT: i32 = 1200 * SCALE;
 const PADDING: i32 = 56 * SCALE;
 
-const TOKSCALE_LOGO_SVG_URL: &str = "https://tokscale.ai/tokscale-logo.svg";
-const TOKSCALE_LOGO_PNG_SIZE: i32 = 400;
+const WRAPPED_FOOTER_REPO: &str = "github.com/makoMakoGo/tokscale";
+const PROVIDER_LOGO_ANTHROPIC_URL: &str =
+    "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-claude.jpg";
+const PROVIDER_LOGO_OPENAI_URL: &str =
+    "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-openai.jpg";
+const PROVIDER_LOGO_GOOGLE_URL: &str =
+    "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-gemini.png";
 const FIGTREE_REGULAR_FILE: &str = "Figtree-Regular.ttf";
 const FIGTREE_REGULAR_URL: &str =
     "https://fonts.gstatic.com/s/figtree/v9/_Xmz-HUzqDCFdgfMsYiV_F7wfS-Bs_d_QF5e.ttf";
@@ -730,41 +735,24 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
     );
 
     let footer_bottom_y = IMAGE_HEIGHT - PADDING;
-    let tokscale_logo_height = 72 * SCALE;
-
-    if let Ok(logo_path) = fetch_svg_and_convert_to_png(
-        &client,
-        TOKSCALE_LOGO_SVG_URL,
-        "tokscale-logo@2x.png",
-        TOKSCALE_LOGO_PNG_SIZE * SCALE,
-    )
-    .await
-    {
-        if let Ok(logo) = load_rgba_image(&logo_path) {
-            draw_text_mut_baseline(
-                &mut canvas,
-                &fonts.regular,
-                (18 * SCALE) as f32,
-                COLOR_TEXT_SECONDARY,
-                PADDING,
-                footer_bottom_y,
-                "github.com/junhoyeo/tokscale",
-            );
-
-            let logo_width = ((logo.width() as f32 / logo.height() as f32)
-                * tokscale_logo_height as f32)
-                .round() as i32;
-            let logo_y = footer_bottom_y - 18 * SCALE - 16 * SCALE - tokscale_logo_height;
-            draw_image(
-                &mut canvas,
-                &logo,
-                PADDING,
-                logo_y,
-                logo_width,
-                tokscale_logo_height,
-            );
-        }
-    }
+    draw_text_mut_baseline(
+        &mut canvas,
+        &fonts.bold,
+        (24 * SCALE) as f32,
+        COLOR_TEXT_PRIMARY,
+        PADDING,
+        footer_bottom_y - 32 * SCALE,
+        "Tokscale",
+    );
+    draw_text_mut_baseline(
+        &mut canvas,
+        &fonts.regular,
+        (18 * SCALE) as f32,
+        COLOR_TEXT_SECONDARY,
+        PADDING,
+        footer_bottom_y,
+        WRAPPED_FOOTER_REPO,
+    );
 
     Ok(canvas)
 }
@@ -915,21 +903,6 @@ fn measure_text_width(font: &FontArc, font_size: f32, text: &str) -> f32 {
     }
 
     width
-}
-
-fn draw_image(canvas: &mut RgbaImage, source: &RgbaImage, x: i32, y: i32, width: i32, height: i32) {
-    if width <= 0 || height <= 0 {
-        return;
-    }
-
-    let resized =
-        image::imageops::resize(source, width as u32, height as u32, FilterType::CatmullRom);
-    for dy in 0..height {
-        for dx in 0..width {
-            let src = *resized.get_pixel(dx as u32, dy as u32);
-            blend_pixel(canvas, x + dx, y + dy, src);
-        }
-    }
 }
 
 fn draw_image_rounded(
@@ -1157,56 +1130,6 @@ async fn fetch_and_cache_image(
     Ok(cached_path)
 }
 
-async fn fetch_svg_and_convert_to_png(
-    client: &reqwest::Client,
-    svg_url: &str,
-    filename: &str,
-    size: i32,
-) -> Result<PathBuf> {
-    let cache_dir = get_image_cache_dir()?;
-    ensure_cache_dir(&cache_dir)?;
-
-    let cached_path = cache_dir.join(filename);
-    if cached_path.exists() {
-        return Ok(cached_path);
-    }
-    if let Some(legacy_path) = first_existing_legacy_wrapped_cache_file("images", filename) {
-        return Ok(legacy_path);
-    }
-
-    let response = client
-        .get(svg_url)
-        .send()
-        .await
-        .with_context(|| format!("Failed to fetch {}", svg_url))?;
-    if !response.status().is_success() {
-        anyhow::bail!("Failed to fetch {} (status {})", svg_url, response.status());
-    }
-
-    let svg_bytes = response.bytes().await?;
-    let options = usvg::Options::default();
-    let tree = usvg::Tree::from_data(&svg_bytes, &options)
-        .map_err(|err| anyhow::anyhow!("Failed to parse SVG: {err:?}"))?;
-
-    let base_size = tree.size().to_int_size();
-    let scale = size as f32 / base_size.width() as f32;
-    let scaled_size = base_size
-        .scale_by(scale)
-        .ok_or_else(|| anyhow::anyhow!("Invalid scaled SVG size"))?;
-
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(scaled_size.width(), scaled_size.height())
-        .ok_or_else(|| anyhow::anyhow!("Failed to create pixmap"))?;
-    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-    let png = pixmap
-        .encode_png()
-        .map_err(|err| anyhow::anyhow!("Failed to encode PNG: {err:?}"))?;
-    atomic_write_bytes(&cached_path, &png)?;
-
-    Ok(cached_path)
-}
-
 async fn fetch_to_file(client: &reqwest::Client, url: &str, path: &Path) -> Result<()> {
     let response = client
         .get(url)
@@ -1396,11 +1319,9 @@ fn client_logo_url(client: &str) -> Option<&'static str> {
 
 fn provider_logo_url(provider: &str) -> Option<&'static str> {
     match provider {
-        "anthropic" => Some("https://tokscale.ai/assets/logos/claude.jpg"),
-        "openai" => Some("https://tokscale.ai/assets/logos/openai.jpg"),
-        "google" => Some("https://tokscale.ai/assets/logos/gemini.png"),
-        "xai" => Some("https://tokscale.ai/assets/logos/grok.jpg"),
-        "zai" => Some("https://tokscale.ai/assets/logos/zai.jpg"),
+        "anthropic" => Some(PROVIDER_LOGO_ANTHROPIC_URL),
+        "openai" => Some(PROVIDER_LOGO_OPENAI_URL),
+        "google" => Some(PROVIDER_LOGO_GOOGLE_URL),
         _ => None,
     }
 }
@@ -2084,15 +2005,15 @@ mod tests {
     }
 
     #[test]
-    fn test_get_provider_from_model_xai() {
-        assert_eq!(get_provider_from_model("grok-3"), Some("xai"));
-        assert_eq!(get_provider_from_model("grok-code"), Some("xai"));
+    fn test_get_provider_from_model_xai_has_no_fork_asset() {
+        assert_eq!(get_provider_from_model("grok-3"), None);
+        assert_eq!(get_provider_from_model("grok-code"), None);
     }
 
     #[test]
-    fn test_get_provider_from_model_zai() {
-        assert_eq!(get_provider_from_model("glm-4.7"), Some("zai"));
-        assert_eq!(get_provider_from_model("pickle-model"), Some("zai"));
+    fn test_get_provider_from_model_zai_has_no_fork_asset() {
+        assert_eq!(get_provider_from_model("glm-4.7"), None);
+        assert_eq!(get_provider_from_model("pickle-model"), None);
     }
 
     #[test]
@@ -2297,40 +2218,28 @@ mod tests {
     fn test_provider_logo_url_anthropic() {
         assert_eq!(
             provider_logo_url("anthropic"),
-            Some("https://tokscale.ai/assets/logos/claude.jpg")
+            Some(PROVIDER_LOGO_ANTHROPIC_URL)
         );
     }
 
     #[test]
     fn test_provider_logo_url_openai() {
-        assert_eq!(
-            provider_logo_url("openai"),
-            Some("https://tokscale.ai/assets/logos/openai.jpg")
-        );
+        assert_eq!(provider_logo_url("openai"), Some(PROVIDER_LOGO_OPENAI_URL));
     }
 
     #[test]
     fn test_provider_logo_url_google() {
-        assert_eq!(
-            provider_logo_url("google"),
-            Some("https://tokscale.ai/assets/logos/gemini.png")
-        );
+        assert_eq!(provider_logo_url("google"), Some(PROVIDER_LOGO_GOOGLE_URL));
     }
 
     #[test]
-    fn test_provider_logo_url_xai() {
-        assert_eq!(
-            provider_logo_url("xai"),
-            Some("https://tokscale.ai/assets/logos/grok.jpg")
-        );
+    fn test_provider_logo_url_xai_has_no_fork_asset() {
+        assert_eq!(provider_logo_url("xai"), None);
     }
 
     #[test]
-    fn test_provider_logo_url_zai() {
-        assert_eq!(
-            provider_logo_url("zai"),
-            Some("https://tokscale.ai/assets/logos/zai.jpg")
-        );
+    fn test_provider_logo_url_zai_has_no_fork_asset() {
+        assert_eq!(provider_logo_url("zai"), None);
     }
 
     #[test]
@@ -2448,8 +2357,8 @@ mod tests {
         assert_eq!(get_provider_from_model("CLAUDE-3-OPUS"), Some("anthropic"));
         assert_eq!(get_provider_from_model("GPT-4"), Some("openai"));
         assert_eq!(get_provider_from_model("Gemini-Pro"), Some("google"));
-        assert_eq!(get_provider_from_model("GROK-3"), Some("xai"));
-        assert_eq!(get_provider_from_model("GLM-4.7"), Some("zai"));
+        assert_eq!(get_provider_from_model("GROK-3"), None);
+        assert_eq!(get_provider_from_model("GLM-4.7"), None);
     }
 
     #[test]
@@ -2477,10 +2386,9 @@ mod tests {
     }
 
     #[test]
-    fn test_get_provider_from_model_pickle() {
-        // "pickle" maps to zai
-        assert_eq!(get_provider_from_model("big-pickle"), Some("zai"));
-        assert_eq!(get_provider_from_model("pickle-3"), Some("zai"));
+    fn test_get_provider_from_model_pickle_has_no_fork_asset() {
+        assert_eq!(get_provider_from_model("big-pickle"), None);
+        assert_eq!(get_provider_from_model("pickle-3"), None);
     }
 
     // ========== calculate_intensity edge case tests ==========

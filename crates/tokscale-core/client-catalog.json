@@ -5,7 +5,7 @@
     "displayName": "OpenCode",
     "shortName": "OpenCode",
     "hotkey": "1",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-opencode.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-opencode.png",
     "color": "#00A8E8"
   },
   {
@@ -14,7 +14,7 @@
     "displayName": "Claude Code",
     "shortName": "Claude",
     "hotkey": "2",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-claude.jpg",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-claude.jpg",
     "color": "#f97316"
   },
   {
@@ -23,7 +23,7 @@
     "displayName": "Codex CLI",
     "shortName": "Codex",
     "hotkey": "3",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-openai.jpg",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-openai.jpg",
     "color": "#3b82f6"
   },
   {
@@ -32,7 +32,7 @@
     "displayName": "Cursor",
     "shortName": "Cursor",
     "hotkey": "4",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-cursor.jpg",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-cursor.jpg",
     "color": "#22c55e"
   },
   {
@@ -41,7 +41,7 @@
     "displayName": "Gemini CLI",
     "shortName": "Gemini",
     "hotkey": "5",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-gemini.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-gemini.png",
     "color": "#8b5cf6"
   },
   {
@@ -50,7 +50,7 @@
     "displayName": "Amp",
     "shortName": "Amp",
     "hotkey": "6",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-amp.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-amp.png",
     "color": "#EC4899"
   },
   {
@@ -59,7 +59,7 @@
     "displayName": "Droid",
     "shortName": "Droid",
     "hotkey": "7",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-droid.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-droid.png",
     "color": "#1F1D1C",
     "textColor": "#FFFFFF"
   },
@@ -69,7 +69,7 @@
     "displayName": "OpenClaw",
     "shortName": "OpenClaw",
     "hotkey": "8",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-openclaw.jpg",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-openclaw.jpg",
     "color": "#EF4444"
   },
   {
@@ -78,7 +78,7 @@
     "displayName": "Pi",
     "shortName": "Pi",
     "hotkey": "9",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-pi.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-pi.png",
     "color": "#6366F1"
   },
   {
@@ -87,7 +87,7 @@
     "displayName": "OMP",
     "shortName": "OMP",
     "hotkey": "m",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-pi.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-pi.png",
     "color": "#6366F1"
   },
   {
@@ -96,7 +96,7 @@
     "displayName": "Kimi",
     "shortName": "Kimi",
     "hotkey": "0",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-kimi.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-kimi.png",
     "color": "#8B5CF6"
   },
   {
@@ -105,7 +105,7 @@
     "displayName": "Qwen",
     "shortName": "Qwen",
     "hotkey": "w",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-qwen.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-qwen.png",
     "color": "#1A73E8"
   },
   {
@@ -114,7 +114,7 @@
     "displayName": "Roo Code",
     "shortName": "Roo Code",
     "hotkey": "r",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-roocode.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-roocode.png",
     "color": "#10B981"
   },
   {
@@ -123,7 +123,7 @@
     "displayName": "KiloCode",
     "shortName": "KiloCode",
     "hotkey": "k",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-kilocode.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-kilocode.png",
     "color": "#F59E0B"
   },
   {
@@ -132,7 +132,7 @@
     "displayName": "Mux",
     "shortName": "Mux",
     "hotkey": "x",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-mux.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-mux.png",
     "color": "#171717"
   },
   {
@@ -141,7 +141,7 @@
     "displayName": "Kilo CLI",
     "shortName": "Kilo CLI",
     "hotkey": "l",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-kilocode.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-kilocode.png",
     "color": "#F59E0B"
   },
   {
@@ -150,7 +150,7 @@
     "displayName": "Crush",
     "shortName": "Crush",
     "hotkey": "h",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-crush.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-crush.png",
     "color": "#DC2626"
   },
   {
@@ -159,7 +159,7 @@
     "displayName": "Hermes Agent",
     "shortName": "Hermes Agent",
     "hotkey": "e",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-hermes.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-hermes.png",
     "color": "#FFD700"
   },
   {
@@ -168,7 +168,7 @@
     "displayName": "Copilot",
     "shortName": "Copilot",
     "hotkey": "c",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-copilot.jpg",
     "color": "#24292F"
   },
   {
@@ -177,7 +177,7 @@
     "displayName": "Goose",
     "shortName": "Goose",
     "hotkey": "o",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-goose.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-goose.png",
     "color": "#64B4DC"
   },
   {
@@ -186,7 +186,7 @@
     "displayName": "Codebuff",
     "shortName": "Codebuff",
     "hotkey": "b",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-codebuff.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-codebuff.png",
     "color": "#7C3AED"
   },
   {
@@ -204,7 +204,7 @@
     "displayName": "Antigravity",
     "shortName": "Antigravity",
     "hotkey": "a",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-antigravity.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-antigravity.png",
     "color": "#6366F1"
   },
   {
@@ -213,7 +213,7 @@
     "displayName": "Zed Agent",
     "shortName": "Zed Agent",
     "hotkey": "z",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-zed.webp",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-zed.webp",
     "color": "#084CCF"
   },
   {
@@ -250,7 +250,7 @@
     "displayName": "Trae",
     "shortName": "Trae",
     "hotkey": "y",
-    "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-trae.png",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-trae.png",
     "color": "#00BFA5"
   },
   {
