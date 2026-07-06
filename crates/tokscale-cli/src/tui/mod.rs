@@ -1,6 +1,5 @@
 mod app;
 mod cache;
-pub mod client_ui;
 mod colors;
 pub mod config;
 pub mod data;
@@ -414,54 +413,6 @@ fn run_loop_with_background(
             break;
         }
     }
-    Ok(())
-}
-
-pub fn test_data_loading() -> Result<()> {
-    println!("Testing data loading...");
-
-    let loader = DataLoader::new(None);
-    let all_clients = vec![
-        ClientId::OpenCode,
-        ClientId::Claude,
-        ClientId::Cursor,
-        ClientId::Gemini,
-        ClientId::Codex,
-        ClientId::Amp,
-        ClientId::Droid,
-        ClientId::OpenClaw,
-        ClientId::Pi,
-        ClientId::Omp,
-        ClientId::Kimi,
-        ClientId::Qwen,
-        ClientId::RooCode,
-        ClientId::KiloCode,
-        ClientId::Kilo,
-        ClientId::Mux,
-        ClientId::Crush,
-        ClientId::Hermes,
-        ClientId::Codebuff,
-    ];
-
-    let data = loader.load(&all_clients, &tokscale_core::GroupBy::default())?;
-
-    println!("Loaded {} models", data.models.len());
-    println!("Total cost: ${:.2}", data.total_cost);
-
-    println!("\nAll models (client:model):");
-    let mut models = data.models.clone();
-    models.sort_by(|a, b| {
-        let client_cmp = a.client.cmp(&b.client);
-        if client_cmp == std::cmp::Ordering::Equal {
-            a.model.cmp(&b.model)
-        } else {
-            client_cmp
-        }
-    });
-    for m in &models {
-        println!("{}:{}", m.client.to_lowercase(), m.model);
-    }
-
     Ok(())
 }
 

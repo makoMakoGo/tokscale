@@ -63,39 +63,5 @@ pub fn render_ascii_bar(remaining_percent: f64, width: usize) -> String {
 }
 
 pub fn atomic_write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path has no parent directory",
-        )
-    })?;
-    std::fs::create_dir_all(dir)?;
-    let temp_path = path.with_extension(format!("{}.tmp", std::process::id()));
-    {
-        #[cfg(unix)]
-        let mut opts = {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut o = std::fs::OpenOptions::new();
-            o.mode(0o600);
-            o
-        };
-        #[cfg(not(unix))]
-        let mut opts = std::fs::OpenOptions::new();
-        let mut f = match opts.write(true).create_new(true).open(&temp_path) {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = std::fs::remove_file(&temp_path);
-                return Err(e);
-            }
-        };
-        if let Err(e) = std::io::Write::write_all(&mut f, data) {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(e);
-        }
-    }
-    if let Err(e) = std::fs::rename(&temp_path, path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(e);
-    }
-    Ok(())
+    tokscale_core::fs_atomic::write_atomic(path, data)
 }

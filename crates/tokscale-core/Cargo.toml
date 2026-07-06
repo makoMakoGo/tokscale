@@ -15,10 +15,6 @@ name = "normalization"
 harness = false
 
 [[bench]]
-name = "core_benchmarks"
-harness = false
-
-[[bench]]
 name = "aggregation"
 harness = false
 

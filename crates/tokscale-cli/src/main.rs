@@ -63,9 +63,6 @@ struct Cli {
     #[arg(long)]
     debug: bool,
 
-    #[arg(long)]
-    test_data: bool,
-
     #[arg(long, help = "Output as JSON")]
     json: bool,
 
@@ -456,10 +453,6 @@ fn main() -> Result<()> {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let can_use_tui = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-
-    if cli.test_data {
-        return tui::test_data_loading();
-    }
 
     match cli.command {
         Some(Commands::Models {

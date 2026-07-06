@@ -12,7 +12,6 @@ use ratatui::{
 };
 use tokscale_core::ClientId;
 
-use crate::tui::client_ui;
 use crate::tui::interaction::{InteractionOutcome, ListInteraction};
 use crate::tui::themes::Theme;
 
@@ -294,7 +293,7 @@ impl DialogContent for ClientPickerDialog {
             }
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
-                    if let Some(client_id) = client_ui::from_hotkey(c) {
+                    if let Some(client_id) = ClientId::from_hotkey(c) {
                         self.toggle(client_id).into()
                     } else {
                         DialogResult::Ignored("unknown hotkey")
@@ -336,11 +335,13 @@ impl DialogContent for ClientPickerDialog {
 }
 
 fn display_name(client: ClientId) -> &'static str {
-    client_ui::display_name(client)
+    client.short_name()
 }
 
 fn hotkey(client: ClientId) -> char {
-    client_ui::hotkey(client).expect("source picker clients must have catalog hotkeys")
+    client
+        .hotkey()
+        .expect("source picker clients must have catalog hotkeys")
 }
 
 #[cfg(test)]
@@ -372,7 +373,7 @@ mod tests {
 
     fn first_hotkey_client() -> (ClientId, char) {
         let client = ClientId::iter()
-            .find(|client| client_ui::hotkey(*client).is_some())
+            .find(|client| client.hotkey().is_some())
             .expect("catalog should expose at least one picker hotkey");
         (client, hotkey(client))
     }

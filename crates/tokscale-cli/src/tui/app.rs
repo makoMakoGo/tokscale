@@ -1799,10 +1799,14 @@ impl App {
             "tokscale-export-{}.json",
             chrono::Utc::now().format("%Y%m%d-%H%M%S")
         );
+        let export_dir = crate::paths::get_config_dir().join("exports");
+        let path = export_dir.join(filename);
 
         match super::export::build_export_json(&self.data) {
-            Ok(json) => match std::fs::write(&filename, json) {
-                Ok(_) => self.set_status(&format!("Exported to {}", filename)),
+            Ok(json) => match std::fs::create_dir_all(&export_dir)
+                .and_then(|_| std::fs::write(&path, json))
+            {
+                Ok(_) => self.set_status(&format!("Exported to {}", path.display())),
                 Err(e) => self.set_status(&format!("Export failed: {}", e)),
             },
             Err(e) => self.set_status(&format!("Export failed: {}", e)),

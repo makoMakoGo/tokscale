@@ -11,7 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 use tokscale_core::{
-    load_aggregated_views_with_pricing, ClientId, GroupBy, ReportOptions, ViewSet,
+    inferred_provider_from_model, load_aggregated_views_with_pricing, ClientId, GroupBy,
+    ReportOptions, ViewSet,
 };
 
 const SCALE: i32 = 2;
@@ -1265,39 +1266,8 @@ fn first_existing_legacy_wrapped_cache_file(subdir: &str, filename: &str) -> Opt
 }
 
 fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cache path has no parent: {}", path.display()))?;
-    ensure_cache_dir(dir)?;
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let tmp_name = format!(
-        ".{}.{}.{:x}.tmp",
-        path.file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("wrapped.cache"),
-        std::process::id(),
-        nanos
-    );
-    let tmp_path = dir.join(tmp_name);
-
-    let write_result = (|| -> Result<()> {
-        let mut file = fs::File::create(&tmp_path)?;
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        tokscale_core::fs_atomic::replace_file(&tmp_path, path)?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-
-    write_result
+    tokscale_core::fs_atomic::write_atomic(path, bytes)
+        .with_context(|| format!("Failed to write cache file: {}", path.display()))
 }
 
 fn calculate_intensity(cost: f64, max_cost: f64) -> u8 {
@@ -1429,31 +1399,7 @@ fn provider_logo_url(provider: &str) -> Option<&'static str> {
 }
 
 fn get_provider_from_model(model_id: &str) -> Option<&'static str> {
-    let lower = model_id.to_lowercase();
-    if lower.contains("claude")
-        || lower.contains("opus")
-        || lower.contains("sonnet")
-        || lower.contains("haiku")
-    {
-        return Some("anthropic");
-    }
-    if lower.contains("gpt")
-        || lower.contains("o1")
-        || lower.contains("o3")
-        || lower.contains("codex")
-    {
-        return Some("openai");
-    }
-    if lower.contains("gemini") {
-        return Some("google");
-    }
-    if lower.contains("grok") {
-        return Some("xai");
-    }
-    if lower.contains("glm") || lower.contains("pickle") {
-        return Some("zai");
-    }
-    None
+    inferred_provider_from_model(model_id).filter(|provider| provider_logo_url(provider).is_some())
 }
 
 fn format_model_name(model: &str) -> String {

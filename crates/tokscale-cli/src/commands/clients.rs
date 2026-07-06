@@ -1,7 +1,7 @@
 use crate::claude_diagnostics;
 use crate::commands::render::format_number;
 use crate::commands::shared::use_env_roots;
-use crate::tui::{self, client_ui};
+use crate::tui;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -201,16 +201,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                         (false, vec![], 0)
                     };
 
-                let label = match client {
-                    ClientId::Claude => "Claude Code",
-                    ClientId::Codex => "Codex CLI",
-                    ClientId::Copilot => "Copilot CLI",
-                    ClientId::Gemini => "Gemini CLI",
-                    ClientId::Cursor => "Cursor IDE",
-                    ClientId::Kimi => "Kimi",
-                    _ => client_ui::display_name(client),
-                }
-                .to_string();
+                let label = client.display_name().to_string();
 
                 let mut extra_paths: Vec<ExtraPath> = settings_extra_dirs
                     .iter()

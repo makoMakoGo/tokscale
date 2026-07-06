@@ -75,31 +75,11 @@ pub fn save_cache<T: Serialize>(filename: &str, data: &T) -> Result<(), std::io:
     let content = serde_json::to_string(&cached)?;
 
     let final_path = get_cache_path(filename);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let tmp_filename = format!(".{}.{}.{:x}.tmp", filename, std::process::id(), nanos);
-    let tmp_path = dir.join(&tmp_filename);
-
-    use std::io::Write;
     // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
     // the canonical cache file before writing — a partial save or process
     // crash between delete and rename would lose the cache. The temp-file
     // pattern makes corruption-on-crash impossible.
-    let write_result = (|| {
-        let mut file = fs::File::create(&tmp_path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-
-    write_result
+    crate::fs_atomic::write_atomic(&final_path, content.as_bytes())
 }
 
 fn legacy_cache_paths(filename: &str) -> Vec<PathBuf> {

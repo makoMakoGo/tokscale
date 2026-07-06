@@ -29,7 +29,7 @@
   {
     "variant": "Cursor",
     "id": "cursor",
-    "displayName": "Cursor",
+    "displayName": "Cursor IDE",
     "shortName": "Cursor",
     "hotkey": "4",
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-cursor.jpg",
@@ -165,7 +165,7 @@
   {
     "variant": "Copilot",
     "id": "copilot",
-    "displayName": "Copilot",
+    "displayName": "Copilot CLI",
     "shortName": "Copilot",
     "hotkey": "c",
     "logo": "https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-copilot.jpg",

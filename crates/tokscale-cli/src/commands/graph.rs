@@ -103,8 +103,6 @@ pub(crate) struct GraphExportData {
     contributions: Vec<GraphDailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     time_metrics: Option<GraphTimeMetrics>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mcp_servers: Option<Vec<String>>,
 }
 
 pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphExportData {
@@ -189,14 +187,6 @@ pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphE
             max_concurrent_sessions: tm.max_concurrent_sessions,
             session_count: tm.session_count,
         }),
-        mcp_servers: {
-            let servers = tokscale_core::mcp::discover_mcp_server_names(None);
-            if servers.is_empty() {
-                None
-            } else {
-                Some(servers)
-            }
-        },
     }
 }
 

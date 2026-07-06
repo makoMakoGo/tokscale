@@ -414,6 +414,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         || lower.contains("zhipu")
         || lower.contains("z-ai")
         || lower.contains("z.ai")
+        || lower.contains("pickle")
     {
         return Some("zai");
     }

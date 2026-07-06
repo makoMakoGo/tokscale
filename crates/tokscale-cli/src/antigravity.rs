@@ -638,52 +638,8 @@ fn session_artifact_file_stem(session_id: &str) -> String {
 }
 
 fn atomic_write_file(path: &Path, contents: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid cache path"))?;
-    if !parent.exists() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let temp_name = format!(
-        ".tmp-{}-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("antigravity"),
-        std::process::id()
-    );
-    let temp_path = parent.join(temp_name);
-
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp_path)?;
-        file.write_all(contents.as_bytes())?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&temp_path, contents)?;
-    }
-
-    if let Err(err) = tokscale_core::fs_atomic::replace_file(&temp_path, path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(anyhow::anyhow!(
-            "Failed to persist file atomically (temp: {}, final: {}): {}",
-            temp_path.display(),
-            path.display(),
-            err
-        ));
-    }
-
-    Ok(())
+    tokscale_core::fs_atomic::write_atomic(path, contents.as_bytes())
+        .with_context(|| format!("Failed to persist file atomically: {}", path.display()))
 }
 
 fn bool_label(value: bool) -> &'static str {
