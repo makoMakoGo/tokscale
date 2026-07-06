@@ -55,7 +55,6 @@ pub mod auth {
     use base64::Engine;
     use chrono::{DateTime, Utc};
     use serde::{Deserialize, Serialize};
-    use std::io::Write;
     use std::path::PathBuf;
 
     // ── API endpoints (constants, not secrets) ─────────────────────────────
@@ -196,19 +195,7 @@ pub mod auth {
         ensure_cache_dir()?;
         let path = creds_path(creds.variant);
         let json = serde_json::to_string_pretty(creds)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)?
-                .write_all(json.as_bytes())?;
-        }
-        #[cfg(not(unix))]
-        std::fs::write(&path, json)?;
+        tokscale_core::fs_atomic::write_atomic(&path, json.as_bytes())?;
         Ok(())
     }
 
@@ -1032,7 +1019,7 @@ pub mod sync {
             std::fs::create_dir_all(&dir)?;
         }
         let json = serde_json::to_string_pretty(manifest)?;
-        std::fs::write(manifest_path(), json)?;
+        tokscale_core::fs_atomic::write_atomic(&manifest_path(), json.as_bytes())?;
         Ok(())
     }
 
@@ -1288,20 +1275,7 @@ pub mod sync {
 
         if batch_wins_manifest {
             let json = serde_json::to_string_pretty(&sessions)?;
-            // Atomic write: serialize to a temp file next to the destination,
-            // then rename (POSIX-atomic on the same filesystem).
-            let tmp_path = artifact_path.with_extension(format!(
-                "json.tmp.{}.{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos()
-            ));
-            std::fs::write(&tmp_path, &json)?;
-            std::fs::rename(&tmp_path, &artifact_path).inspect_err(|_| {
-                let _ = std::fs::remove_file(&tmp_path);
-            })?;
+            tokscale_core::fs_atomic::write_atomic(&artifact_path, json.as_bytes())?;
         }
 
         let valid_paths: std::collections::HashSet<String> = next_manifest
