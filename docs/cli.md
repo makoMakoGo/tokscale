@@ -32,6 +32,10 @@ tokscale time-metrics --no-spinner --json
 The root command defaults to the interactive TUI when stdin/stdout are terminals
 and falls back to scriptable output otherwise.
 
+The TUI captures normal mouse input for tabs, filters, and graph cells. Use your
+terminal's native modified selection gesture, usually `Shift+drag`, when you
+want to select and copy text from the TUI.
+
 ## Filters
 
 Client filters accept comma-separated values or repeated flags:
