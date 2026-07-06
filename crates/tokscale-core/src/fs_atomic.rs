@@ -14,6 +14,18 @@ const TEMP_CREATE_ATTEMPTS: usize = 16;
 /// and cache files; callers that need public file permissions should set them
 /// explicitly after the write.
 pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with(final_path, |file| file.write_all(bytes))
+}
+
+/// Atomically write a private file through a streaming writer.
+///
+/// This has the same file visibility and durability semantics as
+/// [`write_atomic`], but lets callers serialize directly into the temporary
+/// file instead of materializing the full payload in memory first.
+pub fn write_atomic_with(
+    final_path: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = final_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -40,7 +52,7 @@ pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
             Err(err) => return Err(err),
         };
 
-        return write_open_temp_file(file, &tmp_path, final_path, bytes);
+        return write_open_temp_file(file, &tmp_path, final_path, write);
     }
 
     Err(last_exists_error.unwrap_or_else(|| {
@@ -57,7 +69,7 @@ pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 fn write_atomic_to_temp(tmp_path: &Path, final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let file = create_temp_file(tmp_path)?;
-    write_open_temp_file(file, tmp_path, final_path, bytes)
+    write_open_temp_file(file, tmp_path, final_path, |file| file.write_all(bytes))
 }
 
 fn create_temp_file(tmp_path: &Path) -> io::Result<File> {
@@ -76,10 +88,10 @@ fn write_open_temp_file(
     mut file: File,
     tmp_path: &Path,
     final_path: &Path,
-    bytes: &[u8],
+    write: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
     let write_result = (|| -> io::Result<()> {
-        file.write_all(bytes)?;
+        write(&mut file)?;
         file.sync_all()?;
         drop(file);
         replace_file(tmp_path, final_path)
@@ -182,6 +194,22 @@ mod tests {
         write_atomic(&path, b"new").unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "new");
+    }
+
+    #[test]
+    #[serial]
+    fn write_atomic_with_streams_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cache.json");
+
+        write_atomic_with(&path, |file| {
+            file.write_all(b"{\"")?;
+            file.write_all(b"ok\":true}")?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "{\"ok\":true}");
     }
 
     #[test]

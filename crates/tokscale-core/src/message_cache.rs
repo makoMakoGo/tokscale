@@ -891,22 +891,8 @@ fn write_shard_borrowed(
         .serialize(&header)
         .map_err(std::io::Error::other)?;
     let body = BorrowedCachedShardBody { messages };
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let tmp_path = parent.join(format!(
-        ".{}.{}.{:x}.tmp",
-        final_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("source-message-cache-shard"),
-        std::process::id(),
-        nanos
-    ));
 
-    let write_result = (|| -> std::io::Result<()> {
-        let file = File::create(&tmp_path)?;
+    crate::fs_atomic::write_atomic_with(&final_path, |file| {
         let mut writer = BufWriter::new(file);
         writer.write_all(&(header_bytes.len() as u64).to_le_bytes())?;
         writer.write_all(&header_bytes)?;
@@ -915,17 +901,8 @@ fn write_shard_borrowed(
             .serialize_into(&mut writer, &body)
             .map_err(std::io::Error::other)?;
         writer.flush()?;
-        writer.get_ref().sync_all()?;
-        crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
-        let final_file = File::open(&final_path)?;
-        final_file.sync_all()?;
         Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-    write_result
+    })
 }
 
 fn shard_paths(shards_dir: &Path) -> Vec<PathBuf> {
