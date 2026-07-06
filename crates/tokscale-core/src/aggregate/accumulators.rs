@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
-    normalize_provider_for_grouping, ordered_clients_by_token_contribution, positive_token_total,
+    ordered_clients_by_token_contribution, positive_token_total,
     sessionize::SessionTimeEvent,
     ClientContribution, ClientContributionOrder, DailyContribution, DailyTotals, GraphResult,
     GroupBy, HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
@@ -45,12 +45,12 @@ impl ModelEntries {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         let group_by = &self.group_by;
         let canonical_model_id = msg.model_id.to_string();
-        let provider = normalize_provider_for_grouping(&msg.provider_id);
+        let provider = msg.provider_id.as_ref();
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
         let (key, merge_clients) = grouped_model_bucket_key(
             group_by,
             &msg.client,
-            &provider,
+            provider,
             &workspace_group_key,
             &msg.session_id,
             &canonical_model_id,
@@ -82,7 +82,7 @@ impl ModelEntries {
                     None
                 },
                 model: canonical_model_id.clone(),
-                provider: provider.clone(),
+                provider: provider.to_string(),
                 input: 0,
                 output: 0,
                 cache_read: 0,
@@ -362,14 +362,14 @@ impl DailyAcc {
         let client = msg.client.to_string();
         let model = model_id.to_string();
         let key = (client.clone(), model.clone());
-        let provider_id = normalize_provider_for_grouping(&msg.provider_id);
+        let provider_id = msg.provider_id.as_ref();
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
                 client,
                 model_id: model,
-                provider_id: provider_id.clone(),
+                provider_id: provider_id.to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 messages: 0,
@@ -552,16 +552,16 @@ impl SessionAcc {
             .saturating_add(msg.tokens.reasoning);
 
         let client = msg.client.to_string();
-        let provider_id = normalize_provider_for_grouping(&msg.provider_id);
+        let provider_id = msg.provider_id.as_ref();
         let model_id = msg.model_id.to_string();
-        let key = (client.clone(), provider_id.clone(), model_id.clone());
+        let key = (client.clone(), provider_id.to_string(), model_id.clone());
         let client_entry = self
             .clients
             .entry(key)
             .or_insert_with(|| ClientContribution {
                 client,
                 model_id,
-                provider_id: provider_id.clone(),
+                provider_id: provider_id.to_string(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 messages: 0,

@@ -1021,12 +1021,8 @@ fn apply_token_pricing(message: &mut UnifiedMessage, pricing: Option<&pricing::P
 }
 
 fn canonicalize_message_provider(message: &mut UnifiedMessage) {
-    let raw_provider = message.provider_id.trim();
-    let provider = provider_identity::canonical_provider(raw_provider)
-        .or_else(|| {
-            provider_identity::inferred_provider_from_model(&message.model_id).map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string());
+    let provider =
+        provider_identity::finalized_provider_id(&message.provider_id, &message.model_id);
     message.provider_id = sessions::intern::intern(&provider);
 }
 
