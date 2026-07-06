@@ -1,6 +1,6 @@
 use crate::{claude_diagnostics, cursor, tui, ClientFlags};
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokscale_core::ClientId;
 
 pub(crate) fn parse_client_id_arg(raw: &str) -> Result<ClientId, String> {
@@ -577,22 +577,4 @@ pub(crate) fn get_date_range_label_for_date(
     } else {
         Some(parts.join(" "))
     }
-}
-
-pub(crate) fn get_headless_roots(home_dir: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-
-    match std::env::var("TOKSCALE_HEADLESS_DIR") {
-        Ok(env_dir) if !env_dir.trim().is_empty() => roots.push(PathBuf::from(env_dir.trim())),
-        _ => {
-            roots.push(home_dir.join(".config/tokscale/headless"));
-
-            #[cfg(target_os = "macos")]
-            {
-                roots.push(home_dir.join("Library/Application Support/tokscale/headless"));
-            }
-        }
-    }
-
-    roots
 }

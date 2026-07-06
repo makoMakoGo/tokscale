@@ -208,7 +208,8 @@ pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> 
     roots
 }
 
-pub fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
+#[cfg(test)]
+fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
     headless_roots_with_env_strategy(home_dir, true)
 }
 
@@ -224,10 +225,6 @@ pub fn copilot_exporter_path_with_env_strategy(use_env_roots: bool) -> Option<Pa
     }
 
     Some(PathBuf::from(trimmed))
-}
-
-pub fn copilot_exporter_path() -> Option<PathBuf> {
-    copilot_exporter_path_with_env_strategy(true)
 }
 
 /// Scan a single directory for session files
@@ -1057,7 +1054,8 @@ fn scan_all_clients_with_env_strategy_inner(
     result
 }
 
-pub fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
+#[cfg(test)]
+fn scan_all_clients(home_dir: &str, clients: &[String]) -> ScanResult {
     scan_all_clients_with_env_strategy(home_dir, clients, true)
 }
 
