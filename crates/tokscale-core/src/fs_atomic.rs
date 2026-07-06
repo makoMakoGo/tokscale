@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,16 +31,16 @@ pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut last_exists_error = None;
     for _ in 0..TEMP_CREATE_ATTEMPTS {
         let tmp_path = temp_path(parent, filename);
-        match write_atomic_to_temp(&tmp_path, final_path, bytes) {
-            Ok(()) => return Ok(()),
+        let file = match create_temp_file(&tmp_path) {
+            Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 last_exists_error = Some(err);
+                continue;
             }
-            Err(err) => {
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(err);
-            }
-        }
+            Err(err) => return Err(err),
+        };
+
+        return write_open_temp_file(file, &tmp_path, final_path, bytes);
     }
 
     Err(last_exists_error.unwrap_or_else(|| {
@@ -54,27 +54,38 @@ pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     }))
 }
 
+#[cfg(test)]
 fn write_atomic_to_temp(tmp_path: &Path, final_path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let write_result = (|| -> io::Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+    let file = create_temp_file(tmp_path)?;
+    write_open_temp_file(file, tmp_path, final_path, bytes)
+}
 
-        let mut file = options.open(tmp_path)?;
+fn create_temp_file(tmp_path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    options.open(tmp_path)
+}
+
+fn write_open_temp_file(
+    mut file: File,
+    tmp_path: &Path,
+    final_path: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let write_result = (|| -> io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         replace_file(tmp_path, final_path)
     })();
 
-    if write_result
-        .as_ref()
-        .is_err_and(|err| err.kind() != io::ErrorKind::AlreadyExists)
-    {
+    if write_result.is_err() {
         let _ = std::fs::remove_file(tmp_path);
     }
 
@@ -146,10 +157,12 @@ fn windows_replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
     #[test]
+    #[serial]
     fn write_atomic_creates_parent_dirs() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nested").join("cache.json");
@@ -160,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn write_atomic_overwrites_existing_file() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("cache.json");
@@ -171,6 +185,26 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn write_atomic_retries_stale_temp_name_collision() {
+        let dir = TempDir::new().unwrap();
+        let final_path = dir.path().join("cache.json");
+        let filename = final_path.file_name().unwrap().to_string_lossy();
+        let stale_path = dir
+            .path()
+            .join(format!(".{}.{}.0.tmp", filename, std::process::id()));
+
+        TEMP_COUNTER.store(0, Ordering::Relaxed);
+        fs::write(&stale_path, "stale").unwrap();
+
+        write_atomic(&final_path, b"new").unwrap();
+
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&stale_path).unwrap(), "stale");
+    }
+
+    #[test]
+    #[serial]
     fn write_atomic_to_temp_does_not_remove_existing_temp_file() {
         let dir = TempDir::new().unwrap();
         let final_path = dir.path().join("cache.json");
