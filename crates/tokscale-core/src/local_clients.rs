@@ -53,10 +53,11 @@ impl PathRoot {
             } => {
                 if use_env_roots {
                     let val = std::env::var(var).unwrap_or_default();
-                    if val.trim().is_empty() {
+                    let trimmed = val.trim();
+                    if trimmed.is_empty() {
                         format!("{}/{}", home_dir, fallback_relative)
                     } else {
-                        val
+                        trimmed.to_string()
                     }
                 } else {
                     format!("{}/{}", home_dir, fallback_relative)
@@ -686,6 +687,46 @@ mod tests {
         };
         let resolved = root.resolve_with_env_strategy("/tmp/home", false);
         assert_eq!(resolved, "/tmp/home/.fallback");
+
+        restore_env(var, previous);
+    }
+
+    #[test]
+    fn path_root_env_var_trims_env_when_set() {
+        let _guard = env_lock().lock().unwrap();
+        let var = "TOKSCALE_TEST_PATH_ROOT_TRIMMED";
+        let previous = std::env::var(var).ok();
+        unsafe { std::env::set_var(var, "  /tmp/custom-root  ") };
+
+        let root = PathRoot::EnvVar {
+            var,
+            fallback_relative: ".fallback",
+        };
+
+        assert_eq!(
+            root.resolve_with_env_strategy("/tmp/home", true),
+            "/tmp/custom-root"
+        );
+
+        restore_env(var, previous);
+    }
+
+    #[test]
+    fn path_root_env_var_falls_back_for_blank_env() {
+        let _guard = env_lock().lock().unwrap();
+        let var = "TOKSCALE_TEST_PATH_ROOT_BLANK";
+        let previous = std::env::var(var).ok();
+        unsafe { std::env::set_var(var, "   ") };
+
+        let root = PathRoot::EnvVar {
+            var,
+            fallback_relative: ".fallback",
+        };
+
+        assert_eq!(
+            root.resolve_with_env_strategy("/tmp/home", true),
+            "/tmp/home/.fallback"
+        );
 
         restore_env(var, previous);
     }
