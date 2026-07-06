@@ -4,7 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const TEMP_CREATE_ATTEMPTS: usize = 16;
 
+/// Atomically write a private file.
+///
+/// This helper always writes a temp file in the target directory, fsyncs it,
+/// closes it, then replaces the final path. On Unix the temp file is created
+/// with `0600` permissions. It is intended for tokscale config, credentials,
+/// and cache files; callers that need public file permissions should set them
+/// explicitly after the write.
 pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = final_path.parent().ok_or_else(|| {
         io::Error::new(
@@ -20,8 +28,34 @@ pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     })?;
     std::fs::create_dir_all(parent)?;
 
-    let tmp_path = temp_path(parent, filename);
-    let write_result = (|| {
+    let mut last_exists_error = None;
+    for _ in 0..TEMP_CREATE_ATTEMPTS {
+        let tmp_path = temp_path(parent, filename);
+        match write_atomic_to_temp(&tmp_path, final_path, bytes) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                last_exists_error = Some(err);
+            }
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(err);
+            }
+        }
+    }
+
+    Err(last_exists_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "failed to create a unique temp file for {} after {TEMP_CREATE_ATTEMPTS} attempts",
+                final_path.display()
+            ),
+        )
+    }))
+}
+
+fn write_atomic_to_temp(tmp_path: &Path, final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let write_result = (|| -> io::Result<()> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -30,14 +64,18 @@ pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
             options.mode(0o600);
         }
 
-        let mut file = options.open(&tmp_path)?;
+        let mut file = options.open(tmp_path)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        replace_file(&tmp_path, final_path)
+        drop(file);
+        replace_file(tmp_path, final_path)
     })();
 
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+    if write_result
+        .as_ref()
+        .is_err_and(|err| err.kind() != io::ErrorKind::AlreadyExists)
+    {
+        let _ = std::fs::remove_file(tmp_path);
     }
 
     write_result
@@ -130,5 +168,19 @@ mod tests {
         write_atomic(&path, b"new").unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "new");
+    }
+
+    #[test]
+    fn write_atomic_to_temp_does_not_remove_existing_temp_file() {
+        let dir = TempDir::new().unwrap();
+        let final_path = dir.path().join("cache.json");
+        let tmp_path = dir.path().join(".cache.json.stale.tmp");
+        fs::write(&tmp_path, "stale").unwrap();
+
+        let err = write_atomic_to_temp(&tmp_path, &final_path, b"new").unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(tmp_path).unwrap(), "stale");
+        assert!(!final_path.exists());
     }
 }
