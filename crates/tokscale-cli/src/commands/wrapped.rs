@@ -69,6 +69,7 @@ struct WrappedData {
 struct WrappedRankedEntry {
     name: String,
     client_id: Option<String>,
+    provider: Option<&'static str>,
     cost: f64,
     tokens: i64,
 }
@@ -259,15 +260,20 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
 
         for client_contrib in &day.clients {
             let model_name = format_model_name(&client_contrib.model_id);
+            let provider = get_provider_from_model(&client_contrib.model_id);
             let model_entry =
                 model_map
                     .entry(model_name.clone())
                     .or_insert_with(|| WrappedRankedEntry {
                         name: model_name,
                         client_id: None,
+                        provider,
                         cost: 0.0,
                         tokens: 0,
                     });
+            if model_entry.provider.is_none() {
+                model_entry.provider = provider;
+            }
             model_entry.cost += client_contrib.cost;
             model_entry.tokens += client_contrib.tokens.input
                 + client_contrib.tokens.output
@@ -282,6 +288,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 .or_insert_with(|| WrappedRankedEntry {
                     name: client_name,
                     client_id: Some(client_contrib.client.clone()),
+                    provider: None,
                     cost: 0.0,
                     tokens: 0,
                 });
@@ -479,7 +486,7 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
 
         let mut text_x = PADDING + 40 * SCALE;
 
-        if let Some(provider) = get_provider_from_model(&model.name) {
+        if let Some(provider) = model.provider {
             if let Some(logo_url) = provider_logo_url(provider) {
                 let filename = format!("provider-{}@2x.jpg", provider);
                 if let Ok(path) = fetch_and_cache_image(&client, logo_url, &filename).await {
@@ -2092,6 +2099,22 @@ mod tests {
     fn test_get_provider_from_model_unknown() {
         assert_eq!(get_provider_from_model("unknown-model"), None);
         assert_eq!(get_provider_from_model("random-123"), None);
+    }
+
+    #[test]
+    fn test_wrapped_model_entry_keeps_provider_from_raw_model_id() {
+        let raw_model_id = "claude-sonnet-4-20250514";
+        let entry = WrappedRankedEntry {
+            name: format_model_name(raw_model_id),
+            client_id: None,
+            provider: get_provider_from_model(raw_model_id),
+            cost: 1.0,
+            tokens: 1,
+        };
+
+        assert_eq!(entry.name, "Claude Sonnet 4");
+        assert_eq!(entry.provider, Some("anthropic"));
+        assert_eq!(get_provider_from_model(&entry.name), None);
     }
 
     // ========== calculate_intensity tests ==========
