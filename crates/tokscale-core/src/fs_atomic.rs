@@ -9,10 +9,10 @@ const TEMP_CREATE_ATTEMPTS: usize = 16;
 /// Atomically write a private file.
 ///
 /// This helper always writes a temp file in the target directory, fsyncs it,
-/// closes it, then replaces the final path. On Unix the temp file is created
-/// with `0600` permissions. It is intended for tokscale config, credentials,
-/// and cache files; callers that need public file permissions should set them
-/// explicitly after the write.
+/// closes it, replaces the final path, and syncs the parent directory on Unix.
+/// On Unix the temp file is created with `0600` permissions. It is intended for
+/// tokscale config, credentials, and cache files; callers that need public file
+/// permissions should set them explicitly after the write.
 pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic_with(final_path, |file| file.write_all(bytes))
 }
@@ -21,7 +21,8 @@ pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
 ///
 /// This has the same file visibility and durability semantics as
 /// [`write_atomic`], but lets callers serialize directly into the temporary
-/// file instead of materializing the full payload in memory first.
+/// file instead of materializing the full payload in memory first. Callers that
+/// wrap the file in a buffered writer must flush that writer before returning.
 pub fn write_atomic_with(
     final_path: &Path,
     write: impl FnOnce(&mut File) -> io::Result<()>,
@@ -94,7 +95,8 @@ fn write_open_temp_file(
         write(&mut file)?;
         file.sync_all()?;
         drop(file);
-        replace_file(tmp_path, final_path)
+        replace_file(tmp_path, final_path)?;
+        sync_parent_dir(final_path)
     })();
 
     if write_result.is_err() {
@@ -125,6 +127,22 @@ pub fn replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
     {
         std::fs::rename(tmp_path, final_path)
     }
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {}", path.display()),
+        )
+    })?;
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
