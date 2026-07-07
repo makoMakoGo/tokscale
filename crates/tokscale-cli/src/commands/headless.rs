@@ -127,10 +127,7 @@ pub(crate) fn run_headless_command(
 
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let home_dir_str = home_dir.to_str().ok_or_else(|| {
-        anyhow::anyhow!("home directory is not valid UTF-8: {}", home_dir.display())
-    })?;
-    let headless_roots = headless_roots_with_env_strategy(home_dir_str, true);
+    let headless_roots = headless_roots_with_env_strategy(&home_dir, true);
 
     let output_path = if let Some(custom_output) = output {
         let parent = Path::new(&custom_output)

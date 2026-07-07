@@ -31,7 +31,6 @@ pub use clients::{
     PathRoot,
 };
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
-pub use scanner::*;
 pub use sessionize::{
     compute_daily_active_time, compute_time_metrics, sessionize, sessionize_time_intervals,
     SessionInterval, TimeMetrics, TimeSessionInterval, DEFAULT_IDLE_GAP_MS,

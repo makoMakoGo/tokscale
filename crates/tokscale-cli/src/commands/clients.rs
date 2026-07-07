@@ -6,9 +6,13 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
+    use tokscale_core::scanner::{
+        built_in_extra_scan_paths_for, copilot_exporter_path_with_env_strategy,
+        extra_scan_paths_for, parse_extra_dirs,
+    };
     use tokscale_core::{
-        built_in_extra_scan_paths_for, count_local_client_messages, extra_scan_paths_for,
-        warp_sqlite_roots_with_env_strategy, ClientId, LocalParseOptions,
+        count_local_client_messages, warp_sqlite_roots_with_env_strategy, ClientId,
+        LocalParseOptions,
     };
 
     let explicit_home_dir = home_dir;
@@ -37,7 +41,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     .map_err(|e| anyhow::anyhow!(e))?;
 
     let headless_roots =
-        tokscale_core::scanner::headless_roots_with_env_strategy(&home_dir_str, use_env_roots);
+        tokscale_core::scanner::headless_roots_with_env_strategy(&home_dir, use_env_roots);
     let headless_codex_count = client_counts.headless_codex_count;
 
     #[derive(serde::Serialize)]
@@ -100,7 +104,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
         String::new()
     };
     let extra_dirs: Vec<(ClientId, String)> = if use_env_roots {
-        tokscale_core::parse_extra_dirs(&extra_dirs_val, &all_clients)
+        parse_extra_dirs(&extra_dirs_val, &all_clients)
     } else {
         Vec::new()
     };
@@ -109,10 +113,9 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     } else {
         Vec::new()
     };
-    let built_in_extra_paths = built_in_extra_scan_paths_for(&home_dir_str, &all_clients);
+    let built_in_extra_paths = built_in_extra_scan_paths_for(&home_dir, &all_clients);
     let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients);
-    let copilot_exporter_path =
-        tokscale_core::copilot_exporter_path_with_env_strategy(use_env_roots);
+    let copilot_exporter_path = copilot_exporter_path_with_env_strategy(use_env_roots);
 
     let clients: Vec<ClientRow> =
         ClientId::iter()

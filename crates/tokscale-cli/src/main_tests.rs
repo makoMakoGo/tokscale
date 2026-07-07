@@ -5,7 +5,7 @@ use crate::commands::integrations::*;
 use crate::commands::render::*;
 use crate::commands::shared::*;
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn test_parse_variant_arg_accepts_known_values() {
@@ -798,8 +798,10 @@ fn headless_roots_ignore_blank_env_override() {
     let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
     unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "   ") };
 
-    let roots =
-        tokscale_core::scanner::headless_roots_with_env_strategy("/tmp/tokscale-home", true);
+    let roots = tokscale_core::scanner::headless_roots_with_env_strategy(
+        Path::new("/tmp/tokscale-home"),
+        true,
+    );
 
     assert!(!roots.contains(&PathBuf::from("   ")));
     assert!(roots.contains(&PathBuf::from(
@@ -818,8 +820,10 @@ fn headless_roots_trim_env_override() {
     let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
     unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "  /tmp/custom-headless  ") };
 
-    let roots =
-        tokscale_core::scanner::headless_roots_with_env_strategy("/tmp/tokscale-home", true);
+    let roots = tokscale_core::scanner::headless_roots_with_env_strategy(
+        Path::new("/tmp/tokscale-home"),
+        true,
+    );
 
     assert_eq!(roots, vec![PathBuf::from("/tmp/custom-headless")]);
 
