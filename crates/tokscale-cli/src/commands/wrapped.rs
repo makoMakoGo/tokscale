@@ -27,6 +27,9 @@ const PROVIDER_LOGO_OPENAI_URL: &str =
     "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-openai.jpg";
 const PROVIDER_LOGO_GOOGLE_URL: &str =
     "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-gemini.png";
+const PROVIDER_LOGO_ANTHROPIC_CACHE_FILE: &str = "provider-anthropic-fork-v2@2x.jpg";
+const PROVIDER_LOGO_OPENAI_CACHE_FILE: &str = "provider-openai-fork-v2@2x.jpg";
+const PROVIDER_LOGO_GOOGLE_CACHE_FILE: &str = "provider-google-fork-v2@2x.png";
 const FIGTREE_REGULAR_FILE: &str = "Figtree-Regular.ttf";
 const FIGTREE_REGULAR_URL: &str =
     "https://fonts.gstatic.com/s/figtree/v9/_Xmz-HUzqDCFdgfMsYiV_F7wfS-Bs_d_QF5e.ttf";
@@ -84,6 +87,12 @@ struct WrappedAgentEntry {
     name: String,
     tokens: i64,
     messages: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderLogoAsset {
+    url: &'static str,
+    cache_file: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -492,9 +501,9 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
         let mut text_x = PADDING + 40 * SCALE;
 
         if let Some(provider) = model.provider {
-            if let Some(logo_url) = provider_logo_url(provider) {
-                let filename = format!("provider-{}@2x.jpg", provider);
-                if let Ok(path) = fetch_and_cache_image(&client, logo_url, &filename).await {
+            if let Some(asset) = provider_logo_asset(provider) {
+                if let Ok(path) = fetch_and_cache_image(&client, asset.url, asset.cache_file).await
+                {
                     if let Ok(logo) = load_rgba_image(&path) {
                         let logo_y = y_pos - logo_size + 6 * SCALE;
                         let logo_x = PADDING + 40 * SCALE;
@@ -1317,17 +1326,27 @@ fn client_logo_url(client: &str) -> Option<&'static str> {
     ClientId::from_str(client).map(|id| id.identity().logo_url)
 }
 
-fn provider_logo_url(provider: &str) -> Option<&'static str> {
+fn provider_logo_asset(provider: &str) -> Option<ProviderLogoAsset> {
     match provider {
-        "anthropic" => Some(PROVIDER_LOGO_ANTHROPIC_URL),
-        "openai" => Some(PROVIDER_LOGO_OPENAI_URL),
-        "google" => Some(PROVIDER_LOGO_GOOGLE_URL),
+        "anthropic" => Some(ProviderLogoAsset {
+            url: PROVIDER_LOGO_ANTHROPIC_URL,
+            cache_file: PROVIDER_LOGO_ANTHROPIC_CACHE_FILE,
+        }),
+        "openai" => Some(ProviderLogoAsset {
+            url: PROVIDER_LOGO_OPENAI_URL,
+            cache_file: PROVIDER_LOGO_OPENAI_CACHE_FILE,
+        }),
+        "google" => Some(ProviderLogoAsset {
+            url: PROVIDER_LOGO_GOOGLE_URL,
+            cache_file: PROVIDER_LOGO_GOOGLE_CACHE_FILE,
+        }),
         _ => None,
     }
 }
 
 fn get_provider_from_model(model_id: &str) -> Option<&'static str> {
-    inferred_provider_from_model(model_id).filter(|provider| provider_logo_url(provider).is_some())
+    inferred_provider_from_model(model_id)
+        .filter(|provider| provider_logo_asset(provider).is_some())
 }
 
 fn format_model_name(model: &str) -> String {
@@ -2212,41 +2231,56 @@ mod tests {
         assert_eq!(client_logo_url(""), None);
     }
 
-    // ========== provider_logo_url tests ==========
+    // ========== provider_logo_asset tests ==========
 
     #[test]
-    fn test_provider_logo_url_anthropic() {
+    fn test_provider_logo_asset_anthropic() {
         assert_eq!(
-            provider_logo_url("anthropic"),
-            Some(PROVIDER_LOGO_ANTHROPIC_URL)
+            provider_logo_asset("anthropic"),
+            Some(ProviderLogoAsset {
+                url: PROVIDER_LOGO_ANTHROPIC_URL,
+                cache_file: PROVIDER_LOGO_ANTHROPIC_CACHE_FILE,
+            })
         );
     }
 
     #[test]
-    fn test_provider_logo_url_openai() {
-        assert_eq!(provider_logo_url("openai"), Some(PROVIDER_LOGO_OPENAI_URL));
+    fn test_provider_logo_asset_openai() {
+        assert_eq!(
+            provider_logo_asset("openai"),
+            Some(ProviderLogoAsset {
+                url: PROVIDER_LOGO_OPENAI_URL,
+                cache_file: PROVIDER_LOGO_OPENAI_CACHE_FILE,
+            })
+        );
     }
 
     #[test]
-    fn test_provider_logo_url_google() {
-        assert_eq!(provider_logo_url("google"), Some(PROVIDER_LOGO_GOOGLE_URL));
+    fn test_provider_logo_asset_google() {
+        assert_eq!(
+            provider_logo_asset("google"),
+            Some(ProviderLogoAsset {
+                url: PROVIDER_LOGO_GOOGLE_URL,
+                cache_file: PROVIDER_LOGO_GOOGLE_CACHE_FILE,
+            })
+        );
     }
 
     #[test]
-    fn test_provider_logo_url_xai_has_no_fork_asset() {
-        assert_eq!(provider_logo_url("xai"), None);
+    fn test_provider_logo_asset_xai_has_no_fork_asset() {
+        assert_eq!(provider_logo_asset("xai"), None);
     }
 
     #[test]
-    fn test_provider_logo_url_zai_has_no_fork_asset() {
-        assert_eq!(provider_logo_url("zai"), None);
+    fn test_provider_logo_asset_zai_has_no_fork_asset() {
+        assert_eq!(provider_logo_asset("zai"), None);
     }
 
     #[test]
-    fn test_provider_logo_url_unknown() {
-        assert_eq!(provider_logo_url("unknown"), None);
-        assert_eq!(provider_logo_url(""), None);
-        assert_eq!(provider_logo_url("Anthropic"), None); // case-sensitive
+    fn test_provider_logo_asset_unknown() {
+        assert_eq!(provider_logo_asset("unknown"), None);
+        assert_eq!(provider_logo_asset(""), None);
+        assert_eq!(provider_logo_asset("Anthropic"), None); // case-sensitive
     }
 
     // ========== capitalize_word edge case tests ==========
