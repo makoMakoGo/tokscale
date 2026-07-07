@@ -11,7 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 use tokscale_core::{
-    load_aggregated_views_with_pricing, ClientId, GroupBy, ReportOptions, ViewSet,
+    inferred_provider_from_model, load_aggregated_views_with_pricing, ClientId, GroupBy,
+    ReportOptions, ViewSet,
 };
 
 const SCALE: i32 = 2;
@@ -19,8 +20,16 @@ const IMAGE_WIDTH: i32 = 1200 * SCALE;
 const IMAGE_HEIGHT: i32 = 1200 * SCALE;
 const PADDING: i32 = 56 * SCALE;
 
-const TOKSCALE_LOGO_SVG_URL: &str = "https://tokscale.ai/tokscale-logo.svg";
-const TOKSCALE_LOGO_PNG_SIZE: i32 = 400;
+const WRAPPED_FOOTER_REPO: &str = "github.com/makoMakoGo/tokscale";
+const PROVIDER_LOGO_ANTHROPIC_URL: &str =
+    "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-claude.jpg";
+const PROVIDER_LOGO_OPENAI_URL: &str =
+    "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-openai.jpg";
+const PROVIDER_LOGO_GOOGLE_URL: &str =
+    "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-gemini.png";
+const PROVIDER_LOGO_ANTHROPIC_CACHE_FILE: &str = "provider-anthropic-fork-v2@2x.jpg";
+const PROVIDER_LOGO_OPENAI_CACHE_FILE: &str = "provider-openai-fork-v2@2x.jpg";
+const PROVIDER_LOGO_GOOGLE_CACHE_FILE: &str = "provider-google-fork-v2@2x.png";
 const FIGTREE_REGULAR_FILE: &str = "Figtree-Regular.ttf";
 const FIGTREE_REGULAR_URL: &str =
     "https://fonts.gstatic.com/s/figtree/v9/_Xmz-HUzqDCFdgfMsYiV_F7wfS-Bs_d_QF5e.ttf";
@@ -68,6 +77,7 @@ struct WrappedData {
 struct WrappedRankedEntry {
     name: String,
     client_id: Option<String>,
+    provider: Option<&'static str>,
     cost: f64,
     tokens: i64,
 }
@@ -77,6 +87,12 @@ struct WrappedAgentEntry {
     name: String,
     tokens: i64,
     messages: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderLogoAsset {
+    url: &'static str,
+    cache_file: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -258,15 +274,20 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
 
         for client_contrib in &day.clients {
             let model_name = format_model_name(&client_contrib.model_id);
+            let provider = get_provider_from_model(&client_contrib.model_id);
             let model_entry =
                 model_map
                     .entry(model_name.clone())
                     .or_insert_with(|| WrappedRankedEntry {
                         name: model_name,
                         client_id: None,
+                        provider,
                         cost: 0.0,
                         tokens: 0,
                     });
+            if model_entry.provider.is_none() {
+                model_entry.provider = provider;
+            }
             model_entry.cost += client_contrib.cost;
             model_entry.tokens += client_contrib.tokens.input
                 + client_contrib.tokens.output
@@ -281,6 +302,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 .or_insert_with(|| WrappedRankedEntry {
                     name: client_name,
                     client_id: Some(client_contrib.client.clone()),
+                    provider: None,
                     cost: 0.0,
                     tokens: 0,
                 });
@@ -478,10 +500,10 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
 
         let mut text_x = PADDING + 40 * SCALE;
 
-        if let Some(provider) = get_provider_from_model(&model.name) {
-            if let Some(logo_url) = provider_logo_url(provider) {
-                let filename = format!("provider-{}@2x.jpg", provider);
-                if let Ok(path) = fetch_and_cache_image(&client, logo_url, &filename).await {
+        if let Some(provider) = model.provider {
+            if let Some(asset) = provider_logo_asset(provider) {
+                if let Ok(path) = fetch_and_cache_image(&client, asset.url, asset.cache_file).await
+                {
                     if let Ok(logo) = load_rgba_image(&path) {
                         let logo_y = y_pos - logo_size + 6 * SCALE;
                         let logo_x = PADDING + 40 * SCALE;
@@ -722,41 +744,24 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
     );
 
     let footer_bottom_y = IMAGE_HEIGHT - PADDING;
-    let tokscale_logo_height = 72 * SCALE;
-
-    if let Ok(logo_path) = fetch_svg_and_convert_to_png(
-        &client,
-        TOKSCALE_LOGO_SVG_URL,
-        "tokscale-logo@2x.png",
-        TOKSCALE_LOGO_PNG_SIZE * SCALE,
-    )
-    .await
-    {
-        if let Ok(logo) = load_rgba_image(&logo_path) {
-            draw_text_mut_baseline(
-                &mut canvas,
-                &fonts.regular,
-                (18 * SCALE) as f32,
-                COLOR_TEXT_SECONDARY,
-                PADDING,
-                footer_bottom_y,
-                "github.com/junhoyeo/tokscale",
-            );
-
-            let logo_width = ((logo.width() as f32 / logo.height() as f32)
-                * tokscale_logo_height as f32)
-                .round() as i32;
-            let logo_y = footer_bottom_y - 18 * SCALE - 16 * SCALE - tokscale_logo_height;
-            draw_image(
-                &mut canvas,
-                &logo,
-                PADDING,
-                logo_y,
-                logo_width,
-                tokscale_logo_height,
-            );
-        }
-    }
+    draw_text_mut_baseline(
+        &mut canvas,
+        &fonts.bold,
+        (24 * SCALE) as f32,
+        COLOR_TEXT_PRIMARY,
+        PADDING,
+        footer_bottom_y - 32 * SCALE,
+        "Tokscale",
+    );
+    draw_text_mut_baseline(
+        &mut canvas,
+        &fonts.regular,
+        (18 * SCALE) as f32,
+        COLOR_TEXT_SECONDARY,
+        PADDING,
+        footer_bottom_y,
+        WRAPPED_FOOTER_REPO,
+    );
 
     Ok(canvas)
 }
@@ -907,21 +912,6 @@ fn measure_text_width(font: &FontArc, font_size: f32, text: &str) -> f32 {
     }
 
     width
-}
-
-fn draw_image(canvas: &mut RgbaImage, source: &RgbaImage, x: i32, y: i32, width: i32, height: i32) {
-    if width <= 0 || height <= 0 {
-        return;
-    }
-
-    let resized =
-        image::imageops::resize(source, width as u32, height as u32, FilterType::CatmullRom);
-    for dy in 0..height {
-        for dx in 0..width {
-            let src = *resized.get_pixel(dx as u32, dy as u32);
-            blend_pixel(canvas, x + dx, y + dy, src);
-        }
-    }
 }
 
 fn draw_image_rounded(
@@ -1149,56 +1139,6 @@ async fn fetch_and_cache_image(
     Ok(cached_path)
 }
 
-async fn fetch_svg_and_convert_to_png(
-    client: &reqwest::Client,
-    svg_url: &str,
-    filename: &str,
-    size: i32,
-) -> Result<PathBuf> {
-    let cache_dir = get_image_cache_dir()?;
-    ensure_cache_dir(&cache_dir)?;
-
-    let cached_path = cache_dir.join(filename);
-    if cached_path.exists() {
-        return Ok(cached_path);
-    }
-    if let Some(legacy_path) = first_existing_legacy_wrapped_cache_file("images", filename) {
-        return Ok(legacy_path);
-    }
-
-    let response = client
-        .get(svg_url)
-        .send()
-        .await
-        .with_context(|| format!("Failed to fetch {}", svg_url))?;
-    if !response.status().is_success() {
-        anyhow::bail!("Failed to fetch {} (status {})", svg_url, response.status());
-    }
-
-    let svg_bytes = response.bytes().await?;
-    let options = usvg::Options::default();
-    let tree = usvg::Tree::from_data(&svg_bytes, &options)
-        .map_err(|err| anyhow::anyhow!("Failed to parse SVG: {err:?}"))?;
-
-    let base_size = tree.size().to_int_size();
-    let scale = size as f32 / base_size.width() as f32;
-    let scaled_size = base_size
-        .scale_by(scale)
-        .ok_or_else(|| anyhow::anyhow!("Invalid scaled SVG size"))?;
-
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(scaled_size.width(), scaled_size.height())
-        .ok_or_else(|| anyhow::anyhow!("Failed to create pixmap"))?;
-    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-    let png = pixmap
-        .encode_png()
-        .map_err(|err| anyhow::anyhow!("Failed to encode PNG: {err:?}"))?;
-    atomic_write_bytes(&cached_path, &png)?;
-
-    Ok(cached_path)
-}
-
 async fn fetch_to_file(client: &reqwest::Client, url: &str, path: &Path) -> Result<()> {
     let response = client
         .get(url)
@@ -1265,39 +1205,8 @@ fn first_existing_legacy_wrapped_cache_file(subdir: &str, filename: &str) -> Opt
 }
 
 fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cache path has no parent: {}", path.display()))?;
-    ensure_cache_dir(dir)?;
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let tmp_name = format!(
-        ".{}.{}.{:x}.tmp",
-        path.file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("wrapped.cache"),
-        std::process::id(),
-        nanos
-    );
-    let tmp_path = dir.join(tmp_name);
-
-    let write_result = (|| -> Result<()> {
-        let mut file = fs::File::create(&tmp_path)?;
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        tokscale_core::fs_atomic::replace_file(&tmp_path, path)?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-
-    write_result
+    tokscale_core::fs_atomic::write_atomic(path, bytes)
+        .with_context(|| format!("Failed to write cache file: {}", path.display()))
 }
 
 fn calculate_intensity(cost: f64, max_cost: f64) -> u8 {
@@ -1417,43 +1326,27 @@ fn client_logo_url(client: &str) -> Option<&'static str> {
     ClientId::from_str(client).map(|id| id.identity().logo_url)
 }
 
-fn provider_logo_url(provider: &str) -> Option<&'static str> {
+fn provider_logo_asset(provider: &str) -> Option<ProviderLogoAsset> {
     match provider {
-        "anthropic" => Some("https://tokscale.ai/assets/logos/claude.jpg"),
-        "openai" => Some("https://tokscale.ai/assets/logos/openai.jpg"),
-        "google" => Some("https://tokscale.ai/assets/logos/gemini.png"),
-        "xai" => Some("https://tokscale.ai/assets/logos/grok.jpg"),
-        "zai" => Some("https://tokscale.ai/assets/logos/zai.jpg"),
+        "anthropic" => Some(ProviderLogoAsset {
+            url: PROVIDER_LOGO_ANTHROPIC_URL,
+            cache_file: PROVIDER_LOGO_ANTHROPIC_CACHE_FILE,
+        }),
+        "openai" => Some(ProviderLogoAsset {
+            url: PROVIDER_LOGO_OPENAI_URL,
+            cache_file: PROVIDER_LOGO_OPENAI_CACHE_FILE,
+        }),
+        "google" => Some(ProviderLogoAsset {
+            url: PROVIDER_LOGO_GOOGLE_URL,
+            cache_file: PROVIDER_LOGO_GOOGLE_CACHE_FILE,
+        }),
         _ => None,
     }
 }
 
 fn get_provider_from_model(model_id: &str) -> Option<&'static str> {
-    let lower = model_id.to_lowercase();
-    if lower.contains("claude")
-        || lower.contains("opus")
-        || lower.contains("sonnet")
-        || lower.contains("haiku")
-    {
-        return Some("anthropic");
-    }
-    if lower.contains("gpt")
-        || lower.contains("o1")
-        || lower.contains("o3")
-        || lower.contains("codex")
-    {
-        return Some("openai");
-    }
-    if lower.contains("gemini") {
-        return Some("google");
-    }
-    if lower.contains("grok") {
-        return Some("xai");
-    }
-    if lower.contains("glm") || lower.contains("pickle") {
-        return Some("zai");
-    }
-    None
+    inferred_provider_from_model(model_id)
+        .filter(|provider| provider_logo_asset(provider).is_some())
 }
 
 fn format_model_name(model: &str) -> String {
@@ -2131,21 +2024,37 @@ mod tests {
     }
 
     #[test]
-    fn test_get_provider_from_model_xai() {
-        assert_eq!(get_provider_from_model("grok-3"), Some("xai"));
-        assert_eq!(get_provider_from_model("grok-code"), Some("xai"));
+    fn test_get_provider_from_model_xai_has_no_fork_asset() {
+        assert_eq!(get_provider_from_model("grok-3"), None);
+        assert_eq!(get_provider_from_model("grok-code"), None);
     }
 
     #[test]
-    fn test_get_provider_from_model_zai() {
-        assert_eq!(get_provider_from_model("glm-4.7"), Some("zai"));
-        assert_eq!(get_provider_from_model("pickle-model"), Some("zai"));
+    fn test_get_provider_from_model_zai_has_no_fork_asset() {
+        assert_eq!(get_provider_from_model("glm-4.7"), None);
+        assert_eq!(get_provider_from_model("pickle-model"), None);
     }
 
     #[test]
     fn test_get_provider_from_model_unknown() {
         assert_eq!(get_provider_from_model("unknown-model"), None);
         assert_eq!(get_provider_from_model("random-123"), None);
+    }
+
+    #[test]
+    fn test_wrapped_model_entry_keeps_provider_from_raw_model_id() {
+        let raw_model_id = "claude-sonnet-4-20250514";
+        let entry = WrappedRankedEntry {
+            name: format_model_name(raw_model_id),
+            client_id: None,
+            provider: get_provider_from_model(raw_model_id),
+            cost: 1.0,
+            tokens: 1,
+        };
+
+        assert_eq!(entry.name, "Claude Sonnet 4");
+        assert_eq!(entry.provider, Some("anthropic"));
+        assert_eq!(get_provider_from_model(&entry.name), None);
     }
 
     // ========== calculate_intensity tests ==========
@@ -2322,53 +2231,56 @@ mod tests {
         assert_eq!(client_logo_url(""), None);
     }
 
-    // ========== provider_logo_url tests ==========
+    // ========== provider_logo_asset tests ==========
 
     #[test]
-    fn test_provider_logo_url_anthropic() {
+    fn test_provider_logo_asset_anthropic() {
         assert_eq!(
-            provider_logo_url("anthropic"),
-            Some("https://tokscale.ai/assets/logos/claude.jpg")
+            provider_logo_asset("anthropic"),
+            Some(ProviderLogoAsset {
+                url: PROVIDER_LOGO_ANTHROPIC_URL,
+                cache_file: PROVIDER_LOGO_ANTHROPIC_CACHE_FILE,
+            })
         );
     }
 
     #[test]
-    fn test_provider_logo_url_openai() {
+    fn test_provider_logo_asset_openai() {
         assert_eq!(
-            provider_logo_url("openai"),
-            Some("https://tokscale.ai/assets/logos/openai.jpg")
+            provider_logo_asset("openai"),
+            Some(ProviderLogoAsset {
+                url: PROVIDER_LOGO_OPENAI_URL,
+                cache_file: PROVIDER_LOGO_OPENAI_CACHE_FILE,
+            })
         );
     }
 
     #[test]
-    fn test_provider_logo_url_google() {
+    fn test_provider_logo_asset_google() {
         assert_eq!(
-            provider_logo_url("google"),
-            Some("https://tokscale.ai/assets/logos/gemini.png")
+            provider_logo_asset("google"),
+            Some(ProviderLogoAsset {
+                url: PROVIDER_LOGO_GOOGLE_URL,
+                cache_file: PROVIDER_LOGO_GOOGLE_CACHE_FILE,
+            })
         );
     }
 
     #[test]
-    fn test_provider_logo_url_xai() {
-        assert_eq!(
-            provider_logo_url("xai"),
-            Some("https://tokscale.ai/assets/logos/grok.jpg")
-        );
+    fn test_provider_logo_asset_xai_has_no_fork_asset() {
+        assert_eq!(provider_logo_asset("xai"), None);
     }
 
     #[test]
-    fn test_provider_logo_url_zai() {
-        assert_eq!(
-            provider_logo_url("zai"),
-            Some("https://tokscale.ai/assets/logos/zai.jpg")
-        );
+    fn test_provider_logo_asset_zai_has_no_fork_asset() {
+        assert_eq!(provider_logo_asset("zai"), None);
     }
 
     #[test]
-    fn test_provider_logo_url_unknown() {
-        assert_eq!(provider_logo_url("unknown"), None);
-        assert_eq!(provider_logo_url(""), None);
-        assert_eq!(provider_logo_url("Anthropic"), None); // case-sensitive
+    fn test_provider_logo_asset_unknown() {
+        assert_eq!(provider_logo_asset("unknown"), None);
+        assert_eq!(provider_logo_asset(""), None);
+        assert_eq!(provider_logo_asset("Anthropic"), None); // case-sensitive
     }
 
     // ========== capitalize_word edge case tests ==========
@@ -2479,8 +2391,8 @@ mod tests {
         assert_eq!(get_provider_from_model("CLAUDE-3-OPUS"), Some("anthropic"));
         assert_eq!(get_provider_from_model("GPT-4"), Some("openai"));
         assert_eq!(get_provider_from_model("Gemini-Pro"), Some("google"));
-        assert_eq!(get_provider_from_model("GROK-3"), Some("xai"));
-        assert_eq!(get_provider_from_model("GLM-4.7"), Some("zai"));
+        assert_eq!(get_provider_from_model("GROK-3"), None);
+        assert_eq!(get_provider_from_model("GLM-4.7"), None);
     }
 
     #[test]
@@ -2508,10 +2420,9 @@ mod tests {
     }
 
     #[test]
-    fn test_get_provider_from_model_pickle() {
-        // "pickle" maps to zai
-        assert_eq!(get_provider_from_model("big-pickle"), Some("zai"));
-        assert_eq!(get_provider_from_model("pickle-3"), Some("zai"));
+    fn test_get_provider_from_model_pickle_has_no_fork_asset() {
+        assert_eq!(get_provider_from_model("big-pickle"), None);
+        assert_eq!(get_provider_from_model("pickle-3"), None);
     }
 
     // ========== calculate_intensity edge case tests ==========

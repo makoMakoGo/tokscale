@@ -1,8 +1,8 @@
-use crate::commands::shared::get_headless_roots;
 use crate::tui;
 use anyhow::Result;
 use std::path::Path;
 use std::time::Duration;
+use tokscale_core::scanner::headless_roots_with_env_strategy;
 
 pub(crate) struct CaptureCommandOutcome {
     exit_code: i32,
@@ -127,7 +127,10 @@ pub(crate) fn run_headless_command(
 
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let headless_roots = get_headless_roots(&home_dir);
+    let home_dir_str = home_dir.to_str().ok_or_else(|| {
+        anyhow::anyhow!("home directory is not valid UTF-8: {}", home_dir.display())
+    })?;
+    let headless_roots = headless_roots_with_env_strategy(home_dir_str, true);
 
     let output_path = if let Some(custom_output) = output {
         let parent = Path::new(&custom_output)

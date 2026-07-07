@@ -6,10 +6,8 @@ mod client_catalog;
 pub mod clients;
 pub mod fs_atomic;
 mod local_clients;
-pub mod mcp;
 mod message_cache;
 mod model_aliases;
-mod parser;
 pub mod paths;
 pub mod pricing;
 mod provider_identity;
@@ -32,7 +30,6 @@ pub use clients::{
     warp_sqlite_roots_with_env_strategy, ClientCounts, ClientId, ClientIdentity, LocalClientDef,
     PathRoot,
 };
-pub use parser::*;
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
 pub use scanner::*;
 pub use sessionize::{

@@ -2,7 +2,6 @@ use ratatui::widgets::ScrollbarState;
 use tokscale_core::{normalize_provider_for_grouping, ClientId};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::client_ui;
 use crate::tui::config::TokscaleConfig;
 
 pub fn format_tokens_compact(tokens: u64) -> String {
@@ -170,7 +169,7 @@ fn get_single_client_display_name(client: &str) -> String {
     }
     let client_lower = client.to_lowercase();
     if let Some(client_id) = ClientId::from_str(&client_lower) {
-        return client_ui::display_name(client_id).to_string();
+        return client_id.short_name().to_string();
     }
     client.to_string()
 }

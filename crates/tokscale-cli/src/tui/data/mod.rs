@@ -63,15 +63,6 @@ pub struct DataLoadResult {
 }
 
 impl DataLoader {
-    pub fn new(sessions_path: Option<PathBuf>) -> Self {
-        Self {
-            _sessions_path: sessions_path,
-            since: None,
-            until: None,
-            year: None,
-        }
-    }
-
     pub fn with_filters(
         sessions_path: Option<PathBuf>,
         since: Option<String>,
@@ -308,220 +299,94 @@ mod tests {
 
     #[test]
     fn test_client_as_str() {
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::OpenCode),
-            "OpenCode"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Claude),
-            "Claude"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Codex),
-            "Codex"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Copilot),
-            "Copilot"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Cursor),
-            "Cursor"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Gemini),
-            "Gemini"
-        );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Amp), "Amp");
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Droid),
-            "Droid"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::OpenClaw),
-            "OpenClaw"
-        );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Pi), "Pi");
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Omp), "OMP");
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Kimi), "Kimi");
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Qwen), "Qwen");
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::RooCode),
-            "Roo Code"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::KiloCode),
-            "KiloCode"
-        );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Mux), "Mux");
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Kilo),
-            "Kilo CLI"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Crush),
-            "Crush"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Hermes),
-            "Hermes Agent"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Codebuff),
-            "Codebuff"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::CodeBuddy),
-            "CodeBuddy"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Antigravity),
-            "Antigravity"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Zed),
-            "Zed Agent"
-        );
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Zcode),
-            "ZCode"
-        );
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Kiro), "Kiro");
-        assert_eq!(crate::tui::client_ui::display_name(ClientId::Trae), "Trae");
-        assert_eq!(
-            crate::tui::client_ui::display_name(ClientId::Cline),
-            "Cline"
-        );
+        assert_eq!(ClientId::short_name(ClientId::OpenCode), "OpenCode");
+        assert_eq!(ClientId::short_name(ClientId::Claude), "Claude");
+        assert_eq!(ClientId::short_name(ClientId::Codex), "Codex");
+        assert_eq!(ClientId::short_name(ClientId::Copilot), "Copilot");
+        assert_eq!(ClientId::short_name(ClientId::Cursor), "Cursor");
+        assert_eq!(ClientId::short_name(ClientId::Gemini), "Gemini");
+        assert_eq!(ClientId::short_name(ClientId::Amp), "Amp");
+        assert_eq!(ClientId::short_name(ClientId::Droid), "Droid");
+        assert_eq!(ClientId::short_name(ClientId::OpenClaw), "OpenClaw");
+        assert_eq!(ClientId::short_name(ClientId::Pi), "Pi");
+        assert_eq!(ClientId::short_name(ClientId::Omp), "OMP");
+        assert_eq!(ClientId::short_name(ClientId::Kimi), "Kimi");
+        assert_eq!(ClientId::short_name(ClientId::Qwen), "Qwen");
+        assert_eq!(ClientId::short_name(ClientId::RooCode), "Roo Code");
+        assert_eq!(ClientId::short_name(ClientId::KiloCode), "KiloCode");
+        assert_eq!(ClientId::short_name(ClientId::Mux), "Mux");
+        assert_eq!(ClientId::short_name(ClientId::Kilo), "Kilo CLI");
+        assert_eq!(ClientId::short_name(ClientId::Crush), "Crush");
+        assert_eq!(ClientId::short_name(ClientId::Hermes), "Hermes Agent");
+        assert_eq!(ClientId::short_name(ClientId::Codebuff), "Codebuff");
+        assert_eq!(ClientId::short_name(ClientId::CodeBuddy), "CodeBuddy");
+        assert_eq!(ClientId::short_name(ClientId::Antigravity), "Antigravity");
+        assert_eq!(ClientId::short_name(ClientId::Zed), "Zed Agent");
+        assert_eq!(ClientId::short_name(ClientId::Zcode), "ZCode");
+        assert_eq!(ClientId::short_name(ClientId::Kiro), "Kiro");
+        assert_eq!(ClientId::short_name(ClientId::Trae), "Trae");
+        assert_eq!(ClientId::short_name(ClientId::Cline), "Cline");
     }
 
     #[test]
     fn test_client_key() {
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenCode), Some('1'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Claude), Some('2'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codex), Some('3'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Copilot), Some('c'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cursor), Some('4'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Gemini), Some('5'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Amp), Some('6'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Droid), Some('7'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::OpenClaw), Some('8'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Pi), Some('9'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Omp), Some('m'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kimi), Some('0'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Qwen), Some('w'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::RooCode), Some('r'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::KiloCode), Some('k'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Mux), Some('x'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kilo), Some('l'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Crush), Some('h'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Hermes), Some('e'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Codebuff), Some('b'));
-        assert_eq!(
-            crate::tui::client_ui::hotkey(ClientId::CodeBuddy),
-            Some('f')
-        );
-        assert_eq!(
-            crate::tui::client_ui::hotkey(ClientId::Antigravity),
-            Some('a')
-        );
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zed), Some('z'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Zcode), Some('q'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Kiro), Some('i'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Trae), Some('y'));
-        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Cline), Some('n'));
+        assert_eq!(ClientId::hotkey(ClientId::OpenCode), Some('1'));
+        assert_eq!(ClientId::hotkey(ClientId::Claude), Some('2'));
+        assert_eq!(ClientId::hotkey(ClientId::Codex), Some('3'));
+        assert_eq!(ClientId::hotkey(ClientId::Copilot), Some('c'));
+        assert_eq!(ClientId::hotkey(ClientId::Cursor), Some('4'));
+        assert_eq!(ClientId::hotkey(ClientId::Gemini), Some('5'));
+        assert_eq!(ClientId::hotkey(ClientId::Amp), Some('6'));
+        assert_eq!(ClientId::hotkey(ClientId::Droid), Some('7'));
+        assert_eq!(ClientId::hotkey(ClientId::OpenClaw), Some('8'));
+        assert_eq!(ClientId::hotkey(ClientId::Pi), Some('9'));
+        assert_eq!(ClientId::hotkey(ClientId::Omp), Some('m'));
+        assert_eq!(ClientId::hotkey(ClientId::Kimi), Some('0'));
+        assert_eq!(ClientId::hotkey(ClientId::Qwen), Some('w'));
+        assert_eq!(ClientId::hotkey(ClientId::RooCode), Some('r'));
+        assert_eq!(ClientId::hotkey(ClientId::KiloCode), Some('k'));
+        assert_eq!(ClientId::hotkey(ClientId::Mux), Some('x'));
+        assert_eq!(ClientId::hotkey(ClientId::Kilo), Some('l'));
+        assert_eq!(ClientId::hotkey(ClientId::Crush), Some('h'));
+        assert_eq!(ClientId::hotkey(ClientId::Hermes), Some('e'));
+        assert_eq!(ClientId::hotkey(ClientId::Codebuff), Some('b'));
+        assert_eq!(ClientId::hotkey(ClientId::CodeBuddy), Some('f'));
+        assert_eq!(ClientId::hotkey(ClientId::Antigravity), Some('a'));
+        assert_eq!(ClientId::hotkey(ClientId::Zed), Some('z'));
+        assert_eq!(ClientId::hotkey(ClientId::Zcode), Some('q'));
+        assert_eq!(ClientId::hotkey(ClientId::Kiro), Some('i'));
+        assert_eq!(ClientId::hotkey(ClientId::Trae), Some('y'));
+        assert_eq!(ClientId::hotkey(ClientId::Cline), Some('n'));
     }
 
     #[test]
     fn test_client_from_key() {
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('1'),
-            Some(ClientId::OpenCode)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('2'),
-            Some(ClientId::Claude)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('3'),
-            Some(ClientId::Codex)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('c'),
-            Some(ClientId::Copilot)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('4'),
-            Some(ClientId::Cursor)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('5'),
-            Some(ClientId::Gemini)
-        );
-        assert_eq!(crate::tui::client_ui::from_hotkey('6'), Some(ClientId::Amp));
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('7'),
-            Some(ClientId::Droid)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('8'),
-            Some(ClientId::OpenClaw)
-        );
-        assert_eq!(crate::tui::client_ui::from_hotkey('9'), Some(ClientId::Pi));
-        assert_eq!(crate::tui::client_ui::from_hotkey('m'), Some(ClientId::Omp));
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('0'),
-            Some(ClientId::Kimi)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('w'),
-            Some(ClientId::Qwen)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('r'),
-            Some(ClientId::RooCode)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('k'),
-            Some(ClientId::KiloCode)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('l'),
-            Some(ClientId::Kilo)
-        );
-        assert_eq!(crate::tui::client_ui::from_hotkey('x'), Some(ClientId::Mux));
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('h'),
-            Some(ClientId::Crush)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('e'),
-            Some(ClientId::Hermes)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('b'),
-            Some(ClientId::Codebuff)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('f'),
-            Some(ClientId::CodeBuddy)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('a'),
-            Some(ClientId::Antigravity)
-        );
-        assert_eq!(crate::tui::client_ui::from_hotkey('z'), Some(ClientId::Zed));
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('q'),
-            Some(ClientId::Zcode)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('i'),
-            Some(ClientId::Kiro)
-        );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('y'),
-            Some(ClientId::Trae)
-        );
+        assert_eq!(ClientId::from_hotkey('1'), Some(ClientId::OpenCode));
+        assert_eq!(ClientId::from_hotkey('2'), Some(ClientId::Claude));
+        assert_eq!(ClientId::from_hotkey('3'), Some(ClientId::Codex));
+        assert_eq!(ClientId::from_hotkey('c'), Some(ClientId::Copilot));
+        assert_eq!(ClientId::from_hotkey('4'), Some(ClientId::Cursor));
+        assert_eq!(ClientId::from_hotkey('5'), Some(ClientId::Gemini));
+        assert_eq!(ClientId::from_hotkey('6'), Some(ClientId::Amp));
+        assert_eq!(ClientId::from_hotkey('7'), Some(ClientId::Droid));
+        assert_eq!(ClientId::from_hotkey('8'), Some(ClientId::OpenClaw));
+        assert_eq!(ClientId::from_hotkey('9'), Some(ClientId::Pi));
+        assert_eq!(ClientId::from_hotkey('m'), Some(ClientId::Omp));
+        assert_eq!(ClientId::from_hotkey('0'), Some(ClientId::Kimi));
+        assert_eq!(ClientId::from_hotkey('w'), Some(ClientId::Qwen));
+        assert_eq!(ClientId::from_hotkey('r'), Some(ClientId::RooCode));
+        assert_eq!(ClientId::from_hotkey('k'), Some(ClientId::KiloCode));
+        assert_eq!(ClientId::from_hotkey('l'), Some(ClientId::Kilo));
+        assert_eq!(ClientId::from_hotkey('x'), Some(ClientId::Mux));
+        assert_eq!(ClientId::from_hotkey('h'), Some(ClientId::Crush));
+        assert_eq!(ClientId::from_hotkey('e'), Some(ClientId::Hermes));
+        assert_eq!(ClientId::from_hotkey('b'), Some(ClientId::Codebuff));
+        assert_eq!(ClientId::from_hotkey('f'), Some(ClientId::CodeBuddy));
+        assert_eq!(ClientId::from_hotkey('a'), Some(ClientId::Antigravity));
+        assert_eq!(ClientId::from_hotkey('z'), Some(ClientId::Zed));
+        assert_eq!(ClientId::from_hotkey('q'), Some(ClientId::Zcode));
+        assert_eq!(ClientId::from_hotkey('i'), Some(ClientId::Kiro));
+        assert_eq!(ClientId::from_hotkey('y'), Some(ClientId::Trae));
     }
 
     #[test]
@@ -562,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_data_loader_new() {
-        let loader = DataLoader::new(None);
+        let loader = DataLoader::with_filters(None, None, None, None);
         assert!(loader._sessions_path.is_none());
         assert!(loader.since.is_none());
         assert!(loader.until.is_none());
@@ -709,7 +574,7 @@ after"#,
         }
 
         let pricing = test_pricing_service();
-        let loader = DataLoader::new(None);
+        let loader = DataLoader::with_filters(None, None, None, None);
         let usage = load_with_pricing(
             &loader,
             &[ClientId::RooCode],
@@ -803,7 +668,7 @@ after"#,
         }
 
         let pricing = test_pricing_service();
-        let loader = DataLoader::new(None);
+        let loader = DataLoader::with_filters(None, None, None, None);
         let usage = load_with_pricing(
             &loader,
             &[ClientId::OpenCode],

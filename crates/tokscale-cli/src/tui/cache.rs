@@ -5,8 +5,8 @@
 //! or missing cache data still triggers a refresh.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::fs::File;
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -724,10 +724,6 @@ pub fn save_cached_data(
 ) -> anyhow::Result<()> {
     let cache_path = cache_file().ok_or_else(|| anyhow::anyhow!("TUI cache path unavailable"))?;
 
-    if let Some(dir) = cache_path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
     let mut clients_vec: Vec<String> = enabled_clients
@@ -752,39 +748,9 @@ pub fn save_cached_data(
     // the canonical cache file before writing — a partial save or process
     // crash between delete and rename would lose the cache. The temp-file
     // pattern makes corruption-on-crash impossible.
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
-    let file_name = cache_path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!("TUI cache path has no file name: {}", cache_path.display())
-        })?;
-    let temp_path = cache_path.with_file_name(format!(
-        ".{}.{}.{:x}.tmp",
-        file_name,
-        std::process::id(),
-        nanos
-    ));
-
-    let write_result = (|| -> anyhow::Result<()> {
-        let file = File::create(&temp_path)?;
-        serde_json::to_writer(BufWriter::new(file), &cached)?;
-        tokscale_core::fs_atomic::replace_file(&temp_path, &cache_path)?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        match fs::remove_file(&temp_path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => eprintln!(
-                "tokscale: failed to remove temporary TUI cache {} after save error: {err}",
-                temp_path.display()
-            ),
-        }
-    }
-
-    write_result
+    let content = serde_json::to_vec(&cached)?;
+    tokscale_core::fs_atomic::write_atomic(&cache_path, &content)?;
+    Ok(())
 }
 
 #[cfg(test)]

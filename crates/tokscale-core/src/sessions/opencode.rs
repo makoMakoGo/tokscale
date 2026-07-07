@@ -406,8 +406,6 @@ pub fn load_opencode_migration_cache() -> Option<OpenCodeMigrationCache> {
 
 /// Persist the migration cache atomically (write to temp file, then rename).
 pub fn save_opencode_migration_cache(cache: &OpenCodeMigrationCache) {
-    use std::io::Write as _;
-
     let dir = migration_cache_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -418,29 +416,11 @@ pub fn save_opencode_migration_cache(cache: &OpenCodeMigrationCache) {
         Err(_) => return,
     };
 
-    let final_path = migration_cache_path();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let tmp_name = format!(".opencode-migration.{}.{:x}.tmp", std::process::id(), nanos);
-    let tmp_path = dir.join(tmp_name);
-
     // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
     // the canonical cache file before writing — a partial save or process
     // crash between delete and rename would lose the cache. The temp-file
     // pattern makes corruption-on-crash impossible.
-    let result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&tmp_path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
+    let _ = crate::fs_atomic::write_atomic(&migration_cache_path(), content.as_bytes());
 }
 
 /// Return the modification time of `json_dir` as Unix seconds, or `None` on

@@ -127,6 +127,16 @@ fn generate_rust(entries: &[CatalogEntry]) -> String {
             )
         })
         .collect::<String>();
+    let from_hotkey = entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "            {} => Some(ClientId::{}),\n",
+                rust_hotkey_char(&entry.hotkey),
+                entry.variant
+            )
+        })
+        .collect::<String>();
     let identities = entries
         .iter()
         .map(|entry| {
@@ -188,6 +198,12 @@ impl ClientId {{
         self.identity().hotkey
     }}
 
+    pub fn from_hotkey(ch: char) -> Option<ClientId> {{
+        match ch {{
+{from_hotkey}            _ => None,
+        }}
+    }}
+
     pub fn color(self) -> &'static str {{
         self.identity().color
     }}
@@ -223,4 +239,12 @@ fn rust_hotkey(value: &str) -> String {
         .next()
         .expect("catalog validation rejects empty hotkeys");
     format!("Some({ch:?})")
+}
+
+fn rust_hotkey_char(value: &str) -> String {
+    let ch = value
+        .chars()
+        .next()
+        .expect("catalog validation rejects empty hotkeys");
+    format!("{ch:?}")
 }

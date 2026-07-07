@@ -75,7 +75,9 @@ CLI flags override matching config values for a single invocation.
 
 Client-specific homes are also respected where the client supports them, such as
 `CODEX_HOME`, `GEMINI_CLI_HOME`, `KIMI_CODE_HOME`, `HERMES_HOME`,
-`CODEBUFF_DATA_DIR`, `GOOSE_PATH_ROOT`, and `GROK_HOME`.
+`CODEBUFF_DATA_DIR`, `GOOSE_PATH_ROOT`, and `GROK_HOME`. These client home
+overrides trim leading/trailing whitespace and fall back to the default client
+path when set to a blank value.
 
 ## Cache layout
 

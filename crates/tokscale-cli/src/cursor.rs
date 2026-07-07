@@ -166,62 +166,8 @@ fn count_cursor_csv_rows(csv_text: &str) -> usize {
 }
 
 fn atomic_write_file(path: &std::path::Path, contents: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid cache path"))?;
-    if !parent.exists() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let temp_name = format!(
-        ".tmp-{}-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("cursor"),
-        std::process::id()
-    );
-    let temp_path = parent.join(temp_name);
-
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp_path)?;
-        file.write_all(contents.as_bytes())?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&temp_path, contents)?;
-    }
-
-    if let Err(err) = fs::rename(&temp_path, path) {
-        if path.exists() {
-            match fs::copy(&temp_path, path) {
-                Ok(_) => {
-                    let _ = fs::remove_file(&temp_path);
-                }
-                Err(copy_err) => {
-                    let _ = fs::remove_file(&temp_path);
-                    return Err(anyhow::anyhow!(
-                        "Failed to persist file with rename ({}) and copy fallback ({})",
-                        err,
-                        copy_err
-                    ));
-                }
-            }
-        } else {
-            let _ = fs::remove_file(&temp_path);
-            return Err(err.into());
-        }
-    }
-    Ok(())
+    tokscale_core::fs_atomic::write_atomic(path, contents.as_bytes())
+        .with_context(|| format!("Failed to persist Cursor cache file: {}", path.display()))
 }
 
 fn ensure_config_dir_in_home(home_dir: &Path) -> Result<()> {
