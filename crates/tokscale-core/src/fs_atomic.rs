@@ -12,7 +12,9 @@ const TEMP_CREATE_ATTEMPTS: usize = 16;
 /// closes it, replaces the final path, and syncs the parent directory on Unix.
 /// On Unix the temp file is created with `0600` permissions. It is intended for
 /// tokscale config, credentials, and cache files; callers that need public file
-/// permissions should set them explicitly after the write.
+/// permissions should set them explicitly after the write. If this helper has to
+/// create missing directories, crash durability for those newly-created ancestor
+/// directory entries is outside its guarantee.
 pub fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic_with(final_path, |file| file.write_all(bytes))
 }
@@ -27,12 +29,7 @@ pub fn write_atomic_with(
     final_path: &Path,
     write: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
-    let parent = final_path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("path has no parent directory: {}", final_path.display()),
-        )
-    })?;
+    let parent = parent_dir_for_io(final_path)?;
     let filename = final_path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -131,13 +128,22 @@ pub fn replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
 
 #[cfg(unix)]
 fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    File::open(parent_dir_for_io(path)?)?.sync_all()
+}
+
+fn parent_dir_for_io(path: &Path) -> io::Result<&Path> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("path has no parent directory: {}", path.display()),
         )
     })?;
-    File::open(parent)?.sync_all()
+
+    if parent.as_os_str().is_empty() {
+        Ok(Path::new("."))
+    } else {
+        Ok(parent)
+    }
 }
 
 #[cfg(not(unix))]
@@ -188,7 +194,7 @@ fn windows_replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::fs;
+    use std::{env, fs};
     use tempfile::TempDir;
 
     #[test]
@@ -228,6 +234,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "{\"ok\":true}");
+    }
+
+    #[test]
+    #[serial]
+    fn write_atomic_accepts_bare_relative_path() {
+        let dir = TempDir::new().unwrap();
+        let previous_dir = env::current_dir().unwrap();
+
+        env::set_current_dir(dir.path()).unwrap();
+        let result = write_atomic(Path::new("cache.json"), b"ok");
+        env::set_current_dir(previous_dir).unwrap();
+
+        result.unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("cache.json")).unwrap(),
+            "ok"
+        );
     }
 
     #[test]
