@@ -414,7 +414,6 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         || lower.contains("zhipu")
         || lower.contains("z-ai")
         || lower.contains("z.ai")
-        || lower.contains("pickle")
     {
         return Some("zai");
     }
@@ -850,6 +849,8 @@ mod tests {
         assert_eq!(inferred_provider_from_model("u20"), None);
         assert_eq!(inferred_provider_from_model("codexchange"), None);
         assert_eq!(inferred_provider_from_model("mitts-model"), None);
+        assert_eq!(inferred_provider_from_model("pickle-model"), None);
+        assert_eq!(inferred_provider_from_model("big-pickle"), None);
         assert_eq!(
             inferred_provider_from_model("notanthropic.claude-sonnet-4"),
             None
