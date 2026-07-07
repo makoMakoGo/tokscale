@@ -1,6 +1,6 @@
 use crate::tui;
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokscale_core::scanner::headless_roots_with_env_strategy;
 
@@ -129,12 +129,11 @@ pub(crate) fn run_headless_command(
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     let headless_roots = headless_roots_with_env_strategy(&home_dir, true);
 
-    let output_path = if let Some(custom_output) = output {
-        let parent = Path::new(&custom_output)
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
+    let output_path: PathBuf = if let Some(custom_output) = output {
+        let path = PathBuf::from(custom_output);
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent)?;
-        custom_output
+        path
     } else {
         let root = headless_roots
             .first()
@@ -156,7 +155,7 @@ pub(crate) fn run_headless_command(
             source_lower, timestamp, uuid_short, resolved_format
         );
 
-        dir.join(filename).to_string_lossy().to_string()
+        dir.join(filename)
     };
 
     let settings = tui::settings::Settings::load();
@@ -165,15 +164,17 @@ pub(crate) fn run_headless_command(
     use colored::Colorize;
     println!("\n  {}", "Headless capture".cyan());
     println!("  {}", format!("source: {}", source_lower).bright_black());
-    println!("  {}", format!("output: {}", output_path).bright_black());
+    println!(
+        "  {}",
+        format!("output: {}", output_path.display()).bright_black()
+    );
     println!(
         "  {}",
         format!("timeout: {}s", timeout.as_secs()).bright_black()
     );
     println!();
 
-    let outcome =
-        run_capture_command(&source_lower, &final_args, Path::new(&output_path), timeout)?;
+    let outcome = run_capture_command(&source_lower, &final_args, &output_path, timeout)?;
 
     if outcome.timed_out {
         eprintln!(
@@ -187,7 +188,7 @@ pub(crate) fn run_headless_command(
 
     println!(
         "{}",
-        format!("✓ Saved headless output to {}", output_path).green()
+        format!("✓ Saved headless output to {}", output_path.display()).green()
     );
     println!();
 

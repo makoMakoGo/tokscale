@@ -1542,10 +1542,7 @@ mod tests {
         assert!(roots.contains(&config_root));
         #[cfg(target_os = "macos")]
         {
-            let mac_root = PathBuf::from(format!(
-                "{}/Library/Application Support/tokscale/headless",
-                home.display()
-            ));
+            let mac_root = home.join("Library/Application Support/tokscale/headless");
             assert_eq!(roots.len(), 2);
             assert!(roots.contains(&mac_root));
         }

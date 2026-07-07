@@ -84,7 +84,7 @@ release is explicitly published.
 
 Generated Wrapped images identify this fork as `@juya-ai/tokscale`.
 
-Wrapped provider logos are fork-owned remote assets stored in this repository
+Wrapped provider logos are fork-hosted remote assets stored in this repository
 under `.github/assets/` and referenced through raw GitHub URLs. They are not
 vendored into the CLI binary in this fork. This keeps the installed binary
 small while avoiding runtime dependencies on upstream `tokscale.ai` branding.

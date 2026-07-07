@@ -67,7 +67,7 @@ CLI flags override matching config values for a single invocation.
 | `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Non-empty values are used verbatim. Empty values are treated as unset. It does not currently move Cursor credentials or Cursor usage cache. |
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | Overrides `nativeTimeoutMs`. |
 | `TOKSCALE_EXTRA_DIRS` | One-off extra scan roots as `client:/abs/path,client:/abs/path`. |
-| `TOKSCALE_HEADLESS_DIR` | Overrides the headless capture root. |
+| `TOKSCALE_HEADLESS_DIR` | Overrides the headless capture root. Surrounding whitespace is trimmed; blank values fall back to the default root. |
 | `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY` | Z.ai/Zhipu GLM Coding Plan quota key. |
 | `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` | Kimi Code Console quota key. |
 | `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY` | MiniMax CN Token Plan subscription key. |
@@ -81,8 +81,8 @@ path when set to a blank value.
 
 Path-like environment variables intentionally use two different policies:
 
-- Client-specific scan roots trim surrounding whitespace and treat blank values
-  as a request to use the default client root.
+- Client/headless scan roots trim surrounding whitespace and treat blank values
+  as a request to use the default root.
 - Config and XDG roots (`TOKSCALE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and
   `XDG_DATA_HOME`) are system/configuration boundaries. Tokscale keeps
   non-empty values verbatim rather than trimming them. Empty
