@@ -586,10 +586,10 @@ pub(crate) fn merge_user_opencode_db_paths(discovered: &mut Vec<PathBuf>, extra_
 /// [`ScannerSettings`] merged in.
 ///
 /// This is the preferred entry point when you have loaded persistent
-/// settings (e.g. from `~/.config/tokscale/settings.json`). Thin wrappers
-/// [`scan_all_clients_with_env_strategy`] and [`scan_all_clients`] call
-/// into this with `ScannerSettings::default()` for callers that don't care
-/// about the persistent config.
+/// settings (e.g. from `~/.config/tokscale/settings.json`).
+/// [`scan_all_clients_with_env_strategy`] calls into this with
+/// `ScannerSettings::default()` for callers that don't care about the
+/// persistent config.
 pub fn scan_all_clients_with_scanner_settings(
     home_dir: &str,
     clients: &[String],
