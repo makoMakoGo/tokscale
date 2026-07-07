@@ -5,7 +5,7 @@
 //! or missing cache data still triggers a refresh.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -723,10 +723,6 @@ pub fn save_cached_data(
     report_scope: &CacheReportScope,
 ) -> anyhow::Result<()> {
     let cache_path = cache_file().ok_or_else(|| anyhow::anyhow!("TUI cache path unavailable"))?;
-
-    if let Some(dir) = cache_path.parent() {
-        fs::create_dir_all(dir)?;
-    }
 
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
