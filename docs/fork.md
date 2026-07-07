@@ -80,6 +80,15 @@ See [ADR 0016](adr/0016-juya-ai-npm-release-identity.md) for the release
 identity decision. Source builds remain the safest validation path until a fork
 release is explicitly published.
 
+## Wrapped identity and assets
+
+Generated Wrapped images identify this fork as `@juya-ai/tokscale`.
+
+Wrapped provider logos are fork-hosted remote assets stored in this repository
+under `.github/assets/` and referenced through raw GitHub URLs. They are not
+vendored into the CLI binary in this fork. This keeps the installed binary
+small while avoiding runtime dependencies on upstream `tokscale.ai` branding.
+
 ## Non-goals
 
 This fork does not aim to:

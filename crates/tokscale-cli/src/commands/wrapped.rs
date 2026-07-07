@@ -20,16 +20,22 @@ const IMAGE_WIDTH: i32 = 1200 * SCALE;
 const IMAGE_HEIGHT: i32 = 1200 * SCALE;
 const PADDING: i32 = 56 * SCALE;
 
-const WRAPPED_FOOTER_REPO: &str = "github.com/makoMakoGo/tokscale";
+const WRAPPED_FOOTER_IDENTITY: &str = "@juya-ai/tokscale";
 const PROVIDER_LOGO_ANTHROPIC_URL: &str =
     "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-claude.jpg";
 const PROVIDER_LOGO_OPENAI_URL: &str =
     "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-openai.jpg";
 const PROVIDER_LOGO_GOOGLE_URL: &str =
     "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-gemini.png";
+const PROVIDER_LOGO_XAI_URL: &str =
+    "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/provider-xai.png";
+const PROVIDER_LOGO_ZAI_URL: &str =
+    "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/provider-zai.png";
 const PROVIDER_LOGO_ANTHROPIC_CACHE_FILE: &str = "provider-anthropic-fork-v2@2x.jpg";
 const PROVIDER_LOGO_OPENAI_CACHE_FILE: &str = "provider-openai-fork-v2@2x.jpg";
 const PROVIDER_LOGO_GOOGLE_CACHE_FILE: &str = "provider-google-fork-v2@2x.png";
+const PROVIDER_LOGO_XAI_CACHE_FILE: &str = "provider-xai-fork-v1@2x.png";
+const PROVIDER_LOGO_ZAI_CACHE_FILE: &str = "provider-zai-fork-v1@2x.png";
 const FIGTREE_REGULAR_FILE: &str = "Figtree-Regular.ttf";
 const FIGTREE_REGULAR_URL: &str =
     "https://fonts.gstatic.com/s/figtree/v9/_Xmz-HUzqDCFdgfMsYiV_F7wfS-Bs_d_QF5e.ttf";
@@ -760,7 +766,7 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
         COLOR_TEXT_SECONDARY,
         PADDING,
         footer_bottom_y,
-        WRAPPED_FOOTER_REPO,
+        WRAPPED_FOOTER_IDENTITY,
     );
 
     Ok(canvas)
@@ -1339,6 +1345,14 @@ fn provider_logo_asset(provider: &str) -> Option<ProviderLogoAsset> {
         "google" => Some(ProviderLogoAsset {
             url: PROVIDER_LOGO_GOOGLE_URL,
             cache_file: PROVIDER_LOGO_GOOGLE_CACHE_FILE,
+        }),
+        "xai" => Some(ProviderLogoAsset {
+            url: PROVIDER_LOGO_XAI_URL,
+            cache_file: PROVIDER_LOGO_XAI_CACHE_FILE,
+        }),
+        "zai" => Some(ProviderLogoAsset {
+            url: PROVIDER_LOGO_ZAI_URL,
+            cache_file: PROVIDER_LOGO_ZAI_CACHE_FILE,
         }),
         _ => None,
     }
@@ -2024,14 +2038,14 @@ mod tests {
     }
 
     #[test]
-    fn test_get_provider_from_model_xai_has_no_fork_asset() {
-        assert_eq!(get_provider_from_model("grok-3"), None);
-        assert_eq!(get_provider_from_model("grok-code"), None);
+    fn test_get_provider_from_model_xai() {
+        assert_eq!(get_provider_from_model("grok-3"), Some("xai"));
+        assert_eq!(get_provider_from_model("grok-code"), Some("xai"));
     }
 
     #[test]
-    fn test_get_provider_from_model_zai_has_no_fork_asset() {
-        assert_eq!(get_provider_from_model("glm-4.7"), None);
+    fn test_get_provider_from_model_zai() {
+        assert_eq!(get_provider_from_model("glm-4.7"), Some("zai"));
         assert_eq!(get_provider_from_model("pickle-model"), None);
     }
 
@@ -2231,6 +2245,11 @@ mod tests {
         assert_eq!(client_logo_url(""), None);
     }
 
+    #[test]
+    fn wrapped_footer_identity_uses_fork_package() {
+        assert_eq!(WRAPPED_FOOTER_IDENTITY, "@juya-ai/tokscale");
+    }
+
     // ========== provider_logo_asset tests ==========
 
     #[test]
@@ -2267,13 +2286,25 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_logo_asset_xai_has_no_fork_asset() {
-        assert_eq!(provider_logo_asset("xai"), None);
+    fn test_provider_logo_asset_xai() {
+        assert_eq!(
+            provider_logo_asset("xai"),
+            Some(ProviderLogoAsset {
+                url: PROVIDER_LOGO_XAI_URL,
+                cache_file: PROVIDER_LOGO_XAI_CACHE_FILE,
+            })
+        );
     }
 
     #[test]
-    fn test_provider_logo_asset_zai_has_no_fork_asset() {
-        assert_eq!(provider_logo_asset("zai"), None);
+    fn test_provider_logo_asset_zai() {
+        assert_eq!(
+            provider_logo_asset("zai"),
+            Some(ProviderLogoAsset {
+                url: PROVIDER_LOGO_ZAI_URL,
+                cache_file: PROVIDER_LOGO_ZAI_CACHE_FILE,
+            })
+        );
     }
 
     #[test]
@@ -2391,8 +2422,8 @@ mod tests {
         assert_eq!(get_provider_from_model("CLAUDE-3-OPUS"), Some("anthropic"));
         assert_eq!(get_provider_from_model("GPT-4"), Some("openai"));
         assert_eq!(get_provider_from_model("Gemini-Pro"), Some("google"));
-        assert_eq!(get_provider_from_model("GROK-3"), None);
-        assert_eq!(get_provider_from_model("GLM-4.7"), None);
+        assert_eq!(get_provider_from_model("GROK-3"), Some("xai"));
+        assert_eq!(get_provider_from_model("GLM-4.7"), Some("zai"));
     }
 
     #[test]

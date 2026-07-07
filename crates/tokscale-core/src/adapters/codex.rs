@@ -38,7 +38,7 @@ impl LocalSourceAdapter for CodexAdapter {
             .expect("Codex adapter must have local scan policy");
         let codex_home = codex_home(ctx.home_dir, ctx.use_env_roots);
         let headless_roots =
-            scanner::headless_roots_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
+            scanner::headless_roots_with_env_strategy(Path::new(ctx.home_dir), ctx.use_env_roots);
         let mut roots = vec![
             PathBuf::from(def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots)),
             codex_home.join("archived_sessions"),

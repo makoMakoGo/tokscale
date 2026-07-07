@@ -188,7 +188,7 @@ impl ScanResult {
     }
 }
 
-pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+pub fn headless_roots_with_env_strategy(home_dir: &Path, use_env_roots: bool) -> Vec<PathBuf> {
     if use_env_roots {
         if let Ok(path) = std::env::var("TOKSCALE_HEADLESS_DIR") {
             let trimmed = path.trim();
@@ -198,18 +198,22 @@ pub fn headless_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> 
         }
     }
 
-    let mut roots = Vec::new();
-    let home = Path::new(home_dir);
-    roots.push(home.join(".config/tokscale/headless"));
-
     #[cfg(target_os = "macos")]
-    roots.push(home.join("Library/Application Support/tokscale/headless"));
+    {
+        vec![
+            home_dir.join(".config/tokscale/headless"),
+            home_dir.join("Library/Application Support/tokscale/headless"),
+        ]
+    }
 
-    roots
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![home_dir.join(".config/tokscale/headless")]
+    }
 }
 
 #[cfg(test)]
-fn headless_roots(home_dir: &str) -> Vec<PathBuf> {
+fn headless_roots(home_dir: &Path) -> Vec<PathBuf> {
     headless_roots_with_env_strategy(home_dir, true)
 }
 
@@ -393,18 +397,15 @@ pub fn extra_scan_paths_for(
 }
 
 pub fn built_in_extra_scan_paths_for(
-    home_dir: &str,
+    home_dir: &Path,
     enabled: &HashSet<ClientId>,
 ) -> Vec<(ClientId, PathBuf)> {
     let mut paths = Vec::new();
 
     if enabled.contains(&ClientId::Claude) {
-        paths.push((
-            ClientId::Claude,
-            PathBuf::from(format!("{}/.claude/transcripts", home_dir)),
-        ));
+        paths.push((ClientId::Claude, home_dir.join(".claude/transcripts")));
         paths.extend(
-            crate::cc_mirror::discover_claude_project_roots(Path::new(home_dir))
+            crate::cc_mirror::discover_claude_project_roots(home_dir)
                 .into_iter()
                 .map(|path| (ClientId::Claude, path)),
         );
@@ -634,7 +635,8 @@ fn scan_all_clients_with_env_strategy_inner(
             .collect()
     };
 
-    let headless_roots = headless_roots_with_env_strategy(home_dir, use_env_roots);
+    let home_path = Path::new(home_dir);
+    let headless_roots = headless_roots_with_env_strategy(home_path, use_env_roots);
 
     // Define scan tasks
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
@@ -676,7 +678,7 @@ fn scan_all_clients_with_env_strategy_inner(
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
-    for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
+    for (client_id, path) in built_in_extra_scan_paths_for(home_path, &enabled) {
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
@@ -1533,17 +1535,14 @@ mod tests {
         let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
         unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") };
 
-        let home = "/tmp/tokscale-test-home";
+        let home = Path::new("/tmp/tokscale-test-home");
         let roots = headless_roots(home);
-        let config_root = PathBuf::from(format!("{}/.config/tokscale/headless", home));
+        let config_root = home.join(".config/tokscale/headless");
 
         assert!(roots.contains(&config_root));
         #[cfg(target_os = "macos")]
         {
-            let mac_root = PathBuf::from(format!(
-                "{}/Library/Application Support/tokscale/headless",
-                home
-            ));
+            let mac_root = home.join("Library/Application Support/tokscale/headless");
             assert_eq!(roots.len(), 2);
             assert!(roots.contains(&mac_root));
         }
@@ -1559,9 +1558,9 @@ mod tests {
         let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
         unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "   ") };
 
-        let home = "/tmp/tokscale-test-home";
+        let home = Path::new("/tmp/tokscale-test-home");
         let roots = headless_roots(home);
-        let config_root = PathBuf::from(format!("{}/.config/tokscale/headless", home));
+        let config_root = home.join(".config/tokscale/headless");
 
         assert!(roots.contains(&config_root));
         assert!(!roots.contains(&PathBuf::from("   ")));
@@ -1575,7 +1574,7 @@ mod tests {
         let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
         unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "/custom/headless") };
 
-        let roots = headless_roots("/tmp/home");
+        let roots = headless_roots(Path::new("/tmp/home"));
         assert_eq!(roots, vec![PathBuf::from("/custom/headless")]);
 
         restore_env("TOKSCALE_HEADLESS_DIR", previous);
@@ -1587,7 +1586,7 @@ mod tests {
         let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
         unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "  /custom/headless  ") };
 
-        let roots = headless_roots("/tmp/home");
+        let roots = headless_roots(Path::new("/tmp/home"));
         assert_eq!(roots, vec![PathBuf::from("/custom/headless")]);
 
         restore_env("TOKSCALE_HEADLESS_DIR", previous);
@@ -1599,7 +1598,7 @@ mod tests {
         let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
         unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "/custom/headless") };
 
-        let roots = headless_roots_with_env_strategy("/tmp/home", false);
+        let roots = headless_roots_with_env_strategy(Path::new("/tmp/home"), false);
         #[cfg(target_os = "macos")]
         assert_eq!(
             roots,
