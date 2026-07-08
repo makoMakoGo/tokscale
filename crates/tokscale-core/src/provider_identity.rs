@@ -39,8 +39,13 @@ fn canonicalize_provider_segment(segment: &str) -> Option<String> {
         s if s.starts_with("meituan") || s.starts_with("longcat") => "meituan",
         s if s.contains("stepfun") => "stepfun",
         s if s.starts_with("doubao") => "doubao",
+        s if s.starts_with("hunyuan") => "tencent",
+        s if s.starts_with("baichuan") => "baichuan",
         s if s.starts_with("alibaba") => "alibaba",
         s if s.starts_with("tencent") || s.starts_with("tecent") => "tencent",
+        s if s.starts_with("baidu") || s.starts_with("qianfan") || s.starts_with("wenxin") => {
+            "baidu"
+        }
         s if s == "opencode" || s.starts_with("opencode_") => "opencode",
         s if s.starts_with("github_cop") || s.contains("copilot") => "microsoft",
         s if s.starts_with("unisound")
@@ -154,6 +159,11 @@ fn exact_canonical_provider(normalized: &str) -> Option<&'static str> {
         | "kimi_coding_plan" => "kimi",
         "xiaomi" | "mimo" => "xiaomi",
         "meituan" | "longcat" => "meituan",
+        "doubao" => "doubao",
+        "tencent" | "tecent" | "tencent_cloud" | "hunyuan" | "hy3" | "hy3_preview" => "tencent",
+        "baidu" | "qianfan" | "wenxin" => "baidu",
+        "baichuan" | "baichuan_ai" => "baichuan",
+        "01ai" | "01_ai" | "zeroone" | "zero_one" | "zero_one_ai" | "lingyiwanwu" => "01-ai",
         "meta" | "meta_llama" => "meta",
         "microsoft" => "microsoft",
         "azure" | "azure_ai" => "microsoft",
@@ -177,7 +187,7 @@ fn exact_canonical_provider(normalized: &str) -> Option<&'static str> {
         "mistral" | "mistralai" => "mistral",
         "pandora_deepseek" | "deepseek_ai" => "deepseek",
         "qwen" | "qwen_portal" => "qwen",
-        "ai21" => "ai21",
+        "ai21" | "ai21labs" | "ai21_labs" => "ai21",
         _ => return None,
     };
 
@@ -430,6 +440,34 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("meituan");
     }
 
+    if contains_delimited(&lower, "hunyuan") || contains_delimited(&lower, "hy3") {
+        return Some("tencent");
+    }
+
+    if contains_delimited(&lower, "doubao") {
+        return Some("doubao");
+    }
+
+    if contains_delimited(&lower, "ernie")
+        || contains_delimited(&lower, "qianfan")
+        || contains_delimited(&lower, "wenxin")
+    {
+        return Some("baidu");
+    }
+
+    if model_part.starts_with("baichuan") || contains_delimited(&lower, "baichuan") {
+        return Some("baichuan");
+    }
+
+    if model_part.starts_with("yi-")
+        || model_part.starts_with("yi_")
+        || contains_delimited(&lower, "01-ai")
+        || contains_delimited(&lower, "01.ai")
+        || contains_delimited(&lower, "01_ai")
+    {
+        return Some("01-ai");
+    }
+
     if is_anthropic_model(model) {
         return Some("anthropic");
     }
@@ -464,6 +502,33 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("minimax");
     }
 
+    if contains_delimited(&lower, "cohere")
+        || model_part.starts_with("command-r")
+        || model_part.starts_with("command-a")
+        || model_part.starts_with("command-light")
+        || model_part.starts_with("command-nightly")
+        || model_part.starts_with("command-xlarge")
+        || model_part.starts_with("command-medium")
+        || model_part.starts_with("c4ai-aya")
+    {
+        return Some("cohere");
+    }
+
+    if lower.contains("jamba")
+        || contains_delimited(&lower, "ai21")
+        || model_part.starts_with("j2-")
+        || model_part.starts_with("jurassic-")
+    {
+        return Some("ai21");
+    }
+
+    if contains_delimited(&lower, "perplexity")
+        || model_part == "sonar"
+        || model_part.starts_with("sonar-")
+    {
+        return Some("perplexity");
+    }
+
     if lower.contains("mistral") || lower.contains("mixtral") {
         return Some("mistral");
     }
@@ -472,11 +537,20 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("meta");
     }
 
-    if lower.contains("qwen") {
+    if lower.contains("qwen")
+        || model_part == "qwq"
+        || model_part.starts_with("qwq-")
+        || model_part == "qvq"
+        || model_part.starts_with("qvq-")
+    {
         return Some("qwen");
     }
 
-    if lower.contains("stepfun") {
+    if lower.contains("stepfun")
+        || model_part.starts_with("step-1")
+        || model_part.starts_with("step-2")
+        || model_part.starts_with("step-3")
+    {
         return Some("stepfun");
     }
 
@@ -532,6 +606,13 @@ mod tests {
             ("moonshot-ai", vec!["kimi"]),
             ("Xiaomi", vec!["xiaomi"]),
             ("LongCat", vec!["meituan"]),
+            ("hy3", vec!["tencent"]),
+            ("Hunyuan", vec!["tencent"]),
+            ("Qianfan", vec!["baidu"]),
+            ("Baichuan-AI", vec!["baichuan"]),
+            ("01-ai", vec!["01-ai"]),
+            ("zeroone", vec!["01-ai"]),
+            ("AI21Labs", vec!["ai21"]),
             ("xai-oauth", vec!["xai"]),
             ("grok", vec!["xai"]),
             ("grok oauth", vec!["xai"]),
@@ -600,6 +681,13 @@ mod tests {
             ("qwen-coding-plan", "qwen"),
             ("meituan", "meituan"),
             ("longcat-coding-plan", "meituan"),
+            ("hy3", "tencent"),
+            ("hunyuan-api", "tencent"),
+            ("qianfan", "baidu"),
+            ("baichuan-ai", "baichuan"),
+            ("01-ai", "01-ai"),
+            ("zero-one-ai", "01-ai"),
+            ("ai21labs", "ai21"),
             ("stepfun_ai", "stepfun"),
             ("stepfun-coding-plan", "stepfun"),
             ("doubao-coding-plan", "doubao"),
@@ -740,8 +828,58 @@ mod tests {
             Some("meituan")
         );
         assert_eq!(
+            inferred_provider_from_model("hy3-preview-agent"),
+            Some("tencent")
+        );
+        assert_eq!(
+            inferred_provider_from_model("tencent/Hy3-preview"),
+            Some("tencent")
+        );
+        assert_eq!(
+            inferred_provider_from_model("hunyuan-a13b-instruct"),
+            Some("tencent")
+        );
+        assert_eq!(
+            inferred_provider_from_model("doubao-seed-2-0-pro"),
+            Some("doubao")
+        );
+        assert_eq!(
+            inferred_provider_from_model("ERNIE-4.5-300B-A47B"),
+            Some("baidu")
+        );
+        assert_eq!(
+            inferred_provider_from_model("baichuan4-turbo"),
+            Some("baichuan")
+        );
+        assert_eq!(inferred_provider_from_model("yi-large"), Some("01-ai"));
+        assert_eq!(
+            inferred_provider_from_model("01-ai/yi-34b-chat"),
+            Some("01-ai")
+        );
+        assert_eq!(
             inferred_provider_from_model("MiniMax-M2.1"),
             Some("minimax")
+        );
+        assert_eq!(
+            inferred_provider_from_model("command-r-plus"),
+            Some("cohere")
+        );
+        assert_eq!(
+            inferred_provider_from_model("command-a-03-2025"),
+            Some("cohere")
+        );
+        assert_eq!(
+            inferred_provider_from_model("c4ai-aya-expanse-32b"),
+            Some("cohere")
+        );
+        assert_eq!(
+            inferred_provider_from_model("jamba-1.5-large"),
+            Some("ai21")
+        );
+        assert_eq!(inferred_provider_from_model("ai21/j2-ultra"), Some("ai21"));
+        assert_eq!(
+            inferred_provider_from_model("sonar-pro"),
+            Some("perplexity")
         );
         assert_eq!(
             inferred_provider_from_model("mixtral-8x7b"),
@@ -753,6 +891,15 @@ mod tests {
         );
         assert_eq!(inferred_provider_from_model("llama-3"), Some("meta"));
         assert_eq!(inferred_provider_from_model("qwen3-coder"), Some("qwen"));
+        assert_eq!(inferred_provider_from_model("qwq-32b"), Some("qwen"));
+        assert_eq!(
+            inferred_provider_from_model("qvq-72b-preview"),
+            Some("qwen")
+        );
+        assert_eq!(
+            inferred_provider_from_model("step-3.7-flash"),
+            Some("stepfun")
+        );
         assert_eq!(inferred_provider_from_model("u2"), Some("unisound"));
         assert_eq!(
             inferred_provider_from_model("unisound/u2"),
@@ -851,6 +998,15 @@ mod tests {
         assert_eq!(inferred_provider_from_model("mitts-model"), None);
         assert_eq!(inferred_provider_from_model("pickle-model"), None);
         assert_eq!(inferred_provider_from_model("big-pickle"), None);
+        assert_eq!(inferred_provider_from_model("hy30-preview"), None);
+        assert_eq!(inferred_provider_from_model("seed-2-0-pro"), None);
+        assert_eq!(inferred_provider_from_model("myi-large"), None);
+        assert_eq!(inferred_provider_from_model("bernie-4"), None);
+        assert_eq!(inferred_provider_from_model("notcohere-model"), None);
+        assert_eq!(inferred_provider_from_model("notperplexity-model"), None);
+        assert_eq!(inferred_provider_from_model("command-code"), None);
+        assert_eq!(inferred_provider_from_model("step-by-step"), None);
+        assert_eq!(inferred_provider_from_model("sonarqube-model"), None);
         assert_eq!(
             inferred_provider_from_model("notanthropic.claude-sonnet-4"),
             None
