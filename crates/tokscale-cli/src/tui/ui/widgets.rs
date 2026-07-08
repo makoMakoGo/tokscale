@@ -381,6 +381,7 @@ mod tests {
             ("yunzhisheng", "UniSound"),
             ("ai21labs", "AI21"),
             ("perplexity", "Perplexity"),
+            ("cohere", "Cohere"),
             ("amazon", "AWS"),
             ("aws", "AWS"),
             ("bedrock", "AWS"),

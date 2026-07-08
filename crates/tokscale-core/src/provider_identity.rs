@@ -503,12 +503,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     }
 
     if contains_delimited(&lower, "cohere")
-        || model_part.starts_with("command-r")
-        || model_part.starts_with("command-a")
-        || model_part.starts_with("command-light")
-        || model_part.starts_with("command-nightly")
-        || model_part.starts_with("command-xlarge")
-        || model_part.starts_with("command-medium")
+        || is_cohere_command_model_part(model_part)
         || model_part.starts_with("c4ai-aya")
     {
         return Some("cohere");
@@ -555,6 +550,28 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+fn is_cohere_command_model_part(model_part: &str) -> bool {
+    matches_command_family(model_part, "command-r", true)
+        || matches_command_family(model_part, "command-a", false)
+        || matches_command_family(model_part, "command-light", false)
+        || matches_command_family(model_part, "command-nightly", false)
+        || matches_command_family(model_part, "command-xlarge", false)
+        || matches_command_family(model_part, "command-medium", false)
+}
+
+fn matches_command_family(model_part: &str, family: &str, allow_digit_suffix: bool) -> bool {
+    if model_part == family {
+        return true;
+    }
+
+    let Some(suffix) = model_part.strip_prefix(family) else {
+        return false;
+    };
+
+    suffix.starts_with('-')
+        || (allow_digit_suffix && suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
 }
 
 pub fn is_anthropic_model(model: &str) -> bool {
@@ -865,6 +882,10 @@ mod tests {
             Some("cohere")
         );
         assert_eq!(
+            inferred_provider_from_model("command-r7b-12-2024"),
+            Some("cohere")
+        );
+        assert_eq!(
             inferred_provider_from_model("command-a-03-2025"),
             Some("cohere")
         );
@@ -876,7 +897,8 @@ mod tests {
             inferred_provider_from_model("jamba-1.5-large"),
             Some("ai21")
         );
-        assert_eq!(inferred_provider_from_model("ai21/j2-ultra"), Some("ai21"));
+        assert_eq!(inferred_provider_from_model("j2-ultra"), Some("ai21"));
+        assert_eq!(inferred_provider_from_model("jurassic-2-en"), Some("ai21"));
         assert_eq!(
             inferred_provider_from_model("sonar-pro"),
             Some("perplexity")
@@ -1005,6 +1027,9 @@ mod tests {
         assert_eq!(inferred_provider_from_model("notcohere-model"), None);
         assert_eq!(inferred_provider_from_model("notperplexity-model"), None);
         assert_eq!(inferred_provider_from_model("command-code"), None);
+        assert_eq!(inferred_provider_from_model("command-agent"), None);
+        assert_eq!(inferred_provider_from_model("command-router"), None);
+        assert_eq!(inferred_provider_from_model("command-lightyear"), None);
         assert_eq!(inferred_provider_from_model("step-by-step"), None);
         assert_eq!(inferred_provider_from_model("sonarqube-model"), None);
         assert_eq!(
