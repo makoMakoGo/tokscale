@@ -509,7 +509,9 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("cohere");
     }
 
-    if lower.contains("jamba")
+    if contains_delimited(&lower, "jamba")
+        || model_part == "jamba"
+        || model_part.starts_with("jamba-")
         || contains_delimited(&lower, "ai21")
         || model_part.starts_with("j2-")
         || model_part.starts_with("jurassic-")
@@ -1026,6 +1028,8 @@ mod tests {
         assert_eq!(inferred_provider_from_model("bernie-4"), None);
         assert_eq!(inferred_provider_from_model("notcohere-model"), None);
         assert_eq!(inferred_provider_from_model("notperplexity-model"), None);
+        assert_eq!(inferred_provider_from_model("jambalaya-model"), None);
+        assert_eq!(inferred_provider_from_model("notjamba-model"), None);
         assert_eq!(inferred_provider_from_model("command-code"), None);
         assert_eq!(inferred_provider_from_model("command-agent"), None);
         assert_eq!(inferred_provider_from_model("command-router"), None);
