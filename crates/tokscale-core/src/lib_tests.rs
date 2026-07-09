@@ -3881,6 +3881,21 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             },
             0.0,
         ),
+        UnifiedMessage::new(
+            "file",
+            "perplexity/llama-3",
+            "",
+            "route-prefix-must-not-drive-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
     ];
 
     finalize_token_priced_messages(&mut messages, None);
@@ -3898,6 +3913,8 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
     assert_eq!(messages[9].model_id.as_ref(), "hy3-preview-agent");
     assert_eq!(messages[10].provider_id.as_ref(), "ai21");
     assert_eq!(messages[10].model_id.as_ref(), "jamba-1.5-large");
+    assert_eq!(messages[11].provider_id.as_ref(), "meta");
+    assert_eq!(messages[11].model_id.as_ref(), "llama-3");
 }
 
 #[test]

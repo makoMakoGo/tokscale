@@ -504,7 +504,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
 
     if contains_delimited(&lower, "cohere")
         || is_cohere_command_model_part(model_part)
-        || model_part.starts_with("c4ai-aya")
+        || matches_model_family(model_part, "c4ai-aya")
     {
         return Some("cohere");
     }
@@ -544,9 +544,9 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
     }
 
     if lower.contains("stepfun")
-        || model_part.starts_with("step-1")
-        || model_part.starts_with("step-2")
-        || model_part.starts_with("step-3")
+        || matches_model_family(model_part, "step-1")
+        || matches_model_family(model_part, "step-2")
+        || matches_model_family(model_part, "step-3")
     {
         return Some("stepfun");
     }
@@ -572,8 +572,22 @@ fn matches_command_family(model_part: &str, family: &str, allow_digit_suffix: bo
         return false;
     };
 
-    suffix.starts_with('-')
+    matches_family_suffix(suffix)
         || (allow_digit_suffix && suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+}
+
+fn matches_model_family(model_part: &str, family: &str) -> bool {
+    if model_part == family {
+        return true;
+    }
+
+    model_part
+        .strip_prefix(family)
+        .is_some_and(matches_family_suffix)
+}
+
+fn matches_family_suffix(suffix: &str) -> bool {
+    suffix.starts_with('-') || suffix.starts_with('.') || suffix.starts_with('_')
 }
 
 pub fn is_anthropic_model(model: &str) -> bool {
@@ -1034,6 +1048,8 @@ mod tests {
         assert_eq!(inferred_provider_from_model("command-agent"), None);
         assert_eq!(inferred_provider_from_model("command-router"), None);
         assert_eq!(inferred_provider_from_model("command-lightyear"), None);
+        assert_eq!(inferred_provider_from_model("c4ai-ayaya-32b"), None);
+        assert_eq!(inferred_provider_from_model("step-10-preview"), None);
         assert_eq!(inferred_provider_from_model("step-by-step"), None);
         assert_eq!(inferred_provider_from_model("sonarqube-model"), None);
         assert_eq!(
