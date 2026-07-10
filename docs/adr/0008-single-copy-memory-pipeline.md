@@ -86,6 +86,26 @@ The parse pipeline must hold at most one owned copy of any message.
   computed from `timestamp` on demand; `dedup_key` is a 64-bit hash, not
   a string; high-repetition identity fields (client, model, provider,
   session, workspace, agent) are interned `Arc<str>`.
+- The process-wide identity interner is a hash index of `Weak<str>` entries,
+  never a strong owner. Hash matches are always confirmed with full string
+  equality. Successful local streaming loads remove dead weak entries only
+  after source messages and Arc-backed accumulators have been dropped and
+  public String DTOs have been materialized. Failed loads first drop their
+  partial accumulators, then perform the same cleanup before returning the
+  original error. Generic aggregation over caller-owned message slices does
+  not sweep the index.
+- Model grouping and client/provider/session/workspace identity maps use
+  structured Arc-backed keys. They match the requested `GroupBy` before cloning
+  any unrelated workspace or session field, and create public Strings only when
+  a bucket is materialized. Distinct identity collections keep empty and
+  singleton states inline and allocate a hash table only after a second value.
+  Historical delimiter-based public keys remain unchanged. Distinct structured
+  buckets that share one legacy public key are coalesced explicitly in
+  first-seen order at that boundary, preserving legacy totals and
+  representative-field rules without finish-time map overwrite.
+  Delimiter-free composite keys and ordinary length-prefixed workspace keys
+  are provably injective and materialize directly; only delimiter-bearing keys
+  and the unknown-workspace sentinel pair enter the compatibility table.
 - Serialization layout changes bump `CACHE_FORMAT_VERSION`; parser-only
   changes bump the relevant parser revision. The shard envelope stores a
   fixed magic and format version before the bincode header, allowing explicit
@@ -108,3 +128,6 @@ that final output.
   documents missing the field are explicit misses and rebuild once.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go
   through the new accessors; new parsers must intern identity fields.
+- High-cardinality scans no longer leave the interner strongly retaining every
+  identity, and aggregation no longer formats composite String keys for every
+  message. Public report and TUI DTO schemas remain unchanged.

@@ -9,9 +9,8 @@ use std::{
 };
 
 use crate::{
-    aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
-    checked_token_add, checked_token_sum, ordered_clients_by_token_contribution,
-    positive_token_total,
+    aggregate::keys::{workspace_fields, GroupedModelKey, IdentitySet},
+    checked_token_add, checked_token_sum, positive_token_total,
     sessionize::SessionTimeEvent,
     ClientContribution, ClientContributionOrder, DailyContribution, DailyTotals, GraphResult,
     GroupBy, HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
@@ -36,8 +35,49 @@ fn hourly_label(hour_key: &str) -> String {
 /// `push` is the per-message fold; `finish` is the finalize + cost sort.
 pub(super) struct ModelEntries {
     group_by: GroupBy,
-    model_map: HashMap<String, ModelUsage>,
-    client_totals_by_entry: HashMap<String, HashMap<String, ClientContributionOrder>>,
+    model_map: HashMap<GroupedModelKey, ModelBucket>,
+    next_sequence: usize,
+}
+
+struct ModelBucket {
+    first_seen: usize,
+    client: Arc<str>,
+    workspace_key: Option<Arc<str>>,
+    workspace_label: Option<Arc<str>>,
+    session_id: Option<Arc<str>>,
+    model: Arc<str>,
+    providers: IdentitySet<Arc<str>>,
+    // Boxed only for grouping modes that merge clients; keeps session and
+    // client-scoped high-cardinality buckets free of an inline HashMap.
+    #[allow(clippy::box_collection)]
+    client_totals: Option<Box<HashMap<Arc<str>, ClientContributionOrder>>>,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+    message_count: i32,
+    cost: f64,
+    performance: ModelPerformance,
+}
+
+fn ordered_arc_clients(client_totals: &HashMap<Arc<str>, ClientContributionOrder>) -> String {
+    let mut clients: Vec<(&str, ClientContributionOrder)> = client_totals
+        .iter()
+        .map(|(client, totals)| (client.as_ref(), *totals))
+        .collect();
+    clients.sort_by(|(left_client, left), (right_client, right)| {
+        right
+            .total_tokens
+            .cmp(&left.total_tokens)
+            .then_with(|| left.first_seen.cmp(&right.first_seen))
+            .then_with(|| left_client.cmp(right_client))
+    });
+    clients
+        .into_iter()
+        .map(|(client, _)| client)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl ModelEntries {
@@ -45,51 +85,35 @@ impl ModelEntries {
         Self {
             group_by,
             model_map: HashMap::new(),
-            client_totals_by_entry: HashMap::new(),
+            next_sequence: 0,
         }
     }
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
-        let group_by = &self.group_by;
-        let canonical_model_id = msg.model_id.to_string();
-        let provider = msg.provider_id.as_ref();
-        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
-        let (key, merge_clients) = grouped_model_bucket_key(
-            group_by,
-            &msg.client,
-            provider,
-            &workspace_group_key,
-            &msg.session_id,
-            &canonical_model_id,
-        );
-        let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
-        let entry = self
-            .model_map
-            .entry(key.clone())
-            .or_insert_with(|| ModelUsage {
-                client: msg.client.to_string(),
-                merged_clients: if merge_clients {
-                    Some(msg.client.to_string())
-                } else {
-                    None
-                },
-                workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
-                    workspace_key.clone()
-                } else {
-                    None
-                },
-                workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
-                    Some(workspace_label.clone())
-                } else {
-                    None
-                },
-                session_id: if session_grouped {
-                    Some(msg.session_id.to_string())
-                } else {
-                    None
-                },
-                model: canonical_model_id.clone(),
-                provider: provider.to_string(),
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("model aggregation sequence exceeds usize::MAX");
+        let key = GroupedModelKey::from_message(&self.group_by, msg);
+        let merge_clients = key.merges_clients();
+        let entry = self.model_map.entry(key).or_insert_with(|| {
+            let (workspace_key, workspace_label) = if self.group_by == GroupBy::WorkspaceModel {
+                let (key, label) = workspace_fields(msg);
+                (key, Some(label))
+            } else {
+                (None, None)
+            };
+            ModelBucket {
+                first_seen: sequence,
+                client: Arc::clone(&msg.client),
+                workspace_key,
+                workspace_label,
+                session_id: matches!(self.group_by, GroupBy::Session | GroupBy::ClientSession)
+                    .then(|| Arc::clone(&msg.session_id)),
+                model: Arc::clone(&msg.model_id),
+                providers: IdentitySet::one(Arc::clone(&msg.provider_id)),
+                client_totals: merge_clients.then(|| Box::new(HashMap::new())),
                 input: 0,
                 output: 0,
                 cache_read: 0,
@@ -98,15 +122,17 @@ impl ModelEntries {
                 message_count: 0,
                 cost: 0.0,
                 performance: ModelPerformance::default(),
-            });
+            }
+        });
 
         if merge_clients {
-            let client_totals = self.client_totals_by_entry.entry(key.clone()).or_default();
-            let client_count = client_totals.len();
-            let totals = client_totals
-                .entry(msg.client.to_string())
+            let totals = entry
+                .client_totals
+                .as_mut()
+                .expect("merge-client grouping has client totals")
+                .entry(Arc::clone(&msg.client))
                 .or_insert_with(|| ClientContributionOrder {
-                    first_seen: client_count,
+                    first_seen: sequence,
                     total_tokens: 0,
                 });
             totals.total_tokens = totals
@@ -115,11 +141,7 @@ impl ModelEntries {
                 .expect("client token contribution exceeds u64::MAX");
         }
 
-        if *group_by != GroupBy::ClientProviderModel
-            && !entry.provider.split(", ").any(|p| p == provider)
-        {
-            entry.provider = format!("{}, {}", entry.provider, provider);
-        }
+        entry.providers.insert(Arc::clone(&msg.provider_id));
 
         entry.input = checked_token_add(entry.input, msg.tokens.input);
         entry.output = checked_token_add(entry.output, msg.tokens.output);
@@ -135,36 +157,41 @@ impl ModelEntries {
 
     pub(super) fn finish(self) -> Vec<ModelUsage> {
         let Self {
+            group_by,
             model_map,
-            client_totals_by_entry,
             ..
         } = self;
-        let mut entries: Vec<ModelUsage> = model_map
-            .into_iter()
-            .map(|(key, mut entry)| {
-                if let Some(client_totals) = client_totals_by_entry.get(&key) {
-                    let ordered_clients = ordered_clients_by_token_contribution(client_totals);
-                    entry.client = ordered_clients.clone();
-                    if let Some(merged_clients) = &mut entry.merged_clients {
-                        *merged_clients = ordered_clients;
+        let merge_providers = group_by != GroupBy::ClientProviderModel;
+        let mut entries = Vec::with_capacity(model_map.len());
+        let mut risky_buckets = Vec::new();
+        for (key, bucket) in model_map {
+            if key.may_alias_legacy_key() {
+                risky_buckets.push((key, bucket));
+            } else {
+                entries.push(materialize_model_bucket(bucket));
+            }
+        }
+
+        // Delimiter-free keys are injective and materialize directly. Only
+        // keys that can alias the historical text enter this compatibility
+        // table, avoiding a second corpus-sized map and one String per normal
+        // high-cardinality bucket.
+        if !risky_buckets.is_empty() {
+            risky_buckets.sort_by_key(|(_, bucket)| bucket.first_seen);
+            let mut public_buckets: HashMap<String, ModelBucket> = HashMap::new();
+            for (key, bucket) in risky_buckets {
+                match public_buckets.entry(key.public_key()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(bucket);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        merge_model_bucket(entry.get_mut(), bucket, merge_providers);
                     }
                 }
+            }
+            entries.extend(public_buckets.into_values().map(materialize_model_bucket));
+        }
 
-                let total_tokens = checked_token_sum([
-                    entry.input.max(0),
-                    entry.output.max(0),
-                    entry.cache_read.max(0),
-                    entry.cache_write.max(0),
-                    entry.reasoning.max(0),
-                ]);
-                entry.performance.finalize(total_tokens);
-                let mut providers: Vec<&str> = entry.provider.split(", ").collect();
-                providers.sort_unstable();
-                providers.dedup();
-                entry.provider = providers.join(", ");
-                entry
-            })
-            .collect();
         entries.sort_by(|a, b| {
             let cost = match (a.cost.is_nan(), b.cost.is_nan()) {
                 (true, true) => std::cmp::Ordering::Equal,
@@ -188,10 +215,94 @@ impl ModelEntries {
     }
 }
 
+fn materialize_model_bucket(mut entry: ModelBucket) -> ModelUsage {
+    let total_tokens = checked_token_sum([
+        entry.input.max(0),
+        entry.output.max(0),
+        entry.cache_read.max(0),
+        entry.cache_write.max(0),
+        entry.reasoning.max(0),
+    ]);
+    entry.performance.finalize(total_tokens);
+    let provider = entry.providers.into_sorted_string();
+    let merged_clients = entry
+        .client_totals
+        .as_ref()
+        .map(|totals| ordered_arc_clients(totals));
+    ModelUsage {
+        client: merged_clients
+            .clone()
+            .unwrap_or_else(|| entry.client.to_string()),
+        merged_clients,
+        workspace_key: entry.workspace_key.map(|key| key.to_string()),
+        workspace_label: entry.workspace_label.map(|label| label.to_string()),
+        session_id: entry.session_id.map(|session| session.to_string()),
+        model: entry.model.to_string(),
+        provider,
+        input: entry.input,
+        output: entry.output,
+        cache_read: entry.cache_read,
+        cache_write: entry.cache_write,
+        reasoning: entry.reasoning,
+        message_count: entry.message_count,
+        cost: entry.cost,
+        performance: entry.performance,
+    }
+}
+
+fn merge_model_bucket(target: &mut ModelBucket, source: ModelBucket, merge_providers: bool) {
+    if merge_providers {
+        target.providers.extend(source.providers);
+    }
+    if let Some(source_totals_by_client) = source.client_totals {
+        let target_totals_by_client = target
+            .client_totals
+            .as_mut()
+            .expect("colliding merge-client buckets both track client totals");
+        for (client, source_totals) in *source_totals_by_client {
+            match target_totals_by_client.entry(client) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(source_totals);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let totals = entry.get_mut();
+                    totals.first_seen = totals.first_seen.min(source_totals.first_seen);
+                    totals.total_tokens = totals
+                        .total_tokens
+                        .checked_add(source_totals.total_tokens)
+                        .expect("client token contribution exceeds u64::MAX");
+                }
+            }
+        }
+    }
+    target.input = checked_token_add(target.input, source.input);
+    target.output = checked_token_add(target.output, source.output);
+    target.cache_read = checked_token_add(target.cache_read, source.cache_read);
+    target.cache_write = checked_token_add(target.cache_write, source.cache_write);
+    target.reasoning = checked_token_add(target.reasoning, source.reasoning);
+    target.message_count = target
+        .message_count
+        .checked_add(source.message_count)
+        .expect("model message count exceeds i32::MAX");
+    target.cost += source.cost;
+    target.performance.total_duration_ms = target
+        .performance
+        .total_duration_ms
+        .saturating_add(source.performance.total_duration_ms);
+    target.performance.timed_tokens = checked_token_add(
+        target.performance.timed_tokens,
+        source.performance.timed_tokens,
+    );
+    target.performance.sample_count = target
+        .performance
+        .sample_count
+        .saturating_add(source.performance.sample_count);
+}
+
 /// Month accumulator — port of `MonthAggregator` + the month fold.
 #[derive(Default)]
 pub(super) struct MonthAcc {
-    models: HashSet<String>,
+    models: HashSet<Arc<str>>,
     input: i64,
     output: i64,
     cache_read: i64,
@@ -212,7 +323,7 @@ impl MonthAcc {
     }
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
-        self.models.insert(msg.model_id.to_string());
+        self.models.insert(Arc::clone(&msg.model_id));
         self.input = checked_token_add(self.input, msg.tokens.input);
         self.output = checked_token_add(self.output, msg.tokens.output);
         self.cache_read = checked_token_add(self.cache_read, msg.tokens.cache_read);
@@ -232,7 +343,11 @@ pub(super) fn finish_month_map(month_map: HashMap<String, MonthAcc>) -> Vec<Mont
         .map(|(month, agg)| MonthlyUsage {
             month,
             models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
+                let mut v: Vec<String> = agg
+                    .models
+                    .into_iter()
+                    .map(|model| model.to_string())
+                    .collect();
                 v.sort();
                 v
             },
@@ -264,8 +379,8 @@ pub(super) fn hour_key(msg: &UnifiedMessage) -> Option<String> {
 /// Hour accumulator — port of `HourAggregator` + the hour fold.
 #[derive(Default)]
 pub(super) struct HourAcc {
-    clients: HashSet<String>,
-    models: HashSet<String>,
+    clients: HashSet<Arc<str>>,
+    models: HashSet<Arc<str>>,
     input: i64,
     output: i64,
     cache_read: i64,
@@ -278,8 +393,8 @@ pub(super) struct HourAcc {
 
 impl HourAcc {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
-        self.clients.insert(msg.client.to_string());
-        self.models.insert(msg.model_id.to_string());
+        self.clients.insert(Arc::clone(&msg.client));
+        self.models.insert(Arc::clone(&msg.model_id));
         self.input = checked_token_add(self.input, msg.tokens.input);
         self.output = checked_token_add(self.output, msg.tokens.output);
         self.cache_read = checked_token_add(self.cache_read, msg.tokens.cache_read);
@@ -302,12 +417,20 @@ pub(super) fn finish_hour_map(hour_map: HashMap<String, HourAcc>) -> Vec<HourlyU
         let entry = HourlyUsage {
             hour: hourly_label(&hour),
             clients: {
-                let mut v: Vec<String> = agg.clients.into_iter().collect();
+                let mut v: Vec<String> = agg
+                    .clients
+                    .into_iter()
+                    .map(|client| client.to_string())
+                    .collect();
                 v.sort();
                 v
             },
             models: {
-                let mut v: Vec<String> = agg.models.into_iter().collect();
+                let mut v: Vec<String> = agg
+                    .models
+                    .into_iter()
+                    .map(|model| model.to_string())
+                    .collect();
                 v.sort();
                 v
             },
@@ -326,11 +449,23 @@ pub(super) fn finish_hour_map(hour_map: HashMap<String, HourAcc>) -> Vec<HourlyU
     entries.into_iter().map(|(_, entry)| entry).collect()
 }
 
+type ClientModelIdentity = (Arc<str>, Arc<str>);
+type ClientProviderModelIdentity = (Arc<str>, Arc<str>, Arc<str>);
+
 #[derive(Default)]
 pub(super) struct DailyAcc {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
-    clients: HashMap<(String, String), ClientContribution>,
+    clients: HashMap<ClientModelIdentity, DailyClientContributionAcc>,
+}
+
+struct DailyClientContributionAcc {
+    client: Arc<str>,
+    model_id: Arc<str>,
+    providers: IdentitySet<Arc<str>>,
+    tokens: TokenBreakdown,
+    cost: f64,
+    messages: i32,
 }
 
 impl DailyAcc {
@@ -346,41 +481,25 @@ impl DailyAcc {
 
         add_token_breakdown(&mut self.token_breakdown, &msg.tokens);
 
-        let model_id = msg.model_id.as_ref();
-        let client = msg.client.to_string();
-        let model = model_id.to_string();
-        let key = (client.clone(), model.clone());
-        let provider_id = msg.provider_id.as_ref();
+        let key = (Arc::clone(&msg.client), Arc::clone(&msg.model_id));
         let client_entry = self
             .clients
             .entry(key)
-            .or_insert_with(|| ClientContribution {
-                client,
-                model_id: model,
-                provider_id: provider_id.to_string(),
+            .or_insert_with(|| DailyClientContributionAcc {
+                client: Arc::clone(&msg.client),
+                model_id: Arc::clone(&msg.model_id),
+                providers: IdentitySet::default(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 messages: 0,
             });
-
-        if !client_entry
-            .provider_id
-            .split(", ")
-            .any(|p| p == provider_id)
-        {
-            client_entry.provider_id = format!("{}, {}", client_entry.provider_id, provider_id);
-        }
+        client_entry.providers.insert(Arc::clone(&msg.provider_id));
 
         add_token_breakdown(&mut client_entry.tokens, &msg.tokens);
         client_entry.cost += msg.cost;
         client_entry.messages = client_entry
             .messages
             .saturating_add(msg.message_count.max(0));
-
-        let mut providers: Vec<&str> = client_entry.provider_id.split(", ").collect();
-        providers.sort_unstable();
-        providers.dedup();
-        client_entry.provider_id = providers.join(", ");
     }
 
     fn into_contribution(self, date: String) -> DailyContribution {
@@ -395,14 +514,19 @@ impl DailyAcc {
         let mut clients: Vec<ClientContribution> = self
             .clients
             .into_values()
-            .map(|mut contribution| {
-                contribution.tokens.input = contribution.tokens.input.max(0);
-                contribution.tokens.output = contribution.tokens.output.max(0);
-                contribution.tokens.cache_read = contribution.tokens.cache_read.max(0);
-                contribution.tokens.cache_write = contribution.tokens.cache_write.max(0);
-                contribution.tokens.reasoning = contribution.tokens.reasoning.max(0);
-                contribution.cost = contribution.cost.max(0.0);
-                contribution
+            .map(|contribution| ClientContribution {
+                client: contribution.client.to_string(),
+                model_id: contribution.model_id.to_string(),
+                provider_id: contribution.providers.into_sorted_string(),
+                tokens: TokenBreakdown {
+                    input: contribution.tokens.input.max(0),
+                    output: contribution.tokens.output.max(0),
+                    cache_read: contribution.tokens.cache_read.max(0),
+                    cache_write: contribution.tokens.cache_write.max(0),
+                    reasoning: contribution.tokens.reasoning.max(0),
+                },
+                cost: contribution.cost.max(0.0),
+                messages: contribution.messages,
             })
             .collect();
         clients.sort_by(|a, b| {
@@ -466,13 +590,20 @@ fn calculate_intensities(contributions: &mut [DailyContribution]) {
 pub(super) struct SessionAcc {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
-    clients: HashMap<(String, String, String), ClientContribution>,
-    top_client: String,
-    top_provider: String,
-    top_model: String,
+    clients: HashMap<ClientProviderModelIdentity, SessionClientContributionAcc>,
+    top_identity: Option<ClientProviderModelIdentity>,
     top_cost: f64,
     first_seen: i64,
     last_seen: i64,
+}
+
+struct SessionClientContributionAcc {
+    client: Arc<str>,
+    provider_id: Arc<str>,
+    model_id: Arc<str>,
+    tokens: TokenBreakdown,
+    cost: f64,
+    messages: i32,
 }
 
 impl Default for SessionAcc {
@@ -481,9 +612,7 @@ impl Default for SessionAcc {
             totals: DailyTotals::default(),
             token_breakdown: TokenBreakdown::default(),
             clients: HashMap::with_capacity(2),
-            top_client: String::new(),
-            top_provider: String::new(),
-            top_model: String::new(),
+            top_identity: None,
             top_cost: f64::NEG_INFINITY,
             first_seen: i64::MAX,
             last_seen: i64::MIN,
@@ -504,21 +633,22 @@ impl SessionAcc {
 
         add_token_breakdown(&mut self.token_breakdown, &msg.tokens);
 
-        let client = msg.client.to_string();
-        let provider_id = msg.provider_id.as_ref();
-        let model_id = msg.model_id.to_string();
-        let key = (client.clone(), provider_id.to_string(), model_id.clone());
-        let client_entry = self
-            .clients
-            .entry(key)
-            .or_insert_with(|| ClientContribution {
-                client,
-                model_id,
-                provider_id: provider_id.to_string(),
-                tokens: TokenBreakdown::default(),
-                cost: 0.0,
-                messages: 0,
-            });
+        let key = (
+            Arc::clone(&msg.client),
+            Arc::clone(&msg.provider_id),
+            Arc::clone(&msg.model_id),
+        );
+        let client_entry =
+            self.clients
+                .entry(key)
+                .or_insert_with(|| SessionClientContributionAcc {
+                    client: Arc::clone(&msg.client),
+                    provider_id: Arc::clone(&msg.provider_id),
+                    model_id: Arc::clone(&msg.model_id),
+                    tokens: TokenBreakdown::default(),
+                    cost: 0.0,
+                    messages: 0,
+                });
 
         add_token_breakdown(&mut client_entry.tokens, &msg.tokens);
         client_entry.cost += msg.cost;
@@ -528,9 +658,11 @@ impl SessionAcc {
 
         if client_entry.cost > self.top_cost {
             self.top_cost = client_entry.cost;
-            self.top_client = client_entry.client.clone();
-            self.top_provider = client_entry.provider_id.clone();
-            self.top_model = client_entry.model_id.clone();
+            self.top_identity = Some((
+                Arc::clone(&msg.client),
+                Arc::clone(&msg.provider_id),
+                Arc::clone(&msg.model_id),
+            ));
         }
 
         let secs = if msg.timestamp.abs() > 1_000_000_000_000 {
@@ -558,14 +690,19 @@ impl SessionAcc {
         let mut clients: Vec<ClientContribution> = self
             .clients
             .into_values()
-            .map(|mut contribution| {
-                contribution.tokens.input = contribution.tokens.input.max(0);
-                contribution.tokens.output = contribution.tokens.output.max(0);
-                contribution.tokens.cache_read = contribution.tokens.cache_read.max(0);
-                contribution.tokens.cache_write = contribution.tokens.cache_write.max(0);
-                contribution.tokens.reasoning = contribution.tokens.reasoning.max(0);
-                contribution.cost = contribution.cost.max(0.0);
-                contribution
+            .map(|contribution| ClientContribution {
+                client: contribution.client.to_string(),
+                model_id: contribution.model_id.to_string(),
+                provider_id: contribution.provider_id.to_string(),
+                tokens: TokenBreakdown {
+                    input: contribution.tokens.input.max(0),
+                    output: contribution.tokens.output.max(0),
+                    cache_read: contribution.tokens.cache_read.max(0),
+                    cache_write: contribution.tokens.cache_write.max(0),
+                    reasoning: contribution.tokens.reasoning.max(0),
+                },
+                cost: contribution.cost.max(0.0),
+                messages: contribution.messages,
             })
             .collect();
         clients.sort_by(|a, b| {
@@ -588,11 +725,14 @@ impl SessionAcc {
             self.last_seen
         };
 
+        let (client, provider, model) = self
+            .top_identity
+            .expect("session accumulator contains at least one identity");
         SessionContribution {
             session_id,
-            client: self.top_client,
-            provider: self.top_provider,
-            model: self.top_model,
+            client: client.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
             totals: DailyTotals {
                 tokens: self.totals.tokens.max(0),
                 cost: self.totals.cost.max(0.0),
@@ -623,7 +763,13 @@ pub(super) fn finish_session_map(
 
 #[derive(Default)]
 pub(super) struct AgentEntries {
-    agents: HashMap<(String, String), AgentUsage>,
+    agents: HashMap<(Arc<str>, String), AgentUsageAcc>,
+}
+
+struct AgentUsageAcc {
+    tokens: TokenBreakdown,
+    cost: f64,
+    message_count: i32,
 }
 
 impl AgentEntries {
@@ -639,13 +785,10 @@ impl AgentEntries {
         } else {
             crate::sessions::normalize_agent_name(agent)
         };
-        let client = msg.client.to_string();
         let entry = self
             .agents
-            .entry((client.clone(), normalized_agent.clone()))
-            .or_insert_with(|| AgentUsage {
-                client,
-                agent: normalized_agent,
+            .entry((Arc::clone(&msg.client), normalized_agent))
+            .or_insert_with(|| AgentUsageAcc {
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
                 message_count: 0,
@@ -657,7 +800,17 @@ impl AgentEntries {
     }
 
     pub(super) fn finish(self) -> Vec<AgentUsage> {
-        let mut agents: Vec<AgentUsage> = self.agents.into_values().collect();
+        let mut agents: Vec<AgentUsage> = self
+            .agents
+            .into_iter()
+            .map(|((client, agent), totals)| AgentUsage {
+                client: client.to_string(),
+                agent,
+                tokens: totals.tokens,
+                cost: totals.cost,
+                message_count: totals.message_count,
+            })
+            .collect();
         agents.sort_by(|a, b| {
             a.client
                 .cmp(&b.client)
@@ -721,5 +874,83 @@ pub(super) fn finish_graph_and_time_from_events(
         graph,
         time_metrics,
         daily_contributions,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(
+        client: &str,
+        provider: &str,
+        session: &str,
+        model: &str,
+        input: i64,
+    ) -> UnifiedMessage {
+        UnifiedMessage::new(
+            client,
+            model,
+            provider,
+            session,
+            1_735_689_600_000,
+            TokenBreakdown {
+                input,
+                ..TokenBreakdown::default()
+            },
+            input as f64,
+        )
+    }
+
+    #[test]
+    fn model_report_coalesces_legacy_public_key_collisions_explicitly() {
+        let cases = [
+            (
+                GroupBy::ClientModel,
+                message("a:b", "first", "same", "c", 10),
+                message("a", "second", "same", "b:c", 20),
+                "a:b",
+                "c",
+                "first, second",
+            ),
+            (
+                GroupBy::ClientProviderModel,
+                message("a", "b:c", "same", "d", 10),
+                message("a", "b", "same", "c:d", 20),
+                "a",
+                "d",
+                "b:c",
+            ),
+            (
+                GroupBy::Session,
+                message("a", "first", "b:c", "d", 10),
+                message("a", "second", "b", "c:d", 20),
+                "a",
+                "d",
+                "first, second",
+            ),
+            (
+                GroupBy::ClientSession,
+                message("a", "first", "b:c", "d", 10),
+                message("a", "second", "b", "c:d", 20),
+                "a",
+                "d",
+                "first, second",
+            ),
+        ];
+
+        for (group_by, first, second, client, model, provider) in cases {
+            let mut entries = ModelEntries::new(group_by);
+            entries.push(&first);
+            entries.push(&second);
+            let entries = entries.finish();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].client, client);
+            assert_eq!(entries[0].model, model);
+            assert_eq!(entries[0].provider, provider);
+            assert_eq!(entries[0].input, 30);
+            assert_eq!(entries[0].cost, 30.0);
+            assert_eq!(entries[0].message_count, 2);
+        }
     }
 }

@@ -1,6 +1,7 @@
 use codspeed_criterion_compat::{
     black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
 };
+use std::sync::OnceLock;
 use tokscale_core::{
     aggregate_unified_messages, AggregationConfig, DateRange, GroupBy, TokenBreakdown,
     UnifiedMessage, ViewSet,
@@ -20,7 +21,13 @@ const WORKSPACES: &[&str] = &[
 ];
 const AGENTS: &[&str] = &["Sisyphus", "Planner-Sisyphus", "reviewer", "implementer"];
 
-fn synthetic_messages() -> Vec<UnifiedMessage> {
+#[derive(Clone, Copy, Debug)]
+enum Cardinality {
+    Low,
+    High,
+}
+
+fn synthetic_messages(cardinality: Cardinality) -> Vec<UnifiedMessage> {
     let mut messages = Vec::with_capacity(MESSAGE_COUNT);
     let base_timestamp = 1_735_689_600_000i64;
 
@@ -28,7 +35,10 @@ fn synthetic_messages() -> Vec<UnifiedMessage> {
         let client = CLIENTS[index % CLIENTS.len()];
         let model = MODELS[(index / 3) % MODELS.len()];
         let provider = PROVIDERS[(index / 7) % PROVIDERS.len()];
-        let session_id = format!("session-{}", index % 8_192);
+        let session_id = match cardinality {
+            Cardinality::Low => format!("session-{}", index % 8_192),
+            Cardinality::High => format!("session-{index}"),
+        };
         let timestamp = base_timestamp + (index as i64 * 60_000);
         let input = 80 + (index % 2048) as i64;
         let output = 20 + (index % 512) as i64;
@@ -54,8 +64,16 @@ fn synthetic_messages() -> Vec<UnifiedMessage> {
             Some(AGENTS[index % AGENTS.len()].to_string()),
         );
 
-        let workspace = WORKSPACES[index % WORKSPACES.len()];
-        message.set_workspace(Some(workspace.to_string()), Some(workspace.to_string()));
+        match cardinality {
+            Cardinality::Low => {
+                let workspace = WORKSPACES[index % WORKSPACES.len()];
+                message.set_workspace(Some(workspace.to_string()), Some(workspace.to_string()));
+            }
+            Cardinality::High => {
+                let workspace = format!("/repo/unique-{index}");
+                message.set_workspace(Some(workspace.clone()), Some(workspace));
+            }
+        }
         message.duration_ms = Some(500 + (index % 15_000) as i64);
         message.message_count = 1 + (index % 3) as i32;
         message.is_turn_start = index % 2 == 0;
@@ -63,6 +81,15 @@ fn synthetic_messages() -> Vec<UnifiedMessage> {
     }
 
     messages
+}
+
+fn benchmark_messages(cardinality: Cardinality) -> &'static [UnifiedMessage] {
+    static LOW: OnceLock<Vec<UnifiedMessage>> = OnceLock::new();
+    static HIGH: OnceLock<Vec<UnifiedMessage>> = OnceLock::new();
+    match cardinality {
+        Cardinality::Low => LOW.get_or_init(|| synthetic_messages(Cardinality::Low)),
+        Cardinality::High => HIGH.get_or_init(|| synthetic_messages(Cardinality::High)),
+    }
 }
 
 fn push_and_finish(messages: &[UnifiedMessage], views: ViewSet, group_by: GroupBy) -> usize {
@@ -136,24 +163,45 @@ fn push_and_finish(messages: &[UnifiedMessage], views: ViewSet, group_by: GroupB
 }
 
 fn bench_aggregation_engine(c: &mut Criterion) {
-    let messages = synthetic_messages();
     let mut group = c.benchmark_group("aggregation_engine_push_finish");
-    group.throughput(Throughput::Elements(messages.len() as u64));
+    group.throughput(Throughput::Elements(MESSAGE_COUNT as u64));
 
     let cases = [
-        ("tui_client_model", ViewSet::TUI, GroupBy::ClientModel),
-        ("tui_workspace_model", ViewSet::TUI, GroupBy::WorkspaceModel),
-        ("model_only", ViewSet::MODEL, GroupBy::ClientProviderModel),
-        ("workspace_model", ViewSet::MODEL, GroupBy::WorkspaceModel),
+        (
+            "tui_client_model",
+            ViewSet::TUI,
+            GroupBy::ClientModel,
+            Cardinality::Low,
+        ),
+        (
+            "tui_workspace_model",
+            ViewSet::TUI,
+            GroupBy::WorkspaceModel,
+            Cardinality::Low,
+        ),
+        (
+            "model_only",
+            ViewSet::MODEL,
+            GroupBy::ClientProviderModel,
+            Cardinality::Low,
+        ),
+        (
+            "workspace_model",
+            ViewSet::MODEL,
+            GroupBy::WorkspaceModel,
+            Cardinality::Low,
+        ),
         (
             "monthly_hourly",
             ViewSet::MONTHLY | ViewSet::HOURLY,
             GroupBy::ClientModel,
+            Cardinality::Low,
         ),
         (
             "graph_sessions_time",
             ViewSet::GRAPH | ViewSet::SESSIONS | ViewSet::TIME_METRICS,
             GroupBy::ClientModel,
+            Cardinality::Low,
         ),
         (
             "all_views",
@@ -166,15 +214,41 @@ fn bench_aggregation_engine(c: &mut Criterion) {
                 | ViewSet::TIME_METRICS
                 | ViewSet::AGENTS,
             GroupBy::ClientProviderModel,
+            Cardinality::Low,
+        ),
+        (
+            "tui_session_high_cardinality",
+            ViewSet::TUI,
+            GroupBy::Session,
+            Cardinality::High,
+        ),
+        (
+            "tui_workspace_high_cardinality",
+            ViewSet::TUI,
+            GroupBy::WorkspaceModel,
+            Cardinality::High,
+        ),
+        (
+            "model_session_high_cardinality",
+            ViewSet::MODEL,
+            GroupBy::Session,
+            Cardinality::High,
+        ),
+        (
+            "model_workspace_high_cardinality",
+            ViewSet::MODEL,
+            GroupBy::WorkspaceModel,
+            Cardinality::High,
         ),
     ];
 
-    for (name, views, group_by) in cases {
+    for (name, views, group_by, cardinality) in cases {
         group.bench_with_input(
             BenchmarkId::from_parameter(name),
-            &(views, group_by),
-            |b, (views, group_by)| {
-                b.iter(|| black_box(push_and_finish(&messages, *views, group_by.clone())));
+            &(views, group_by, cardinality),
+            |b, (views, group_by, cardinality)| {
+                let messages = benchmark_messages(*cardinality);
+                b.iter(|| black_box(push_and_finish(messages, *views, group_by.clone())));
             },
         );
     }

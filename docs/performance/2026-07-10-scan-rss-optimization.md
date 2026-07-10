@@ -54,7 +54,8 @@ Baseline commit: `1c7bb2ed99b0`
 | C1 | `3cce3edb` | Explicit cache GC | 0 | 0.00 | 9,760 | 4,354 | 4.36 | 34,832 | 0.16 | 35,040 |
 | C2 | `37c7c865` | Metadata-stamp warm hits | 0 | 0.00 | 9,920 | 3,624 | 3.94 | 37,512 | 0.15 | 35,040 |
 | C3 | `b9d5dae2` | Single prepared TUI inventory | 0 | 0.00 | 9,760 | 4,534 | 4.54 | 39,288 | 0.15 | 35,040 |
-| C4 | `C4` | Bounded single-copy source fold | 0 | 0.00 | 9,920 | 4,290 | 4.29 | 38,700 | 0.15 | 35,040 |
+| C4 | `5f50b6f2` | Bounded single-copy source fold | 0 | 0.00 | 9,920 | 4,290 | 4.29 | 38,700 | 0.15 | 35,040 |
+| C5 | `C5` | Structured aggregation identities | 0 | 0.00 | 9,760 | 3,353 | 3.35 | 37,096 | 0.10 | 32,764 |
 
 ## Raw samples
 
@@ -524,6 +525,181 @@ cargo test -p tokscale-cli
 Workspace all-target Clippy with `-D warnings`, rustfmt, diff checks, and the
 release build passed. ADR 0018 records the bounded ownership, ordering, planner,
 and Codex raw-write contracts; ADR 0008 now points to that implemented follow-up.
+
+### C5 — structured aggregation identities
+
+Candidate: replace formatted `String` identities in aggregation maps with
+structured, value-equal `Arc<str>` keys, and stop the process interner from
+strongly owning every identity ever observed. The interner now indexes
+`Weak<str>` values, confirms full string equality after hash matches, uses an
+inline singleton bucket with no per-hash collision-vector allocation for the
+normal case, and prunes dead entries at explicit successful- and failed-load
+lifecycle seams. Aggregation provider/session/client sets likewise keep empty
+and singleton states inline and allocate a hash table only after a second
+distinct value appears.
+
+Public report and TUI schemas and historical key text are unchanged. Private
+structured keys distinguish delimiter collisions. Only keys that can actually
+alias the historical text (delimiter-bearing composite fields and the
+unknown-workspace sentinel pair) enter an explicit first-seen compatibility
+merge; provably injective keys materialize directly. This avoids both hot-path
+formatting and a corpus-sized finish-time compatibility table. `C5` is replaced
+with the exact commit hash by the next stage.
+
+Release build:
+
+```text
+cargo build -p tokscale-cli --release
+Finished release profile [optimized] target(s) in 2m 15s.
+GNU time: wall 147.02s; user 143.10s; sys 2.56s; max RSS 1,514,340 KiB.
+Binary SHA-256: 79272fa404870bc3b01590fd63119ca4d2681da1fdc7d2588da8aa2b4bae259c
+```
+
+The reboot between C4 and C5 removed the temporary comparison artifacts, so an
+exact `5f50b6f2` detached worktree, release binary, and benchmark target were
+rebuilt under a persistent cache directory. The C4 benchmark contains only the
+same C5 benchmark-harness patch; its production library remains exact C4. Both
+versions use the same synthetic messages and the same isolated real settings.
+
+Corpus at final measurement time:
+
+| Input | Size / count | Change from the recorded C4 corpus |
+| --- | ---: | ---: |
+| isolated source-message cache after verification | 9,237 shards / 88 MiB | +10 shards / unchanged size |
+| Claude projects | 647 MiB | unchanged |
+| Codex sessions | 735 MiB | +10 MiB |
+| OpenCode data | 429 MiB | unchanged |
+
+The recreated isolated cache was warmed by exact C4 before any C5 samples. The
+active Codex session added one session during the run, so the fixed comparison
+below includes a later exact-C4 control against the same 2,623-session corpus.
+
+Zero-session probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    0              0.00    0.00    0.00    9760
+2    0              0.00    0.00    0.00    9920
+3    0              0.00    0.00    0.01    9600
+```
+
+Warm three-client C5 probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    3233           3.23    0.85    1.11   37096
+2    3353           3.35    0.75    1.21   35836
+3    3406           3.41    0.81    1.16   37828
+```
+
+Exact-C4 control on that same warmed corpus:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    3296           3.30    0.82    1.15   36240
+2    3134           3.14    0.80    1.16   35956
+3    3267           3.27    0.78    1.17   38620
+```
+
+The C5-to-control median changes are +2.6% processing, +2.4% wall, and +2.4%
+RSS. `time-metrics` buffers temporal events and does not exercise the changed
+MODEL/TUI identity maps, so these noise-sized readings do not support either a
+normal scan-speed improvement or regression claim. The apparently larger
+change from the historical C4 row is not attributed to C5 because that row was
+recorded before the reboot, against a different cache instance and smaller live
+corpus.
+
+The primary candidate-specific probe uses 100,000 messages. Message creation is
+outside Criterion's timed iterations. Every sample below is an external fresh
+process measured by `/usr/bin/time`; C4 and C5 alternate, and both executables
+contain the identical benchmark harness.
+
+Low-cardinality `tui_client_model` raw samples:
+
+```text
+version  run  wall_s  user_s  sys_s  max_rss_kib
+C4       1    0.15    0.13    0.00   35040
+C5       1    0.10    0.10    0.00   32920
+C4       2    0.13    0.13    0.00   35040
+C5       2    0.10    0.10    0.00   32764
+C4       3    0.12    0.13    0.00   35040
+C5       3    0.10    0.11    0.00   32760
+C4       4    0.13    0.14    0.00   35040
+C5       4    0.09    0.10    0.00   32760
+C4       5    0.12    0.13    0.00   35040
+C5       5    0.10    0.10    0.00   32920
+```
+
+Its median wall time fell from 0.13s to 0.10s (23.1%), and median peak RSS
+fell from 35,040 KiB to 32,764 KiB (6.5%). The cumulative table retains the
+historically recorded C4 aggregation row and uses the measured C5 median.
+
+High-cardinality medians:
+
+| Case (100K unique identity fields) | C4 wall s | C5 wall s | Wall change | C4 RSS KiB | C5 RSS KiB | RSS change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| TUI session | 0.49 | 0.33 | -32.7% | 192,564 | 153,428 | -20.3% |
+| TUI workspace | 0.62 | 0.41 | -33.9% | 238,020 | 161,104 | -32.3% |
+| MODEL session | 0.23 | 0.18 | -21.7% | 121,280 | 119,284 | -1.6% |
+| MODEL workspace | 0.34 | 0.25 | -26.5% | 164,460 | 128,612 | -21.8% |
+
+The retained raw wall/RSS samples are:
+
+```text
+case             version  wall_s (five runs)             max_rss_kib (five runs)
+TUI session      C4       .51 .48 .49 .47 .49            192412 192720 192564 192720 192556
+TUI session      C5       .32 .34 .33 .33 .34            153244 153448 153252 153428 153432
+TUI workspace    C4       .64 .63 .62 .61 .62            238036 237720 237736 238024 238020
+TUI workspace    C5       .42 .41 .39 .41 .39            160952 161108 160940 161104 161132
+MODEL session    C4       .24 .23 .23 .22 .23            121260 121288 121112 121288 121280
+MODEL session    C5       .18 .18 .18 .19 .18            119320 119264 119284 119424 119252
+MODEL workspace  C4       .37 .35 .22 .34 .34            164404 164632 164452 164460 164608
+MODEL workspace  C5       .25 .27 .25 .24 .25            128612 128600 128748 128748 128580
+```
+
+Measurement caught and rejected an intermediate implementation. It first
+collected every 280-byte structured key/bucket row into a vector, then built a
+second roughly 248-byte `String`/bucket table to preserve legacy collisions.
+At 100,000 MODEL-session buckets its median was 0.25s / 135,480 KiB versus a
+0.22s / 121,188 KiB C4 control. The alias-risk fast path removed that full
+double buffer; the final samples above reverse both regressions. The temporary
+layout probe was deleted before the recorded build.
+
+Candidate-specific verification covers all six `GroupBy` variants, structured
+value equality across distinct Arc allocations, delimiter and workspace
+sentinel collisions, provider/client first-seen rules, session unions,
+explicit-versus-derived agent instances, daily/hourly legacy-key materialization,
+weak-index hash collisions, concurrent interning, dead-entry compaction, and
+successful-load cleanup without deleting externally live values. The error
+branch explicitly drops partial accumulators, prunes the weak index, and returns
+the original error unchanged. On a stable real inventory, C4 and C5 model JSON
+content matched for every grouping after removing only `processingTimeMs`. A
+Claude/OpenCode TUI cache comparison also matched exactly after volatile
+metadata removal:
+
+```text
+normalized schema-25 SHA-256: ca6eb113e7fe010ccec0df7d811f7c66689924a8126a198560104dfa37884bce
+models 33; agents 15; daily buckets 78; hourly buckets 412;
+total tokens 4,243,768,907
+```
+
+Final gates:
+
+```text
+cargo test -p tokscale-core
+1158 passed; 3 ignored
+
+cargo test -p tokscale-cli
+834 passed; 1 ignored
+
+cargo clippy --workspace --all-targets -- -D warnings
+passed
+```
+
+Rustfmt, `git diff --check`, the release CLI build, and an independent semantic
+review also passed. ADR 0008 now records weak interner ownership, the local-load
+prune boundary, structured aggregation identities, singleton collections, and
+the explicit legacy-key collision boundary.
 
 ## Interpretation rules
 

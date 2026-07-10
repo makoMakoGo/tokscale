@@ -4,7 +4,10 @@
 //! core report loading drives that engine instead of the CLI carrying its own
 //! fold (#37).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Weekday};
 
@@ -14,11 +17,8 @@ use crate::usage_views::{
     UsageTokenBreakdown,
 };
 use crate::{
-    aggregate::keys::{
-        daily_source_model_key, grouped_model_bucket_key, hourly_model_key, workspace_bucket,
-    },
-    ordered_clients_by_token_contribution, sessions, ClientContributionOrder, GroupBy,
-    ModelPerformance, UnifiedMessage,
+    aggregate::keys::{workspace_fields, GroupedModelKey, HourlyModelKey, IdentitySet},
+    sessions, ClientContributionOrder, GroupBy, ModelPerformance, UnifiedMessage,
 };
 
 fn positive_unified_token_total(tokens: &crate::TokenBreakdown) -> i64 {
@@ -44,11 +44,21 @@ fn grouped_model_display_label(
 
 fn daily_source_model_display_name(
     group_by: &GroupBy,
-    workspace_label: &str,
-    session_id: &str,
+    workspace_label: Option<&str>,
+    session_id: Option<&str>,
     model: &str,
 ) -> String {
-    grouped_model_display_label(group_by, Some(workspace_label), Some(session_id), model)
+    match group_by {
+        GroupBy::WorkspaceModel => format!(
+            "{} / {model}",
+            workspace_label.expect("workspace model bucket has a display label")
+        ),
+        GroupBy::Session | GroupBy::ClientSession => format!(
+            "{} / {model}",
+            session_id.expect("session model bucket has a session identity")
+        ),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::ClientProviderModel => model.to_string(),
+    }
 }
 
 fn model_color_key(_group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
@@ -436,14 +446,309 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
 /// graph + streaks from the finished daily buckets.
 pub(super) struct TuiAcc {
     group_by: GroupBy,
-    model_map: HashMap<String, UsageModelEntry>,
-    agent_map: HashMap<String, AgentEntry>,
-    agent_clients: HashMap<String, BTreeSet<String>>,
-    agent_instances: HashMap<String, HashSet<String>>,
-    daily_map: HashMap<NaiveDate, DailyUsage>,
-    hourly_map: HashMap<NaiveDateTime, HourlyUsage>,
-    model_session_ids: HashMap<String, HashSet<String>>,
-    client_totals_by_model: HashMap<String, HashMap<String, ClientContributionOrder>>,
+    model_map: HashMap<GroupedModelKey, TuiModelBucket>,
+    agent_map: HashMap<String, AgentBucket>,
+    daily_map: HashMap<NaiveDate, DailyBucket>,
+    hourly_map: HashMap<NaiveDateTime, HourlyBucket>,
+    next_sequence: usize,
+}
+
+struct TuiModelBucket {
+    first_seen: usize,
+    model: Arc<str>,
+    providers: IdentitySet<Arc<str>>,
+    client: Arc<str>,
+    workspace_key: Option<Arc<str>>,
+    workspace_label: Option<Arc<str>>,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    performance: ModelPerformance,
+    sessions: IdentitySet<(Arc<str>, Arc<str>)>,
+    // Boxed only for grouping modes that merge clients; keeps session and
+    // client-scoped high-cardinality buckets free of an inline HashMap.
+    #[allow(clippy::box_collection)]
+    client_totals: Option<Box<HashMap<Arc<str>, ClientContributionOrder>>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum AgentInstanceKey {
+    Explicit(Arc<str>),
+    Derived { client: Arc<str>, session: Arc<str> },
+}
+
+struct AgentBucket {
+    clients: IdentitySet<Arc<str>>,
+    instances: IdentitySet<AgentInstanceKey>,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    message_count: u32,
+}
+
+struct DailyBucket {
+    date: NaiveDate,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    sources: HashMap<Arc<str>, DailySourceBucket>,
+    message_count: u32,
+    turn_count: u32,
+}
+
+struct DailySourceBucket {
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    models: HashMap<GroupedModelKey, DailyModelBucket>,
+}
+
+struct DailyModelBucket {
+    first_seen: usize,
+    provider: Arc<str>,
+    workspace_label: Option<Arc<str>>,
+    session_id: Option<Arc<str>>,
+    model: Arc<str>,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    messages: u64,
+}
+
+struct HourlyBucket {
+    datetime: NaiveDateTime,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    clients: IdentitySet<Arc<str>>,
+    models: HashMap<HourlyModelKey, HourlyModelBucket>,
+    message_count: u32,
+    turn_count: u32,
+}
+
+struct HourlyModelBucket {
+    first_seen: usize,
+    provider: Arc<str>,
+    model: Arc<str>,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+}
+
+fn merge_performance(target: &mut ModelPerformance, source: ModelPerformance) {
+    target.total_duration_ms = target
+        .total_duration_ms
+        .saturating_add(source.total_duration_ms);
+    target.timed_tokens = target
+        .timed_tokens
+        .checked_add(source.timed_tokens)
+        .expect("timed token count exceeds i64::MAX");
+    target.sample_count = target.sample_count.saturating_add(source.sample_count);
+}
+
+fn merge_tui_model_bucket(
+    target: &mut TuiModelBucket,
+    source: TuiModelBucket,
+    merge_providers: bool,
+) {
+    if merge_providers {
+        target.providers.extend(source.providers);
+    }
+    target.sessions.extend(source.sessions);
+    if let Some(source_totals_by_client) = source.client_totals {
+        let target_totals_by_client = target
+            .client_totals
+            .as_mut()
+            .expect("colliding merge-client TUI buckets both track client totals");
+        for (client, source_totals) in *source_totals_by_client {
+            match target_totals_by_client.entry(client) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(source_totals);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let totals = entry.get_mut();
+                    totals.first_seen = totals.first_seen.min(source_totals.first_seen);
+                    totals.total_tokens = totals
+                        .total_tokens
+                        .checked_add(source_totals.total_tokens)
+                        .expect("client token contribution exceeds u64::MAX");
+                }
+            }
+        }
+    }
+    add_tokens(&mut target.tokens, &source.tokens);
+    target.cost += source.cost;
+    merge_performance(&mut target.performance, source.performance);
+}
+
+fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
+    let provider = bucket.providers.into_sorted_string();
+    let client = if let Some(client_totals) = bucket.client_totals {
+        let mut clients: Vec<_> = (*client_totals).into_iter().collect();
+        clients.sort_by(|(left_client, left), (right_client, right)| {
+            right
+                .total_tokens
+                .cmp(&left.total_tokens)
+                .then_with(|| left.first_seen.cmp(&right.first_seen))
+                .then_with(|| left_client.cmp(right_client))
+        });
+        clients
+            .iter()
+            .map(|(client, _)| client.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        bucket.client.to_string()
+    };
+    bucket.performance.finalize(bucket.tokens.total() as i64);
+    UsageModelEntry {
+        model: bucket.model.to_string(),
+        provider,
+        client,
+        workspace_key: bucket.workspace_key.map(|key| key.to_string()),
+        workspace_label: bucket.workspace_label.map(|label| label.to_string()),
+        tokens: bucket.tokens,
+        cost: bucket.cost,
+        performance: bucket.performance,
+        session_count: bucket
+            .sessions
+            .len()
+            .try_into()
+            .expect("model session count exceeds u32::MAX"),
+    }
+}
+
+fn merge_daily_model_bucket(target: &mut DailyModelBucket, source: DailyModelBucket) {
+    add_tokens(&mut target.tokens, &source.tokens);
+    target.cost += source.cost;
+    target.messages = target
+        .messages
+        .checked_add(source.messages)
+        .expect("daily model message count exceeds u64::MAX");
+}
+
+fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> DailyModelInfo {
+    let provider = model.provider.to_string();
+    let display_name = daily_source_model_display_name(
+        group_by,
+        model.workspace_label.as_deref(),
+        model.session_id.as_deref(),
+        &model.model,
+    );
+    let color_key = model_color_key(group_by, &provider, &model.model);
+    DailyModelInfo {
+        provider,
+        display_name,
+        color_key,
+        tokens: model.tokens,
+        cost: model.cost,
+        messages: model.messages,
+    }
+}
+
+fn materialize_daily(bucket: DailyBucket, group_by: &GroupBy) -> DailyUsage {
+    let mut source_breakdown = BTreeMap::new();
+    for (client, source) in bucket.sources {
+        let mut models = BTreeMap::new();
+        let mut risky_models = Vec::new();
+        for (key, model) in source.models {
+            if key.may_alias_legacy_key() {
+                risky_models.push((key, model));
+            } else {
+                models.insert(key.public_key(), materialize_daily_model(model, group_by));
+            }
+        }
+        if !risky_models.is_empty() {
+            risky_models.sort_by_key(|(_, model)| model.first_seen);
+            let mut public_models: HashMap<String, DailyModelBucket> = HashMap::new();
+            for (key, model) in risky_models {
+                match public_models.entry(key.public_key()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(model);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        merge_daily_model_bucket(entry.get_mut(), model);
+                    }
+                }
+            }
+            models.extend(
+                public_models
+                    .into_iter()
+                    .map(|(key, model)| (key, materialize_daily_model(model, group_by))),
+            );
+        }
+        source_breakdown.insert(
+            client.to_string(),
+            DailySourceInfo {
+                tokens: source.tokens,
+                cost: source.cost,
+                models,
+            },
+        );
+    }
+    DailyUsage {
+        date: bucket.date,
+        tokens: bucket.tokens,
+        cost: bucket.cost,
+        source_breakdown,
+        message_count: bucket.message_count,
+        turn_count: bucket.turn_count,
+    }
+}
+
+fn merge_hourly_model_bucket(target: &mut HourlyModelBucket, source: HourlyModelBucket) {
+    add_tokens(&mut target.tokens, &source.tokens);
+    target.cost += source.cost;
+}
+
+fn materialize_hourly_model(model: HourlyModelBucket, group_by: &GroupBy) -> HourlyModelInfo {
+    let provider = model.provider.to_string();
+    HourlyModelInfo {
+        provider: provider.clone(),
+        display_name: hourly_model_display_name(group_by, &model.model),
+        color_key: model_color_key(group_by, &provider, &model.model),
+        tokens: model.tokens,
+        cost: model.cost,
+    }
+}
+
+fn materialize_hourly(bucket: HourlyBucket, group_by: &GroupBy) -> HourlyUsage {
+    let mut models = BTreeMap::new();
+    let mut risky_models = Vec::new();
+    for (key, model) in bucket.models {
+        if key.may_alias_legacy_key() {
+            risky_models.push((key, model));
+        } else {
+            models.insert(key.public_key(), materialize_hourly_model(model, group_by));
+        }
+    }
+    if !risky_models.is_empty() {
+        risky_models.sort_by_key(|(_, model)| model.first_seen);
+        let mut public_models: HashMap<String, HourlyModelBucket> = HashMap::new();
+        for (key, model) in risky_models {
+            match public_models.entry(key.public_key()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(model);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    merge_hourly_model_bucket(entry.get_mut(), model);
+                }
+            }
+        }
+        models.extend(
+            public_models
+                .into_iter()
+                .map(|(key, model)| (key, materialize_hourly_model(model, group_by))),
+        );
+    }
+    let clients = bucket
+        .clients
+        .into_vec()
+        .into_iter()
+        .map(|client| client.to_string())
+        .collect();
+    HourlyUsage {
+        datetime: bucket.datetime,
+        tokens: bucket.tokens,
+        cost: bucket.cost,
+        clients,
+        models,
+        message_count: bucket.message_count,
+        turn_count: bucket.turn_count,
+    }
 }
 
 impl TuiAcc {
@@ -452,61 +757,54 @@ impl TuiAcc {
             group_by,
             model_map: HashMap::new(),
             agent_map: HashMap::new(),
-            agent_clients: HashMap::new(),
-            agent_instances: HashMap::new(),
             daily_map: HashMap::new(),
             hourly_map: HashMap::new(),
-            model_session_ids: HashMap::new(),
-            client_totals_by_model: HashMap::new(),
+            next_sequence: 0,
         }
     }
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("TUI aggregation sequence exceeds usize::MAX");
         let group_by = &self.group_by;
-        let canonical_model_id = msg.model_id.to_string();
-        let provider = msg.provider_id.as_ref();
-        let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(msg);
-        let (key, merge_clients) = grouped_model_bucket_key(
-            group_by,
-            &msg.client,
-            provider,
-            &workspace_group_key,
-            &msg.session_id,
-            &canonical_model_id,
-        );
+        let key = GroupedModelKey::from_message(group_by, msg);
+        let merge_clients = key.merges_clients();
 
         let msg_cost = sane_cost(msg.cost);
 
-        let model_entry = self
-            .model_map
-            .entry(key.clone())
-            .or_insert_with(|| UsageModelEntry {
-                model: canonical_model_id.clone(),
-                provider: provider.to_string(),
-                client: msg.client.to_string(),
-                workspace_key: if *group_by == GroupBy::WorkspaceModel {
-                    workspace_key.clone()
-                } else {
-                    None
-                },
-                workspace_label: if *group_by == GroupBy::WorkspaceModel {
-                    Some(workspace_label.clone())
-                } else {
-                    None
-                },
+        let model_entry = self.model_map.entry(key).or_insert_with(|| {
+            let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
+                let (key, label) = workspace_fields(msg);
+                (key, Some(label))
+            } else {
+                (None, None)
+            };
+            TuiModelBucket {
+                first_seen: sequence,
+                model: Arc::clone(&msg.model_id),
+                providers: IdentitySet::one(Arc::clone(&msg.provider_id)),
+                client: Arc::clone(&msg.client),
+                workspace_key,
+                workspace_label,
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
                 performance: ModelPerformance::default(),
-                session_count: 0,
-            });
+                sessions: IdentitySet::default(),
+                client_totals: merge_clients.then(|| Box::new(HashMap::new())),
+            }
+        });
 
         if merge_clients {
-            let client_totals = self.client_totals_by_model.entry(key.clone()).or_default();
-            let client_count = client_totals.len();
-            let totals = client_totals
-                .entry(msg.client.to_string())
+            let totals = model_entry
+                .client_totals
+                .as_mut()
+                .expect("merge-client TUI grouping has client totals")
+                .entry(Arc::clone(&msg.client))
                 .or_insert_with(|| ClientContributionOrder {
-                    first_seen: client_count,
+                    first_seen: sequence,
                     total_tokens: 0,
                 });
             totals.total_tokens = totals
@@ -515,11 +813,7 @@ impl TuiAcc {
                 .expect("client token contribution exceeds u64::MAX");
         }
 
-        if *group_by != GroupBy::ClientProviderModel
-            && !model_entry.provider.split(", ").any(|p| p == provider)
-        {
-            model_entry.provider = format!("{}, {}", model_entry.provider, provider);
-        }
+        model_entry.providers.insert(Arc::clone(&msg.provider_id));
 
         add_unified_tokens(&mut model_entry.tokens, &msg.tokens);
         model_entry.cost += msg_cost;
@@ -527,11 +821,9 @@ impl TuiAcc {
             .performance
             .record_message(positive_unified_token_total(&msg.tokens), msg.duration_ms);
 
-        let session_key = format!("{}:{}", msg.client, msg.session_id);
-        let model_sessions = self.model_session_ids.entry(key).or_default();
-        if model_sessions.insert(session_key) {
-            model_entry.session_count += 1;
-        }
+        model_entry
+            .sessions
+            .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));
 
         if let Some(agent) = msg.agent.as_ref() {
             let normalized_agent = if msg.client.as_ref() == "opencode" {
@@ -541,43 +833,38 @@ impl TuiAcc {
             } else {
                 sessions::normalize_agent_name(agent)
             };
-            let agent_entry = self
-                .agent_map
-                .entry(normalized_agent.clone())
-                .or_insert_with(|| AgentEntry {
-                    agent: normalized_agent.clone(),
-                    clients: String::new(),
-                    tokens: UsageTokenBreakdown::default(),
-                    cost: 0.0,
-                    message_count: 0,
-                    instance_count: 0,
-                });
+            let agent_entry =
+                self.agent_map
+                    .entry(normalized_agent)
+                    .or_insert_with(|| AgentBucket {
+                        clients: IdentitySet::default(),
+                        instances: IdentitySet::default(),
+                        tokens: UsageTokenBreakdown::default(),
+                        cost: 0.0,
+                        message_count: 0,
+                    });
             add_unified_tokens(&mut agent_entry.tokens, &msg.tokens);
             agent_entry.cost += msg_cost;
             agent_entry.message_count = agent_entry
                 .message_count
                 .saturating_add(msg.message_count.max(0) as u32);
-            self.agent_clients
-                .entry(normalized_agent.clone())
-                .or_default()
-                .insert(msg.client.to_string());
-            let instance_key = msg
-                .agent_instance
-                .as_deref()
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("{}:{}", msg.client, msg.session_id));
-            self.agent_instances
-                .entry(normalized_agent)
-                .or_default()
-                .insert(instance_key);
+            agent_entry.clients.insert(Arc::clone(&msg.client));
+            let instance_key = msg.agent_instance.as_ref().map_or_else(
+                || AgentInstanceKey::Derived {
+                    client: Arc::clone(&msg.client),
+                    session: Arc::clone(&msg.session_id),
+                },
+                |instance| AgentInstanceKey::Explicit(Arc::clone(instance)),
+            );
+            agent_entry.instances.insert(instance_key);
         }
 
         if let Some(date) = msg.local_date() {
-            let daily_entry = self.daily_map.entry(date).or_insert_with(|| DailyUsage {
+            let daily_entry = self.daily_map.entry(date).or_insert_with(|| DailyBucket {
                 date,
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
-                source_breakdown: BTreeMap::new(),
+                sources: HashMap::new(),
                 message_count: 0,
                 turn_count: 0,
             });
@@ -589,36 +876,28 @@ impl TuiAcc {
             }
 
             let source_entry = daily_entry
-                .source_breakdown
-                .entry(msg.client.to_string())
-                .or_insert_with(|| DailySourceInfo {
+                .sources
+                .entry(Arc::clone(&msg.client))
+                .or_insert_with(|| DailySourceBucket {
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
-                    models: BTreeMap::new(),
+                    models: HashMap::new(),
                 });
             add_unified_tokens(&mut source_entry.tokens, &msg.tokens);
             source_entry.cost += msg_cost;
 
-            let daily_model_key = daily_source_model_key(
-                group_by,
-                &msg.client,
-                &workspace_group_key,
-                provider,
-                &msg.session_id,
-                &canonical_model_id,
-            );
+            let daily_model_key = GroupedModelKey::from_message(group_by, msg);
             let model_info = source_entry
                 .models
                 .entry(daily_model_key)
-                .or_insert_with(|| DailyModelInfo {
-                    provider: provider.to_string(),
-                    display_name: daily_source_model_display_name(
-                        group_by,
-                        &workspace_label,
-                        &msg.session_id,
-                        &canonical_model_id,
-                    ),
-                    color_key: model_color_key(group_by, provider, &canonical_model_id),
+                .or_insert_with(|| DailyModelBucket {
+                    first_seen: sequence,
+                    provider: Arc::clone(&msg.provider_id),
+                    workspace_label: (*group_by == GroupBy::WorkspaceModel)
+                        .then(|| workspace_fields(msg).1),
+                    session_id: matches!(group_by, GroupBy::Session | GroupBy::ClientSession)
+                        .then(|| Arc::clone(&msg.session_id)),
+                    model: Arc::clone(&msg.model_id),
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                     messages: 0,
@@ -634,30 +913,30 @@ impl TuiAcc {
             let hourly_entry = self
                 .hourly_map
                 .entry(bucket)
-                .or_insert_with(|| HourlyUsage {
+                .or_insert_with(|| HourlyBucket {
                     datetime: bucket,
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
-                    clients: BTreeSet::new(),
-                    models: BTreeMap::new(),
+                    clients: IdentitySet::default(),
+                    models: HashMap::new(),
                     message_count: 0,
                     turn_count: 0,
                 });
             add_unified_tokens(&mut hourly_entry.tokens, &msg.tokens);
             hourly_entry.cost += msg_cost;
-            hourly_entry.clients.insert(msg.client.to_string());
+            hourly_entry.clients.insert(Arc::clone(&msg.client));
             hourly_entry.message_count += msg.message_count.max(0) as u32;
             if msg.is_turn_start {
                 hourly_entry.turn_count += 1;
             }
-            let hkey = hourly_model_key(group_by, provider, &canonical_model_id);
+            let hkey = HourlyModelKey::from_message(group_by, msg);
             let hmodel = hourly_entry
                 .models
                 .entry(hkey)
-                .or_insert_with(|| HourlyModelInfo {
-                    provider: provider.to_string(),
-                    display_name: hourly_model_display_name(group_by, &canonical_model_id),
-                    color_key: model_color_key(group_by, provider, &canonical_model_id),
+                .or_insert_with(|| HourlyModelBucket {
+                    first_seen: sequence,
+                    provider: Arc::clone(&msg.provider_id),
+                    model: Arc::clone(&msg.model_id),
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                 });
@@ -668,52 +947,74 @@ impl TuiAcc {
 
     pub(super) fn finish(self) -> UsageData {
         let Self {
+            group_by,
             model_map,
-            mut agent_map,
-            agent_clients,
-            agent_instances,
+            agent_map,
             daily_map,
             hourly_map,
-            client_totals_by_model,
             ..
         } = self;
 
-        let mut models: Vec<UsageModelEntry> = model_map
-            .into_iter()
-            .map(|(key, mut model)| {
-                let provider = {
-                    let mut providers: Vec<&str> = model.provider.split(", ").collect();
-                    providers.sort_unstable();
-                    providers.dedup();
-                    providers.join(", ")
-                };
-                model.provider = provider;
-                if let Some(client_totals) = client_totals_by_model.get(&key) {
-                    model.client = ordered_clients_by_token_contribution(client_totals);
+        let mut keyed_models = Vec::with_capacity(model_map.len());
+        let mut risky_models = Vec::new();
+        for (key, bucket) in model_map {
+            if key.may_alias_legacy_key() {
+                risky_models.push((key, bucket));
+            } else {
+                keyed_models.push((key.public_key(), materialize_tui_model(bucket)));
+            }
+        }
+        if !risky_models.is_empty() {
+            risky_models.sort_by_key(|(_, bucket)| bucket.first_seen);
+            let mut public_models: HashMap<String, TuiModelBucket> = HashMap::new();
+            for (key, bucket) in risky_models {
+                match public_models.entry(key.public_key()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(bucket);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        merge_tui_model_bucket(
+                            entry.get_mut(),
+                            bucket,
+                            group_by != GroupBy::ClientProviderModel,
+                        );
+                    }
                 }
-                model.performance.finalize(model.tokens.total() as i64);
-                model
-            })
-            .collect();
-        models.sort_by(|a, b| {
+            }
+            keyed_models.extend(
+                public_models
+                    .into_iter()
+                    .map(|(key, bucket)| (key, materialize_tui_model(bucket))),
+            );
+        }
+        keyed_models.sort_by(|(a_key, a), (b_key, b)| {
             b.cost
                 .total_cmp(&a.cost)
                 .then_with(|| a.model.cmp(&b.model))
                 .then_with(|| a.provider.cmp(&b.provider))
+                .then_with(|| a.client.cmp(&b.client))
+                .then_with(|| a.workspace_label.cmp(&b.workspace_label))
+                .then_with(|| a.workspace_key.cmp(&b.workspace_key))
+                .then_with(|| a_key.cmp(b_key))
         });
+        let models: Vec<UsageModelEntry> =
+            keyed_models.into_iter().map(|(_, model)| model).collect();
 
-        for (agent, clients) in agent_clients {
-            if let Some(agent_entry) = agent_map.get_mut(&agent) {
-                agent_entry.clients = clients.into_iter().collect::<Vec<_>>().join(", ");
-            }
-        }
-        for (agent, instances) in agent_instances {
-            if let Some(agent_entry) = agent_map.get_mut(&agent) {
-                agent_entry.instance_count = instances.len() as u32;
-            }
-        }
-
-        let mut agents: Vec<AgentEntry> = agent_map.into_values().collect();
+        let mut agents: Vec<AgentEntry> = agent_map
+            .into_iter()
+            .map(|(agent_name, agent)| AgentEntry {
+                agent: agent_name,
+                clients: agent.clients.into_sorted_string(),
+                tokens: agent.tokens,
+                cost: agent.cost,
+                message_count: agent.message_count,
+                instance_count: agent
+                    .instances
+                    .len()
+                    .try_into()
+                    .expect("agent instance count exceeds u32::MAX"),
+            })
+            .collect();
         agents.sort_by(|a, b| {
             b.cost
                 .total_cmp(&a.cost)
@@ -721,10 +1022,16 @@ impl TuiAcc {
                 .then_with(|| a.agent.cmp(&b.agent))
         });
 
-        let mut daily: Vec<DailyUsage> = daily_map.into_values().collect();
+        let mut daily: Vec<DailyUsage> = daily_map
+            .into_values()
+            .map(|bucket| materialize_daily(bucket, &group_by))
+            .collect();
         daily.sort_by_key(|b| std::cmp::Reverse(b.date));
 
-        let mut hourly: Vec<HourlyUsage> = hourly_map.into_values().collect();
+        let mut hourly: Vec<HourlyUsage> = hourly_map
+            .into_values()
+            .map(|bucket| materialize_hourly(bucket, &group_by))
+            .collect();
         hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
         let total_tokens: u64 = models.iter().map(|m| m.tokens.total()).sum();
@@ -1689,6 +1996,184 @@ mod tests {
             .agents
             .iter()
             .any(|agent| agent.agent == "Sisyphus (Ultraworker)"));
+    }
+
+    fn collision_message(
+        client: &str,
+        provider: &str,
+        session: &str,
+        model: &str,
+        input: i64,
+        timestamp: i64,
+    ) -> UnifiedMessage {
+        UnifiedMessage::new(
+            client,
+            model,
+            provider,
+            session,
+            timestamp,
+            crate::TokenBreakdown {
+                input,
+                ..crate::TokenBreakdown::default()
+            },
+            input as f64,
+        )
+    }
+
+    #[test]
+    fn legacy_public_key_collisions_are_explicitly_coalesced_without_dropping_totals() {
+        let timestamp = 1_735_689_600_000;
+        let cases = [
+            (
+                GroupBy::ClientModel,
+                collision_message("a:b", "first", "same", "c", 10, timestamp),
+                collision_message("a", "second", "same", "b:c", 20, timestamp),
+                "a:b",
+                "c",
+                "first, second",
+                2,
+            ),
+            (
+                GroupBy::ClientProviderModel,
+                collision_message("a", "b:c", "same", "d", 10, timestamp),
+                collision_message("a", "b", "same", "c:d", 20, timestamp),
+                "a",
+                "d",
+                "b:c",
+                1,
+            ),
+            (
+                GroupBy::Session,
+                collision_message("a", "first", "b:c", "d", 10, timestamp),
+                collision_message("a", "second", "b", "c:d", 20, timestamp),
+                "a",
+                "d",
+                "first, second",
+                2,
+            ),
+            (
+                GroupBy::ClientSession,
+                collision_message("a", "first", "b:c", "d", 10, timestamp),
+                collision_message("a", "second", "b", "c:d", 20, timestamp),
+                "a",
+                "d",
+                "first, second",
+                2,
+            ),
+        ];
+
+        for (group_by, first, second, client, model, provider, sessions) in cases {
+            let mut acc = TuiAcc::new(group_by);
+            acc.push(&first);
+            acc.push(&second);
+            let usage = acc.finish();
+            assert_eq!(usage.models.len(), 1);
+            assert_eq!(usage.models[0].client, client);
+            assert_eq!(usage.models[0].model, model);
+            assert_eq!(usage.models[0].provider, provider);
+            assert_eq!(usage.models[0].tokens.total(), 30);
+            assert_eq!(usage.models[0].cost, 30.0);
+            assert_eq!(usage.models[0].session_count, sessions);
+        }
+    }
+
+    #[test]
+    fn daily_and_hourly_collision_materialization_preserves_first_fields_and_all_totals() {
+        let timestamp = 1_735_689_600_000;
+        let first = collision_message("a", "b:c", "same", "d", 10, timestamp);
+        let second = collision_message("a", "b", "same", "c:d", 20, timestamp);
+        let mut acc = TuiAcc::new(GroupBy::ClientProviderModel);
+        acc.push(&first);
+        acc.push(&second);
+        let usage = acc.finish();
+
+        let daily = &usage.daily[0].source_breakdown["a"].models;
+        assert_eq!(daily.len(), 1);
+        let daily_model = &daily["a:b:c:d"];
+        assert_eq!(daily_model.provider, "b:c");
+        assert_eq!(daily_model.display_name, "d");
+        assert_eq!(daily_model.tokens.total(), 30);
+        assert_eq!(daily_model.cost, 30.0);
+        assert_eq!(daily_model.messages, 2);
+
+        let hourly = &usage.hourly[0].models;
+        assert_eq!(hourly.len(), 1);
+        let hourly_model = &hourly["b:c:d"];
+        assert_eq!(hourly_model.provider, "b:c");
+        assert_eq!(hourly_model.display_name, "d");
+        assert_eq!(hourly_model.tokens.total(), 30);
+        assert_eq!(hourly_model.cost, 30.0);
+    }
+
+    #[test]
+    fn structured_session_and_agent_instance_identities_do_not_alias_delimiters() {
+        let timestamp = 1_735_689_600_000;
+        let model_messages = [
+            collision_message("a:b", "provider", "c", "model", 10, timestamp),
+            collision_message("a", "provider", "b:c", "model", 20, timestamp),
+        ];
+        let mut model_acc = TuiAcc::new(GroupBy::Model);
+        for message in &model_messages {
+            model_acc.push(message);
+        }
+        assert_eq!(model_acc.finish().models[0].session_count, 2);
+
+        let mut explicit = UnifiedMessage::new_with_agent(
+            "a",
+            "model",
+            "provider",
+            "session",
+            timestamp,
+            crate::TokenBreakdown::default(),
+            0.0,
+            Some("builder".to_string()),
+        );
+        explicit.set_agent_instance(Some("a:b:c".to_string()));
+        let derived_left = UnifiedMessage::new_with_agent(
+            "a:b",
+            "model",
+            "provider",
+            "c",
+            timestamp,
+            crate::TokenBreakdown::default(),
+            0.0,
+            Some("builder".to_string()),
+        );
+        let derived_right = UnifiedMessage::new_with_agent(
+            "a",
+            "model",
+            "provider",
+            "b:c",
+            timestamp,
+            crate::TokenBreakdown::default(),
+            0.0,
+            Some("builder".to_string()),
+        );
+        let mut agent_acc = TuiAcc::new(GroupBy::Model);
+        for message in [&explicit, &derived_left, &derived_right] {
+            agent_acc.push(message);
+        }
+        assert_eq!(agent_acc.finish().agents[0].instance_count, 3);
+    }
+
+    #[test]
+    fn session_grouping_uses_public_identity_as_the_final_sort_tie_break() {
+        let timestamp = 1_735_689_600_000;
+        let mut session_b =
+            collision_message("client", "provider", "session-b", "model", 20, timestamp);
+        session_b.cost = 1.0;
+        let mut session_a =
+            collision_message("client", "provider", "session-a", "model", 10, timestamp);
+        session_a.cost = 1.0;
+
+        let mut acc = TuiAcc::new(GroupBy::Session);
+        acc.push(&session_b);
+        acc.push(&session_a);
+        let usage = acc.finish();
+
+        assert_eq!(usage.models.len(), 2);
+        assert_eq!(usage.models[0].tokens.total(), 10);
+        assert_eq!(usage.models[1].tokens.total(), 20);
     }
 
     fn hourly(hour: u32, input_tokens: u64, cost: f64) -> HourlyUsage {

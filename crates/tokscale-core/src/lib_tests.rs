@@ -2362,6 +2362,52 @@ fn ordinary_and_explicit_prepare_usage_loads_match() {
 
 #[test]
 #[serial_test::serial]
+fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let model = "c5-production-lifecycle-dead-model";
+    std::fs::write(
+        amp_dir.join("T-c5-lifecycle.json"),
+        format!(
+            r#"{{
+                "id": "c5-lifecycle-session",
+                "messages": [{{
+                    "role": "assistant",
+                    "messageId": 1,
+                    "usage": {{
+                        "timestamp": "2026-05-21T04:00:00Z",
+                        "model": "{model}",
+                        "inputTokens": 10,
+                        "outputTokens": 2
+                    }}
+                }}]
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let externally_live = crate::sessions::intern::intern("c5-production-lifecycle-live");
+    let prune_before = crate::sessions::intern::prune_count();
+    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let usage =
+        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
+
+    assert_eq!(usage.models[0].model, model);
+    assert_eq!(crate::sessions::intern::prune_count(), prune_before + 1);
+    assert_eq!(crate::sessions::intern::indexed_live_count(model), 0);
+    assert_eq!(
+        crate::sessions::intern::indexed_live_count(&externally_live),
+        1
+    );
+    assert!(Arc::ptr_eq(
+        &externally_live,
+        &crate::sessions::intern::intern(&externally_live)
+    ));
+}
+
+#[test]
+#[serial_test::serial]
 fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();

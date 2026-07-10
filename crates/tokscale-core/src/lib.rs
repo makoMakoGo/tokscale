@@ -906,8 +906,18 @@ fn load_prepared_aggregated_views(
         date_range,
         views,
     });
-    stream_local_sources_into_engine(prepared, pricing, &mut engine)?;
-    Ok(engine.finish())
+    if let Err(error) = stream_local_sources_into_engine(prepared, pricing, &mut engine) {
+        drop(engine);
+        sessions::intern::prune_dead();
+        return Err(error);
+    }
+    let views = engine.finish();
+    // The streaming sink has dropped every source message and `finish` has
+    // consumed all Arc-backed accumulators. Public views own Strings, so this
+    // is the narrow lifecycle seam where dead weak identity indices can be
+    // reclaimed without sweeping caller-owned generic message slices.
+    sessions::intern::prune_dead();
+    Ok(views)
 }
 
 fn load_aggregated_views_for_resolved_report(
