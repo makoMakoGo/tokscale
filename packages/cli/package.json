@@ -1,6 +1,6 @@
 {
   "name": "@juya-ai/tokscale-cli",
-  "version": "4.0.10",
+  "version": "4.3.0",
   "description": "A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
   "license": "MIT",
   "type": "module",
@@ -29,9 +29,9 @@
   },
   "dependencies": {},
   "optionalDependencies": {
-    "@juya-ai/tokscale-cli-darwin-arm64": "4.0.10",
-    "@juya-ai/tokscale-cli-linux-x64-gnu": "4.0.10",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "4.0.10"
+    "@juya-ai/tokscale-cli-darwin-arm64": "4.3.0",
+    "@juya-ai/tokscale-cli-linux-x64-gnu": "4.3.0",
+    "@juya-ai/tokscale-cli-win32-x64-msvc": "4.3.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
