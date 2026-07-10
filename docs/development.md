@@ -16,6 +16,7 @@ packages/
 
 docs/
   adr/                  architecture decisions
+  releases.md           fork release and recovery procedure
   upstream/             upstream port logs
 ```
 
@@ -79,6 +80,14 @@ When porting an upstream fix:
 4. Record notable upstream port batches under `docs/upstream/yyyy-mm-dd.md`.
 
 See [ADR 0009](adr/0009-ahead-only-upstream-policy.md).
+
+## Releases
+
+Use `bun run release:bump -- <major|minor|patch|version>` to update every Rust
+and npm release manifest together. The standard path is a version-only pull
+request; merging it to `personal/local-clients` triggers npm publication, the
+version tag, and the GitHub Release. See [the release process](releases.md) for
+the direct maintainer path and exact-commit recovery procedure.
 
 ## Documentation changes
 

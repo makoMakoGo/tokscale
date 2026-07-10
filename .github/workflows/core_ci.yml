@@ -21,6 +21,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
+          fetch-depth: 2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -39,6 +40,23 @@ jobs:
           key: core-ci-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             core-ci-${{ runner.os }}-cargo-
+
+      - name: Validate release tooling
+        run: |
+          bash scripts/check-version-coherence.sh
+          bash scripts/test-check-version-coherence.sh
+          bash scripts/test-bump-release-version.sh
+          bash scripts/test-check-release-commit.sh
+          bash scripts/test-npm-release-state.sh
+          bash scripts/test-release-workflow-safety.sh
+
+      - name: Validate release pull request
+        if: github.event_name == 'pull_request'
+        env:
+          RELEASE_EVENT_NAME: pull_request
+          RELEASE_BEFORE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_RELEASE_SHA: ${{ github.sha }}
+        run: bash scripts/check-release-commit.sh
 
       - name: Check formatting
         run: cargo fmt --all -- --check

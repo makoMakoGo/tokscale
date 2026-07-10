@@ -13,6 +13,7 @@
     "build:core": "cargo build --release -p tokscale-cli",
     "cli": "./scripts/cli.sh",
     "dev:benchmarks": "bun run --cwd packages/benchmarks run",
+    "release:bump": "bash scripts/bump-release-version.sh",
     "test:launchers": "bash scripts/test-package-launchers.sh"
   },
   "devDependencies": {

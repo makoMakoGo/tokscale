@@ -83,7 +83,10 @@ function getCommitsBetween(fromTag: string, toRef: string): Commit[] {
       const [hash = "", message = "", authorName = "", authorEmail = ""] = line.split("\x1f");
       return { hash, message, authorName, authorEmail };
     })
-    .filter((entry) => entry.hash && !entry.message.startsWith("chore: bump version"));
+    .filter(
+      (entry) =>
+        entry.hash && !/^chore(?:\(release\))?: bump version\b/.test(entry.message)
+    );
 }
 
 function resolveGitHubUsername(email: string, fallbackName: string): string {
