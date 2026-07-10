@@ -75,8 +75,7 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
 
     by_model
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, (model_key, model_usage))| {
+        .filter_map(|(model_key, model_usage)| {
             let tokens =
                 |b: &Option<MuxTokenBucket>| b.as_ref().and_then(|b| b.tokens).unwrap_or(0).max(0);
             let input = tokens(&model_usage.input);
@@ -88,6 +87,9 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
             if input == 0 && cached == 0 && cache_create == 0 && output == 0 && reasoning == 0 {
                 return None;
             }
+
+            let dedup_key =
+                crate::sessions::dedup_hash_str(&format!("mux:{session_id}:{model_key}"));
 
             // Strip "provider:" prefix for model ID.
             let (provider, model_id) = if model_key.contains(':') {
@@ -101,8 +103,6 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
             let model_id = model_aliases::canonicalize_source_model_id(&model_id)
                 .unwrap_or_else(|| model_id.trim().to_string());
             let provider = provider_identity::canonical_provider(&provider).unwrap_or(provider);
-            let dedup_key =
-                crate::sessions::dedup_hash_str(&format!("mux:{session_id}:{model_id}:{index}"));
 
             Some(UnifiedMessage::new_with_dedup(
                 "mux",
@@ -314,5 +314,52 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].provider_id.as_ref(), "provider");
         assert_eq!(msgs[0].model_id.as_ref(), "sub:model-name");
+    }
+
+    #[test]
+    fn dedup_key_is_workspace_scoped_and_stable_when_models_are_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let write_workspace = |workspace: &str, json: &str| {
+            let workspace_dir = dir.path().join(workspace);
+            std::fs::create_dir_all(&workspace_dir).unwrap();
+            let path = workspace_dir.join("session-usage.json");
+            std::fs::write(&path, json).unwrap();
+            path
+        };
+        let one_model = r#"{
+            "byModel": {
+                "anthropic:claude-opus-4-6": {
+                    "input": { "tokens": 100 },
+                    "output": { "tokens": 20 }
+                }
+            }
+        }"#;
+
+        let alpha = write_workspace("alpha", one_model);
+        let beta = write_workspace("beta", one_model);
+        let alpha_key = parse_mux_file(&alpha)[0].dedup_key;
+        let beta_key = parse_mux_file(&beta)[0].dedup_key;
+
+        assert_ne!(alpha_key, beta_key);
+
+        let with_earlier_model = r#"{
+            "byModel": {
+                "anthropic:aaa": {
+                    "input": { "tokens": 1 }
+                },
+                "anthropic:claude-opus-4-6": {
+                    "input": { "tokens": 100 },
+                    "output": { "tokens": 20 }
+                }
+            }
+        }"#;
+        std::fs::write(&alpha, with_earlier_model).unwrap();
+        let reparsed_key = parse_mux_file(&alpha)
+            .into_iter()
+            .find(|message| message.tokens.input == 100)
+            .unwrap()
+            .dedup_key;
+
+        assert_eq!(alpha_key, reparsed_key);
     }
 }
