@@ -6,22 +6,72 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Write};
+#[cfg(test)]
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 // Source-message cache shards split serialization layout from parser/source
 // semantics. Bump this only when the shard bincode layout changes; parser-only
 // fixes should bump the relevant SourceUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 1;
+const CACHE_FORMAT_VERSION: u32 = 2;
+const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const SHARDS_DIRNAME: &str = "shards";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SHARD_HEADER_BYTES: u64 = 16 * 1024 * 1024;
-const FINGERPRINT_SAMPLE_BYTES: usize = 4096;
-const FINGERPRINT_SAMPLE_POINTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SourceReadStats {
+    pub bytes: u64,
+    pub hash_passes: u64,
+}
+
+#[cfg(test)]
+fn source_read_stats() -> &'static std::sync::Mutex<HashMap<PathBuf, SourceReadStats>> {
+    static STATS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, SourceReadStats>>> =
+        std::sync::OnceLock::new();
+    STATS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn reset_source_read_stats(path: &Path) {
+    source_read_stats().lock().unwrap().remove(path);
+}
+
+#[cfg(test)]
+pub(crate) fn get_source_read_stats(path: &Path) -> SourceReadStats {
+    source_read_stats()
+        .lock()
+        .unwrap()
+        .get(path)
+        .copied()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn record_source_hash_start(path: &Path) {
+    source_read_stats()
+        .lock()
+        .unwrap()
+        .entry(path.to_path_buf())
+        .or_default()
+        .hash_passes += 1;
+}
+
+#[cfg(test)]
+pub(crate) fn record_source_bytes(path: &Path, bytes: usize) {
+    source_read_stats()
+        .lock()
+        .unwrap()
+        .entry(path.to_path_buf())
+        .or_default()
+        .bytes += bytes as u64;
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SourceCachePruneStats {
@@ -199,120 +249,6 @@ fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct FileSampleHash {
-    pub offset: u64,
-    pub len: u64,
-    pub hash: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SourceFingerprint {
-    pub size: u64,
-    pub modified_ns: u64,
-    pub sample_hashes: Vec<FileSampleHash>,
-    pub content_hash: [u8; 32],
-    pub related_files: Vec<RelatedFileFingerprint>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RelatedFileFingerprint {
-    pub suffix: String,
-    pub size: u64,
-    pub modified_ns: u64,
-    pub sample_hashes: Vec<FileSampleHash>,
-    pub content_hash: [u8; 32],
-}
-
-impl SourceFingerprint {
-    pub(crate) fn from_path(path: &Path) -> Option<Self> {
-        Self::from_path_with_related(path, std::iter::empty())
-    }
-
-    pub(crate) fn from_sqlite_path(path: &Path) -> Option<Self> {
-        let related_paths = ["-wal"]
-            .into_iter()
-            .map(|suffix| (suffix.to_string(), append_path_suffix(path, suffix)));
-        Self::from_path_with_related(path, related_paths)
-    }
-
-    pub(crate) fn from_path_with_siblings<'a, I>(path: &Path, sibling_names: I) -> Option<Self>
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        let related_paths = sibling_names.into_iter().map(|name| {
-            let sibling = path.parent().unwrap_or_else(|| Path::new(".")).join(name);
-            (name.to_string(), sibling)
-        });
-        Self::from_path_with_related(path, related_paths)
-    }
-
-    /// Fingerprint for a Claude Code JSONL file that may have a sibling `.meta.json`
-    /// sidecar. When the sidecar appears or changes (e.g. after a Claude Code upgrade),
-    /// the fingerprint changes and the cache invalidates.
-    pub(crate) fn from_claude_code_path_with_home(
-        path: &Path,
-        home_dir: Option<&Path>,
-    ) -> Option<Self> {
-        let mut related = Vec::new();
-
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            let meta_filename = format!("{}.meta.json", stem);
-            related.push((".meta.json".to_string(), path.with_file_name(meta_filename)));
-        }
-
-        if let Some(variant_path) = crate::cc_mirror::variant_file_for_session_path(path, home_dir)
-        {
-            related.push(("cc-mirror/variant.json".to_string(), variant_path));
-        }
-
-        Self::from_path_with_related(path, related)
-    }
-
-    fn from_path_with_related<I>(path: &Path, related_paths: I) -> Option<Self>
-    where
-        I: IntoIterator<Item = (String, PathBuf)>,
-    {
-        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path)?;
-        let mut related_files: Vec<RelatedFileFingerprint> = related_paths
-            .into_iter()
-            .filter_map(|(suffix, related_path)| {
-                RelatedFileFingerprint::from_path(suffix, &related_path)
-            })
-            .collect();
-        related_files.sort_by(|left, right| left.suffix.cmp(&right.suffix));
-
-        Some(Self {
-            size,
-            modified_ns,
-            sample_hashes,
-            content_hash,
-            related_files,
-        })
-    }
-}
-
-impl RelatedFileFingerprint {
-    fn from_path(suffix: String, path: &Path) -> Option<Self> {
-        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path)?;
-        Some(Self {
-            suffix,
-            size,
-            modified_ns,
-            sample_hashes,
-            content_hash,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CodexIncrementalCache {
-    pub state: CodexParseState,
-    pub consumed_offset: u64,
-    pub ends_with_newline: bool,
-    pub prefix_hash: [u8; 32],
-}
-
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct CachedPath(Vec<u8>);
@@ -366,6 +302,297 @@ impl CachedPath {
     pub(crate) fn to_path_buf(&self) -> PathBuf {
         PathBuf::from(&self.0)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SourceFileStamp {
+    label: String,
+    path: CachedPath,
+    present: bool,
+    size: u64,
+    modified_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SourceStamp {
+    files: Vec<SourceFileStamp>,
+}
+
+impl SourceStamp {
+    pub(crate) fn primary_size(&self) -> Option<u64> {
+        self.files
+            .first()
+            .filter(|file| file.present)
+            .map(|file| file.size)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+pub(crate) fn source_file_identity(metadata: &fs::Metadata) -> SourceFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    SourceFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceFileIdentity {
+    volume_serial_number: Option<u32>,
+    file_index: Option<u64>,
+}
+
+#[cfg(windows)]
+pub(crate) fn source_file_identity(metadata: &fs::Metadata) -> SourceFileIdentity {
+    use std::os::windows::fs::MetadataExt;
+
+    SourceFileIdentity {
+        volume_serial_number: metadata.volume_serial_number(),
+        file_index: metadata.file_index(),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceFileIdentity {
+    size: u64,
+    modified_ns: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn source_file_identity(metadata: &fs::Metadata) -> SourceFileIdentity {
+    SourceFileIdentity {
+        size: metadata.len(),
+        modified_ns: modified_ns(metadata).unwrap_or(0),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceInputSnapshot {
+    stamp: SourceStamp,
+    identities: Vec<Option<SourceFileIdentity>>,
+}
+
+impl SourceInputSnapshot {
+    pub(crate) fn stamp(&self) -> &SourceStamp {
+        &self.stamp
+    }
+
+    pub(crate) fn primary_identity(&self) -> Option<SourceFileIdentity> {
+        self.identities.first().copied().flatten()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SourceInputPolicy {
+    inputs: Vec<(String, PathBuf)>,
+}
+
+impl SourceInputPolicy {
+    pub(crate) fn plain(path: &Path) -> Self {
+        Self::with_related(path, std::iter::empty())
+    }
+
+    pub(crate) fn sqlite_with_wal(path: &Path) -> Self {
+        Self::with_related(
+            path,
+            [("-wal".to_string(), append_path_suffix(path, "-wal"))],
+        )
+    }
+
+    pub(crate) fn with_siblings<'a, I>(path: &Path, sibling_names: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::with_related(
+            path,
+            sibling_names
+                .into_iter()
+                .map(|name| (name.to_string(), parent.join(name))),
+        )
+    }
+
+    pub(crate) fn claude_code(path: &Path, variant_path: Option<PathBuf>) -> Self {
+        let mut related = Vec::new();
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            related.push((
+                ".meta.json".to_string(),
+                path.with_file_name(format!("{stem}.meta.json")),
+            ));
+        }
+        if let Some(variant_path) = variant_path {
+            related.push(("cc-mirror/variant.json".to_string(), variant_path));
+        }
+        Self::with_related(path, related)
+    }
+
+    fn with_related<I>(path: &Path, related: I) -> Self
+    where
+        I: IntoIterator<Item = (String, PathBuf)>,
+    {
+        let mut inputs = vec![("source".to_string(), path.to_path_buf())];
+        let mut related: Vec<_> = related.into_iter().collect();
+        related.sort_by(|left, right| left.0.cmp(&right.0));
+        inputs.extend(related);
+        Self { inputs }
+    }
+
+    pub(crate) fn paths(&self) -> Vec<PathBuf> {
+        self.inputs.iter().map(|(_, path)| path.clone()).collect()
+    }
+
+    pub(crate) fn stamp(&self) -> Option<SourceStamp> {
+        Some(self.snapshot()?.stamp)
+    }
+
+    pub(crate) fn snapshot(&self) -> Option<SourceInputSnapshot> {
+        let mut files = Vec::with_capacity(self.inputs.len());
+        let mut identities = Vec::with_capacity(self.inputs.len());
+        for (index, (label, path)) in self.inputs.iter().enumerate() {
+            let (stamp, identity) = match fs::metadata(path) {
+                Ok(metadata) => (
+                    SourceFileStamp {
+                        label: label.clone(),
+                        path: CachedPath::from_path(path),
+                        present: true,
+                        size: metadata.len(),
+                        modified_ns: modified_ns(&metadata)?,
+                    },
+                    Some(source_file_identity(&metadata)),
+                ),
+                Err(error) if index > 0 && error.kind() == std::io::ErrorKind::NotFound => (
+                    SourceFileStamp {
+                        label: label.clone(),
+                        path: CachedPath::from_path(path),
+                        present: false,
+                        size: 0,
+                        modified_ns: 0,
+                    },
+                    None,
+                ),
+                Err(_) => return None,
+            };
+            files.push(stamp);
+            identities.push(identity);
+        }
+        Some(SourceInputSnapshot {
+            stamp: SourceStamp { files },
+            identities,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fingerprint(&self) -> Option<SourceFingerprint> {
+        let stamp = self.stamp()?;
+        self.fingerprint_from_stamp(stamp)
+    }
+
+    pub(crate) fn fingerprint_from_stamp(&self, stamp: SourceStamp) -> Option<SourceFingerprint> {
+        if stamp.files.len() != self.inputs.len()
+            || self
+                .inputs
+                .iter()
+                .zip(&stamp.files)
+                .any(|((label, path), file)| {
+                    file.label != *label || file.path != CachedPath::from_path(path)
+                })
+        {
+            return None;
+        }
+        let size = stamp.primary_size()?;
+        let content_hash = hash_prefix(&self.inputs[0].1, size)?;
+        let mut related_files = Vec::with_capacity(self.inputs.len().saturating_sub(1));
+        for ((label, path), file_stamp) in
+            self.inputs.iter().skip(1).zip(stamp.files.iter().skip(1))
+        {
+            let content_hash = if file_stamp.present {
+                Some(hash_prefix(path, file_stamp.size)?)
+            } else {
+                None
+            };
+            related_files.push(RelatedFileFingerprint {
+                label: label.clone(),
+                content_hash,
+            });
+        }
+        Some(SourceFingerprint {
+            stamp,
+            size,
+            content_hash,
+            related_files,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SourceFingerprint {
+    pub stamp: SourceStamp,
+    pub size: u64,
+    pub content_hash: [u8; 32],
+    pub related_files: Vec<RelatedFileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RelatedFileFingerprint {
+    label: String,
+    content_hash: Option<[u8; 32]>,
+}
+
+impl SourceFingerprint {
+    #[cfg(test)]
+    pub(crate) fn from_path(path: &Path) -> Option<Self> {
+        SourceInputPolicy::plain(path).fingerprint()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_sqlite_path(path: &Path) -> Option<Self> {
+        SourceInputPolicy::sqlite_with_wal(path).fingerprint()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_path_with_siblings<'a, I>(path: &Path, sibling_names: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        SourceInputPolicy::with_siblings(path, sibling_names).fingerprint()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_claude_code_path_with_home(
+        path: &Path,
+        home_dir: Option<&Path>,
+    ) -> Option<Self> {
+        let variant_path = crate::cc_mirror::variant_file_for_session_path(path, home_dir);
+        SourceInputPolicy::claude_code(path, variant_path).fingerprint()
+    }
+
+    pub(crate) fn from_main_digest(stamp: SourceStamp, content_hash: [u8; 32]) -> Option<Self> {
+        let size = stamp.primary_size()?;
+        (stamp.files.len() == 1).then_some(Self {
+            stamp,
+            size,
+            content_hash,
+            related_files: Vec::new(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CodexIncrementalCache {
+    pub state: CodexParseState,
+    pub consumed_offset: u64,
+    pub ends_with_newline: bool,
+    pub prefix_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -540,7 +767,6 @@ pub(crate) enum CacheWrite {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedShardHeader {
-    format_version: u32,
     parser_version: ParserVersion,
     path: CachedPath,
     fingerprint: SourceFingerprint,
@@ -586,6 +812,20 @@ impl SourceMessageCache {
             Some(dir)
         });
 
+        Self {
+            cache_dir,
+            dirty_entries: HashMap::new(),
+            deleted_paths: HashSet::new(),
+            taken_paths: HashSet::new(),
+            dirty: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_cache_dir(cache_dir: &Path) -> Self {
+        let cache_dir = ensure_cache_dir(cache_dir)
+            .is_ok()
+            .then(|| cache_dir.to_path_buf());
         Self {
             cache_dir,
             dirty_entries: HashMap::new(),
@@ -747,7 +987,7 @@ impl SourceMessageCache {
 
 struct PrunableShard {
     path: PathBuf,
-    header: CachedShardHeader,
+    header: Option<CachedShardHeader>,
     source_exists: bool,
     canonical_path: bool,
 }
@@ -766,30 +1006,34 @@ pub fn prune_source_message_cache() -> Result<SourceCachePruneStats, SourceCache
     let mut source_existence: HashMap<CachedPath, bool> = HashMap::new();
 
     for shard_path in shard_paths {
-        let header = read_shard_header_for_prune(&shard_path)?;
+        let Some(header) = read_shard_header_for_prune(&shard_path)? else {
+            shards.push(PrunableShard {
+                path: shard_path,
+                header: None,
+                source_exists: false,
+                canonical_path: false,
+            });
+            continue;
+        };
         let key = CachedSourceKey {
             path: header.path.clone(),
             parser_version: header.parser_version,
         };
         let canonical_path = shard_path_for_source_key(&cache_dir, &key)
             .is_some_and(|expected| expected == shard_path);
-        let source_exists = if header.format_version == CACHE_FORMAT_VERSION {
-            match source_existence.get(&header.path) {
-                Some(exists) => *exists,
-                None => {
-                    let source_path = header.path.to_path_buf();
-                    let exists = source_path.try_exists().map_err(|source| {
-                        SourceCachePruneError::io("inspect source path", &source_path, source)
-                    })?;
-                    source_existence.insert(header.path.clone(), exists);
-                    exists
-                }
+        let source_exists = match source_existence.get(&header.path) {
+            Some(exists) => *exists,
+            None => {
+                let source_path = header.path.to_path_buf();
+                let exists = source_path.try_exists().map_err(|source| {
+                    SourceCachePruneError::io("inspect source path", &source_path, source)
+                })?;
+                source_existence.insert(header.path.clone(), exists);
+                exists
             }
-        } else {
-            false
         };
 
-        if header.format_version == CACHE_FORMAT_VERSION && source_exists && canonical_path {
+        if source_exists && canonical_path {
             latest_revisions
                 .entry((header.path.clone(), header.parser_version.parser_id))
                 .and_modify(|revision| *revision = (*revision).max(header.parser_version.revision))
@@ -798,7 +1042,7 @@ pub fn prune_source_message_cache() -> Result<SourceCachePruneStats, SourceCache
 
         shards.push(PrunableShard {
             path: shard_path,
-            header,
+            header: Some(header),
             source_exists,
             canonical_path,
         });
@@ -807,13 +1051,12 @@ pub fn prune_source_message_cache() -> Result<SourceCachePruneStats, SourceCache
     let scanned = shards.len();
     let mut removed = 0;
     for shard in shards {
-        let latest_revision = latest_revisions.get(&(
-            shard.header.path.clone(),
-            shard.header.parser_version.parser_id,
-        ));
-        let stale_revision =
-            latest_revision.is_some_and(|latest| shard.header.parser_version.revision < *latest);
-        let should_remove = shard.header.format_version != CACHE_FORMAT_VERSION
+        let stale_revision = shard.header.as_ref().is_some_and(|header| {
+            latest_revisions
+                .get(&(header.path.clone(), header.parser_version.parser_id))
+                .is_some_and(|latest| header.parser_version.revision < *latest)
+        });
+        let should_remove = shard.header.is_none()
             || !shard.source_exists
             || !shard.canonical_path
             || stale_revision;
@@ -894,7 +1137,6 @@ fn hex_sha256(bytes: &[u8; 32]) -> String {
 
 fn header_from_plan(plan: &CacheWritePlan, message_count: usize) -> CachedShardHeader {
     CachedShardHeader {
-        format_version: CACHE_FORMAT_VERSION,
         parser_version: plan.parser_version,
         path: plan.path.clone(),
         fingerprint: plan.fingerprint.clone(),
@@ -947,6 +1189,16 @@ fn read_shard_entry_with_plan(path: &Path, plan: &CacheReadPlan) -> Option<Cache
 }
 
 fn read_shard_header_from_file(file: &mut File) -> Option<CachedShardHeader> {
+    let mut magic = [0_u8; 8];
+    file.read_exact(&mut magic).ok()?;
+    if magic != SHARD_MAGIC {
+        return None;
+    }
+    let mut version_bytes = [0_u8; 4];
+    file.read_exact(&mut version_bytes).ok()?;
+    if u32::from_le_bytes(version_bytes) != CACHE_FORMAT_VERSION {
+        return None;
+    }
     let mut len_bytes = [0_u8; 8];
     file.read_exact(&mut len_bytes).ok()?;
     let header_len = u64::from_le_bytes(len_bytes);
@@ -956,14 +1208,10 @@ fn read_shard_header_from_file(file: &mut File) -> Option<CachedShardHeader> {
 
     let mut header_bytes = vec![0_u8; header_len as usize];
     file.read_exact(&mut header_bytes).ok()?;
-    let header: CachedShardHeader = bincode::options()
+    bincode::options()
         .with_limit(MAX_SHARD_HEADER_BYTES)
         .deserialize(&header_bytes)
-        .ok()?;
-    if header.format_version != CACHE_FORMAT_VERSION {
-        return None;
-    }
-    Some(header)
+        .ok()
 }
 
 fn write_shard_entry(cache_dir: &Path, entry: &CachedSourceEntry) -> std::io::Result<()> {
@@ -990,6 +1238,8 @@ fn write_shard_borrowed(
 
     crate::fs_atomic::write_atomic_with(&final_path, |file| {
         let mut writer = BufWriter::new(file);
+        writer.write_all(&SHARD_MAGIC)?;
+        writer.write_all(&CACHE_FORMAT_VERSION.to_le_bytes())?;
         writer.write_all(&(header_bytes.len() as u64).to_le_bytes())?;
         writer.write_all(&header_bytes)?;
         bincode::options()
@@ -1052,7 +1302,9 @@ fn shard_paths_for_prune(shards_dir: &Path) -> Result<Vec<PathBuf>, SourceCacheP
     Ok(paths)
 }
 
-fn read_shard_header_for_prune(path: &Path) -> Result<CachedShardHeader, SourceCachePruneError> {
+fn read_shard_header_for_prune(
+    path: &Path,
+) -> Result<Option<CachedShardHeader>, SourceCachePruneError> {
     let mut file = File::open(path)
         .map_err(|source| SourceCachePruneError::io("open source cache shard", path, source))?;
     let file_len = file
@@ -1066,9 +1318,45 @@ fn read_shard_header_for_prune(path: &Path) -> Result<CachedShardHeader, SourceC
         ));
     }
 
+    let mut prefix = [0_u8; 8];
+    file.read_exact(&mut prefix).map_err(|source| {
+        SourceCachePruneError::io("read source cache shard header", path, source)
+    })?;
+    if prefix != SHARD_MAGIC {
+        let header_len = u64::from_le_bytes(prefix);
+        if header_len == 0 || header_len > MAX_SHARD_HEADER_BYTES {
+            return Err(SourceCachePruneError::decode(
+                path,
+                format!(
+                    "unrecognized shard envelope and invalid legacy header length {header_len}"
+                ),
+            ));
+        }
+        let mut legacy_header = vec![0_u8; header_len as usize];
+        file.read_exact(&mut legacy_header).map_err(|source| {
+            SourceCachePruneError::io("read legacy source cache shard header", path, source)
+        })?;
+        if legacy_header.first().copied() == Some(1) {
+            return Ok(None);
+        }
+        return Err(SourceCachePruneError::decode(
+            path,
+            "unrecognized source cache shard envelope",
+        ));
+    }
+
+    let mut version_bytes = [0_u8; 4];
+    file.read_exact(&mut version_bytes).map_err(|source| {
+        SourceCachePruneError::io("read source cache shard format version", path, source)
+    })?;
+    let format_version = u32::from_le_bytes(version_bytes);
+    if format_version != CACHE_FORMAT_VERSION {
+        return Ok(None);
+    }
+
     let mut len_bytes = [0_u8; 8];
     file.read_exact(&mut len_bytes).map_err(|source| {
-        SourceCachePruneError::io("read source cache shard header", path, source)
+        SourceCachePruneError::io("read source cache shard header length", path, source)
     })?;
     let header_len = u64::from_le_bytes(len_bytes);
     if header_len == 0 || header_len > MAX_SHARD_HEADER_BYTES {
@@ -1085,90 +1373,19 @@ fn read_shard_header_for_prune(path: &Path) -> Result<CachedShardHeader, SourceC
     bincode::options()
         .with_limit(MAX_SHARD_HEADER_BYTES)
         .deserialize(&header_bytes)
+        .map(Some)
         .map_err(|source| SourceCachePruneError::decode(path, source.to_string()))
 }
 
-fn read_sample_hash(file: &mut File, offset: u64, len: usize) -> Option<FileSampleHash> {
-    if len == 0 {
-        return Some(FileSampleHash {
-            offset,
-            len: 0,
-            hash: 0,
-        });
-    }
-
-    file.seek(SeekFrom::Start(offset)).ok()?;
-    let mut buffer = vec![0_u8; len];
-    file.read_exact(&mut buffer).ok()?;
-
-    Some(FileSampleHash {
-        offset,
-        len: len as u64,
-        hash: hash_bytes(&buffer),
-    })
-}
-
-fn compute_sample_hashes(path: &Path, size: u64) -> Option<Vec<FileSampleHash>> {
-    if size == 0 {
-        return Some(Vec::new());
-    }
-
-    let mut file = File::open(path).ok()?;
-    let offsets = sample_offsets(size);
-    offsets
-        .into_iter()
-        .map(|(offset, len)| read_sample_hash(&mut file, offset, len))
-        .collect()
-}
-
-fn sample_offsets(size: u64) -> Vec<(u64, usize)> {
-    let sample_len = size.min(FINGERPRINT_SAMPLE_BYTES as u64) as usize;
-    if sample_len == 0 {
-        return Vec::new();
-    }
-
-    let max_offset = size.saturating_sub(sample_len as u64);
-    let mut offsets = if max_offset == 0 {
-        vec![0]
-    } else {
-        vec![
-            0,
-            max_offset / 4,
-            max_offset / 2,
-            max_offset.saturating_mul(3) / 4,
-            max_offset,
-        ]
-    };
-    offsets.sort_unstable();
-    offsets.dedup();
-    offsets.truncate(FINGERPRINT_SAMPLE_POINTS);
-    offsets
-        .into_iter()
-        .map(|offset| (offset, sample_len))
-        .collect()
-}
-
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-fn file_fingerprint_parts(path: &Path) -> Option<(u64, u64, Vec<FileSampleHash>, [u8; 32])> {
-    let metadata = path.metadata().ok()?;
-    let size = metadata.len();
-    let modified_ns = metadata
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_nanos() as u64;
-    let sample_hashes = compute_sample_hashes(path, size)?;
-    let content_hash = hash_prefix(path, size)?;
-    Some((size, modified_ns, sample_hashes, content_hash))
+fn modified_ns(metadata: &fs::Metadata) -> Option<u64> {
+    Some(
+        metadata
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos() as u64,
+    )
 }
 
 fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -1179,6 +1396,8 @@ fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 fn hash_prefix(path: &Path, len: u64) -> Option<[u8; 32]> {
     let mut file = File::open(path).ok()?;
+    #[cfg(test)]
+    record_source_hash_start(path);
     let mut hasher = Sha256::new();
     let mut remaining = len;
     let mut buffer = [0_u8; HASH_BUFFER_BYTES];
@@ -1189,6 +1408,8 @@ fn hash_prefix(path: &Path, len: u64) -> Option<[u8; 32]> {
         if read == 0 {
             return None;
         }
+        #[cfg(test)]
+        record_source_bytes(path, read);
         hasher.update(&buffer[..read]);
         remaining -= read as u64;
     }
@@ -1197,11 +1418,11 @@ fn hash_prefix(path: &Path, len: u64) -> Option<[u8; 32]> {
 }
 
 pub(crate) fn build_codex_incremental_cache(
-    path: &Path,
     consumed_offset: u64,
     state: CodexParseState,
+    ends_with_newline: bool,
+    content_hash: [u8; 32],
 ) -> Option<CodexIncrementalCache> {
-    let ends_with_newline = consumed_offset == 0 || file_ends_with_newline(path, consumed_offset);
     if !ends_with_newline {
         return None;
     }
@@ -1210,27 +1431,11 @@ pub(crate) fn build_codex_incremental_cache(
         state,
         consumed_offset,
         ends_with_newline,
-        prefix_hash: hash_prefix(path, consumed_offset)?,
+        prefix_hash: content_hash,
     })
 }
 
-fn file_ends_with_newline(path: &Path, size: u64) -> bool {
-    if size == 0 {
-        return true;
-    }
-
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return false,
-    };
-    if file.seek(SeekFrom::Start(size.saturating_sub(1))).is_err() {
-        return false;
-    }
-
-    let mut byte = [0_u8; 1];
-    file.read_exact(&mut byte).is_ok() && byte[0] == b'\n'
-}
-
+#[cfg(test)]
 pub(crate) fn codex_prefix_matches(path: &Path, cached: &CodexIncrementalCache) -> bool {
     if cached.consumed_offset > 0 && !cached.ends_with_newline {
         return false;
@@ -1242,16 +1447,13 @@ pub(crate) fn codex_prefix_matches(path: &Path, cached: &CodexIncrementalCache) 
     }
 }
 
-pub(crate) fn codex_cache_meta_matches_fingerprint(
-    cached: &CachedSourceMeta,
-    fingerprint: &SourceFingerprint,
-) -> bool {
+pub(crate) fn codex_cache_meta_is_consistent(cached: &CachedSourceMeta) -> bool {
     let Some(codex_incremental) = cached.codex_incremental.as_ref() else {
         return false;
     };
-    codex_incremental.consumed_offset == fingerprint.size
+    codex_incremental.consumed_offset == cached.fingerprint.size
         && codex_incremental.ends_with_newline
-        && codex_incremental.prefix_hash == fingerprint.content_hash
+        && codex_incremental.prefix_hash == cached.fingerprint.content_hash
 }
 
 #[cfg(test)]
@@ -1260,6 +1462,42 @@ mod tests {
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[derive(Serialize)]
+    struct LegacyV1FileSampleHash {
+        offset: u64,
+        len: u64,
+        hash: u64,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyV1RelatedFileFingerprint {
+        suffix: String,
+        size: u64,
+        modified_ns: u64,
+        sample_hashes: Vec<LegacyV1FileSampleHash>,
+        content_hash: [u8; 32],
+    }
+
+    #[derive(Serialize)]
+    struct LegacyV1SourceFingerprint {
+        size: u64,
+        modified_ns: u64,
+        sample_hashes: Vec<LegacyV1FileSampleHash>,
+        content_hash: [u8; 32],
+        related_files: Vec<LegacyV1RelatedFileFingerprint>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyV1CachedShardHeader {
+        format_version: u32,
+        parser_version: ParserVersion,
+        path: CachedPath,
+        fingerprint: LegacyV1SourceFingerprint,
+        fallback_timestamp_indices: Vec<usize>,
+        codex_incremental: Option<CodexIncrementalCache>,
+        message_count: usize,
+    }
 
     fn restore_env_var(key: &str, value: Option<impl AsRef<std::ffi::OsStr>>) {
         unsafe {
@@ -1346,13 +1584,53 @@ mod tests {
     }
 
     #[test]
+    fn related_input_stamp_tracks_add_delete_and_mtime_change() {
+        let dir = TempDir::new().unwrap();
+        let primary = dir.path().join("ui_messages.json");
+        let sibling = dir.path().join("api_conversation_history.json");
+        std::fs::write(&primary, b"[]").unwrap();
+        let policy = SourceInputPolicy::with_siblings(&primary, ["api_conversation_history.json"]);
+
+        let absent = policy.stamp().unwrap();
+        std::fs::write(&sibling, b"related").unwrap();
+        std::fs::File::open(&sibling)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(10)),
+            )
+            .unwrap();
+        let added = policy.stamp().unwrap();
+        assert_ne!(absent, added, "adding a related input must invalidate");
+
+        std::fs::File::open(&sibling)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(20)),
+            )
+            .unwrap();
+        let mtime_changed = policy.stamp().unwrap();
+        assert_ne!(added, mtime_changed, "related mtime must invalidate");
+
+        std::fs::remove_file(&sibling).unwrap();
+        let deleted = policy.stamp().unwrap();
+        assert_ne!(
+            mtime_changed, deleted,
+            "deleting a related input must invalidate"
+        );
+        assert_eq!(absent, deleted);
+    }
+
+    #[test]
     fn test_codex_prefix_matches_appended_file() {
         let file = write_temp_file(b"line-1\nline-2\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
         let incremental_cache = build_codex_incremental_cache(
-            file.path(),
             fingerprint.size,
             CodexParseState::default(),
+            true,
+            fingerprint.content_hash,
         )
         .unwrap();
 
@@ -1376,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_fingerprint_changes_for_large_same_size_unsampled_rewrite() {
+    fn test_source_fingerprint_changes_for_large_same_size_middle_rewrite() {
         let mut original = vec![b'a'; 128 * 1024];
         original.extend_from_slice(b"\n");
         let file = write_temp_file(&original);
@@ -1544,9 +1822,10 @@ mod tests {
         let file = write_temp_file(b"line-1\nline-2");
 
         assert!(build_codex_incremental_cache(
-            file.path(),
             file.as_file().metadata().unwrap().len(),
             CodexParseState::default(),
+            false,
+            [0; 32],
         )
         .is_none());
     }
@@ -1556,9 +1835,10 @@ mod tests {
         let file = write_temp_file(b"aaaa\nbbbb\ncccc\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
         let incremental_cache = build_codex_incremental_cache(
-            file.path(),
             fingerprint.size,
             CodexParseState::default(),
+            true,
+            fingerprint.content_hash,
         )
         .unwrap();
 
@@ -1568,15 +1848,16 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_prefix_matches_rejects_large_unsampled_rewrite() {
+    fn test_codex_prefix_matches_rejects_large_middle_rewrite() {
         let mut original = vec![b'a'; 128 * 1024];
         original.extend_from_slice(b"\n");
         let file = write_temp_file(&original);
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
         let incremental_cache = build_codex_incremental_cache(
-            file.path(),
             fingerprint.size,
             CodexParseState::default(),
+            true,
+            fingerprint.content_hash,
         )
         .unwrap();
 
@@ -1797,6 +2078,92 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_explicit_prune_keeps_malformed_current_format_shard() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+
+        let invalid_shard = cache_dir()
+            .unwrap()
+            .join(SHARDS_DIRNAME)
+            .join("ff")
+            .join("invalid-current.bin");
+        ensure_cache_dir(invalid_shard.parent().unwrap()).unwrap();
+        let mut file = File::create(&invalid_shard).unwrap();
+        file.write_all(&SHARD_MAGIC).unwrap();
+        file.write_all(&CACHE_FORMAT_VERSION.to_le_bytes()).unwrap();
+        file.write_all(&1_u64.to_le_bytes()).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.flush().unwrap();
+
+        let error = prune_source_message_cache().unwrap_err();
+        assert!(matches!(error, SourceCachePruneError::Decode { .. }));
+        assert!(
+            invalid_shard.exists(),
+            "current-format corruption must not be mistaken for a removable legacy shard"
+        );
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_explicit_prune_removes_real_v1_shard_without_decoding_layout() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(b"legacy source\n");
+        let metadata = source.as_file().metadata().unwrap();
+        let legacy_header = LegacyV1CachedShardHeader {
+            format_version: 1,
+            parser_version: test_parser_version(1),
+            path: CachedPath::from_path(source.path()),
+            fingerprint: LegacyV1SourceFingerprint {
+                size: metadata.len(),
+                modified_ns: modified_ns(&metadata).unwrap(),
+                sample_hashes: Vec::new(),
+                content_hash: hash_prefix(source.path(), metadata.len()).unwrap(),
+                related_files: Vec::new(),
+            },
+            fallback_timestamp_indices: Vec::new(),
+            codex_incremental: None,
+            message_count: 0,
+        };
+        let header_bytes = bincode::options().serialize(&legacy_header).unwrap();
+        assert_eq!(header_bytes.first().copied(), Some(1));
+        let legacy_shard = cache_dir()
+            .unwrap()
+            .join(SHARDS_DIRNAME)
+            .join("01")
+            .join("legacy-v1.bin");
+        ensure_cache_dir(legacy_shard.parent().unwrap()).unwrap();
+        let mut file = File::create(&legacy_shard).unwrap();
+        file.write_all(&(header_bytes.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header_bytes).unwrap();
+        bincode::options()
+            .serialize_into(
+                &mut file,
+                &CachedShardBody {
+                    messages: Vec::new(),
+                },
+            )
+            .unwrap();
+        file.flush().unwrap();
+
+        assert_eq!(
+            prune_source_message_cache().unwrap(),
+            SourceCachePruneStats {
+                scanned: 1,
+                removed: 1,
+                retained: 0,
+            }
+        );
+        assert!(!legacy_shard.exists());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_report_load_does_not_prune_orphaned_source_shards() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
@@ -1895,7 +2262,6 @@ mod tests {
         let shard = shard_path(source.path(), test_parser_version(1)).unwrap();
         ensure_cache_dir(shard.parent().unwrap()).unwrap();
         let header = CachedShardHeader {
-            format_version: CACHE_FORMAT_VERSION + 1,
             parser_version: test_parser_version(1),
             path: CachedPath::from_path(source.path()),
             fingerprint: SourceFingerprint::from_path(source.path()).unwrap(),
@@ -1905,6 +2271,9 @@ mod tests {
         };
         let header_bytes = bincode::options().serialize(&header).unwrap();
         let mut file = File::create(&shard).unwrap();
+        file.write_all(&SHARD_MAGIC).unwrap();
+        file.write_all(&(CACHE_FORMAT_VERSION + 1).to_le_bytes())
+            .unwrap();
         file.write_all(&(header_bytes.len() as u64).to_le_bytes())
             .unwrap();
         file.write_all(&header_bytes).unwrap();

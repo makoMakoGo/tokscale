@@ -13,8 +13,11 @@ use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// Codex entry structure (from JSONL files)
 #[derive(Debug, Deserialize)]
@@ -200,6 +203,30 @@ pub(crate) struct ParsedCodexFile {
     /// True when model-less token_count rows were emitted without a later model.
     pub unresolved_model_events: bool,
     pub state: CodexParseState,
+    pub content_hash: Option<[u8; 32]>,
+    pub ends_with_newline: bool,
+    pub source_identity: Option<crate::message_cache::SourceFileIdentity>,
+}
+
+struct HashingReader<R> {
+    inner: R,
+    hasher: Sha256,
+    last_byte: Option<u8>,
+    #[cfg(test)]
+    path: PathBuf,
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if read > 0 {
+            self.hasher.update(&buffer[..read]);
+            self.last_byte = Some(buffer[read - 1]);
+            #[cfg(test)]
+            crate::message_cache::record_source_bytes(&self.path, read);
+        }
+        Ok(read)
+    }
 }
 
 fn session_id_from_path(path: &Path) -> String {
@@ -242,8 +269,8 @@ fn looks_like_explicit_workspace_path(path: &str) -> bool {
     bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
-fn parse_codex_reader<R: BufRead>(
-    mut reader: R,
+fn parse_codex_reader<R: BufRead + ?Sized>(
+    reader: &mut R,
     session_id: &str,
     fallback_timestamp: i64,
     start_offset: u64,
@@ -663,6 +690,9 @@ fn parse_codex_reader<R: BufRead>(
         parse_succeeded,
         unresolved_model_events,
         state,
+        content_hash: None,
+        ends_with_newline: false,
+        source_identity: None,
     }
 }
 
@@ -880,9 +910,9 @@ pub fn parse_codex_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let session_id = session_id_from_path(path);
     let fallback_timestamp = file_modified_timestamp_ms(path);
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let parsed = parse_codex_reader(
-        reader,
+        &mut reader,
         &session_id,
         fallback_timestamp,
         0,
@@ -931,6 +961,24 @@ pub(crate) fn parse_codex_file_incremental(
     start_offset: u64,
     state: CodexParseState,
 ) -> ParsedCodexFile {
+    parse_codex_file_incremental_hashed(path, start_offset, state, None)
+}
+
+pub(crate) fn parse_codex_file_incremental_verified(
+    path: &Path,
+    start_offset: u64,
+    state: CodexParseState,
+    expected_prefix_hash: [u8; 32],
+) -> ParsedCodexFile {
+    parse_codex_file_incremental_hashed(path, start_offset, state, Some(expected_prefix_hash))
+}
+
+fn parse_codex_file_incremental_hashed(
+    path: &Path,
+    start_offset: u64,
+    state: CodexParseState,
+    expected_prefix_hash: Option<[u8; 32]>,
+) -> ParsedCodexFile {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(_) => {
@@ -941,25 +989,78 @@ pub(crate) fn parse_codex_file_incremental(
                 parse_succeeded: false,
                 unresolved_model_events: false,
                 state,
+                content_hash: None,
+                ends_with_newline: false,
+                source_identity: None,
             };
         }
     };
+    let source_identity = file
+        .metadata()
+        .ok()
+        .map(|metadata| crate::message_cache::source_file_identity(&metadata));
 
-    if file.seek(SeekFrom::Start(start_offset)).is_err() {
-        return ParsedCodexFile {
-            messages: Vec::new(),
-            fallback_timestamp_indices: Vec::new(),
-            consumed_offset: start_offset,
-            parse_succeeded: false,
-            unresolved_model_events: false,
-            state,
+    #[cfg(test)]
+    crate::message_cache::record_source_hash_start(path);
+    let mut hasher = Sha256::new();
+    let mut last_byte = None;
+    let mut remaining = start_offset;
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let bytes_to_read = remaining.min(buffer.len() as u64) as usize;
+        let read = match file.read(&mut buffer[..bytes_to_read]) {
+            Ok(0) | Err(_) => return failed_incremental_parse(start_offset, state),
+            Ok(read) => read,
         };
+        #[cfg(test)]
+        crate::message_cache::record_source_bytes(path, read);
+        hasher.update(&buffer[..read]);
+        last_byte = Some(buffer[read - 1]);
+        remaining -= read as u64;
+    }
+    if expected_prefix_hash
+        .is_some_and(|expected| <[u8; 32]>::from(hasher.clone().finalize()) != expected)
+    {
+        return failed_incremental_parse(start_offset, state);
     }
 
     let session_id = session_id_from_path(path);
     let fallback_timestamp = file_modified_timestamp_ms(path);
-    let reader = BufReader::new(file);
-    parse_codex_reader(reader, &session_id, fallback_timestamp, start_offset, state)
+    let hashing_reader = HashingReader {
+        inner: file,
+        hasher,
+        last_byte,
+        #[cfg(test)]
+        path: path.to_path_buf(),
+    };
+    let mut reader = BufReader::new(hashing_reader);
+    let mut parsed = parse_codex_reader(
+        &mut reader,
+        &session_id,
+        fallback_timestamp,
+        start_offset,
+        state,
+    );
+    let hashing_reader = reader.into_inner();
+    parsed.content_hash = Some(hashing_reader.hasher.finalize().into());
+    parsed.ends_with_newline =
+        parsed.consumed_offset == 0 || hashing_reader.last_byte == Some(b'\n');
+    parsed.source_identity = source_identity;
+    parsed
+}
+
+fn failed_incremental_parse(start_offset: u64, state: CodexParseState) -> ParsedCodexFile {
+    ParsedCodexFile {
+        messages: Vec::new(),
+        fallback_timestamp_indices: Vec::new(),
+        consumed_offset: start_offset,
+        parse_succeeded: false,
+        unresolved_model_events: false,
+        state,
+        content_hash: None,
+        ends_with_newline: false,
+        source_identity: None,
+    }
 }
 
 fn extract_model(payload: &CodexPayload) -> Option<String> {
@@ -1395,14 +1496,14 @@ mod tests {
 
     #[test]
     fn test_parse_reader_marks_failure_on_line_read_error() {
-        let reader = FailAfterFirstLine::new(concat!(
+        let mut reader = FailAfterFirstLine::new(concat!(
             r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
             "\n",
             r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
             "\n"
         ));
 
-        let parsed = parse_codex_reader(reader, "session", 0, 0, CodexParseState::default());
+        let parsed = parse_codex_reader(&mut reader, "session", 0, 0, CodexParseState::default());
 
         assert!(!parsed.parse_succeeded);
         assert!(parsed.messages.is_empty());

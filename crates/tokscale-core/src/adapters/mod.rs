@@ -115,10 +115,14 @@ impl SourceUnit {
     }
 
     pub(crate) fn claude_code(client: ClientId, path: PathBuf, home_dir: PathBuf) -> Self {
+        let variant_path = crate::cc_mirror::variant_file_for_session_path(&path, Some(&home_dir));
         Self {
             client,
             path,
-            fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome { home_dir },
+            fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome {
+                home_dir,
+                variant_path,
+            },
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
         }
@@ -136,36 +140,25 @@ impl SourceUnit {
     }
 
     pub(crate) fn digest_paths(&self) -> Vec<PathBuf> {
+        self.source_input_policy().paths()
+    }
+
+    pub(crate) fn source_input_policy(&self) -> message_cache::SourceInputPolicy {
         match &self.fingerprint_policy {
-            FingerprintPolicy::SqliteWithWal => {
-                vec![self.path.clone(), append_path_suffix(&self.path, "-wal")]
+            FingerprintPolicy::PlainFile | FingerprintPolicy::NoMessageCache => {
+                message_cache::SourceInputPolicy::plain(&self.path)
             }
-            FingerprintPolicy::ClaudeCodeWithHome { home_dir } => {
-                let mut paths = vec![self.path.clone()];
-                if let Some(stem) = self.path.file_stem().and_then(|s| s.to_str()) {
-                    paths.push(self.path.with_file_name(format!("{stem}.meta.json")));
-                }
-                if let Some(variant_path) =
-                    crate::cc_mirror::variant_file_for_session_path(&self.path, Some(home_dir))
-                {
-                    paths.push(variant_path);
-                }
-                paths
+            FingerprintPolicy::SqliteWithWal => {
+                message_cache::SourceInputPolicy::sqlite_with_wal(&self.path)
+            }
+            FingerprintPolicy::ClaudeCodeWithHome { variant_path, .. } => {
+                message_cache::SourceInputPolicy::claude_code(&self.path, variant_path.clone())
             }
             FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
-                let mut paths = vec![self.path.clone()];
-                let parent = self.path.parent();
-                for sibling_name in *sibling_names {
-                    paths.push(
-                        parent
-                            .unwrap_or_else(|| std::path::Path::new("."))
-                            .join(sibling_name),
-                    );
-                }
-                paths
-            }
-            FingerprintPolicy::PlainFile | FingerprintPolicy::NoMessageCache => {
-                vec![self.path.clone()]
+                message_cache::SourceInputPolicy::with_siblings(
+                    &self.path,
+                    sibling_names.iter().copied(),
+                )
             }
         }
     }
@@ -283,6 +276,7 @@ pub(crate) enum FingerprintPolicy {
     SqliteWithWal,
     ClaudeCodeWithHome {
         home_dir: PathBuf,
+        variant_path: Option<PathBuf>,
     },
     PrimaryWithSiblings {
         sibling_names: &'static [&'static str],
@@ -397,12 +391,6 @@ fn requested_client_ids(clients: &[String]) -> HashSet<ClientId> {
         .collect()
 }
 
-fn append_path_suffix(path: &std::path::Path, suffix: &str) -> PathBuf {
-    let mut os = std::ffi::OsString::from(path.as_os_str());
-    os.push(suffix);
-    PathBuf::from(os)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +399,14 @@ mod tests {
     fn crush_is_not_registered_as_local_adapter() {
         assert!(adapter_for(ClientId::Crush).is_none());
         assert!(selected_adapters(&["crush".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn plain_db_source_does_not_guess_a_wal_input() {
+        let path = PathBuf::from("/tmp/plain-history.db");
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+
+        assert_eq!(unit.digest_paths(), vec![path]);
     }
 
     #[test]

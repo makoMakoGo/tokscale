@@ -47,6 +47,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
             adapter_discover::scan_roots(roots, def.pattern),
             FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir: PathBuf::from(ctx.home_dir),
+                variant_path: None,
             },
         )
         .into_iter()
@@ -64,7 +65,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
             .into_par_iter()
             .map(|unit| {
                 let home_dir = match &unit.fingerprint_policy {
-                    FingerprintPolicy::ClaudeCodeWithHome { home_dir } => home_dir.clone(),
+                    FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => home_dir.clone(),
                     _ => unreachable!("unexpected Claude source fingerprint policy"),
                 };
                 adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {

@@ -51,7 +51,8 @@ Baseline commit: `1c7bb2ed99b0`
 | Stage | Commit | Candidate | zero processing ms | zero wall s | zero RSS KiB | core processing ms | core wall s | core RSS KiB | Aggregation wall s | Aggregation RSS KiB |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Baseline | `1c7bb2ed99b0` | Unoptimized | 1,601 | 1.60 | 16,800 | 6,011 | 6.01 | 35,828 | 0.17 | 34,924 |
-| C1 | `C1` | Explicit cache GC | 0 | 0.00 | 9,760 | 4,354 | 4.36 | 34,832 | 0.16 | 35,040 |
+| C1 | `3cce3edb` | Explicit cache GC | 0 | 0.00 | 9,760 | 4,354 | 4.36 | 34,832 | 0.16 | 35,040 |
+| C2 | `C2` | Metadata-stamp warm hits | 0 | 0.00 | 9,920 | 3,624 | 3.94 | 37,512 | 0.15 | 35,040 |
 
 ## Raw samples
 
@@ -100,8 +101,7 @@ run  wall_s  user_s  sys_s  max_rss_kib
 
 Candidate: remove source-cache garbage collection from ordinary report loads
 and expose it as the observable `tokscale cache prune` maintenance command.
-`C1` is a stable stage identifier; its commit hash is backfilled by the next
-stage because a commit cannot contain its own hash.
+The cumulative table records its exact commit as `3cce3edb`.
 
 Release build:
 
@@ -172,6 +172,87 @@ explicit prune removes two of three synthetic shards (one orphan and one stale
 parser revision), and an undecodable shard produces a non-zero CLI failure
 without deleting the bad file. Core/CLI all-target Clippy with `-D warnings`,
 `cargo fmt --check`, and `git diff --check` also passed.
+
+### C2 — metadata-stamp warm cache hits
+
+Candidate: read the shard header first and compare a persisted source metadata
+stamp before reading source bytes. Main files and parser-declared related inputs
+share one policy; Codex computes its digest in the parser's single read pass.
+`C2` is replaced with the commit hash by the next stage.
+
+Release build:
+
+```text
+cargo build -p tokscale-cli --release
+Finished release profile [optimized] target(s) in 2m 46s.
+```
+
+Corpus at measurement time:
+
+| Input | Size / count | Change from C1 |
+| --- | ---: | ---: |
+| source-message cache | 35,815 shards / 391 MiB | +22 shards / unchanged size |
+| Claude projects | 647 MiB | unchanged |
+| Codex sessions | 715 MiB | +5 MiB |
+| OpenCode data | 429 MiB | unchanged |
+
+The cache envelope changed from v1 to v2. The unmeasured warm-up rebuilt the
+selected clients' encountered v1 shards; all samples below are v2 warm hits.
+No explicit prune was run against the real cache.
+
+Zero-session probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    0              0.00    0.00    0.00    9920
+2    0              0.00    0.00    0.02    9760
+3    1              0.00    0.00    0.00    9920
+```
+
+Warm three-client probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    3624           3.66    0.83    1.29   38048
+2    3493           5.48    0.82    1.34   36912
+3    3942           3.94    0.84    1.29   37512
+```
+
+Aggregation probe:
+
+```text
+run  wall_s  user_s  sys_s  max_rss_kib
+1    0.15    0.14    0.02   34880
+2    0.15    0.14    0.02   35040
+3    0.15    0.15    0.01   35040
+4    0.15    0.16    0.00   35040
+5    0.15    0.15    0.01   35040
+```
+
+Against C1 medians, warm core processing time fell 16.8% and wall time fell
+9.6%; against the original baseline they fell 39.7% and 34.4%. Core median RSS
+rose 7.7% from C1 (4.7% above baseline). The larger v2 header carries input
+paths and stamps in every pending cache read plan, and the current adapter API
+retains a whole client's plans until fold. That observed regression is not
+hidden; C4 is responsible for bounding that lifetime. Aggregation remained
+effectively unchanged.
+
+Candidate-specific verification instruments actual source reads under tests:
+
+```text
+cargo test -p tokscale-core
+1119 passed; 3 ignored
+```
+
+Plain, SQLite/WAL, Claude-related, and Codex exact warm hits recorded zero
+source bytes and zero hash passes. Codex cold and append paths each recorded one
+continuous hash pass. Additional cases cover related-input add/delete/mtime
+changes, generic main/WAL parse races, Codex path replacement, a real v1 shard
+prune, and malformed current-envelope preservation. The deliberately accepted
+blind spot is a non-concurrent content rewrite that restores the exact path,
+size, and mtime; detecting that would require reading source bytes on every
+warm hit. Core all-target Clippy with `-D warnings`, the CLI build, rustfmt, and
+diff checks passed.
 
 ## Interpretation rules
 

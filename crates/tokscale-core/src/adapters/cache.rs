@@ -10,9 +10,12 @@ pub(crate) fn try_cache_hit(
     unit: SourceUnit,
     source_cache: &message_cache::SourceMessageCache,
 ) -> Option<ParsedUnit> {
-    let fingerprint = fingerprint_for_unit(&unit)?;
     let cached = source_cache.get_meta(&unit.path, unit.parser_version)?;
-    if cached.fingerprint != fingerprint || !cached.has_messages {
+    if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
+        return None;
+    }
+    let stamp = unit.source_input_policy().stamp()?;
+    if cached.fingerprint.stamp != stamp || !cached.has_messages {
         return None;
     }
 
@@ -47,7 +50,7 @@ pub(crate) fn load_or_parse_unit_with_policy<F>(
 where
     F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
 {
-    let Some(fingerprint) = fingerprint_for_unit(&unit) else {
+    if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
         let (mut messages, _) = parse(&unit.path);
         crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
         return ParsedUnit {
@@ -56,10 +59,18 @@ where
             cache_write: None,
             invalidate_cache: false,
         };
-    };
+    }
 
-    if let Some(cached) = ctx.source_cache.get_meta(&unit.path, unit.parser_version) {
-        if cached.fingerprint == fingerprint && cached.has_messages {
+    let cached = ctx.source_cache.get_meta(&unit.path, unit.parser_version);
+    let input_policy = unit.source_input_policy();
+    let snapshot = input_policy.snapshot();
+    if let Some(cached) = cached {
+        if snapshot
+            .as_ref()
+            .map(message_cache::SourceInputSnapshot::stamp)
+            == Some(&cached.fingerprint.stamp)
+            && cached.has_messages
+        {
             return ParsedUnit {
                 messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
                     &unit.path,
@@ -73,9 +84,26 @@ where
         }
     }
 
+    let Some(fingerprint) = snapshot
+        .as_ref()
+        .and_then(|snapshot| input_policy.fingerprint_from_stamp(snapshot.stamp().clone()))
+    else {
+        let (mut messages, _) = parse(&unit.path);
+        crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
+        return ParsedUnit {
+            unit,
+            messages: UnitMessageSource::Fresh(messages),
+            cache_write: None,
+            invalidate_cache: false,
+        };
+    };
+
     let (mut messages, cacheable) = parse(&unit.path);
     crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-    let cache_write = if messages.is_empty() || !cacheable {
+    let source_unchanged = snapshot
+        .as_ref()
+        .is_some_and(|before| input_policy.snapshot().as_ref() == Some(before));
+    let cache_write = if messages.is_empty() || !cacheable || !source_unchanged {
         None
     } else {
         Some(message_cache::CacheWrite::Borrowed(
@@ -93,7 +121,7 @@ where
         unit,
         messages: UnitMessageSource::Fresh(messages),
         cache_write,
-        invalidate_cache: !cacheable,
+        invalidate_cache: !cacheable || !source_unchanged,
     }
 }
 
@@ -163,24 +191,205 @@ pub(crate) fn resolve_messages(
     }
 }
 
-fn fingerprint_for_unit(unit: &SourceUnit) -> Option<message_cache::SourceFingerprint> {
-    match &unit.fingerprint_policy {
-        FingerprintPolicy::PlainFile => message_cache::SourceFingerprint::from_path(&unit.path),
-        FingerprintPolicy::SqliteWithWal => {
-            message_cache::SourceFingerprint::from_sqlite_path(&unit.path)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::SourceUnit;
+    use crate::clients::ClientId;
+    use crate::TokenBreakdown;
+
+    fn cached_message() -> UnifiedMessage {
+        UnifiedMessage::new(
+            "test",
+            "gpt-5",
+            "openai",
+            "session",
+            1,
+            TokenBreakdown::default(),
+            0.0,
+        )
+    }
+
+    fn assert_warm_hit_reads_no_source_bytes(unit: SourceUnit) {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let policy = unit.source_input_policy();
+        let stamp = policy.stamp().unwrap();
+        let fingerprint = policy.fingerprint_from_stamp(stamp).unwrap();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+            &unit.path,
+            unit.parser_version,
+            fingerprint,
+            vec![cached_message()],
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+        let cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        for path in policy.paths() {
+            message_cache::reset_source_read_stats(&path);
         }
-        FingerprintPolicy::ClaudeCodeWithHome { home_dir } => {
-            message_cache::SourceFingerprint::from_claude_code_path_with_home(
-                &unit.path,
-                Some(home_dir),
-            )
+
+        let parsed = load_or_parse_unit_with(
+            unit,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |_| panic!("an exact stamp hit must not parse the source"),
+        );
+
+        assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
+        for path in policy.paths() {
+            assert_eq!(
+                message_cache::get_source_read_stats(&path),
+                message_cache::SourceReadStats::default(),
+                "warm hit read or hashed source input {}",
+                path.display()
+            );
         }
-        FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
-            message_cache::SourceFingerprint::from_path_with_siblings(
-                &unit.path,
-                sibling_names.iter().copied(),
-            )
-        }
-        FingerprintPolicy::NoMessageCache => None,
+    }
+
+    #[test]
+    fn plain_file_warm_hit_reads_no_source_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, b"source contents").unwrap();
+
+        assert_warm_hit_reads_no_source_bytes(SourceUnit::plain_file(ClientId::Amp, path));
+    }
+
+    #[test]
+    fn sqlite_wal_warm_hit_reads_no_source_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("history.db");
+        let wal_path = dir.path().join("history.db-wal");
+        std::fs::write(&path, b"sqlite contents").unwrap();
+        std::fs::write(&wal_path, b"wal contents").unwrap();
+
+        assert_warm_hit_reads_no_source_bytes(SourceUnit::sqlite_with_wal(ClientId::Zed, path));
+    }
+
+    #[test]
+    fn claude_related_inputs_warm_hit_reads_no_source_bytes() {
+        let home = tempfile::TempDir::new().unwrap();
+        let variant_dir = home.path().join(".cc-mirror/kimi-code");
+        let path = variant_dir.join("config/projects/project/session.jsonl");
+        let meta_path = path.with_file_name("session.meta.json");
+        let variant_path = variant_dir.join("variant.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"session contents").unwrap();
+        std::fs::write(&meta_path, b"meta contents").unwrap();
+        std::fs::write(&variant_path, b"{\"name\":\"Kimi\"}").unwrap();
+
+        assert_warm_hit_reads_no_source_bytes(SourceUnit::claude_code(
+            ClientId::Claude,
+            path,
+            home.path().to_path_buf(),
+        ));
+    }
+
+    #[test]
+    fn same_size_rewrite_with_restored_mtime_remains_a_stamp_hit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, b"original").unwrap();
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+        let policy = unit.source_input_policy();
+        let original_stamp = policy.stamp().unwrap();
+        let fingerprint = policy
+            .fingerprint_from_stamp(original_stamp.clone())
+            .unwrap();
+        let original_content_hash = fingerprint.content_hash;
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            unit.parser_version,
+            fingerprint,
+            vec![cached_message()],
+            Vec::new(),
+            None,
+        ));
+
+        std::fs::write(&path, b"rewritte").unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        assert_eq!(policy.stamp().unwrap(), original_stamp);
+        assert_ne!(
+            policy
+                .fingerprint_from_stamp(policy.stamp().unwrap())
+                .unwrap()
+                .content_hash,
+            original_content_hash,
+            "the rewrite really changed content even though its stamp was restored"
+        );
+        message_cache::reset_source_read_stats(&path);
+
+        let parsed = load_or_parse_unit_with(
+            unit,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |_| panic!("same stamp is the documented freshness contract"),
+        );
+        assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats::default()
+        );
+    }
+
+    #[test]
+    fn source_change_during_parse_prevents_cache_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, b"before").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+        let cache = message_cache::SourceMessageCache::default();
+
+        let parsed = load_or_parse_unit_with(
+            unit,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |_| {
+                std::fs::write(&path, b"after-and-different-size").unwrap();
+                vec![cached_message()]
+            },
+        );
+
+        assert!(parsed.cache_write.is_none());
+        assert!(parsed.invalidate_cache);
+    }
+
+    #[test]
+    fn wal_change_during_parse_prevents_cache_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("history.db");
+        let wal_path = dir.path().join("history.db-wal");
+        std::fs::write(&path, b"database").unwrap();
+        std::fs::write(&wal_path, b"wal-before").unwrap();
+        let unit = SourceUnit::sqlite_with_wal(ClientId::Zed, path);
+        let cache = message_cache::SourceMessageCache::default();
+
+        let parsed = load_or_parse_unit_with(
+            unit,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |_| {
+                std::fs::write(&wal_path, b"wal-after-and-larger").unwrap();
+                vec![cached_message()]
+            },
+        );
+
+        assert!(parsed.cache_write.is_none());
+        assert!(parsed.invalidate_cache);
     }
 }

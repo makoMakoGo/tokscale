@@ -616,9 +616,9 @@ fn stream_local_sources_into_engine(
     )
 }
 
-/// Digest over every scannable source's (path, size, mtime) plus the
-/// requested client set. Two equal digests mean a fresh parse would see
-/// byte-identical inputs, so refresh work can be skipped entirely (ADR 0008).
+/// Digest over every adapter-declared source input's (path, size, mtime) plus
+/// the requested client set. Two equal digests mean the source stamps are
+/// unchanged, so refresh work can be skipped under the ADR 0008 contract.
 /// The value is only comparable within one process (`DefaultHasher`) and is
 /// never persisted.
 pub fn compute_source_digest(
@@ -627,32 +627,28 @@ pub fn compute_source_digest(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> u64 {
-    use std::hash::{Hash, Hasher};
-
     let selected_adapters = adapters::selected_adapters(clients);
-    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut units = Vec::new();
     let scan_ctx = adapters::AdapterScanContext {
         home_dir,
         use_env_roots,
         scanner_settings,
     };
     for adapter in selected_adapters {
-        for unit in adapter.discover(&scan_ctx) {
-            paths.extend(unit.digest_paths());
-        }
+        units.extend(adapter.discover(&scan_ctx));
     }
 
-    // SQLite writes may only touch the WAL sidecar between checkpoints.
-    let wal_paths: Vec<PathBuf> = paths
-        .iter()
-        .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
-        .map(|path| {
-            let mut name = path.as_os_str().to_owned();
-            name.push("-wal");
-            PathBuf::from(name)
-        })
+    compute_source_digest_for_units(units, clients)
+}
+
+fn compute_source_digest_for_units(units: Vec<adapters::SourceUnit>, clients: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut paths: Vec<PathBuf> = units
+        .into_iter()
+        .flat_map(|unit| unit.digest_paths())
         .collect();
-    paths.extend(wal_paths);
+
     paths.sort_unstable();
     paths.dedup();
 

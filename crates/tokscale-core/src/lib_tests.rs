@@ -2035,6 +2035,26 @@ fn test_compute_source_digest_stable_and_sensitive() {
 }
 
 #[test]
+fn test_compute_source_digest_does_not_guess_wal_for_plain_db_source() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("plain-history.db");
+    let wal_path = dir.path().join("plain-history.db-wal");
+    std::fs::write(&db_path, b"plain source").unwrap();
+    std::fs::write(&wal_path, b"wal-before").unwrap();
+    let clients = ["amp".to_string()];
+    let unit = crate::adapters::SourceUnit::plain_file(ClientId::Amp, db_path);
+
+    let before = crate::compute_source_digest_for_units(vec![unit.clone()], &clients);
+    std::fs::write(&wal_path, b"wal-after-and-different").unwrap();
+    let after = crate::compute_source_digest_for_units(vec![unit], &clients);
+
+    assert_eq!(
+        before, after,
+        "plain .db sources must not acquire an undeclared WAL dependency"
+    );
+}
+
+#[test]
 #[serial_test::serial]
 fn test_compute_source_digest_tracks_adapter_zed_wal() {
     let source_home = tempfile::TempDir::new().unwrap();

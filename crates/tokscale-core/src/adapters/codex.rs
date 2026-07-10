@@ -122,6 +122,7 @@ fn parse_full_log_source(
     is_headless: bool,
 ) -> ParsedUnit {
     let path = unit.path.clone();
+    let source_snapshot = unit.source_input_policy().snapshot();
     let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
     let parsed = sessions::codex::parse_codex_file_incremental(
         &path,
@@ -144,14 +145,8 @@ fn parse_full_log_source(
         };
     }
 
-    let cache_write = build_codex_cache_write(
-        &path,
-        unit.parser_version,
-        parsed.messages,
-        parsed.consumed_offset,
-        parsed.state,
-        parsed.fallback_timestamp_indices,
-    );
+    let cache_write = source_snapshot
+        .and_then(|snapshot| build_codex_cache_write(&path, unit.parser_version, parsed, snapshot));
 
     ParsedUnit {
         unit,
@@ -183,29 +178,73 @@ fn finalize_codex_messages(
 fn build_codex_cache_write(
     path: &Path,
     parser_version: message_cache::ParserVersion,
-    raw_messages: Vec<UnifiedMessage>,
-    consumed_offset: u64,
-    state: sessions::codex::CodexParseState,
-    fallback_timestamp_indices: Vec<usize>,
+    parsed: sessions::codex::ParsedCodexFile,
+    source_snapshot: message_cache::SourceInputSnapshot,
 ) -> Option<message_cache::CacheWrite> {
-    let fingerprint = message_cache::SourceFingerprint::from_path(path)?;
-    if fingerprint.size != consumed_offset {
-        return None;
-    }
-
-    let codex_incremental =
-        message_cache::build_codex_incremental_cache(path, consumed_offset, state)?;
+    let sessions::codex::ParsedCodexFile {
+        messages,
+        fallback_timestamp_indices,
+        consumed_offset,
+        state,
+        content_hash,
+        ends_with_newline,
+        source_identity,
+        ..
+    } = parsed;
+    let (fingerprint, codex_incremental) = build_codex_cache_metadata(
+        path,
+        consumed_offset,
+        state,
+        ends_with_newline,
+        content_hash?,
+        source_snapshot,
+        source_identity?,
+    )?;
 
     Some(message_cache::CacheWrite::Owned(
         message_cache::CachedSourceEntry::new_with_version(
             path,
             parser_version,
             fingerprint,
-            raw_messages,
+            messages,
             fallback_timestamp_indices,
             Some(codex_incremental),
         ),
     ))
+}
+
+fn build_codex_cache_metadata(
+    path: &Path,
+    consumed_offset: u64,
+    state: sessions::codex::CodexParseState,
+    ends_with_newline: bool,
+    content_hash: [u8; 32],
+    source_snapshot: message_cache::SourceInputSnapshot,
+    source_identity: message_cache::SourceFileIdentity,
+) -> Option<(
+    message_cache::SourceFingerprint,
+    message_cache::CodexIncrementalCache,
+)> {
+    let input_policy = message_cache::SourceInputPolicy::plain(path);
+    if source_snapshot.primary_identity()? != source_identity
+        || input_policy.snapshot().as_ref() != Some(&source_snapshot)
+    {
+        return None;
+    }
+    let fingerprint = message_cache::SourceFingerprint::from_main_digest(
+        source_snapshot.stamp().clone(),
+        content_hash,
+    )?;
+    if fingerprint.size != consumed_offset {
+        return None;
+    }
+    let incremental = message_cache::build_codex_incremental_cache(
+        consumed_offset,
+        state,
+        ends_with_newline,
+        content_hash,
+    )?;
+    Some((fingerprint, incremental))
 }
 
 fn load_or_parse_codex_unit(
@@ -215,20 +254,21 @@ fn load_or_parse_codex_unit(
     is_headless: bool,
 ) -> ParsedUnit {
     let path = unit.path.clone();
-    let Some(fingerprint) = message_cache::SourceFingerprint::from_path(&path) else {
-        return parse_full_log_source(unit, pricing, is_headless);
-    };
+    let cached = source_cache.get_meta(&path, unit.parser_version);
     let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
 
-    if let Some(cached) = source_cache.get_meta(&path, unit.parser_version) {
+    if let Some(cached) = cached {
         let reparse_from_start = |invalidate_cache: bool| {
             let mut parsed = parse_full_log_source(unit.clone(), pricing, is_headless);
             parsed.invalidate_cache = invalidate_cache && parsed.cache_write.is_none();
             parsed
         };
+        let Some(snapshot) = unit.source_input_policy().snapshot() else {
+            return reparse_from_start(true);
+        };
 
-        if cached.fingerprint == fingerprint {
-            if message_cache::codex_cache_meta_matches_fingerprint(&cached, &fingerprint) {
+        if cached.fingerprint.stamp == *snapshot.stamp() {
+            if message_cache::codex_cache_meta_is_consistent(&cached) {
                 let read_plan = message_cache::CacheReadPlan::new(
                     &path,
                     unit.parser_version,
@@ -250,31 +290,28 @@ fn load_or_parse_codex_unit(
         }
 
         if let Some(codex_incremental) = cached.codex_incremental.as_ref() {
-            if fingerprint.size > codex_incremental.consumed_offset
-                && message_cache::codex_prefix_matches(&path, codex_incremental)
-            {
-                let parsed = sessions::codex::parse_codex_file_incremental(
+            if snapshot.stamp().primary_size().is_some_and(|size| {
+                size > codex_incremental.consumed_offset && codex_incremental.ends_with_newline
+            }) {
+                let parsed = sessions::codex::parse_codex_file_incremental_verified(
                     &path,
                     codex_incremental.consumed_offset,
                     codex_incremental.state.clone(),
+                    codex_incremental.prefix_hash,
                 );
                 if parsed.parse_succeeded && !parsed.unresolved_model_events {
-                    let entry_fingerprint = message_cache::SourceFingerprint::from_path(&path);
-                    let codex_incremental_cache = entry_fingerprint
-                        .as_ref()
-                        .filter(|entry_fingerprint| {
-                            entry_fingerprint.size == parsed.consumed_offset
-                        })
-                        .and_then(|_| {
-                            message_cache::build_codex_incremental_cache(
-                                &path,
-                                parsed.consumed_offset,
-                                parsed.state,
-                            )
-                        });
-                    if let (Some(entry_fingerprint), Some(codex_incremental_cache)) =
-                        (entry_fingerprint, codex_incremental_cache)
-                    {
+                    let cache_metadata = parsed.content_hash.and_then(|content_hash| {
+                        build_codex_cache_metadata(
+                            &path,
+                            parsed.consumed_offset,
+                            parsed.state.clone(),
+                            parsed.ends_with_newline,
+                            content_hash,
+                            snapshot.clone(),
+                            parsed.source_identity?,
+                        )
+                    });
+                    if let Some((entry_fingerprint, codex_incremental_cache)) = cache_metadata {
                         let parser_version = unit.parser_version;
                         let read_plan = message_cache::CacheReadPlan::new(
                             &path,
@@ -415,6 +452,7 @@ fn reparse_full_codex_messages(
     is_headless: bool,
     fallback_timestamp: i64,
 ) -> (Vec<UnifiedMessage>, Option<message_cache::CacheWrite>) {
+    let source_snapshot = message_cache::SourceInputPolicy::plain(path).snapshot();
     let parsed = sessions::codex::parse_codex_file_incremental(
         path,
         0,
@@ -428,14 +466,8 @@ fn reparse_full_codex_messages(
         fallback_timestamp,
     );
     let cache_write = if parsed.parse_succeeded && !parsed.unresolved_model_events {
-        build_codex_cache_write(
-            path,
-            parser_version,
-            parsed.messages,
-            parsed.consumed_offset,
-            parsed.state,
-            parsed.fallback_timestamp_indices,
-        )
+        source_snapshot
+            .and_then(|snapshot| build_codex_cache_write(path, parser_version, parsed, snapshot))
     } else {
         None
     };
@@ -646,7 +678,16 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
 
         let mut cache = message_cache::SourceMessageCache::default();
+        message_cache::reset_source_read_stats(&path);
         let actual = parse_and_fold(vec![codex_unit(&path, false)], &mut cache);
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats {
+                bytes: std::fs::metadata(&path).unwrap().len(),
+                hash_passes: 1,
+            },
+            "cold Codex parsing must hash the parser's single read stream"
+        );
         let expected = parser_messages(&path);
 
         assert_eq!(actual, expected);
@@ -664,12 +705,16 @@ mod tests {
 
     #[test]
     fn codex_adapter_cache_hit_matches_fresh_parse() {
+        let cache_home = tempfile::TempDir::new().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut cache = message_cache::SourceMessageCache::default();
-        let fresh = parse_and_fold(vec![codex_unit(&path, false)], &mut cache);
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let fresh = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        seed_cache.save_if_dirty();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_source_read_stats(&path);
         let parsed = CODEX_ADAPTER.parse(
             vec![codex_unit(&path, false)],
             &ParseContext {
@@ -686,6 +731,11 @@ mod tests {
 
         let cached = fold_parsed(parsed, &mut cache);
         assert_eq!(cached, fresh);
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats::default(),
+            "exact Codex cache hits must not read or hash source bytes"
+        );
     }
 
     #[test]
@@ -699,6 +749,7 @@ mod tests {
         assert_eq!(initial.len(), 1);
 
         append_file(&path, APPENDED_CODEX_ENTRY);
+        message_cache::reset_source_read_stats(&path);
         let parsed = CODEX_ADAPTER.parse(
             vec![codex_unit(&path, false)],
             &ParseContext {
@@ -714,8 +765,58 @@ mod tests {
         ));
 
         let actual = fold_parsed(parsed, &mut cache);
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats {
+                bytes: std::fs::metadata(&path).unwrap().len(),
+                hash_passes: 1,
+            },
+            "Codex append must verify the prefix and hash the tail in one pass"
+        );
         let expected = parser_messages(&path);
         assert_eq!(actual, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_same_stamp_atomic_replacement_is_not_cached() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let input_policy = message_cache::SourceInputPolicy::plain(&path);
+        let before = input_policy.snapshot().unwrap();
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let parsed = sessions::codex::parse_codex_file_incremental(
+            &path,
+            0,
+            sessions::codex::CodexParseState::default(),
+        );
+        assert!(parsed.parse_succeeded);
+
+        let replacement = dir.path().join("replacement.jsonl");
+        let replacement_contents =
+            FIRST_CODEX_ENTRY.replace("input_tokens\":10", "input_tokens\":11");
+        assert_eq!(replacement_contents.len(), FIRST_CODEX_ENTRY.len());
+        write_file(&replacement, &replacement_contents);
+        std::fs::File::open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let after = input_policy.snapshot().unwrap();
+        assert_eq!(before.stamp(), after.stamp());
+        assert_ne!(before.primary_identity(), after.primary_identity());
+        assert!(build_codex_cache_metadata(
+            &path,
+            parsed.consumed_offset,
+            parsed.state,
+            parsed.ends_with_newline,
+            parsed.content_hash.unwrap(),
+            before,
+            parsed.source_identity.unwrap(),
+        )
+        .is_none());
     }
 
     #[test]

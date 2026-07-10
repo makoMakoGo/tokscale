@@ -118,7 +118,7 @@ fn source_unit_for_policy(
     match fingerprint_policy {
         FingerprintPolicy::PlainFile => SourceUnit::plain_file(client, path),
         FingerprintPolicy::SqliteWithWal => SourceUnit::sqlite_with_wal(client, path),
-        FingerprintPolicy::ClaudeCodeWithHome { home_dir } => {
+        FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
             SourceUnit::claude_code(client, path, home_dir.clone())
         }
         FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
