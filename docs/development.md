@@ -16,6 +16,7 @@ packages/
 
 docs/
   adr/                  architecture decisions
+  performance/          measured optimization and regression reports
   releases.md           fork release and recovery procedure
   upstream/             upstream port logs
 ```
@@ -53,6 +54,10 @@ cargo test -p tokscale-cli
 
 When running Tokscale itself from automated scripts, pass `--no-spinner` unless
 spinner behavior is what you are testing.
+
+Measured performance work must keep its command, corpus facts, raw samples, and
+cumulative comparison under `docs/performance/`. Do not replace an earlier
+baseline row when a later implementation changes the result.
 
 ## Client identity
 

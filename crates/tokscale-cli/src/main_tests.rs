@@ -694,6 +694,17 @@ fn clap_accepts_models_light_write_cache_after_subcommand() {
 }
 
 #[test]
+fn clap_accepts_source_cache_prune_command() {
+    let cli = Cli::try_parse_from(["tokscale", "cache", "prune"]).expect("cache prune parses");
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Cache {
+            subcommand: CacheSubcommand::Prune
+        })
+    ));
+}
+
+#[test]
 fn clap_accepts_cursor_sync_command() {
     assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_ok());
     assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());

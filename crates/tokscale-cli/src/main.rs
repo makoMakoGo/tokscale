@@ -7,7 +7,7 @@ mod trae;
 mod tui;
 mod warp;
 
-use commands::cache::run_warm_tui_cache;
+use commands::cache::{run_source_cache_prune, run_warm_tui_cache};
 use commands::clients::run_clients_command;
 use commands::graph::run_graph_command;
 use commands::headless::run_headless_command;
@@ -266,6 +266,11 @@ enum Commands {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
+    #[command(about = "Maintain local Tokscale caches")]
+    Cache {
+        #[command(subcommand)]
+        subcommand: CacheSubcommand,
+    },
     #[command(about = "Codex account integration commands")]
     Codex {
         #[command(subcommand)]
@@ -306,6 +311,12 @@ enum Commands {
     },
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
     WarmTuiCache,
+}
+
+#[derive(Subcommand)]
+enum CacheSubcommand {
+    #[command(about = "Remove orphaned and superseded source-message cache shards")]
+    Prune,
 }
 
 #[derive(Subcommand)]
@@ -694,6 +705,12 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "usage")?;
             reject_usage_parent_flags(&matches)?;
             commands::usage::run(json)
+        }
+        Some(Commands::Cache { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "cache")?;
+            match subcommand {
+                CacheSubcommand::Prune => run_source_cache_prune(),
+            }
         }
         Some(Commands::Codex { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "codex")?;

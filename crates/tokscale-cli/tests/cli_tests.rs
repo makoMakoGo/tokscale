@@ -860,6 +860,38 @@ fn test_clients_command_help() {
 }
 
 #[test]
+fn test_cache_prune_reports_empty_cache_stats() {
+    let config_dir = TempDir::new().unwrap();
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    cmd.env("TOKSCALE_CONFIG_DIR", config_dir.path())
+        .args(["--no-spinner", "cache", "prune"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Source cache prune: scanned 0, removed 0, retained 0.",
+        ));
+}
+
+#[test]
+fn test_cache_prune_surfaces_shard_decode_errors() {
+    let config_dir = TempDir::new().unwrap();
+    let shard = config_dir.path().join("cache/shards/ff/invalid.bin");
+    fs::create_dir_all(shard.parent().unwrap()).unwrap();
+    let mut bytes = 1_u64.to_le_bytes().to_vec();
+    bytes.push(0xff);
+    fs::write(&shard, bytes).unwrap();
+
+    let mut cmd = cargo_bin_cmd!("tokscale");
+    cmd.env("TOKSCALE_CONFIG_DIR", config_dir.path())
+        .args(["--no-spinner", "cache", "prune"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "failed to decode source cache shard",
+        ));
+}
+
+#[test]
 fn test_codex_command_help() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("codex")

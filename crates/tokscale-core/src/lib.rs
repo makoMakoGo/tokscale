@@ -30,6 +30,7 @@ pub use clients::{
     warp_sqlite_roots_with_env_strategy, ClientCounts, ClientId, ClientIdentity, LocalClientDef,
     PathRoot,
 };
+pub use message_cache::{prune_source_message_cache, SourceCachePruneError, SourceCachePruneStats};
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
 pub use sessionize::{
     compute_daily_active_time, compute_time_metrics, sessionize, sessionize_time_intervals,
@@ -503,7 +504,6 @@ fn fold_local_sources_with_pricing(
 ) -> Result<(), String> {
     let selected_adapters = adapters::selected_adapters(clients);
     let mut source_cache = message_cache::SourceMessageCache::load();
-    source_cache.prune_missing_files();
 
     let scan_ctx = adapters::AdapterScanContext {
         home_dir,

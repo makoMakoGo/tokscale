@@ -23,6 +23,45 @@ const FINGERPRINT_SAMPLE_BYTES: usize = 4096;
 const FINGERPRINT_SAMPLE_POINTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceCachePruneStats {
+    pub scanned: usize,
+    pub removed: usize,
+    pub retained: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SourceCachePruneError {
+    #[error("source cache directory is unavailable")]
+    CacheDirectoryUnavailable,
+    #[error("failed to {operation} `{path}`: {source}")]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to decode source cache shard `{path}`: {reason}")]
+    Decode { path: PathBuf, reason: String },
+}
+
+impl SourceCachePruneError {
+    fn io(operation: &'static str, path: &Path, source: std::io::Error) -> Self {
+        Self::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
+    fn decode(path: &Path, reason: impl Into<String>) -> Self {
+        Self::Decode {
+            path: path.to_path_buf(),
+            reason: reason.into(),
+        }
+    }
+}
+
 pub(crate) type ParserRevision = u32;
 
 // Persisted in source-cache shard keys and headers. Append new variants only;
@@ -664,32 +703,6 @@ impl SourceMessageCache {
         self.dirty = true;
     }
 
-    pub(crate) fn prune_missing_files(&mut self) {
-        let removed_dirty_paths: Vec<CachedSourceKey> = self
-            .dirty_entries
-            .keys()
-            .filter(|key| !key.to_path_buf().exists())
-            .cloned()
-            .collect();
-        for key in removed_dirty_paths {
-            self.dirty_entries.remove(&key);
-            self.deleted_paths.insert(key);
-            self.dirty = true;
-        }
-
-        let Some(shards_dir) = self.shards_dir() else {
-            return;
-        };
-        for shard_path in shard_paths(&shards_dir) {
-            let Some(header) = read_shard_header(&shard_path) else {
-                continue;
-            };
-            if !header.path.to_path_buf().exists() {
-                let _ = fs::remove_file(shard_path);
-            }
-        }
-    }
-
     pub(crate) fn save_if_dirty(&mut self) {
         if !self.dirty {
             return;
@@ -727,13 +740,96 @@ impl SourceMessageCache {
         self.taken_paths.clear();
     }
 
-    fn shards_dir(&self) -> Option<PathBuf> {
-        Some(self.cache_dir.as_ref()?.join(SHARDS_DIRNAME))
-    }
-
     fn shard_path_for_source_key(&self, key: &CachedSourceKey) -> Option<PathBuf> {
         shard_path_for_source_key(self.cache_dir.as_ref()?, key)
     }
+}
+
+struct PrunableShard {
+    path: PathBuf,
+    header: CachedShardHeader,
+    source_exists: bool,
+    canonical_path: bool,
+}
+
+/// Explicitly garbage-collect source-message cache shards.
+///
+/// Ordinary report and TUI loads intentionally do not call this function. The
+/// caller is responsible for exposing this potentially expensive full-cache
+/// traversal as an explicit maintenance operation.
+pub fn prune_source_message_cache() -> Result<SourceCachePruneStats, SourceCachePruneError> {
+    let cache_dir = cache_dir().ok_or(SourceCachePruneError::CacheDirectoryUnavailable)?;
+    let shards_dir = cache_dir.join(SHARDS_DIRNAME);
+    let shard_paths = shard_paths_for_prune(&shards_dir)?;
+    let mut shards = Vec::with_capacity(shard_paths.len());
+    let mut latest_revisions: HashMap<(CachedPath, ParserId), ParserRevision> = HashMap::new();
+    let mut source_existence: HashMap<CachedPath, bool> = HashMap::new();
+
+    for shard_path in shard_paths {
+        let header = read_shard_header_for_prune(&shard_path)?;
+        let key = CachedSourceKey {
+            path: header.path.clone(),
+            parser_version: header.parser_version,
+        };
+        let canonical_path = shard_path_for_source_key(&cache_dir, &key)
+            .is_some_and(|expected| expected == shard_path);
+        let source_exists = if header.format_version == CACHE_FORMAT_VERSION {
+            match source_existence.get(&header.path) {
+                Some(exists) => *exists,
+                None => {
+                    let source_path = header.path.to_path_buf();
+                    let exists = source_path.try_exists().map_err(|source| {
+                        SourceCachePruneError::io("inspect source path", &source_path, source)
+                    })?;
+                    source_existence.insert(header.path.clone(), exists);
+                    exists
+                }
+            }
+        } else {
+            false
+        };
+
+        if header.format_version == CACHE_FORMAT_VERSION && source_exists && canonical_path {
+            latest_revisions
+                .entry((header.path.clone(), header.parser_version.parser_id))
+                .and_modify(|revision| *revision = (*revision).max(header.parser_version.revision))
+                .or_insert(header.parser_version.revision);
+        }
+
+        shards.push(PrunableShard {
+            path: shard_path,
+            header,
+            source_exists,
+            canonical_path,
+        });
+    }
+
+    let scanned = shards.len();
+    let mut removed = 0;
+    for shard in shards {
+        let latest_revision = latest_revisions.get(&(
+            shard.header.path.clone(),
+            shard.header.parser_version.parser_id,
+        ));
+        let stale_revision =
+            latest_revision.is_some_and(|latest| shard.header.parser_version.revision < *latest);
+        let should_remove = shard.header.format_version != CACHE_FORMAT_VERSION
+            || !shard.source_exists
+            || !shard.canonical_path
+            || stale_revision;
+        if should_remove {
+            fs::remove_file(&shard.path).map_err(|source| {
+                SourceCachePruneError::io("remove source cache shard", &shard.path, source)
+            })?;
+            removed += 1;
+        }
+    }
+
+    Ok(SourceCachePruneStats {
+        scanned,
+        removed,
+        retained: scanned - removed,
+    })
 }
 
 fn delete_monolithic_cache_files() {
@@ -905,31 +1001,91 @@ fn write_shard_borrowed(
     })
 }
 
-fn shard_paths(shards_dir: &Path) -> Vec<PathBuf> {
+fn shard_paths_for_prune(shards_dir: &Path) -> Result<Vec<PathBuf>, SourceCachePruneError> {
     let mut paths = Vec::new();
-    let Ok(prefixes) = fs::read_dir(shards_dir) else {
-        return paths;
-    };
-    for prefix in prefixes.flatten() {
-        let Ok(file_type) = prefix.file_type() else {
-            continue;
-        };
+    let exists = shards_dir.try_exists().map_err(|source| {
+        SourceCachePruneError::io("inspect source cache shard directory", shards_dir, source)
+    })?;
+    if !exists {
+        return Ok(paths);
+    }
+
+    let prefixes = fs::read_dir(shards_dir).map_err(|source| {
+        SourceCachePruneError::io("read source cache shard directory", shards_dir, source)
+    })?;
+    for prefix in prefixes {
+        let prefix = prefix.map_err(|source| {
+            SourceCachePruneError::io(
+                "read source cache shard directory entry",
+                shards_dir,
+                source,
+            )
+        })?;
+        let prefix_path = prefix.path();
+        let file_type = prefix.file_type().map_err(|source| {
+            SourceCachePruneError::io("inspect source cache shard prefix", &prefix_path, source)
+        })?;
         if !file_type.is_dir() {
             continue;
         }
-        let Ok(files) = fs::read_dir(prefix.path()) else {
-            continue;
-        };
-        for file in files.flatten() {
-            let Ok(file_type) = file.file_type() else {
-                continue;
-            };
-            if file_type.is_file() && file.path().extension().is_some_and(|ext| ext == "bin") {
-                paths.push(file.path());
+        let files = fs::read_dir(&prefix_path).map_err(|source| {
+            SourceCachePruneError::io("read source cache shard prefix", &prefix_path, source)
+        })?;
+        for file in files {
+            let file = file.map_err(|source| {
+                SourceCachePruneError::io("read source cache shard entry", &prefix_path, source)
+            })?;
+            let file_path = file.path();
+            let file_type = file.file_type().map_err(|source| {
+                SourceCachePruneError::io("inspect source cache shard", &file_path, source)
+            })?;
+            if file_type.is_file()
+                && file_path
+                    .extension()
+                    .is_some_and(|extension| extension == "bin")
+            {
+                paths.push(file_path);
             }
         }
     }
-    paths
+    paths.sort_unstable();
+    Ok(paths)
+}
+
+fn read_shard_header_for_prune(path: &Path) -> Result<CachedShardHeader, SourceCachePruneError> {
+    let mut file = File::open(path)
+        .map_err(|source| SourceCachePruneError::io("open source cache shard", path, source))?;
+    let file_len = file
+        .metadata()
+        .map_err(|source| SourceCachePruneError::io("inspect source cache shard", path, source))?
+        .len();
+    if file_len > MAX_CACHE_FILE_BYTES {
+        return Err(SourceCachePruneError::decode(
+            path,
+            format!("shard is {file_len} bytes; limit is {MAX_CACHE_FILE_BYTES} bytes"),
+        ));
+    }
+
+    let mut len_bytes = [0_u8; 8];
+    file.read_exact(&mut len_bytes).map_err(|source| {
+        SourceCachePruneError::io("read source cache shard header", path, source)
+    })?;
+    let header_len = u64::from_le_bytes(len_bytes);
+    if header_len == 0 || header_len > MAX_SHARD_HEADER_BYTES {
+        return Err(SourceCachePruneError::decode(
+            path,
+            format!("invalid header length {header_len}"),
+        ));
+    }
+
+    let mut header_bytes = vec![0_u8; header_len as usize];
+    file.read_exact(&mut header_bytes).map_err(|source| {
+        SourceCachePruneError::io("read source cache shard header", path, source)
+    })?;
+    bincode::options()
+        .with_limit(MAX_SHARD_HEADER_BYTES)
+        .deserialize(&header_bytes)
+        .map_err(|source| SourceCachePruneError::decode(path, source.to_string()))
 }
 
 fn read_sample_hash(file: &mut File, offset: u64, len: usize) -> Option<FileSampleHash> {
@@ -1549,20 +1705,113 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_prune_missing_files_removes_deleted_shards() {
+    fn test_explicit_prune_removes_orphans_and_old_parser_revisions() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
-        let file = write_temp_file(b"{}\n");
-        let path = file.path().to_path_buf();
+        let live_source = write_temp_file(b"live\n");
+        let orphan_source = write_temp_file(b"orphan\n");
+        let orphan_path = orphan_source.path().to_path_buf();
+        let mut cache = SourceMessageCache::load();
+        for (path, revision) in [
+            (live_source.path(), 1),
+            (live_source.path(), 3),
+            (orphan_source.path(), 2),
+        ] {
+            cache.insert(CachedSourceEntry::new_with_revision(
+                path,
+                revision,
+                SourceFingerprint::from_path(path).unwrap(),
+                vec![UnifiedMessage::new(
+                    "client",
+                    "gpt-5",
+                    "provider",
+                    format!("session-{revision}"),
+                    1,
+                    TokenBreakdown {
+                        input: 1,
+                        output: 0,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    0.0,
+                )],
+                Vec::new(),
+                None,
+            ));
+        }
+        cache.save_if_dirty();
+        let stale_revision_shard = shard_path(live_source.path(), test_parser_version(1)).unwrap();
+        let current_revision_shard =
+            shard_path(live_source.path(), test_parser_version(3)).unwrap();
+        let orphan_shard = shard_path(&orphan_path, test_parser_version(2)).unwrap();
+        assert!(stale_revision_shard.exists());
+        assert!(current_revision_shard.exists());
+        assert!(orphan_shard.exists());
+
+        drop(orphan_source);
+        let stats = prune_source_message_cache().unwrap();
+
+        assert_eq!(
+            stats,
+            SourceCachePruneStats {
+                scanned: 3,
+                removed: 2,
+                retained: 1,
+            }
+        );
+        assert!(!stale_revision_shard.exists());
+        assert!(current_revision_shard.exists());
+        assert!(!orphan_shard.exists());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_explicit_prune_returns_shard_decode_errors() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+
+        let invalid_shard = cache_dir()
+            .unwrap()
+            .join(SHARDS_DIRNAME)
+            .join("ff")
+            .join("invalid.bin");
+        ensure_cache_dir(invalid_shard.parent().unwrap()).unwrap();
+        let mut file = File::create(&invalid_shard).unwrap();
+        file.write_all(&1_u64.to_le_bytes()).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.flush().unwrap();
+
+        let error = prune_source_message_cache().unwrap_err();
+        assert!(matches!(error, SourceCachePruneError::Decode { .. }));
+        assert!(
+            invalid_shard.exists(),
+            "failed maintenance must not hide the bad shard"
+        );
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_report_load_does_not_prune_orphaned_source_shards() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(cache_home.path());
+
+        let source = write_temp_file(b"{}\n");
+        let path = source.path().to_path_buf();
         let mut cache = SourceMessageCache::load();
         cache.insert(CachedSourceEntry::new(
             &path,
             SourceFingerprint::from_path(&path).unwrap(),
             vec![UnifiedMessage::new(
-                "client",
+                "opencode",
                 "gpt-5",
-                "provider",
+                "openai",
                 "session-1",
                 1,
                 TokenBreakdown {
@@ -1581,11 +1830,18 @@ mod tests {
         let shard = shard_path(&path, test_parser_version(1)).unwrap();
         assert!(shard.exists());
 
-        std::fs::remove_file(&path).unwrap();
-        cache.prune_missing_files();
+        drop(source);
+        crate::parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["qwen".to_string()],
+            None,
+        )
+        .unwrap();
 
-        assert!(!shard.exists());
-        assert!(cache.get_meta(&path, test_parser_version(1)).is_none());
+        assert!(
+            shard.exists(),
+            "ordinary report loads must not perform source-cache garbage collection"
+        );
 
         restore_cache_env(prev_env);
     }
@@ -2009,87 +2265,6 @@ mod tests {
             replacement_messages[0].session_id.as_ref(),
             "replacement-session"
         );
-
-        restore_cache_env(prev_env);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_save_if_dirty_preserves_recreated_path_from_concurrent_writer() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
-
-        {
-            let source_dir = TempDir::new().unwrap();
-            let path = source_dir.path().join("session.jsonl");
-            std::fs::write(&path, b"{\"id\":\"old\"}\n").unwrap();
-
-            let mut seed = SourceMessageCache::load();
-            seed.insert(CachedSourceEntry::new(
-                &path,
-                SourceFingerprint::from_path(&path).unwrap(),
-                vec![UnifiedMessage::new(
-                    "client",
-                    "gpt-5",
-                    "provider",
-                    "old-session",
-                    1,
-                    TokenBreakdown {
-                        input: 1,
-                        output: 0,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
-                    0.0,
-                )],
-                Vec::new(),
-                None,
-            ));
-            seed.save_if_dirty();
-
-            let mut stale_deleter = SourceMessageCache::load();
-            std::fs::remove_file(&path).unwrap();
-            stale_deleter.prune_missing_files();
-
-            std::fs::write(&path, b"{\"id\":\"fresh\"}\n").unwrap();
-            let mut fresh_writer = SourceMessageCache::load();
-            fresh_writer.insert(CachedSourceEntry::new(
-                &path,
-                SourceFingerprint::from_path(&path).unwrap(),
-                vec![UnifiedMessage::new(
-                    "client",
-                    "gpt-5",
-                    "provider",
-                    "fresh-session",
-                    2,
-                    TokenBreakdown {
-                        input: 2,
-                        output: 0,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
-                    0.0,
-                )],
-                Vec::new(),
-                None,
-            ));
-            fresh_writer.save_if_dirty();
-
-            stale_deleter.save_if_dirty();
-
-            let mut loaded = SourceMessageCache::load();
-            let fingerprint = SourceFingerprint::from_path(&path).unwrap();
-            let messages = loaded
-                .take_messages(&CacheReadPlan::new(
-                    &path,
-                    test_parser_version(1),
-                    fingerprint,
-                ))
-                .expect("recreated source cache entry should survive stale delete");
-            assert_eq!(messages[0].session_id.as_ref(), "fresh-session");
-        }
 
         restore_cache_env(prev_env);
     }

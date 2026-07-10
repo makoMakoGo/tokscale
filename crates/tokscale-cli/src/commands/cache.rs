@@ -107,6 +107,15 @@ pub(crate) fn can_write_light_cache(home_dir: &Option<String>) -> bool {
     home_dir.is_none()
 }
 
+pub(crate) fn run_source_cache_prune() -> Result<()> {
+    let stats = tokscale_core::prune_source_message_cache()?;
+    println!(
+        "Source cache prune: scanned {}, removed {}, retained {}.",
+        stats.scanned, stats.removed, stats.retained
+    );
+    Ok(())
+}
+
 pub(crate) fn run_warm_tui_cache() -> Result<()> {
     use crate::tui::{save_cached_data, CacheReportScope, DataLoader, TUI_DEFAULT_GROUP_BY};
     use tokscale_core::ClientId;

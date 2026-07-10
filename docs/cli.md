@@ -92,6 +92,19 @@ tokscale clients --json
 
 This shows scan locations and session counts for local clients.
 
+## Cache maintenance
+
+```bash
+tokscale cache prune
+```
+
+This explicitly scans every source-message cache shard, removes shards whose
+source file no longer exists, and removes older parser revisions when a newer
+revision exists for the same source and parser. It prints the scanned, removed,
+and retained shard counts. Normal reports and TUI loads do not run this full
+cache traversal. If a shard cannot be read or decoded, or a selected shard
+cannot be removed, the command fails instead of reporting a partial success.
+
 ## Pricing lookup
 
 ```bash
