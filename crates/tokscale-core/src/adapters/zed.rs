@@ -4,9 +4,10 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit,
+    ParseContext, ParsedUnit, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
 pub(crate) struct ZedAdapter;
@@ -60,6 +61,14 @@ impl LocalSourceAdapter for ZedAdapter {
             paths,
             FingerprintPolicy::SqliteWithWal,
         )
+        .into_iter()
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(
+                ParserId::Zed,
+                EXPLICIT_TOKEN_OVERFLOW_REVISION,
+            ))
+        })
+        .collect()
     }
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {

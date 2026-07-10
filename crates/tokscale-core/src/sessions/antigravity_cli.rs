@@ -95,12 +95,19 @@ fn parse_gen_metadata(
         .filter(|ms| *ms > 0)
         .unwrap_or(session_timestamp);
 
-    let to_i64 = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
-    let input = to_i64(varint_field(usage, 1).unwrap_or(0))
-        .saturating_add(to_i64(varint_field(usage, 2).unwrap_or(0)));
-    let cache_read = to_i64(varint_field(usage, 5).unwrap_or(0));
-    let output = to_i64(varint_field(usage, 9).unwrap_or(0));
-    let reasoning = to_i64(varint_field(usage, 10).unwrap_or(0));
+    let to_i64 = |field: &str, value: u64| {
+        i64::try_from(value)
+            .unwrap_or_else(|_| panic!("Antigravity CLI {field} token count exceeds i64::MAX"))
+    };
+    let input = to_i64("input", varint_field(usage, 1).unwrap_or(0))
+        .checked_add(to_i64(
+            "input-attributed cache",
+            varint_field(usage, 2).unwrap_or(0),
+        ))
+        .expect("Antigravity CLI input token total exceeds i64::MAX");
+    let cache_read = to_i64("cache read", varint_field(usage, 5).unwrap_or(0));
+    let output = to_i64("output", varint_field(usage, 9).unwrap_or(0));
+    let reasoning = to_i64("reasoning", varint_field(usage, 10).unwrap_or(0));
     if input == 0 && cache_read == 0 && output == 0 && reasoning == 0 {
         return None;
     }
@@ -659,7 +666,8 @@ mod tests {
     }
 
     #[test]
-    fn overlarge_varint_token_counts_are_clamped_not_wrapped() {
+    #[should_panic(expected = "Antigravity CLI input token count exceeds i64::MAX")]
+    fn overlarge_varint_token_counts_fail_explicitly() {
         let mut usage = Vec::new();
         usage.extend(enc_varint(1, u64::MAX));
         usage.extend(enc_varint(2, 10));
@@ -673,9 +681,7 @@ mod tests {
         let blob = enc_len(1, &chat_model);
 
         let mut seen = HashSet::new();
-        let message = parse_gen_metadata(&blob, "session", 1_000, &mut seen).unwrap();
-        assert_eq!(message.tokens.input, i64::MAX);
-        assert_eq!(message.tokens.output, i64::MAX);
+        let _ = parse_gen_metadata(&blob, "session", 1_000, &mut seen);
     }
 
     #[test]

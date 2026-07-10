@@ -304,11 +304,10 @@ impl SessionBlockAcc<UnifiedMessage> for AccountingSessionBlock {
 
     fn add(&mut self, span: &SessionMessageSpan<'_, UnifiedMessage>) {
         self.end_ts = self.end_ts.max(span.end_ts);
-        self.tokens.input += span.row.tokens.input;
-        self.tokens.output += span.row.tokens.output;
-        self.tokens.cache_read += span.row.tokens.cache_read;
-        self.tokens.cache_write += span.row.tokens.cache_write;
-        self.tokens.reasoning += span.row.tokens.reasoning;
+        self.tokens = self
+            .tokens
+            .checked_add(&span.row.tokens)
+            .expect("session token buckets exceed i64::MAX");
         self.cost += span.row.cost;
         self.message_count += span.row.message_count.max(1);
     }
@@ -749,6 +748,17 @@ mod tests {
         assert_eq!(result[0].wall_duration_ms, 0);
         assert_eq!(result[0].active_duration_ms, 0);
         assert_eq!(result[0].message_count, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "session token buckets exceed i64::MAX")]
+    fn test_sessionize_rejects_overflowing_token_fold() {
+        let mut first = make_msg("antigravity-cli", "ses1", 1_000_000);
+        first.tokens.input = i64::MAX;
+        let mut second = make_msg("antigravity-cli", "ses1", 1_001_000);
+        second.tokens.input = 1;
+
+        let _ = sessionize(&[first, second], DEFAULT_IDLE_GAP_MS);
     }
 
     #[test]

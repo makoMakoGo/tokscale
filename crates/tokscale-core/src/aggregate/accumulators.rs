@@ -10,7 +10,8 @@ use std::{
 
 use crate::{
     aggregate::keys::{grouped_model_bucket_key, workspace_bucket},
-    ordered_clients_by_token_contribution, positive_token_total,
+    checked_token_add, checked_token_sum, ordered_clients_by_token_contribution,
+    positive_token_total,
     sessionize::SessionTimeEvent,
     ClientContribution, ClientContributionOrder, DailyContribution, DailyTotals, GraphResult,
     GroupBy, HourlyUsage, ModelPerformance, ModelUsage, MonthlyUsage, SessionContribution,
@@ -18,6 +19,12 @@ use crate::{
 };
 
 use super::{finish_graph_result, views::AgentUsage};
+
+fn add_token_breakdown(target: &mut TokenBreakdown, source: &TokenBreakdown) {
+    *target = target
+        .checked_add(source)
+        .expect("token buckets exceed i64::MAX while aggregating usage");
+}
 
 fn hourly_label(hour_key: &str) -> String {
     // `hourly_report_label` returns `key[5..]` ("MM-DD HH:00"). Kept inline to
@@ -104,7 +111,8 @@ impl ModelEntries {
                 });
             totals.total_tokens = totals
                 .total_tokens
-                .saturating_add(msg.tokens.total().max(0) as u64);
+                .checked_add(msg.tokens.total().max(0) as u64)
+                .expect("client token contribution exceeds u64::MAX");
         }
 
         if *group_by != GroupBy::ClientProviderModel
@@ -113,11 +121,11 @@ impl ModelEntries {
             entry.provider = format!("{}, {}", entry.provider, provider);
         }
 
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
+        entry.input = checked_token_add(entry.input, msg.tokens.input);
+        entry.output = checked_token_add(entry.output, msg.tokens.output);
+        entry.cache_read = checked_token_add(entry.cache_read, msg.tokens.cache_read);
+        entry.cache_write = checked_token_add(entry.cache_write, msg.tokens.cache_write);
+        entry.reasoning = checked_token_add(entry.reasoning, msg.tokens.reasoning);
         entry.message_count += msg.message_count.max(0);
         entry.cost += msg.cost;
         entry
@@ -142,11 +150,13 @@ impl ModelEntries {
                     }
                 }
 
-                let total_tokens = entry.input.max(0)
-                    + entry.output.max(0)
-                    + entry.cache_read.max(0)
-                    + entry.cache_write.max(0)
-                    + entry.reasoning.max(0);
+                let total_tokens = checked_token_sum([
+                    entry.input.max(0),
+                    entry.output.max(0),
+                    entry.cache_read.max(0),
+                    entry.cache_write.max(0),
+                    entry.reasoning.max(0),
+                ]);
                 entry.performance.finalize(total_tokens);
                 let mut providers: Vec<&str> = entry.provider.split(", ").collect();
                 providers.sort_unstable();
@@ -203,10 +213,10 @@ impl MonthAcc {
 
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         self.models.insert(msg.model_id.to_string());
-        self.input += msg.tokens.input;
-        self.output += msg.tokens.output;
-        self.cache_read += msg.tokens.cache_read;
-        self.cache_write += msg.tokens.cache_write;
+        self.input = checked_token_add(self.input, msg.tokens.input);
+        self.output = checked_token_add(self.output, msg.tokens.output);
+        self.cache_read = checked_token_add(self.cache_read, msg.tokens.cache_read);
+        self.cache_write = checked_token_add(self.cache_write, msg.tokens.cache_write);
         self.message_count += msg.message_count.max(0);
         self.cost += msg.cost;
     }
@@ -270,11 +280,11 @@ impl HourAcc {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
         self.clients.insert(msg.client.to_string());
         self.models.insert(msg.model_id.to_string());
-        self.input += msg.tokens.input;
-        self.output += msg.tokens.output;
-        self.cache_read += msg.tokens.cache_read;
-        self.cache_write += msg.tokens.cache_write;
-        self.reasoning += msg.tokens.reasoning;
+        self.input = checked_token_add(self.input, msg.tokens.input);
+        self.output = checked_token_add(self.output, msg.tokens.output);
+        self.cache_read = checked_token_add(self.cache_read, msg.tokens.cache_read);
+        self.cache_write = checked_token_add(self.cache_write, msg.tokens.cache_write);
+        self.reasoning = checked_token_add(self.reasoning, msg.tokens.reasoning);
         self.message_count += msg.message_count.max(0);
         if msg.is_turn_start {
             self.turn_count += 1;
@@ -325,38 +335,16 @@ pub(super) struct DailyAcc {
 
 impl DailyAcc {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
-        let total_tokens = msg
-            .tokens
-            .input
-            .saturating_add(msg.tokens.output)
-            .saturating_add(msg.tokens.cache_read)
-            .saturating_add(msg.tokens.cache_write)
-            .saturating_add(msg.tokens.reasoning);
+        let total_tokens = msg.tokens.total();
 
-        self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
+        self.totals.tokens = checked_token_add(self.totals.tokens, total_tokens);
         self.totals.cost += msg.cost;
         self.totals.messages = self
             .totals
             .messages
             .saturating_add(msg.message_count.max(0));
 
-        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(msg.tokens.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        add_token_breakdown(&mut self.token_breakdown, &msg.tokens);
 
         let model_id = msg.model_id.as_ref();
         let client = msg.client.to_string();
@@ -383,20 +371,7 @@ impl DailyAcc {
             client_entry.provider_id = format!("{}, {}", client_entry.provider_id, provider_id);
         }
 
-        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
-        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
-        client_entry.tokens.cache_read = client_entry
-            .tokens
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        client_entry.tokens.cache_write = client_entry
-            .tokens
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        client_entry.tokens.reasoning = client_entry
-            .tokens
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        add_token_breakdown(&mut client_entry.tokens, &msg.tokens);
         client_entry.cost += msg.cost;
         client_entry.messages = client_entry
             .messages
@@ -518,38 +493,16 @@ impl Default for SessionAcc {
 
 impl SessionAcc {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
-        let total_tokens = msg
-            .tokens
-            .input
-            .saturating_add(msg.tokens.output)
-            .saturating_add(msg.tokens.cache_read)
-            .saturating_add(msg.tokens.cache_write)
-            .saturating_add(msg.tokens.reasoning);
+        let total_tokens = msg.tokens.total();
 
-        self.totals.tokens = self.totals.tokens.saturating_add(total_tokens);
+        self.totals.tokens = checked_token_add(self.totals.tokens, total_tokens);
         self.totals.cost += msg.cost;
         self.totals.messages = self
             .totals
             .messages
             .saturating_add(msg.message_count.max(0));
 
-        self.token_breakdown.input = self.token_breakdown.input.saturating_add(msg.tokens.input);
-        self.token_breakdown.output = self
-            .token_breakdown
-            .output
-            .saturating_add(msg.tokens.output);
-        self.token_breakdown.cache_read = self
-            .token_breakdown
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        self.token_breakdown.cache_write = self
-            .token_breakdown
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        self.token_breakdown.reasoning = self
-            .token_breakdown
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        add_token_breakdown(&mut self.token_breakdown, &msg.tokens);
 
         let client = msg.client.to_string();
         let provider_id = msg.provider_id.as_ref();
@@ -567,20 +520,7 @@ impl SessionAcc {
                 messages: 0,
             });
 
-        client_entry.tokens.input = client_entry.tokens.input.saturating_add(msg.tokens.input);
-        client_entry.tokens.output = client_entry.tokens.output.saturating_add(msg.tokens.output);
-        client_entry.tokens.cache_read = client_entry
-            .tokens
-            .cache_read
-            .saturating_add(msg.tokens.cache_read);
-        client_entry.tokens.cache_write = client_entry
-            .tokens
-            .cache_write
-            .saturating_add(msg.tokens.cache_write);
-        client_entry.tokens.reasoning = client_entry
-            .tokens
-            .reasoning
-            .saturating_add(msg.tokens.reasoning);
+        add_token_breakdown(&mut client_entry.tokens, &msg.tokens);
         client_entry.cost += msg.cost;
         client_entry.messages = client_entry
             .messages
@@ -711,11 +651,7 @@ impl AgentEntries {
                 message_count: 0,
             });
 
-        entry.tokens.input += msg.tokens.input;
-        entry.tokens.output += msg.tokens.output;
-        entry.tokens.cache_read += msg.tokens.cache_read;
-        entry.tokens.cache_write += msg.tokens.cache_write;
-        entry.tokens.reasoning += msg.tokens.reasoning;
+        add_token_breakdown(&mut entry.tokens, &msg.tokens);
         entry.cost += msg.cost;
         entry.message_count += msg.message_count.max(0);
     }

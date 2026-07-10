@@ -3984,7 +3984,8 @@ fn test_finalize_token_priced_messages_preserves_owl_provider_identity() {
 }
 
 #[test]
-fn test_positive_token_total_saturates() {
+#[should_panic(expected = "token count exceeds i64::MAX while aggregating usage")]
+fn test_positive_token_total_rejects_overflow() {
     let tokens = TokenBreakdown {
         input: i64::MAX,
         output: i64::MAX,
@@ -3993,7 +3994,45 @@ fn test_positive_token_total_saturates() {
         reasoning: i64::MAX,
     };
 
-    assert_eq!(positive_token_total(&tokens), i64::MAX);
+    let _ = positive_token_total(&tokens);
+}
+
+#[test]
+#[should_panic(expected = "token total exceeds i64::MAX")]
+fn test_token_breakdown_total_rejects_overflow() {
+    let tokens = TokenBreakdown {
+        input: i64::MAX,
+        output: 1,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+    };
+
+    let _ = tokens.total();
+}
+
+#[test]
+#[should_panic(expected = "token count exceeds i64::MAX while aggregating usage")]
+fn test_model_aggregation_rejects_overflowing_bucket_fold() {
+    let message = || {
+        UnifiedMessage::new(
+            "antigravity-cli",
+            "gemini-3-pro",
+            "google",
+            "overflow-session",
+            1_700_000_000_000,
+            TokenBreakdown {
+                input: i64::MAX,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        )
+    };
+
+    let _ = aggregate_model_usage_entries(vec![message(), message()], &GroupBy::Model);
 }
 
 #[test]

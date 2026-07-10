@@ -238,7 +238,7 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
                 estimate_tokens(assistant_chars)
             };
 
-            if input + output == 0 {
+            if input == 0 && output == 0 {
                 return None;
             }
 
@@ -465,7 +465,7 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
     collect_kiro_snapshot_text(&value, &mut counts, None);
     let input = estimate_tokens(counts.prompt_chars);
     let output = estimate_tokens(counts.assistant_chars);
-    if input + output == 0 {
+    if input == 0 && output == 0 {
         return Vec::new();
     }
 
@@ -579,7 +579,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             };
             let output = estimate_tokens(response_size);
 
-            if input + output == 0 {
+            if input == 0 && output == 0 {
                 continue;
             }
 

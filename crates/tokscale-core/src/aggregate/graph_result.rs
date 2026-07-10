@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::{DailyContribution, DataSummary, GraphMeta, GraphResult, YearSummary};
+use crate::{
+    checked_token_add, checked_token_sum, DailyContribution, DataSummary, GraphMeta, GraphResult,
+    YearSummary,
+};
 
 /// Normalize `-0.0` to `0.0` so serialized reports do not display negative zero.
 fn clean_total_cost(cost: f64) -> f64 {
@@ -13,10 +16,7 @@ fn clean_total_cost(cost: f64) -> f64 {
 
 /// Calculate summary statistics for contribution graph output.
 pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
-    let total_tokens = contributions
-        .iter()
-        .map(|c| c.totals.tokens)
-        .fold(0_i64, i64::saturating_add);
+    let total_tokens = checked_token_sum(contributions.iter().map(|c| c.totals.tokens));
     let total_cost = clean_total_cost(contributions.iter().map(|c| c.totals.cost).sum());
     let active_days = contributions
         .iter()
@@ -85,7 +85,7 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         }
         let year = &contribution.date[0..4];
         let entry = years_map.entry(year.to_string()).or_default();
-        entry.tokens = entry.tokens.saturating_add(contribution.totals.tokens);
+        entry.tokens = checked_token_add(entry.tokens, contribution.totals.tokens);
         entry.cost += contribution.totals.cost;
 
         if entry.start.is_empty() || contribution.date < entry.start {
@@ -267,14 +267,14 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_summary_saturates_total_tokens() {
+    #[should_panic(expected = "token count exceeds i64::MAX while aggregating usage")]
+    fn test_calculate_summary_rejects_token_overflow() {
         let contributions = vec![
             contribution("2024-01-01", i64::MAX, 0.05, 1),
             contribution("2024-01-02", 1, 0.10, 1),
         ];
 
-        let summary = calculate_summary(&contributions);
-        assert_eq!(summary.total_tokens, i64::MAX);
+        let _ = calculate_summary(&contributions);
     }
 
     #[test]
@@ -345,15 +345,21 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_years_saturates_tokens_and_cleans_negative_zero_cost() {
+    #[should_panic(expected = "token count exceeds i64::MAX while aggregating usage")]
+    fn test_calculate_years_rejects_token_overflow() {
         let contributions = vec![
             contribution("2024-01-01", i64::MAX, -0.0, 1),
             contribution("2024-01-02", 1, 0.0, 1),
         ];
 
+        let _ = calculate_years(&contributions);
+    }
+
+    #[test]
+    fn test_calculate_years_cleans_negative_zero_cost() {
+        let contributions = vec![contribution("2024-01-01", 1, -0.0, 1)];
         let years = calculate_years(&contributions);
         assert_eq!(years.len(), 1);
-        assert_eq!(years[0].total_tokens, i64::MAX);
         assert_eq!(clean_total_cost(-0.0).to_bits(), 0.0_f64.to_bits());
         assert_eq!(years[0].total_cost.to_bits(), 0.0_f64.to_bits());
     }

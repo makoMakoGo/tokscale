@@ -165,9 +165,43 @@ pub struct TokenBreakdown {
 }
 
 impl TokenBreakdown {
-    pub fn total(&self) -> i64 {
-        self.input + self.output + self.cache_read + self.cache_write + self.reasoning
+    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+        Some(Self {
+            input: self.input.checked_add(other.input)?,
+            output: self.output.checked_add(other.output)?,
+            cache_read: self.cache_read.checked_add(other.cache_read)?,
+            cache_write: self.cache_write.checked_add(other.cache_write)?,
+            reasoning: self.reasoning.checked_add(other.reasoning)?,
+        })
     }
+
+    pub fn checked_total(&self) -> Option<i64> {
+        [
+            self.input,
+            self.output,
+            self.cache_read,
+            self.cache_write,
+            self.reasoning,
+        ]
+        .into_iter()
+        .try_fold(0_i64, i64::checked_add)
+    }
+
+    pub fn total(&self) -> i64 {
+        self.checked_total().expect("token total exceeds i64::MAX")
+    }
+}
+
+pub(crate) fn checked_token_add(left: i64, right: i64) -> i64 {
+    left.checked_add(right)
+        .expect("token count exceeds i64::MAX while aggregating usage")
+}
+
+pub(crate) fn checked_token_sum(values: impl IntoIterator<Item = i64>) -> i64 {
+    values
+        .into_iter()
+        .try_fold(0_i64, i64::checked_add)
+        .expect("token count exceeds i64::MAX while aggregating usage")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -191,7 +225,7 @@ impl ModelPerformance {
         }
 
         self.total_duration_ms = self.total_duration_ms.saturating_add(duration_ms);
-        self.timed_tokens = self.timed_tokens.saturating_add(token_total);
+        self.timed_tokens = checked_token_add(self.timed_tokens, token_total);
         self.sample_count = self.sample_count.saturating_add(1);
     }
 
@@ -743,16 +777,17 @@ fn aggregate_model_usage_entries(
 }
 
 pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
-    [
-        tokens.input,
-        tokens.output,
-        tokens.cache_read,
-        tokens.cache_write,
-        tokens.reasoning,
-    ]
-    .into_iter()
-    .map(|value| value.max(0))
-    .fold(0, i64::saturating_add)
+    checked_token_sum(
+        [
+            tokens.input,
+            tokens.output,
+            tokens.cache_read,
+            tokens.cache_write,
+            tokens.reasoning,
+        ]
+        .into_iter()
+        .map(|value| value.max(0)),
+    )
 }
 
 pub(crate) fn has_positive_tokens(tokens: &TokenBreakdown) -> bool {

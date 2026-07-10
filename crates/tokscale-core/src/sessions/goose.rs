@@ -7,7 +7,7 @@
 //! - Custom: `$GOOSE_PATH_ROOT/data/sessions/sessions.db`
 
 use super::UnifiedMessage;
-use crate::{provider_identity, TokenBreakdown};
+use crate::{checked_token_add, provider_identity, TokenBreakdown};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::path::Path;
@@ -179,6 +179,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             }
 
             let provider = resolved_provider(provider_name, &model_id);
+            let non_reasoning_tokens = checked_token_add(input, output);
             let mut msg = UnifiedMessage::new(
                 "goose",
                 model_id,
@@ -190,8 +191,8 @@ pub fn parse_goose_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                     output,
                     cache_read: 0,
                     cache_write: 0,
-                    reasoning: if total > input + output {
-                        (total - input - output).max(0)
+                    reasoning: if total > non_reasoning_tokens {
+                        total - non_reasoning_tokens
                     } else {
                         0
                     },

@@ -501,17 +501,11 @@ mod tests {
         assert_eq!(messages[0].tokens, expected_tokens[0]);
         assert_eq!(messages[1].tokens, expected_tokens[1]);
 
-        let aggregate =
-            messages
-                .iter()
-                .fold(crate::TokenBreakdown::default(), |mut acc, message| {
-                    acc.input += message.tokens.input;
-                    acc.output += message.tokens.output;
-                    acc.cache_read += message.tokens.cache_read;
-                    acc.cache_write += message.tokens.cache_write;
-                    acc.reasoning += message.tokens.reasoning;
-                    acc
-                });
+        let aggregate = messages
+            .iter()
+            .fold(crate::TokenBreakdown::default(), |acc, message| {
+                acc.checked_add(&message.tokens).unwrap()
+            });
         assert_eq!(
             aggregate,
             crate::token_imputation::impute_total_only_token_breakdown(6)

@@ -22,11 +22,7 @@ use crate::{
 };
 
 fn positive_unified_token_total(tokens: &crate::TokenBreakdown) -> i64 {
-    tokens.input.max(0)
-        + tokens.output.max(0)
-        + tokens.cache_read.max(0)
-        + tokens.cache_write.max(0)
-        + tokens.reasoning.max(0)
+    crate::positive_token_total(tokens)
 }
 
 fn grouped_model_display_label(
@@ -74,15 +70,16 @@ fn sane_cost(cost: f64) -> f64 {
 }
 
 fn add_unified_tokens(target: &mut UsageTokenBreakdown, src: &crate::TokenBreakdown) {
-    target.input = target.input.saturating_add(src.input.max(0) as u64);
-    target.output = target.output.saturating_add(src.output.max(0) as u64);
-    target.cache_read = target
-        .cache_read
-        .saturating_add(src.cache_read.max(0) as u64);
-    target.cache_write = target
-        .cache_write
-        .saturating_add(src.cache_write.max(0) as u64);
-    target.reasoning = target.reasoning.saturating_add(src.reasoning.max(0) as u64);
+    let source = UsageTokenBreakdown {
+        input: src.input.max(0) as u64,
+        output: src.output.max(0) as u64,
+        cache_read: src.cache_read.max(0) as u64,
+        cache_write: src.cache_write.max(0) as u64,
+        reasoning: src.reasoning.max(0) as u64,
+    };
+    *target = target
+        .checked_add(&source)
+        .expect("TUI token buckets exceed u64::MAX while aggregating usage");
 }
 
 /// Convert Unix ms timestamp to a NaiveDateTime truncated to the hour (local tz).
@@ -117,11 +114,9 @@ struct PeriodDescriptor {
 }
 
 fn add_tokens(target: &mut UsageTokenBreakdown, source: &UsageTokenBreakdown) {
-    target.input = target.input.saturating_add(source.input);
-    target.output = target.output.saturating_add(source.output);
-    target.cache_read = target.cache_read.saturating_add(source.cache_read);
-    target.cache_write = target.cache_write.saturating_add(source.cache_write);
-    target.reasoning = target.reasoning.saturating_add(source.reasoning);
+    *target = target
+        .checked_add(source)
+        .expect("TUI token buckets exceed u64::MAX while aggregating usage");
 }
 
 fn merge_daily_sources(
@@ -371,7 +366,9 @@ pub fn aggregate_by_period(hourly: &[HourlyUsage]) -> Vec<PeriodBucket> {
             for entry in hourly {
                 let hour = entry.datetime.hour() as usize;
                 if hours.contains(&hour) {
-                    total_tokens = total_tokens.saturating_add(entry.tokens.total());
+                    total_tokens = total_tokens
+                        .checked_add(entry.tokens.total())
+                        .expect("period token total exceeds u64::MAX");
                 }
             }
             PeriodBucket {
@@ -396,7 +393,9 @@ pub fn aggregate_by_weekday(hourly: &[HourlyUsage]) -> Vec<WeekdayBucket> {
     let mut buckets: Vec<u64> = vec![0; 7];
     for entry in hourly {
         let weekday = entry.datetime.weekday().num_days_from_monday() as usize;
-        buckets[weekday] = buckets[weekday].saturating_add(entry.tokens.total());
+        buckets[weekday] = buckets[weekday]
+            .checked_add(entry.tokens.total())
+            .expect("weekday token total exceeds u64::MAX");
     }
     weekdays
         .iter()
@@ -413,7 +412,10 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
     for entry in hourly {
         let hour = entry.datetime.hour();
         let entry_totals = hour_totals.entry(hour).or_insert((0, 0.0));
-        entry_totals.0 = entry_totals.0.saturating_add(entry.tokens.total());
+        entry_totals.0 = entry_totals
+            .0
+            .checked_add(entry.tokens.total())
+            .expect("hourly token total exceeds u64::MAX");
         entry_totals.1 += entry.cost;
     }
     hour_totals
@@ -509,7 +511,8 @@ impl TuiAcc {
                 });
             totals.total_tokens = totals
                 .total_tokens
-                .saturating_add(msg.tokens.total().max(0) as u64);
+                .checked_add(msg.tokens.total().max(0) as u64)
+                .expect("client token contribution exceeds u64::MAX");
         }
 
         if *group_by != GroupBy::ClientProviderModel

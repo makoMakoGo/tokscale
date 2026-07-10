@@ -5,7 +5,7 @@
 //! core's aggregation engine can produce them directly (#37: one aggregation
 //! site), but they stay distinct from the report types in
 //! [`crate`] (e.g. core `TokenBreakdown` is the parsed `i64` form; the
-//! [`UsageTokenBreakdown`] here is the sanitized `u64` saturating form the TUI
+//! [`UsageTokenBreakdown`] here is the sanitized `u64` form the TUI
 //! renders).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,9 +14,9 @@ use chrono::{NaiveDate, NaiveDateTime};
 
 use crate::ModelPerformance;
 
-/// Sanitized token breakdown: non-negative `u64` fields accumulated with
-/// `saturating_add`. Distinct from the core parsed `TokenBreakdown` (`i64`),
-/// which can carry negative/placeholder values from the parsers.
+/// Sanitized token breakdown with non-negative `u64` fields. Distinct from the
+/// core parsed `TokenBreakdown` (`i64`), which can carry negative/placeholder
+/// values from parsers.
 #[derive(Debug, Clone, Default)]
 pub struct UsageTokenBreakdown {
     pub input: u64,
@@ -27,12 +27,31 @@ pub struct UsageTokenBreakdown {
 }
 
 impl UsageTokenBreakdown {
+    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+        Some(Self {
+            input: self.input.checked_add(other.input)?,
+            output: self.output.checked_add(other.output)?,
+            cache_read: self.cache_read.checked_add(other.cache_read)?,
+            cache_write: self.cache_write.checked_add(other.cache_write)?,
+            reasoning: self.reasoning.checked_add(other.reasoning)?,
+        })
+    }
+
+    pub fn checked_total(&self) -> Option<u64> {
+        [
+            self.input,
+            self.output,
+            self.cache_read,
+            self.cache_write,
+            self.reasoning,
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+    }
+
     pub fn total(&self) -> u64 {
-        self.input
-            .saturating_add(self.output)
-            .saturating_add(self.cache_read)
-            .saturating_add(self.cache_write)
-            .saturating_add(self.reasoning)
+        self.checked_total()
+            .expect("TUI token total exceeds u64::MAX")
     }
 }
 

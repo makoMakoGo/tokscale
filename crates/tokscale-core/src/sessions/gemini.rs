@@ -9,7 +9,7 @@ use super::utils::{
     read_file_or_none,
 };
 use super::UnifiedMessage;
-use crate::TokenBreakdown;
+use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -235,7 +235,7 @@ fn build_gemini_token_message(
         session_id,
         timestamp,
         TokenBreakdown {
-            input: input.saturating_add(tool),
+            input: checked_token_add(input, tool),
             output: tokens.output.unwrap_or(0).max(0),
             cache_read,
             cache_write: 0,
@@ -458,7 +458,7 @@ fn subtract_cached_overlap(input: i64, cached: i64) -> (i64, i64) {
     let input = input.max(0);
     let cached = cached.max(0);
     let cached_portion = cached.min(input);
-    (input.saturating_sub(cached_portion), cached)
+    (input - cached_portion, cached)
 }
 
 fn normalize_gemini_headless_input_and_cache(input: i64, cached: i64) -> (i64, i64) {
@@ -482,11 +482,8 @@ fn normalize_gemini_session_input_and_cache(
         return (input, cached);
     };
 
-    let inclusive_total = input
-        .saturating_add(output.max(0))
-        .saturating_add(reasoning.max(0))
-        .saturating_add(tool.max(0));
-    let exclusive_total = inclusive_total.saturating_add(cached);
+    let inclusive_total = checked_token_sum([input, output.max(0), reasoning.max(0), tool.max(0)]);
+    let exclusive_total = checked_token_add(inclusive_total, cached);
 
     if cached > 0 && total == inclusive_total && total != exclusive_total {
         return subtract_cached_overlap(input, cached);
