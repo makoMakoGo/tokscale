@@ -52,8 +52,8 @@ pub fn get_config_dir() -> PathBuf {
 
 /// Resolve the tokscale cache dir as `<config_dir>/cache`.
 ///
-/// Caches (TUI display data, source-message bincode, pricing JSON, the
-/// OpenCode migration record, Wrapped fonts/images) all live under this
+/// Caches (TUI display data, source-message bincode, pricing JSON, and
+/// Wrapped fonts/images) all live under this
 /// single subdirectory so an isolated profile (`TOKSCALE_CONFIG_DIR=...`)
 /// covers everything in one shot, and so `rm -rf <cache_dir>` is always
 /// safe — no durable state mixed in.
@@ -76,8 +76,8 @@ pub fn is_config_dir_overridden() -> bool {
 /// Pre-#470 cache directory at `dirs::cache_dir()/tokscale`.
 ///
 /// On macOS this resolves to `~/Library/Caches/tokscale/` (where the
-/// source-message-cache, pricing caches, and opencode-migration.json
-/// historically lived). On Linux this resolves to `$XDG_CACHE_HOME/tokscale`
+/// source-message-cache and pricing caches historically lived). On Linux this
+/// resolves to `$XDG_CACHE_HOME/tokscale`
 /// or `~/.cache/tokscale/`.
 ///
 /// Returns `None` when `TOKSCALE_CONFIG_DIR` is set so the override stays

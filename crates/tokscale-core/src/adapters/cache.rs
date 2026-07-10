@@ -52,6 +52,90 @@ where
     load_or_parse_unit_with_policy(unit, ctx, |path| (parse(path), true))
 }
 
+pub(crate) fn load_or_parse_unit_with_result<F>(
+    mut unit: SourceUnit,
+    ctx: &ParseContext<'_>,
+    parse: F,
+) -> Result<ParsedUnit, String>
+where
+    F: Fn(&Path) -> Result<Vec<UnifiedMessage>, String>,
+{
+    if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
+        unit.release_prepared_snapshot();
+        let mut messages = parse(&unit.path)?;
+        crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
+        return Ok(ParsedUnit {
+            unit,
+            messages: UnitMessageSource::Fresh(messages),
+            cache_write: None,
+            invalidate_cache: false,
+        });
+    }
+
+    let cached = if unit.take_cache_lookup_completed_no_hit() {
+        None
+    } else {
+        ctx.source_cache.get_meta(&unit.path, unit.parser_version)
+    };
+    let input_policy = unit.source_input_policy();
+    let snapshot = unit.take_source_input_snapshot();
+    if let Some(cached) = cached {
+        let stamp = snapshot
+            .as_ref()
+            .and_then(|snapshot| input_policy.stamp_from_snapshot(snapshot));
+        if stamp.as_ref() == Some(&cached.fingerprint.stamp) && cached.has_messages {
+            return Ok(ParsedUnit {
+                messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
+                    &unit.path,
+                    unit.parser_version,
+                    cached.fingerprint,
+                )),
+                unit,
+                cache_write: None,
+                invalidate_cache: false,
+            });
+        }
+    }
+
+    let Some(fingerprint) = snapshot
+        .as_ref()
+        .and_then(|snapshot| input_policy.fingerprint_from_snapshot(snapshot))
+    else {
+        let mut messages = parse(&unit.path)?;
+        crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
+        return Ok(ParsedUnit {
+            unit,
+            messages: UnitMessageSource::Fresh(messages),
+            cache_write: None,
+            invalidate_cache: false,
+        });
+    };
+
+    let mut messages = parse(&unit.path)?;
+    crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
+    let source_unchanged = snapshot
+        .as_ref()
+        .is_some_and(|before| input_policy.snapshot().as_ref() == Some(before));
+    let cache_write = if messages.is_empty() || !source_unchanged {
+        None
+    } else {
+        Some(Box::new(message_cache::CacheWritePlan::new(
+            &unit.path,
+            unit.parser_version,
+            fingerprint,
+            Vec::new(),
+            None,
+        )))
+    };
+
+    Ok(ParsedUnit {
+        unit,
+        messages: UnitMessageSource::Fresh(messages),
+        cache_write,
+        invalidate_cache: !source_unchanged,
+    })
+}
+
 pub(crate) fn load_or_parse_unit_with_policy<F>(
     mut unit: SourceUnit,
     ctx: &ParseContext<'_>,
@@ -158,7 +242,8 @@ pub(crate) fn fold_units_with_filter<F>(
             messages,
             cache_write,
             invalidate_cache,
-        } = resolve_unit(parsed_unit, ctx);
+        } = resolve_unit(parsed_unit, ctx)
+            .expect("ordinary adapter cache recovery must parse its source");
         debug_assert!(unit.client.local_def().is_some());
         let path = unit.path.clone();
         let parser_version = unit.parser_version;
@@ -179,7 +264,10 @@ pub(crate) struct ResolvedUnit {
     pub(crate) invalidate_cache: bool,
 }
 
-pub(crate) fn resolve_unit(mut parsed: ParsedUnit, ctx: &mut FoldContext<'_>) -> ResolvedUnit {
+pub(crate) fn resolve_unit(
+    mut parsed: ParsedUnit,
+    ctx: &mut FoldContext<'_>,
+) -> Result<ResolvedUnit, String> {
     let mut recovery_requires_removal = false;
     loop {
         let ParsedUnit {
@@ -190,7 +278,7 @@ pub(crate) fn resolve_unit(mut parsed: ParsedUnit, ctx: &mut FoldContext<'_>) ->
         } = parsed;
         match resolve_messages(messages, ctx) {
             Ok(messages) => {
-                return ResolvedUnit {
+                return Ok(ResolvedUnit {
                     unit,
                     messages,
                     cache_write,
@@ -198,7 +286,7 @@ pub(crate) fn resolve_unit(mut parsed: ParsedUnit, ctx: &mut FoldContext<'_>) ->
                         recovery_requires_removal,
                         invalidate_cache,
                     ),
-                };
+                });
             }
             Err(failure) => {
                 assert!(
@@ -220,18 +308,19 @@ pub(crate) fn resolve_unit(mut parsed: ParsedUnit, ctx: &mut FoldContext<'_>) ->
 
                 let adapter = super::adapter_for(unit.client)
                     .expect("cacheable source unit must have a registered local adapter");
-                let mut reparsed = adapter.parse(
+                let mut reparsed = adapter.parse_checked(
                     vec![unit],
                     &ParseContext {
                         source_cache: &*ctx.source_cache,
                         pricing: ctx.pricing,
                     },
-                );
-                assert_eq!(
-                    reparsed.len(),
-                    1,
-                    "single-source cache recovery must return exactly one parsed unit"
-                );
+                )?;
+                if reparsed.len() != 1 {
+                    return Err(format!(
+                        "single-source cache recovery returned {} parsed units instead of one",
+                        reparsed.len()
+                    ));
+                }
                 parsed = reparsed
                     .pop()
                     .expect("single-source cache recovery result disappeared");
@@ -512,6 +601,153 @@ mod tests {
         assert!(parse_called.get());
         assert!(matches!(parsed.messages, UnitMessageSource::Fresh(_)));
         assert!(!parsed.unit.cache_lookup_completed_no_hit);
+    }
+
+    #[test]
+    fn result_parser_error_preserves_same_key_v2_envelope() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let source_path = source_dir.path().join("session.jsonl");
+        std::fs::write(&source_path, PI_SOURCE).unwrap();
+        let unit = pi_unit(&source_path);
+        seed_disk_cache(cache_dir.path(), &unit, "v2-cache-session");
+        let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
+            cache_dir.path(),
+            &source_path,
+            unit.parser_version,
+        );
+        let before = std::fs::read(&shard_path).unwrap();
+        let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+
+        let result = load_or_parse_unit_with_result(
+            unit.prepare_snapshot(),
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |_| Err("sqlite root cause".to_string()),
+        );
+
+        match result {
+            Err(error) => assert_eq!(error, "sqlite root cause"),
+            Ok(_) => panic!("parser error must not produce a ParsedUnit"),
+        }
+        assert_eq!(
+            std::fs::read(shard_path).unwrap(),
+            before,
+            "parse failure must not replace or delete a known v2 shard"
+        );
+    }
+
+    #[test]
+    fn same_key_v2_envelope_is_reparsed_and_atomically_replaced_during_scan() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let source_path = source_dir.path().join("session.jsonl");
+        std::fs::write(&source_path, PI_SOURCE).unwrap();
+        let unit = pi_unit(&source_path);
+        seed_disk_cache(cache_dir.path(), &unit, "v2-cache-session");
+        message_cache::mark_current_key_shard_as_previous_format_for_test(
+            cache_dir.path(),
+            &source_path,
+            unit.parser_version,
+        );
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+
+        let miss = plan_cache_hit(unit.clone().prepare_snapshot(), &cache)
+            .expect_err("v2 shards must not enter the current-format decode path");
+        let parsed = load_or_parse_unit_with(
+            miss,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            crate::sessions::pi::parse_pi_file,
+        );
+        let messages = fold_planned_unit(parsed, &mut cache);
+        assert_eq!(messages[0].session_id.as_ref(), "source-session");
+
+        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let warm = plan_cache_hit(unit.prepare_snapshot(), &warm_cache)
+            .expect("successful scan must replace v2 with a warm-readable v3 shard");
+        assert!(matches!(warm.messages, UnitMessageSource::CacheHit(_)));
+    }
+
+    #[test]
+    fn noncacheable_reparse_preserves_same_key_v2_envelope() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let source_path = source_dir.path().join("session.jsonl");
+        std::fs::write(&source_path, PI_SOURCE).unwrap();
+        let unit = pi_unit(&source_path);
+        seed_disk_cache(cache_dir.path(), &unit, "v2-cache-session");
+        let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
+            cache_dir.path(),
+            &source_path,
+            unit.parser_version,
+        );
+        let before = std::fs::read(&shard_path).unwrap();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+
+        let miss = plan_cache_hit(unit.prepare_snapshot(), &cache)
+            .expect_err("v2 shards must be reparsed");
+        let parsed = load_or_parse_unit_with_policy(
+            miss,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |path| (crate::sessions::pi::parse_pi_file(path), false),
+        );
+        assert!(parsed.cache_write.is_none());
+        assert!(parsed.invalidate_cache);
+        let messages = fold_planned_unit(parsed, &mut cache);
+        assert_eq!(messages[0].session_id.as_ref(), "source-session");
+        assert_eq!(
+            std::fs::read(shard_path).unwrap(),
+            before,
+            "non-cacheable reparses must not delete a v2 shard"
+        );
+    }
+
+    #[test]
+    fn source_race_during_reparse_preserves_same_key_v2_envelope() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let source_path = source_dir.path().join("session.jsonl");
+        std::fs::write(&source_path, PI_SOURCE).unwrap();
+        let unit = pi_unit(&source_path);
+        seed_disk_cache(cache_dir.path(), &unit, "v2-cache-session");
+        let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
+            cache_dir.path(),
+            &source_path,
+            unit.parser_version,
+        );
+        let before = std::fs::read(&shard_path).unwrap();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+
+        let miss = plan_cache_hit(unit.prepare_snapshot(), &cache)
+            .expect_err("v2 shards must be reparsed");
+        let parsed = load_or_parse_unit_with(
+            miss,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |path| {
+                let messages = crate::sessions::pi::parse_pi_file(path);
+                std::fs::write(path, PI_REPLACEMENT_SOURCE).unwrap();
+                messages
+            },
+        );
+        assert!(parsed.cache_write.is_none());
+        assert!(parsed.invalidate_cache);
+        fold_planned_unit(parsed, &mut cache);
+        assert_eq!(
+            std::fs::read(shard_path).unwrap(),
+            before,
+            "a source race must not delete an unrecognized-on-read v2 shard"
+        );
     }
 
     #[test]

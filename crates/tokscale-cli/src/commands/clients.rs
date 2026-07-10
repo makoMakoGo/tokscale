@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     use tokscale_core::scanner::{
         built_in_extra_scan_paths_for, copilot_exporter_path_with_env_strategy,
-        extra_scan_paths_for, parse_extra_dirs,
+        discover_opencode_dbs, extra_scan_paths_for, opencode_data_dir_with_env_strategy,
+        parse_extra_dirs,
     };
     use tokscale_core::{
         count_local_client_messages, warp_sqlite_roots_with_env_strategy, ClientId,
@@ -116,6 +117,8 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     let built_in_extra_paths = built_in_extra_scan_paths_for(&home_dir, &all_clients);
     let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients);
     let copilot_exporter_path = copilot_exporter_path_with_env_strategy(use_env_roots);
+    let opencode_data_root = opencode_data_dir_with_env_strategy(&home_dir_str, use_env_roots);
+    let opencode_auto_dbs = discover_opencode_dbs(&opencode_data_root)?;
 
     let clients: Vec<ClientRow> =
         ClientId::iter()
@@ -125,7 +128,9 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                 } else {
                     Vec::new()
                 };
-                let sessions_path = if let Some(path) = warp_default_roots.first() {
+                let sessions_path = if client == ClientId::OpenCode {
+                    opencode_data_root.to_string_lossy().into_owned()
+                } else if let Some(path) = warp_default_roots.first() {
                     path.to_string_lossy().to_string()
                 } else {
                     client
@@ -148,6 +153,12 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                             path: path.to_string_lossy().to_string(),
                             exists: path.exists(),
                         }
+                    }));
+                }
+                if client == ClientId::OpenCode {
+                    additional_paths.extend(opencode_auto_dbs.iter().map(|path| AdditionalPath {
+                        path: path.to_string_lossy().to_string(),
+                        exists: true,
                     }));
                 }
                 if client == ClientId::Antigravity {
@@ -222,6 +233,15 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                         source: "env".to_string(),
                     },
                 ));
+                if client == ClientId::OpenCode {
+                    extra_paths.extend(scanner_settings.opencode_db_paths.iter().map(|path| {
+                        ExtraPath {
+                            path: path.to_string_lossy().to_string(),
+                            exists: path.is_file(),
+                            source: "scanner.opencodeDbPaths".to_string(),
+                        }
+                    }));
+                }
                 if client == ClientId::Antigravity {
                     if let Some(paths) = scanner_settings.extra_scan_paths.get("antigravity-cli") {
                         extra_paths.extend(

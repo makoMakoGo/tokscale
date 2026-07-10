@@ -550,7 +550,7 @@ fn fold_prepared_local_sources_with_pricing(
     let mut source_cache = message_cache::SourceMessageCache::load();
 
     if clients.is_empty() {
-        adapters::run_prepared_local_source_adapters(groups, &mut source_cache, pricing, sink);
+        adapters::run_prepared_local_source_adapters(groups, &mut source_cache, pricing, sink)?;
     } else {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
         let mut filtered_sink = RequestedClientFilterSink {
@@ -562,7 +562,7 @@ fn fold_prepared_local_sources_with_pricing(
             &mut source_cache,
             pricing,
             &mut filtered_sink,
-        );
+        )?;
     }
 
     source_cache.save_if_dirty();
@@ -651,16 +651,16 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
         .map(|adapter| {
             #[cfg(test)]
             PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
-            adapters::PreparedAdapterSources {
+            Ok(adapters::PreparedAdapterSources {
                 adapter,
                 units: adapter
-                    .discover(&scan_ctx)
+                    .discover_checked(&scan_ctx)?
                     .into_iter()
                     .map(adapters::SourceUnit::prepare_snapshot)
                     .collect(),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     let signature = source_inventory_signature(&clients, &groups);
     Ok(PreparedLocalSources {
         options,

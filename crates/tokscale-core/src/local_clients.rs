@@ -105,8 +105,8 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         client: ClientId::OpenCode,
         def: LocalClientDef {
             root: PathRoot::XdgData,
-            relative_path: "opencode/storage/message",
-            pattern: "*.json",
+            relative_path: "opencode",
+            pattern: "*.db",
             headless: false,
             parse_local: true,
         },

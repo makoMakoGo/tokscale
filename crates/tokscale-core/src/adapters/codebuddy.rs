@@ -92,13 +92,14 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), String> {
         let mut deduper = CodeBuddyDeduper::default();
-        while let Some(parsed) = batches.next(ctx) {
+        while let Some(parsed) = batches.next(ctx)? {
             adapter_cache::fold_units_with_filter(parsed, ctx, sink, |unit, messages| {
                 deduper.filter(unit, messages)
             });
         }
+        Ok(())
     }
 }
 

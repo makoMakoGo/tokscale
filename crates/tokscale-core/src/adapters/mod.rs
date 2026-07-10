@@ -31,6 +31,8 @@ use crate::message_cache::{ParserId, ParserRevision, ParserVersion};
 use crate::{message_cache, pricing, scanner, UnifiedMessage};
 
 pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 2;
+pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
+    MODEL_ID_CANONICALIZATION_REVISION + 1;
 pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
 
@@ -39,7 +41,19 @@ pub(crate) trait LocalSourceAdapter: Sync {
 
     fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit>;
 
+    fn discover_checked(&self, ctx: &AdapterScanContext<'_>) -> Result<Vec<SourceUnit>, String> {
+        Ok(self.discover(ctx))
+    }
+
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit>;
+
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, String> {
+        Ok(self.parse(units, ctx))
+    }
 
     fn plan_cache_hit(
         &self,
@@ -56,10 +70,11 @@ pub(crate) trait LocalSourceAdapter: Sync {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
-        while let Some(parsed) = batches.next(ctx) {
+    ) -> Result<(), String> {
+        while let Some(parsed) = batches.next(ctx)? {
             self.fold(parsed, ctx, sink);
         }
+        Ok(())
     }
 }
 
@@ -219,10 +234,7 @@ impl SourceUnit {
         message_cache::hash_inventory_bytes(hasher, self.client.as_str().as_bytes());
         message_cache::hash_inventory_bytes(
             hasher,
-            self.parser_version
-                .parser_id
-                .inventory_signature_name()
-                .as_bytes(),
+            self.parser_version.parser_id.stable_name().as_bytes(),
         );
         hasher.update(self.parser_version.revision.to_le_bytes());
         self.update_meta_inventory_signature(hasher);
@@ -235,7 +247,6 @@ impl SourceUnit {
         let (name, detail) = match self.meta {
             SourceUnitMeta::None => ("none", None),
             SourceUnitMeta::OpenCodeSqlite => ("opencode-sqlite", None),
-            SourceUnitMeta::OpenCodeJson => ("opencode-json", None),
             SourceUnitMeta::AntigravityCacheJsonl => ("antigravity-cache-jsonl", None),
             SourceUnitMeta::AntigravityCliSqlite => ("antigravity-cli-sqlite", None),
             SourceUnitMeta::KiroFile => ("kiro-file", None),
@@ -313,7 +324,6 @@ pub(crate) enum SourceUnitMeta {
     #[default]
     None,
     OpenCodeSqlite,
-    OpenCodeJson,
     AntigravityCacheJsonl,
     AntigravityCliSqlite,
     KiroFile,
@@ -342,10 +352,7 @@ impl SourceUnitMeta {
                 MODEL_ID_CANONICALIZATION_REVISION,
             ),
             Self::OpenCodeSqlite => {
-                ParserVersion::new(ParserId::OpenCodeSqlite, MODEL_ID_CANONICALIZATION_REVISION)
-            }
-            Self::OpenCodeJson => {
-                ParserVersion::new(ParserId::OpenCodeJson, MODEL_ID_CANONICALIZATION_REVISION)
+                ParserVersion::new(ParserId::OpenCodeSqlite, OPENCODE_CURRENT_SQLITE_REVISION)
             }
             Self::AntigravityCacheJsonl => ParserVersion::new(
                 ParserId::AntigravityCacheJsonl,
@@ -377,7 +384,7 @@ impl SourceUnitMeta {
 
 fn default_parser_id(client: ClientId) -> ParserId {
     match client {
-        ClientId::OpenCode => ParserId::OpenCode,
+        ClientId::OpenCode => ParserId::OpenCodeSqlite,
         ClientId::Claude => ParserId::Claude,
         ClientId::Codex => ParserId::Codex,
         ClientId::Cursor => ParserId::Cursor,
@@ -541,10 +548,10 @@ impl<'a> ParsedBatchSource<'a> {
         }
     }
 
-    fn next(&mut self, ctx: &FoldContext<'_>) -> Option<Vec<ParsedUnit>> {
+    fn next(&mut self, ctx: &FoldContext<'_>) -> Result<Option<Vec<ParsedUnit>>, String> {
         self.plan_remaining_units(ctx);
         if self.planned.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let mut slots = Vec::new();
@@ -574,13 +581,13 @@ impl<'a> ParsedBatchSource<'a> {
         let parsed_misses = if miss_units.is_empty() {
             Vec::new()
         } else {
-            self.adapter.parse(
+            self.adapter.parse_checked(
                 miss_units,
                 &ParseContext {
                     source_cache: &*ctx.source_cache,
                     pricing: ctx.pricing,
                 },
-            )
+            )?
         };
         let mut parsed_misses = parsed_misses.into_iter();
         let parsed = slots
@@ -602,7 +609,7 @@ impl<'a> ParsedBatchSource<'a> {
             parsed_misses.next().is_none(),
             "adapter returned more parsed units than source misses"
         );
-        Some(parsed)
+        Ok(Some(parsed))
     }
 
     fn take_remaining_units(&mut self) -> Vec<SourceUnit> {
@@ -639,15 +646,16 @@ pub(crate) fn run_prepared_local_source_adapters(
     source_cache: &mut message_cache::SourceMessageCache,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn MessageSink,
-) {
+) -> Result<(), String> {
     for PreparedAdapterSources { adapter, units } in prepared {
         let mut batches = ParsedBatchSource::new(adapter, units);
         let mut fold_ctx = FoldContext {
             source_cache,
             pricing,
         };
-        adapter.fold_batches(&mut batches, &mut fold_ctx, sink);
+        adapter.fold_batches(&mut batches, &mut fold_ctx, sink)?;
     }
+    Ok(())
 }
 
 fn requested_client_ids(clients: &[String]) -> HashSet<ClientId> {
@@ -848,14 +856,16 @@ mod tests {
                 let mut cache = message_cache::SourceMessageCache::default();
                 let mut sink = Vec::new();
                 let mut batches = ParsedBatchSource::new(&adapter, units);
-                adapter.fold_batches(
-                    &mut batches,
-                    &mut FoldContext {
-                        source_cache: &mut cache,
-                        pricing: None,
-                    },
-                    &mut sink,
-                );
+                adapter
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
                 sink.into_iter()
                     .map(|message| message.session_id.to_string())
                     .collect::<Vec<_>>()
@@ -883,14 +893,16 @@ mod tests {
                     .collect();
                 let mut cache = message_cache::SourceMessageCache::default();
                 let mut batches = ParsedBatchSource::new(&adapter, units);
-                adapter.fold_batches(
-                    &mut batches,
-                    &mut FoldContext {
-                        source_cache: &mut cache,
-                        pricing: None,
-                    },
-                    &mut DroppingSink,
-                );
+                adapter
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut DroppingSink,
+                    )
+                    .unwrap();
             });
     }
 
@@ -938,14 +950,16 @@ mod tests {
                 }
                 let mut sink = Vec::new();
                 let mut batches = ParsedBatchSource::new(&adapter, units);
-                adapter.fold_batches(
-                    &mut batches,
-                    &mut FoldContext {
-                        source_cache: &mut cache,
-                        pricing: None,
-                    },
-                    &mut sink,
-                );
+                adapter
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
 
                 assert_eq!(adapter.planner_calls.load(Ordering::Relaxed), 6);
                 assert_eq!(*adapter.parse_batch_sizes.lock().unwrap(), [2, 1]);
@@ -1002,14 +1016,16 @@ mod tests {
                 }
                 let mut sink = Vec::new();
                 let mut batches = ParsedBatchSource::new(&adapter, units);
-                adapter.fold_batches(
-                    &mut batches,
-                    &mut FoldContext {
-                        source_cache: &mut cache,
-                        pricing: None,
-                    },
-                    &mut sink,
-                );
+                adapter
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
 
                 assert_eq!(adapter.planner_calls.load(Ordering::Relaxed), 4);
                 assert!(adapter.parse_batch_sizes.lock().unwrap().is_empty());
@@ -1054,14 +1070,16 @@ mod tests {
         let mut sink = Vec::new();
         let mut batches = ParsedBatchSource::new(&adapter, vec![unit]);
 
-        adapter.fold_batches(
-            &mut batches,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-            &mut sink,
-        );
+        adapter
+            .fold_batches(
+                &mut batches,
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .unwrap();
 
         assert_eq!(*adapter.batch_sizes.lock().unwrap(), [1]);
         assert_eq!(sink.len(), 1);

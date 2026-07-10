@@ -2,6 +2,9 @@
 
 Status: Accepted
 
+OpenCode's retired JSON source-class and precedence details are superseded by
+ADR 0019; this document reflects the current SQLite-only fold contract.
+
 ## Context
 
 Source discovery already produced an ordered inventory, but execution parsed every
@@ -13,10 +16,9 @@ finished.
 
 The fold also carries observable adapter-specific semantics. Codex, Claude,
 Hermes, Antigravity, OpenCode, and CodeBuddy deduplicate across source units;
-Trae selects one latest message per session; OpenCode gives SQLite sources
-precedence over legacy JSON; and OMP emits cache hits before misses while using
-one parent-task index for all misses. A bounded implementation must preserve
-those rules across batch boundaries.
+Trae selects one latest message per session; and OMP emits cache hits before
+misses while using one parent-task index for all misses. A bounded
+implementation must preserve those rules across batch boundaries.
 
 ## Decision
 
@@ -47,12 +49,11 @@ Execute each prepared adapter group as ordered, bounded batches.
 - Deduplication and merge state is created once per adapter group and survives
   every batch. Trae retains only the current latest message per session until
   its final sorted emission.
-- OpenCode partitions the lightweight prepared units into separately planned
-  SQLite and JSON streams so every SQLite unit still precedes every legacy JSON
-  unit, including arbitrarily mixed input. OMP retains its dedicated lightweight
-  whole-group cache-hit/miss plan, builds one parent-task index from all miss
-  paths, then folds hits and misses in bounded ordered batches. Neither exception
-  retains message-bearing parse results for the whole group.
+- OpenCode retains one deduplication set across all current-format SQLite
+  databases and every batch. OMP retains its dedicated lightweight whole-group
+  cache-hit/miss plan, builds one parent-task index from all miss paths, then
+  folds hits and misses in bounded ordered batches. Neither exception retains
+  message-bearing parse results for the whole group.
 - Cache reads, cache writes, invalidation, message filtering, deduplication, and
   sink emission remain in the same sequential unit fold order. Pricing
   diagnostics are collected before source execution and retain their existing

@@ -112,7 +112,7 @@ impl LocalSourceAdapter for OmpAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), String> {
         let mut hit_units = Vec::new();
         let mut miss_units = Vec::new();
         for unit in batches.take_remaining_units() {
@@ -164,6 +164,7 @@ impl LocalSourceAdapter for OmpAdapter {
             recovery_invalidations.next().is_none(),
             "OMP cache recovery returned fewer parsed units than failed hits"
         );
+        Ok(())
     }
 }
 
@@ -427,14 +428,16 @@ mod tests {
                     &OMP_ADAPTER,
                     vec![child_unit, cached_unit, parent_unit],
                 );
-                OMP_ADAPTER.fold_batches(
-                    &mut batches,
-                    &mut FoldContext {
-                        source_cache: &mut cache,
-                        pricing: None,
-                    },
-                    &mut sink,
-                );
+                OMP_ADAPTER
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
                 sink
             });
 
@@ -509,14 +512,16 @@ mod tests {
             .install(|| {
                 let mut sink = Vec::new();
                 let mut batches = crate::adapters::ParsedBatchSource::new(&OMP_ADAPTER, units);
-                OMP_ADAPTER.fold_batches(
-                    &mut batches,
-                    &mut FoldContext {
-                        source_cache: &mut cache,
-                        pricing: None,
-                    },
-                    &mut sink,
-                );
+                OMP_ADAPTER
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
                 sink
             });
 

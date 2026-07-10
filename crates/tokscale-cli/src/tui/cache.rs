@@ -22,7 +22,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 25;
+const CACHE_SCHEMA_VERSION: u32 = 26;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1775,7 +1775,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 25,
+  "schemaVersion": 26,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
@@ -1897,7 +1897,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn source_inventory_signature_round_trips_in_schema_25() {
+    fn source_inventory_signature_round_trips_in_schema_26() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         unsafe {
@@ -1927,7 +1927,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn schema_24_cache_is_an_explicit_miss() {
+    fn schema_25_cache_is_an_explicit_miss() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         unsafe {
@@ -1946,7 +1946,7 @@ mod tests {
         let path = cache_file().unwrap();
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value["schemaVersion"] = serde_json::json!(24);
+        value["schemaVersion"] = serde_json::json!(25);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
 
         assert!(matches!(
@@ -1962,7 +1962,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn schema_25_without_source_inventory_signature_is_a_miss() {
+    fn schema_26_without_source_inventory_signature_is_a_miss() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         unsafe {

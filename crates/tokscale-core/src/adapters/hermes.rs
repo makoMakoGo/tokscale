@@ -72,11 +72,12 @@ impl LocalSourceAdapter for HermesAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), String> {
         let mut seen = HashSet::new();
-        while let Some(parsed) = batches.next(ctx) {
+        while let Some(parsed) = batches.next(ctx)? {
             fold_hermes_units(parsed, sink, &mut seen);
         }
+        Ok(())
     }
 }
 

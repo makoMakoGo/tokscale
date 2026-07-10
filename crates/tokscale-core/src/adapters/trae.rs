@@ -59,9 +59,9 @@ impl LocalSourceAdapter for TraeAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), String> {
         let mut accumulator = crate::TraeMessageAccumulator::default();
-        while let Some(parsed) = batches.next(ctx) {
+        while let Some(parsed) = batches.next(ctx)? {
             for unit in parsed {
                 if let UnitMessageSource::Fresh(messages) = unit.messages {
                     accumulator.push_messages(messages);
@@ -69,6 +69,7 @@ impl LocalSourceAdapter for TraeAdapter {
             }
         }
         sink.extend_messages(accumulator.finish());
+        Ok(())
     }
 }
 
@@ -126,14 +127,16 @@ mod tests {
             .install(|| {
                 let mut sink = Vec::new();
                 let mut batches = crate::adapters::ParsedBatchSource::new(&TRAE_ADAPTER, units);
-                TRAE_ADAPTER.fold_batches(
-                    &mut batches,
-                    &mut FoldContext {
-                        source_cache: &mut cache,
-                        pricing: Some(&pricing),
-                    },
-                    &mut sink,
-                );
+                TRAE_ADAPTER
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: Some(&pricing),
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
                 sink
             });
 

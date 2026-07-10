@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[derive(Debug)]
 struct LocalMessagesForTest {
     messages: Vec<UnifiedMessage>,
     counts: ClientCounts,
@@ -192,13 +193,15 @@ fn aggregate_finalized_model_usage_entries(
 }
 
 fn write_streaming_fold_fixture(home: &Path) {
-    let opencode_dir = home.join(".local/share/opencode/storage/message/project-streaming");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"opencode-session","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":1,"cache":{"read":2,"write":3}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    let db_path = home.join(".local/share/opencode/opencode.db");
+    let conn = create_opencode_sqlite_db(&db_path);
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "opencode-session",
+        "/repo",
+        r#"{"id":"msg-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":1,"cache":{"read":2,"write":3}},"time":{"created":1733011200000}}"#,
+    );
 
     let codex_dir = home.join(".codex/sessions");
     std::fs::create_dir_all(&codex_dir).unwrap();
@@ -614,9 +617,14 @@ fn build_opencode_sqlite_payload(
 }
 
 fn create_opencode_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
     let conn = rusqlite::Connection::open(db_path).unwrap();
     conn.execute_batch(
-        "CREATE TABLE message (
+        "CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            directory TEXT NOT NULL
+        );
+        CREATE TABLE message (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             data TEXT NOT NULL
@@ -624,6 +632,36 @@ fn create_opencode_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection 
     )
     .unwrap();
     conn
+}
+
+fn insert_opencode_sqlite_message(
+    conn: &rusqlite::Connection,
+    row_id: &str,
+    session_id: &str,
+    directory: &str,
+    data: &str,
+) {
+    conn.execute(
+        "INSERT OR IGNORE INTO session (id, directory) VALUES (?1, ?2)",
+        rusqlite::params![session_id, directory],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+        rusqlite::params![row_id, session_id, data],
+    )
+    .unwrap();
+}
+
+fn write_single_opencode_sqlite_fixture(home: &Path) {
+    let conn = create_opencode_sqlite_db(&home.join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
+        r#"{"id":"msg-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+    );
 }
 
 fn create_hermes_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
@@ -1936,18 +1974,20 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let message_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        std::fs::create_dir_all(&message_dir).unwrap();
-        let path = message_dir.join("msg_001.json");
-        std::fs::write(
-            &path,
+        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
+        );
+        drop(conn);
 
-        let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
         // Provider deliberately wrong for the model: the cache-hit path
         // must re-run refresh_derived_fields (dates are derived from
         // timestamps since schema v24, so provider identity is the
@@ -1971,10 +2011,7 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
         let mut cache = message_cache::SourceMessageCache::load();
         cache.insert(message_cache::CachedSourceEntry::new_with_version(
             &path,
-            message_cache::ParserVersion::new(
-                message_cache::ParserId::OpenCodeJson,
-                crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
-            ),
+            unit.parser_version,
             fingerprint,
             vec![stale_message],
             Vec::new(),
@@ -2415,16 +2452,18 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let message_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        std::fs::create_dir_all(&message_dir).unwrap();
-        let path = message_dir.join("msg_001.json");
-        std::fs::write(
-            &path,
+        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
+        );
+        drop(conn);
+        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
 
         let home = source_home.path().to_str().unwrap();
         let clients = ["opencode".to_string()];
@@ -2441,15 +2480,12 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
         assert_eq!(warm_first, warm_second);
 
         let mut cache = message_cache::SourceMessageCache::load();
-        let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
         assert_eq!(
             cache
                 .take_messages(&message_cache::CacheReadPlan::new(
                     &path,
-                    message_cache::ParserVersion::new(
-                        message_cache::ParserId::OpenCodeJson,
-                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
-                    ),
+                    unit.parser_version,
                     fingerprint.clone(),
                 ))
                 .expect("saved warm cache shard must remain readable")
@@ -2459,11 +2495,8 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
         );
         assert!(matches!(
             cache.take_messages(&message_cache::CacheReadPlan::new(
-                std::path::Path::new("/nonexistent/source.json"),
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::OpenCodeJson,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
-                ),
+                std::path::Path::new("/nonexistent/opencode.db"),
+                unit.parser_version,
                 fingerprint,
             )),
             Err(message_cache::CacheReadFailure {
@@ -2482,7 +2515,7 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
 #[cfg(unix)]
 #[test]
 #[serial_test::serial]
-fn test_empty_parse_results_are_not_cached_for_optional_file_sources() {
+fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
     use std::os::unix::fs::PermissionsExt;
 
     let cache_home = tempfile::TempDir::new().unwrap();
@@ -2491,39 +2524,33 @@ fn test_empty_parse_results_are_not_cached_for_optional_file_sources() {
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let message_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        std::fs::create_dir_all(&message_dir).unwrap();
-        let path = message_dir.join("msg_001.json");
-        std::fs::write(
-            &path,
+        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
+        );
+        drop(conn);
+        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
 
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o000);
         std::fs::set_permissions(&path, permissions).unwrap();
 
-        let first_messages = parse_all_messages_with_pricing(
+        let first_error = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
-        .unwrap();
-        assert!(first_messages.is_empty());
+        .unwrap_err();
+        assert!(first_error.contains("failed to open current OpenCode SQLite database"));
 
         let cache = message_cache::SourceMessageCache::load();
-        assert!(cache
-            .get_meta(
-                &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::OpenCodeJson,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
-                )
-            )
-            .is_none());
+        assert!(cache.get_meta(&path, unit.parser_version).is_none());
 
         let mut readable_permissions = std::fs::metadata(&path).unwrap().permissions();
         readable_permissions.set_mode(0o644);
@@ -2546,32 +2573,31 @@ fn test_empty_parse_results_are_not_cached_for_optional_file_sources() {
 
 #[test]
 #[serial_test::serial]
-fn test_empty_cache_hits_are_reparsed_for_optional_file_sources() {
+fn test_empty_opencode_sqlite_cache_entries_are_reparsed() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let message_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        std::fs::create_dir_all(&message_dir).unwrap();
-        let path = message_dir.join("msg_001.json");
-        std::fs::write(
-            &path,
+        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
+        );
+        drop(conn);
 
-        let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
         let mut cache = message_cache::SourceMessageCache::load();
         cache.insert(message_cache::CachedSourceEntry::new_with_version(
             &path,
-            message_cache::ParserVersion::new(
-                message_cache::ParserId::OpenCodeJson,
-                crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
-            ),
+            unit.parser_version,
             fingerprint,
             Vec::new(),
             Vec::new(),
@@ -2588,14 +2614,11 @@ fn test_empty_cache_hits_are_reparsed_for_optional_file_sources() {
         assert_eq!(messages.len(), 1);
 
         let mut loaded = message_cache::SourceMessageCache::load();
-        let repaired_fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+        let repaired_fingerprint = unit.source_input_policy().fingerprint().unwrap();
         let repaired_messages = loaded
             .take_messages(&message_cache::CacheReadPlan::new(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::OpenCodeJson,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
-                ),
+                unit.parser_version,
                 repaired_fingerprint,
             ))
             .unwrap();
@@ -2628,6 +2651,7 @@ fn test_sqlite_source_cache_invalidates_on_wal_change() {
         assert_eq!(journal_mode.to_lowercase(), "wal");
         conn.execute_batch(
             "PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
              CREATE TABLE message (
                  id TEXT PRIMARY KEY,
                  session_id TEXT NOT NULL,
@@ -2704,6 +2728,7 @@ fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
 
         let schema = "PRAGMA journal_mode=WAL;
              PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
              CREATE TABLE message (
                  id TEXT PRIMARY KEY,
                  session_id TEXT NOT NULL,
@@ -5332,15 +5357,15 @@ fn test_dedupe_latest_trae_messages_tiebreaks_by_dedup_key() {
 #[test]
 fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_real_client_filter() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let message_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&message_dir).unwrap();
-    std::fs::write(
-        message_dir.join("msg_001.json"),
+    let conn =
+        create_opencode_sqlite_db(&temp_dir.path().join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
         r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"hf:deepseek-ai/DeepSeek-V3-0324","providerID":"unknown","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    );
 
     let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
     let messages = parse_all_messages_with_pricing(
@@ -5359,15 +5384,15 @@ fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_real_client_
 #[test]
 fn test_local_message_loader_preserves_gateway_message_client_counts() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let message_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&message_dir).unwrap();
-    std::fs::write(
-        message_dir.join("msg_001.json"),
+    let conn =
+        create_opencode_sqlite_db(&temp_dir.path().join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
         r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    );
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5407,6 +5432,7 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     let conn = rusqlite::Connection::open(&external_db).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
+         CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
          CREATE TABLE message (
              id TEXT PRIMARY KEY,
              session_id TEXT NOT NULL,
@@ -5471,6 +5497,46 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
         parsed_with_settings.messages[0].model_id.as_ref(),
         "claude-sonnet-4"
     );
+}
+
+#[test]
+fn test_missing_configured_opencode_database_is_an_explicit_error() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let missing_db = temp_dir.path().join("missing/custom-current.db");
+
+    let error = load_local_messages_for_test(LocalParseOptions {
+        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        use_env_roots: false,
+        clients: Some(vec!["opencode".to_string()]),
+        scanner_settings: scanner::ScannerSettings {
+            opencode_db_paths: vec![missing_db.clone()],
+            ..Default::default()
+        },
+        ..LocalParseOptions::default()
+    })
+    .unwrap_err();
+
+    assert!(error.contains("failed to open current OpenCode SQLite database"));
+    assert!(error.contains(missing_db.to_str().unwrap()));
+}
+
+#[test]
+fn test_opencode_auto_discovery_error_reaches_public_loader() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let data_root = temp_dir.path().join(".local/share/opencode");
+    std::fs::create_dir_all(data_root.parent().unwrap()).unwrap();
+    std::fs::write(&data_root, "not a directory").unwrap();
+
+    let error = load_local_messages_for_test(LocalParseOptions {
+        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        use_env_roots: false,
+        clients: Some(vec!["opencode".to_string()]),
+        ..LocalParseOptions::default()
+    })
+    .unwrap_err();
+
+    assert!(error.contains("failed to read OpenCode data directory"));
+    assert!(error.contains(data_root.to_str().unwrap()));
 }
 
 #[test]
@@ -5710,15 +5776,7 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
     insert_zed_thread(&zed_conn, "zed-only-thread", "claude-sonnet-4-5");
     drop(zed_conn);
 
-    let opencode_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    write_single_opencode_sqlite_fixture(temp_dir.path());
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5735,7 +5793,7 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
     assert_eq!(
         parsed.counts.get(ClientId::OpenCode),
         0,
-        "only adapter clients must not turn an empty legacy partition into an all-client scan"
+        "an explicit Zed-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(parsed.messages[0].client.as_ref(), "zed");
@@ -5768,15 +5826,7 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
     )
     .unwrap();
 
-    let opencode_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    write_single_opencode_sqlite_fixture(temp_dir.path());
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5793,7 +5843,7 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
     assert_eq!(
         parsed.counts.get(ClientId::OpenCode),
         0,
-        "only C3.1 adapter clients must not turn an empty legacy partition into an all-client scan"
+        "an explicit Amp-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(parsed.messages[0].client.as_ref(), "amp");
@@ -5823,15 +5873,7 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
     )
     .unwrap();
 
-    let opencode_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    write_single_opencode_sqlite_fixture(temp_dir.path());
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5848,7 +5890,7 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
     assert_eq!(
         parsed.counts.get(ClientId::OpenCode),
         0,
-        "only C3.2 adapter clients must not turn an empty legacy partition into an all-client scan"
+        "an explicit Codebuff-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(parsed.messages[0].client.as_ref(), "codebuff");
@@ -5895,7 +5937,7 @@ fn test_driver_uses_pi_and_omp_adapters_when_requested() {
 }
 
 #[test]
-fn test_driver_all_clients_includes_adapter_and_legacy_without_duplicate() {
+fn test_driver_all_clients_includes_each_adapter_without_duplicate() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
     let zed_threads_dir = temp_dir.path().join("zed-fixture/threads");
@@ -5905,15 +5947,7 @@ fn test_driver_all_clients_includes_adapter_and_legacy_without_duplicate() {
     insert_zed_thread(&zed_conn, "zed-all-thread", "claude-sonnet-4-5");
     drop(zed_conn);
 
-    let opencode_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    write_single_opencode_sqlite_fixture(temp_dir.path());
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -6030,6 +6064,7 @@ fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_
     let conn = rusqlite::Connection::open(&external_db).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
+         CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
          CREATE TABLE message (
              id TEXT PRIMARY KEY,
              session_id TEXT NOT NULL,

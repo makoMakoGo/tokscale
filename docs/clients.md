@@ -18,7 +18,7 @@ When using an installed binary, use `tokscale clients` instead.
 
 | ID | Display name | Local source | Notes |
 | --- | --- | --- | --- |
-| `opencode` | OpenCode | `~/.local/share/opencode/opencode*.db` and legacy `~/.local/share/opencode/storage/message/` | Scans multiple release-channel databases when present. |
+| `opencode` | OpenCode | `~/.local/share/opencode/opencode*.db` | Reads only current-format SQLite databases and combines multiple release channels when present. |
 | `claude` | Claude Code | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Claude Desktop chat history is not treated as Claude Code token accounting. |
 | `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Also supports `tokscale headless codex ...` capture. |
 | `cursor` | Cursor | `~/.config/tokscale/cursor-cache/usage*.csv` | Reads a local API cache. Logged-in reports and the TUI may auto-refresh stale cache data; local `~/.cursor` state is not parsed. |
@@ -78,6 +78,32 @@ Use `scanner.extraScanPaths` in `settings.json` for persistent extra roots:
   }
 }
 ```
+
+OpenCode SQLite files are configured separately because they are database files,
+not recursive scan roots:
+
+```json
+{
+  "scanner": {
+    "opencodeDbPaths": [
+      "/Users/me/Library/Application Support/opencode/opencode-stable.db"
+    ]
+  }
+}
+```
+
+`scanner.opencodeDbPaths` is the only persistent custom OpenCode input.
+`scanner.extraScanPaths.opencode` and `TOKSCALE_EXTRA_DIRS` entries for
+OpenCode are ignored. Its configured file paths are authoritative, so missing
+or unreadable paths fail explicitly. Legacy `storage/message/**/*.json` data is
+not read. `NotFound` during automatic discovery is treated as absent; every
+other discovery I/O failure is an explicit error. Databases without the current
+session schema, or with malformed current message payloads, likewise produce an
+explicit error rather than an empty report. Current payloads must include role,
+model, provider, timestamp, token, and cache-token fields. Blank model, provider,
+or session identifiers and timestamps that are non-positive, non-finite, or not
+exactly representable as `i64` are rejected. Explicit `tokens: null`,
+non-assistant messages, and zero positive usage are filtered.
 
 Use `TOKSCALE_EXTRA_DIRS` for one-off runs:
 

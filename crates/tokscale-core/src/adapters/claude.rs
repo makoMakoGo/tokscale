@@ -93,11 +93,12 @@ impl LocalSourceAdapter for ClaudeAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), String> {
         let mut seen_keys = HashSet::new();
-        while let Some(parsed) = batches.next(ctx) {
+        while let Some(parsed) = batches.next(ctx)? {
             fold_claude_units(parsed, ctx, sink, &mut seen_keys);
         }
+        Ok(())
     }
 }
 
@@ -113,7 +114,8 @@ fn fold_claude_units(
             messages,
             cache_write,
             invalidate_cache,
-        } = adapter_cache::resolve_unit(parsed_unit, ctx);
+        } = adapter_cache::resolve_unit(parsed_unit, ctx)
+            .expect("Claude cache recovery must parse its source");
         let path = unit.path.clone();
         let cache_write_succeeded = adapter_cache::write_cache(cache_write, ctx, &messages);
         sink.extend_messages(

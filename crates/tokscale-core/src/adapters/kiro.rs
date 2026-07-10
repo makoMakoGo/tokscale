@@ -79,7 +79,6 @@ impl LocalSourceAdapter for KiroAdapter {
                 | SourceUnitMeta::AntigravityCacheJsonl
                 | SourceUnitMeta::AntigravityCliSqlite
                 | SourceUnitMeta::OpenCodeSqlite
-                | SourceUnitMeta::OpenCodeJson
                 | SourceUnitMeta::CodeBuddyJsonl
                 | SourceUnitMeta::CodeBuddyExtensionLog { .. }
                 | SourceUnitMeta::Codex { .. } => unreachable!("unexpected Kiro source unit meta"),

@@ -48,7 +48,10 @@ The parse pipeline must hold at most one owned copy of any message.
   repaired child sessions retain the same attribution as ordinary misses while
   valid hits are still folded one at a time. Codex remains on its dedicated
   incremental read/reparse path because its cached fallback-timestamp state and
-  append-prefix validation are not the generic adapter contract.
+  append-prefix validation are not the generic adapter contract. That dedicated
+  path still returns typed cache-read failures, carries whether proven body
+  corruption requires removal, and treats recovery as successful only when the
+  atomic replacement writer returns success.
 - Cache writes serialize borrowed message slices when possible. They must not
   clone entries merely to build a serialized cache representation.
 - After a TUI data load completes, return freed pages to the OS
@@ -93,6 +96,12 @@ The parse pipeline must hold at most one owned copy of any message.
   append, the old full digest is the expected prefix digest; one hasher reads
   and verifies that prefix, then continues across the parsed tail. Exact hits
   use only the stamp and cached digest consistency, with no source-byte read.
+- OpenCode reads current SQLite message rows without owning the potentially
+  large payload TEXT. A first streaming JSON pass requires and classifies the
+  role while validating the complete document; only assistant rows enter the
+  strict full decoder. This keeps large user prompts out of the live parse
+  representation without turning malformed JSON, missing roles, or assistant
+  field errors into empty usage.
 - Each prepared inventory has two related keys. A versioned SHA-256
   `SourceInventorySignature` hashes the canonical requested-client set,
   adapter and unit order, parser/unit identity, and every declared input's
@@ -134,9 +143,14 @@ The parse pipeline must hold at most one owned copy of any message.
   and the unknown-workspace sentinel pair enter the compatibility table.
 - Serialization layout changes bump `CACHE_FORMAT_VERSION`; parser-only
   changes bump the relevant parser revision. The shard envelope stores a
-  fixed magic and format version before the bincode header, allowing explicit
-  pruning to remove old layouts without decoding compatibility structs. Stale
-  shards rebuild instead of being decoded under incompatible assumptions.
+  fixed magic and format version before the bincode header. Current v3 shard
+  filenames hash native path bytes, an explicit stable parser name, and parser
+  revision rather than serialized enum order. Ordinary reads have one current
+  decoder and do not locate, migrate, or delete v2 files. Explicit pruning can
+  classify and remove the known v2 envelope without a compatibility decoder;
+  unknown, future, or malformed-current envelopes stop classification before
+  deletion. Stale shards rebuild instead of being decoded under incompatible
+  assumptions.
 
 ADR 0018 implements the planned streaming follow-up with a bounded ordered
 source-fold pipeline. Aggregation paths no longer retain adapter-wide parsed
@@ -150,11 +164,15 @@ that final output.
 - The total serialized shard payload shrinks roughly in half (no date
   strings, no string dedup keys, interned strings still serialize as strings).
 - Cache layout changes cause a one-time shard rebuild after the format bump.
+  Old v2 files remain until explicit prune, so disk usage can temporarily
+  include both layouts.
 - A corrupt generic shard produces one visible warning and a same-run source
   reparse instead of silently suppressing usage. Normal exact hits still read
   no source bytes and do not eagerly materialize adapter-wide cache bodies.
-- TUI cache schema 25 requires `sourceInventorySignature`; schema 24 and cache
-  documents missing the field are explicit misses and rebuild once.
+- TUI cache schema 26 requires `sourceInventorySignature`; schema 25 and cache
+  documents missing the field are explicit misses and rebuild once. ADR 0019
+  advances the marker so retired OpenCode JSON-derived aggregates cannot remain
+  visible.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go
   through the new accessors; new parsers must intern identity fields.
 - High-cardinality scans no longer leave the interner strongly retaining every

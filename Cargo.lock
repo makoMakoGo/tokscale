@@ -3400,6 +3400,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "rpassword",
+ "rusqlite",
  "serde",
  "serde_json",
  "serial_test",

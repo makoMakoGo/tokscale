@@ -1,6 +1,7 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::Command;
 use predicates::prelude::*;
+use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -39,12 +40,45 @@ fn prime_override_pricing_cache(config_dir: &Path) {
     fs::write(cache_dir.join("pricing-openrouter.json"), &payload).unwrap();
 }
 
+fn create_opencode_sqlite(base: &Path) -> Connection {
+    let data_dir = base.join(".local/share/opencode");
+    fs::create_dir_all(&data_dir).unwrap();
+    let conn = Connection::open(data_dir.join("opencode.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+         CREATE TABLE message (
+             id TEXT PRIMARY KEY,
+             session_id TEXT NOT NULL,
+             data TEXT NOT NULL
+         );",
+    )
+    .unwrap();
+    conn
+}
+
+fn insert_opencode_message(
+    conn: &Connection,
+    row_id: &str,
+    session_id: &str,
+    directory: &str,
+    data: &str,
+) {
+    conn.execute(
+        "INSERT OR IGNORE INTO session (id, directory) VALUES (?1, ?2)",
+        rusqlite::params![session_id, directory],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+        rusqlite::params![row_id, session_id, data],
+    )
+    .unwrap();
+}
+
 /// Create a temporary directory with minimal OpenCode fixture data.
 ///
-/// Layout:
-///   <tmp>/.local/share/opencode/storage/message/session1/msg_a.json  (2024-06-15, claude-sonnet-4-20250514, anthropic)
-///   <tmp>/.local/share/opencode/storage/message/session1/msg_b.json  (2024-06-15, claude-sonnet-4-20250514, anthropic)
-///   <tmp>/.local/share/opencode/storage/message/session2/msg_c.json  (2025-01-10, gpt-4o, openai)
+/// Layout: `<tmp>/.local/share/opencode/opencode.db`, containing three current
+/// schema message rows across two sessions.
 fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
@@ -52,9 +86,7 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
         prime_pricing_cache(base);
     }
 
-    // Session 1: two messages on 2024-06-15 using claude-sonnet-4
-    let session1 = base.join(".local/share/opencode/storage/message/session1");
-    fs::create_dir_all(&session1).unwrap();
+    let conn = create_opencode_sqlite(base);
 
     // 2024-06-15 12:00:00 UTC = 1718452800000 ms
     let msg_a = r#"{
@@ -72,7 +104,7 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
         },
         "time": { "created": 1718452800000.0, "completed": 1718452803500.0 }
     }"#;
-    fs::write(session1.join("msg_a.json"), msg_a).unwrap();
+    insert_opencode_message(&conn, "msg_a", "session1", "", msg_a);
 
     // Same session, a bit later on the same day
     let msg_b = r#"{
@@ -90,12 +122,9 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
         },
         "time": { "created": 1718456400000.0, "completed": 1718456402560.0 }
     }"#;
-    fs::write(session1.join("msg_b.json"), msg_b).unwrap();
+    insert_opencode_message(&conn, "msg_b", "session1", "", msg_b);
 
     // Session 2: one message on 2025-01-10 using gpt-4o
-    let session2 = base.join(".local/share/opencode/storage/message/session2");
-    fs::create_dir_all(&session2).unwrap();
-
     // 2025-01-10 12:00:00 UTC = 1736510400000 ms
     let msg_c = r#"{
         "id": "msg_c",
@@ -112,7 +141,7 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
         },
         "time": { "created": 1736510400000.0, "completed": 1736510400920.0 }
     }"#;
-    fs::write(session2.join("msg_c.json"), msg_c).unwrap();
+    insert_opencode_message(&conn, "msg_c", "session2", "", msg_c);
 
     tmp
 }
@@ -246,8 +275,7 @@ fn create_empty_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
     prime_pricing_cache(base);
-    let opencode_dir = base.join(".local/share/opencode/storage/message");
-    fs::create_dir_all(opencode_dir).unwrap();
+    drop(create_opencode_sqlite(base));
     tmp
 }
 
@@ -256,8 +284,7 @@ fn create_timezone_boundary_fixture_dir() -> TempDir {
     let base = tmp.path();
     prime_pricing_cache(base);
 
-    let session = base.join(".local/share/opencode/storage/message/session1");
-    fs::create_dir_all(&session).unwrap();
+    let conn = create_opencode_sqlite(base);
 
     // 2026-03-02 18:00:00 UTC = 2026-03-02 10:00:00 in America/Los_Angeles
     let msg_a = r#"{
@@ -275,7 +302,7 @@ fn create_timezone_boundary_fixture_dir() -> TempDir {
         },
         "time": { "created": 1772474400000.0 }
     }"#;
-    fs::write(session.join("msg_a.json"), msg_a).unwrap();
+    insert_opencode_message(&conn, "msg_a", "session1", "", msg_a);
 
     // 2026-03-03 04:30:00 UTC = 2026-03-02 20:30:00 in America/Los_Angeles
     let msg_b = r#"{
@@ -293,7 +320,7 @@ fn create_timezone_boundary_fixture_dir() -> TempDir {
         },
         "time": { "created": 1772512200000.0 }
     }"#;
-    fs::write(session.join("msg_b.json"), msg_b).unwrap();
+    insert_opencode_message(&conn, "msg_b", "session1", "", msg_b);
 
     tmp
 }
@@ -501,8 +528,7 @@ fn create_opencode_workspace_fixture_dir() -> TempDir {
     let base = tmp.path();
     prime_pricing_cache(base);
 
-    let session = base.join(".local/share/opencode/storage/message/workspace-session");
-    fs::create_dir_all(&session).unwrap();
+    let conn = create_opencode_sqlite(base);
 
     let msg = r#"{
         "id": "workspace_msg",
@@ -517,10 +543,15 @@ fn create_opencode_workspace_fixture_dir() -> TempDir {
             "reasoning": 0,
             "cache": { "read": 200, "write": 50 }
         },
-        "time": { "created": 1718452800000.0 },
-        "path": { "root": "/Users/alice/opencode-workspace" }
+        "time": { "created": 1718452800000.0 }
     }"#;
-    fs::write(session.join("workspace_msg.json"), msg).unwrap();
+    insert_opencode_message(
+        &conn,
+        "workspace_msg",
+        "workspace-session",
+        "/Users/alice/opencode-workspace",
+        msg,
+    );
 
     tmp
 }
@@ -530,8 +561,7 @@ fn create_conflicting_opencode_fixture_dir() -> TempDir {
     let base = tmp.path();
     prime_pricing_cache(base);
 
-    let session = base.join(".local/share/opencode/storage/message/conflicting-session");
-    fs::create_dir_all(&session).unwrap();
+    let conn = create_opencode_sqlite(base);
 
     let msg = r#"{
         "id": "conflict_msg",
@@ -548,7 +578,7 @@ fn create_conflicting_opencode_fixture_dir() -> TempDir {
         },
         "time": { "created": 1736510400000.0 }
     }"#;
-    fs::write(session.join("conflict_msg.json"), msg).unwrap();
+    insert_opencode_message(&conn, "conflict_msg", "conflicting-session", "", msg);
 
     tmp
 }
@@ -873,7 +903,7 @@ fn test_cache_prune_reports_empty_cache_stats() {
 }
 
 #[test]
-fn test_cache_prune_surfaces_shard_decode_errors() {
+fn test_cache_prune_surfaces_unknown_shard_magic() {
     let config_dir = TempDir::new().unwrap();
     let shard = config_dir.path().join("cache/shards/ff/invalid.bin");
     fs::create_dir_all(shard.parent().unwrap()).unwrap();
@@ -886,9 +916,8 @@ fn test_cache_prune_surfaces_shard_decode_errors() {
         .args(["--no-spinner", "cache", "prune"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "failed to decode source cache shard",
-        ));
+        .stderr(predicate::str::contains("has unrecognized magic"))
+        .stderr(predicate::str::contains(shard.to_str().unwrap()));
 }
 
 #[test]
@@ -1036,6 +1065,85 @@ fn test_global_theme_flag() {
 fn test_global_debug_flag() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("--debug").arg("--help").assert().success();
+}
+
+#[test]
+fn test_opencode_json_only_storage_is_not_reported() {
+    let tmp = TempDir::new().unwrap();
+    prime_pricing_cache(tmp.path());
+    let legacy_dir = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/session-1");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    fs::write(
+        legacy_dir.join("msg_legacy.json"),
+        r#"{"id":"legacy-only","sessionID":"session-1","role":"assistant","modelID":"legacy-json-model","providerID":"openai","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+    )
+    .unwrap();
+
+    cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("legacy-json-model").not());
+}
+
+#[test]
+fn test_opencode_obsolete_sqlite_schema_is_an_explicit_cli_error() {
+    let tmp = TempDir::new().unwrap();
+    prime_pricing_cache(tmp.path());
+    let data_dir = tmp.path().join(".local/share/opencode");
+    fs::create_dir_all(&data_dir).unwrap();
+    let conn = Connection::open(data_dir.join("opencode.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            data TEXT NOT NULL
+        );",
+    )
+    .unwrap();
+    drop(conn);
+
+    cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not match the current session schema",
+        ));
+}
+
+#[test]
+fn test_opencode_invalid_sqlite_payload_is_an_explicit_cli_error() {
+    let tmp = TempDir::new().unwrap();
+    prime_pricing_cache(tmp.path());
+    let conn = create_opencode_sqlite(tmp.path());
+    conn.execute(
+        "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            "invalid-payload-row",
+            "session-1",
+            r#"{"role":"assistant","modelID":["not","a","string"],"providerID":"openai","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "failed to decode current OpenCode SQLite message payload",
+        ))
+        .stderr(predicate::str::contains("invalid-payload-row"))
+        .stderr(predicate::str::contains(
+            tmp.path()
+                .join(".local/share/opencode/opencode.db")
+                .to_str()
+                .unwrap(),
+        ));
 }
 
 // ── Date filtering tests ───────────────────────────────────────────────────
@@ -2705,6 +2813,78 @@ fn test_clients_json() {
         first.get("messageCount").is_some(),
         "Client entry should have 'messageCount' field"
     );
+
+    let opencode = arr.iter().find(|row| row["client"] == "opencode").unwrap();
+    assert_eq!(
+        opencode["sessionsPath"],
+        serde_json::json!(tmp.path().join(".local/share/opencode"))
+    );
+    assert_eq!(opencode["sessionsPathExists"], true);
+    assert!(opencode["additionalPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"]
+            == serde_json::json!(tmp.path().join(".local/share/opencode/opencode.db"))
+            && entry["exists"] == true));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_clients_json_opencode_diagnostics_match_adapter_for_non_utf8_xdg() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = TempDir::new().unwrap();
+    prime_pricing_cache(tmp.path());
+    let xdg_data_home = tmp
+        .path()
+        .join(OsString::from_vec(b"xdg-data-\xff".to_vec()));
+    let data_dir = xdg_data_home.join("opencode");
+    fs::create_dir_all(&data_dir).unwrap();
+    let conn = Connection::open(data_dir.join("opencode.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+         CREATE TABLE message (
+             id TEXT PRIMARY KEY,
+             session_id TEXT NOT NULL,
+             data TEXT NOT NULL
+         );",
+    )
+    .unwrap();
+    insert_opencode_message(
+        &conn,
+        "msg-non-utf8",
+        "session-non-utf8",
+        "/workspace/non-utf8",
+        r#"{"id":"msg-non-utf8","role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+    );
+    drop(conn);
+
+    let output = cmd_with_home(tmp.path())
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let opencode = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "opencode")
+        .unwrap();
+    assert_eq!(opencode["messageCount"], 1);
+    assert_eq!(
+        opencode["sessionsPath"],
+        data_dir.to_string_lossy().as_ref()
+    );
+    assert!(opencode["additionalPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == data_dir.join("opencode.db").to_string_lossy().as_ref()));
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

@@ -57,7 +57,8 @@ Baseline commit: `1c7bb2ed99b0`
 | C4 | `5f50b6f2` | Bounded single-copy source fold | 0 | 0.00 | 9,920 | 4,290 | 4.29 | 38,700 | 0.15 | 35,040 |
 | C5 | `061d5b18` | Structured aggregation identities | 0 | 0.00 | 9,760 | 3,353 | 3.35 | 37,096 | 0.10 | 32,764 |
 | C6 | `e5da96e6` | Explicit planned-read recovery | 0 | 0.00 | 9,760 | 4,139 | 4.14 | 37,304 | 0.11 | 32,920 |
-| C7 | `C7` | Streamed TUI cache persistence | 1 | 0.00 | 9,920 | 3,387 | 3.39 | 35,760 | 0.11 | 32,760 |
+| C7 | `6e499ecd` | Streamed TUI cache persistence | 1 | 0.00 | 9,920 | 3,387 | 3.39 | 35,760 | 0.11 | 32,760 |
+| C8 | `C8 (this commit)` | Current-format local storage | 0 | 0.00 | 9,760 | 3,676 | 3.68 | 37,972 | 0.10 | 32,764 |
 
 ## Raw samples
 
@@ -859,7 +860,7 @@ existing allocator trim at the end. This second lifecycle seam can return the
 old aggregate's pages; the parse-time trim cannot do so while the old aggregate
 is still live. Schema version, compact field order, tuple-array maps, sorted
 sets, date formats, nulls, read DTOs, and all cache failure behavior are
-unchanged. `C7` is replaced with the exact commit hash by the next stage.
+unchanged. The cumulative table records its exact commit as `6e499ecd`.
 
 Release build:
 
@@ -1025,6 +1026,240 @@ passed
 Rustfmt, `git diff --check`, the release build, focused cache/app/atomic-writer
 tests, and an independent semantic review also passed. ADR 0008 records both
 the borrowed streaming writer and the post-swap allocator lifecycle seam.
+
+### C8 — current-format local storage
+
+Candidate: remove retired local-storage compatibility from the hot scan path.
+OpenCode now discovers and reads only current SQLite databases. Legacy message
+JSON, migration bookkeeping, JSON/SQLite precedence, and the SQL query for
+databases without the current `session.directory` schema are gone. Database
+discovery, open, schema, query, row, payload, and semantic failures propagate
+through the public report path instead of becoming successful empty sources.
+
+The source-message envelope advances to v3. Shard filenames hash the native
+path bytes, an explicit stable parser name, and the parser revision instead of
+a serialized enum ordinal. Ordinary reads have one v3 decoder. They do not
+locate, decode, migrate, or delete v2 files; explicit `cache prune` classifies
+the complete store before deleting known v2 or stale current shards. Unknown,
+future, and malformed-current envelopes stop classification without deletion.
+An unlink error after classification remains explicit but does not roll back
+already completed unlinks.
+
+Planned Codex reads now use the same typed body-failure result as generic
+adapters. Recovery carries whether proven body corruption requires deletion,
+and it treats a replacement as successful only when the atomic shard writer
+returns success. A planned write is no longer mistaken for an actual repair.
+
+OpenCode's strict parser initially exposed a candidate-specific RSS regression:
+decoding every raw row through an internally tagged enum materialized enormous
+non-assistant JSON values. The final implementation borrows SQLite TEXT,
+stream-validates a small required `role` envelope, and fully decodes only
+assistant rows. This still rejects malformed JSON and missing roles with
+database and row context. Assistant model, provider, session, timestamp,
+token, and cache-token fields remain strict. The current query orders by the
+unique message id and does not build a redundant second-key sorter.
+
+The TUI aggregate cache schema advances to 26 so aggregates that may contain
+retired JSON-only OpenCode history rebuild once. ADR 0019 records the breaking
+current-format boundary. Since this report and implementation are in the same
+terminal commit, the cumulative table names the commit `C8 (this commit)`;
+the release binary hash below pins the exact measured code.
+
+Release build:
+
+```text
+cargo build -p tokscale-cli --release
+Finished release profile [optimized] target(s) in 2m 26s.
+Binary SHA-256: ead53d3bb58513b093106bb0ba604e548f970f31559766ce972fdb7554ff1c90
+```
+
+Corpus at measurement time:
+
+| Input | Size / count | Change from C7 measurement |
+| --- | ---: | ---: |
+| isolated pre-C8 source cache | 9,243 v2 shards / 70,833,913 logical bytes (88 MiB allocated) | unchanged prepared snapshot |
+| settled C8 source cache | 9,243 retained v2 + 4,382 v3 shards / 112,283,638 logical bytes | one-time v3 rebuild; no implicit v2 deletion |
+| Claude projects | 647 MiB | unchanged |
+| Codex sessions | 759 MiB | +14 MiB |
+| OpenCode data | 429 MiB | unchanged |
+
+Zero-session probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    0              0.00    0.00    0.00    9920
+2    0              0.00    0.00    0.00    9600
+3    0              0.00    0.00    0.00    9760
+```
+
+The one-time v3 rebuild completed before the final release artifact was
+measured. The final warm core cohort was:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    3536           3.54    0.70    1.32   37040
+2    3676           3.68    0.81    1.26   37972
+3    4783           6.61    0.78    1.33   39080
+```
+
+An exact-C7 control immediately after C8 used the same live inputs:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    3786           3.79    0.98    1.11   36280
+2    3434           3.43    0.97    1.13   36840
+3    3484           3.49    0.78    1.30   36116
+```
+
+C8's 3,676 ms / 3.68 s / 37,972 KiB medians are respectively 5.5%, 5.4%,
+and 4.7% above the adjacent C7 control's 3,484 ms / 3.49 s / 36,280 KiB.
+The 6.61-second C8 outlier and live Codex growth prevent isolating a cause, but
+the direction is retained as a real-corpus regression signal. No general
+core-scan speed or RSS improvement is attributed to C8; the fixed OpenCode
+probe below is the candidate-specific deciding measurement.
+
+Aggregation probe:
+
+```text
+run  wall_s  user_s  sys_s  max_rss_kib
+1    0.11    0.10    0.00   32760
+2    0.10    0.10    0.00   32924
+3    0.10    0.09    0.01   32920
+4    0.10    0.09    0.02   32764
+5    0.11    0.09    0.02   32764
+```
+
+The 0.10 s / 32,764 KiB medians are effectively unchanged from C7's 0.11 s /
+32,760 KiB; both differences are noise-sized. The measured aggregation
+executable SHA-256 is
+`73954e50487717d06e34e6e74902b81dc89a7f4d6adadf3c54d79475e70aae51`.
+
+#### Fixed current OpenCode database
+
+The isolated fixture is an online backup of a real current OpenCode database:
+172,265,472 bytes, 4,070 message rows, and SHA-256
+`a0ba2276a6a9a17bb5adeab8c05bbb8027d8e1731ab2ecc6ec4c508108bd00b3`.
+Its copied legacy message JSON is entirely duplicated by SQLite, so removing
+that compatibility path must not change the report.
+
+Every run used `TOKSCALE_PRICING_CACHE_ONLY=1`; pricing was therefore excluded
+from both output and timing. Three paired fresh-shard parses were:
+
+```text
+version  run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+C7       1    389            0.41    0.14    0.06   40080
+C7       2    368            0.37    0.13    0.06   40364
+C7       3    368            0.37    0.13    0.06   40044
+C8       1    203            0.20    0.12    0.07   27468
+C8       2    148            0.15    0.11    0.04   27468
+C8       3    152            0.15    0.12    0.02   26988
+```
+
+Median processing time falls from 368 to 152 ms (58.7%), median wall time
+from 0.37 to 0.15 s (59.5%), and peak RSS from 40,080 to 27,468 KiB
+(31.5%, or 12,612 KiB). C7 wrote 50 source shards using the database plus
+positive legacy JSON; C8 writes one 513,882-byte SQLite shard.
+
+Three alternating warm runs retained exact output and showed the smaller
+discovery/header surface:
+
+```text
+version  run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+C7       1    33             0.03    0.01    0.04   10980
+C7       2    34             0.03    0.01    0.03   10460
+C7       3    33             0.03    0.01    0.04   11116
+C8       1    24             0.02    0.01    0.01   10300
+C8       2    25             0.03    0.00    0.04   10300
+C8       3    25             0.02    0.01    0.01   10140
+```
+
+Warm processing falls from 33 to 25 ms (24.2%). Median wall time is 0.02 s
+versus 0.03 s, a single timer quantum, and median RSS falls from 10,980 to
+10,300 KiB (6.2%). Cold and warm reports contain 3,188 messages, 12 entries,
+68,406,581 input tokens, 855,509 output tokens, 261,648,113 cache-read tokens,
+and 254,074 cache-write tokens. Every normalized report matches C7 exactly:
+
+```text
+normalized SHA-256: 316a0e0acea3c74406e9112657b2459828b7a7ae160fe130229dba2677157ebf
+```
+
+The initial strict implementation's three cold RSS samples were 94,048,
+94,104, and 94,264 KiB. Database inspection found 30,300,869 bytes of user
+payload but only 1,491,019 bytes of assistant payload; the largest user row
+was 10,987,321 bytes. During diagnosis, a temporary controlled copy replaced
+only those user payloads with `{"role":"user"}` and sharply reduced RSS while
+leaving assistant data fixed. That temporary probe was not retained as a
+benchmark artifact and is not used in the percentage claims above; the retained
+same-fixture before/after samples are the reported evidence. The diagnosis led
+to the borrowed TEXT and streaming role-envelope design, and a permanent 10
+MiB user-payload test locks the classification boundary.
+
+#### Breaking and cache-format fixtures
+
+The JSON-only fixture contains one positive legacy message. Exact C7 reports
+one message with 10,170 input, 2 output, 2,176 cache-read, and 168 reasoning
+tokens. C8 intentionally reports zero messages, writes no source shard, and
+emits no error because retired JSON is outside the accepted input format.
+
+The old-schema fixture has a `message` table but no current `session` table.
+C7's retired SQL fallback reported one message. C8 exits 1 with:
+
+```text
+OpenCode SQLite database .../opencode.db does not match the current session schema: no such table: session
+```
+
+It writes no successful empty shard.
+
+A real v2 Amp shard at its old enum-key path retained its exact SHA-256
+`4a06d4a380b03c9011559232c38c42e71aeb968a9ea15cc19c028058b633a6e0`
+after an ordinary C8 scan. The scan reported the same one message and wrote a
+separate stable-key v3 shard. On a copied cache, explicit prune produced:
+
+```text
+Source cache prune: scanned 2, removed 1, retained 1.
+```
+
+Only the v3 shard remained. Focused tests separately prove that unknown magic,
+future versions, and malformed-current headers stop prune classification before
+the first unlink and remain protected during ordinary repair attempts.
+
+The fixed OpenCode TUI write produced schema 26 with 12 models, 9 agents, 38
+daily buckets, 127 hourly buckets, and 331,865,864 tokens. Its complete `.data`
+object matches the exact schema-25 C7 artifact:
+
+```text
+normalized .data SHA-256: 533feb77a9767216fc4a942b33abbd8c6d4676865749274a542dc5f394b47744
+```
+
+The Bun benchmark generator was also executed at scale 0.02. Its generated
+current SQLite database parsed as 10 OpenCode messages with no diagnostics;
+generated millisecond timestamps are integers and satisfy the same strict
+current-format contract as production data.
+
+The obsolete TypeScript benchmark runner was removed rather than given a
+compatibility shim. It imported modules that no longer exist and labeled the
+larger of before/after RSS samples as process peak memory. The remaining docs
+route scan measurements through `scripts/measure-scan-performance.sh` and
+aggregation through the Rust benchmark executable used in this report. The
+random fixture generator is documented as scale-repeatable but not
+deterministic.
+
+Final gates:
+
+```text
+cargo test --workspace
+2026 passed; 4 ignored
+
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+passed
+```
+
+Rustfmt, `git diff --check`, the final release and benchmark builds, focused
+OpenCode/source-cache/Codex/CLI/TUI tests, and independent reviews of both
+storage chains also passed. `bun run build:cli`, the generator's help path, and
+a generated-fixture scan also passed. The ignored OpenCode test requires a
+developer's live database; the fixed real database above exercises the same
+production path with deterministic output and resource measurements.
 
 ## Interpretation rules
 

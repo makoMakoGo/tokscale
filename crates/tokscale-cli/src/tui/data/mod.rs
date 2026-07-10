@@ -683,15 +683,28 @@ after"#,
     fn test_data_loader_keeps_gateway_model_path_under_original_client() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
-        let message_dir = temp_dir
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        fs::create_dir_all(&message_dir).unwrap();
-        fs::write(
-            message_dir.join("msg_001.json"),
-            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0.25,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        let data_dir = temp_dir.path().join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        let conn = rusqlite::Connection::open(data_dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );",
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "msg-1",
+                "session-1",
+                r#"{"id":"msg-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0.25,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
 
         unsafe {
             env::set_var("HOME", temp_dir.path());

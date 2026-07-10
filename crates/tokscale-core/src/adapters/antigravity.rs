@@ -79,7 +79,6 @@ impl LocalSourceAdapter for AntigravityAdapter {
                 ),
                 SourceUnitMeta::None
                 | SourceUnitMeta::OpenCodeSqlite
-                | SourceUnitMeta::OpenCodeJson
                 | SourceUnitMeta::KiroFile
                 | SourceUnitMeta::KiroSqlite
                 | SourceUnitMeta::KiroGlobalStorage
@@ -110,11 +109,12 @@ impl LocalSourceAdapter for AntigravityAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), String> {
         let mut seen = HashSet::new();
-        while let Some(parsed) = batches.next(ctx) {
+        while let Some(parsed) = batches.next(ctx)? {
             fold_antigravity_units(parsed, ctx, sink, &mut seen);
         }
+        Ok(())
     }
 }
 
@@ -130,7 +130,8 @@ fn fold_antigravity_units(
             messages,
             cache_write,
             invalidate_cache,
-        } = adapter_cache::resolve_unit(parsed_unit, ctx);
+        } = adapter_cache::resolve_unit(parsed_unit, ctx)
+            .expect("Antigravity cache recovery must parse its source");
         let path = unit.path.clone();
         let cache_write_succeeded = adapter_cache::write_cache(cache_write, ctx, &messages);
         sink.extend_messages(
