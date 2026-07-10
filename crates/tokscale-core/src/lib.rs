@@ -713,38 +713,51 @@ fn source_inventory_signature(
     SourceInventorySignature(hasher.finalize().into())
 }
 
-fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
-    let mut latest_by_session: HashMap<std::sync::Arc<str>, UnifiedMessage> = HashMap::new();
+#[derive(Default)]
+struct TraeMessageAccumulator {
+    latest_by_session: HashMap<std::sync::Arc<str>, UnifiedMessage>,
+}
 
-    for message in messages.drain(..) {
-        let session_id = std::sync::Arc::clone(&message.session_id);
-        match latest_by_session.get_mut(&session_id) {
-            Some(existing) => {
-                let should_replace = message.timestamp > existing.timestamp
-                    || (message.timestamp == existing.timestamp
-                        && message.dedup_key.as_ref().is_some_and(|key| {
-                            existing
-                                .dedup_key
-                                .as_ref()
-                                .is_none_or(|existing_key| key > existing_key)
-                        }));
-                if should_replace {
-                    *existing = message;
+impl TraeMessageAccumulator {
+    fn push_messages(&mut self, messages: Vec<UnifiedMessage>) {
+        for message in messages {
+            let session_id = std::sync::Arc::clone(&message.session_id);
+            match self.latest_by_session.get_mut(&session_id) {
+                Some(existing) => {
+                    let should_replace = message.timestamp > existing.timestamp
+                        || (message.timestamp == existing.timestamp
+                            && message.dedup_key.as_ref().is_some_and(|key| {
+                                existing
+                                    .dedup_key
+                                    .as_ref()
+                                    .is_none_or(|existing_key| key > existing_key)
+                            }));
+                    if should_replace {
+                        *existing = message;
+                    }
                 }
-            }
-            None => {
-                let _ = latest_by_session.insert(session_id, message);
+                None => {
+                    let _ = self.latest_by_session.insert(session_id, message);
+                }
             }
         }
     }
 
-    let mut deduped: Vec<UnifiedMessage> = latest_by_session.into_values().collect();
-    deduped.sort_unstable_by(|a, b| {
-        a.session_id
-            .cmp(&b.session_id)
-            .then_with(|| a.timestamp.cmp(&b.timestamp))
-    });
-    deduped
+    fn finish(self) -> Vec<UnifiedMessage> {
+        let mut deduped: Vec<UnifiedMessage> = self.latest_by_session.into_values().collect();
+        deduped.sort_unstable_by(|a, b| {
+            a.session_id
+                .cmp(&b.session_id)
+                .then_with(|| a.timestamp.cmp(&b.timestamp))
+        });
+        deduped
+    }
+}
+
+fn dedupe_latest_trae_messages(messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+    let mut accumulator = TraeMessageAccumulator::default();
+    accumulator.push_messages(messages);
+    accumulator.finish()
 }
 
 /// Date-range retain shared by the report and local-parse filters. One

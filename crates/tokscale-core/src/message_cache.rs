@@ -829,6 +829,7 @@ impl CachedSourceEntry {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_version(
         path: &Path,
         parser_version: ParserVersion,
@@ -857,6 +858,7 @@ impl CachedSourceEntry {
         }
     }
 
+    #[cfg(test)]
     fn key(&self) -> CachedSourceKey {
         CachedSourceKey {
             path: self.path.clone(),
@@ -897,12 +899,6 @@ impl CacheWritePlan {
             parser_version: self.parser_version,
         }
     }
-}
-
-#[derive(Debug)]
-pub(crate) enum CacheWrite {
-    Borrowed(CacheWritePlan),
-    Owned(CachedSourceEntry),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -975,6 +971,7 @@ impl SourceMessageCache {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn insert(&mut self, entry: CachedSourceEntry) {
         let key = entry.key();
         self.dirty_entries.insert(key.clone(), entry);
@@ -1007,10 +1004,6 @@ impl SourceMessageCache {
     }
 
     pub(crate) fn write_messages(&mut self, plan: CacheWritePlan, messages: &[UnifiedMessage]) {
-        if messages.is_empty() {
-            return;
-        }
-
         let key = plan.key();
         let Some(dir) = self.cache_dir.clone() else {
             return;

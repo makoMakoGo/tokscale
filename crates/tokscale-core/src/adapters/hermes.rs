@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -64,18 +64,32 @@ impl LocalSourceAdapter for HermesAdapter {
         sink: &mut dyn MessageSink,
     ) {
         let mut seen = HashSet::new();
-        let mut messages = Vec::new();
-        for unit in parsed {
-            if let UnitMessageSource::Fresh(unit_messages) = unit.messages {
-                messages.extend(unit_messages);
-            }
+        fold_hermes_units(parsed, sink, &mut seen);
+    }
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) {
+        let mut seen = HashSet::new();
+        while let Some(parsed) = batches.next(ctx) {
+            fold_hermes_units(parsed, sink, &mut seen);
         }
-        sink.extend_messages(
-            messages
-                .into_iter()
-                .filter(|message| crate::should_keep_deduped_message(&mut seen, message))
-                .collect(),
-        );
+    }
+}
+
+fn fold_hermes_units(parsed: Vec<ParsedUnit>, sink: &mut dyn MessageSink, seen: &mut HashSet<u64>) {
+    for unit in parsed {
+        if let UnitMessageSource::Fresh(messages) = unit.messages {
+            sink.extend_messages(
+                messages
+                    .into_iter()
+                    .filter(|message| crate::should_keep_deduped_message(seen, message))
+                    .collect(),
+            );
+        }
     }
 }
 
@@ -84,6 +98,36 @@ pub(crate) static HERMES_ADAPTER: HermesAdapter = HermesAdapter;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hermes_direct_parser_ignores_seeded_source_message_shard() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.db");
+        std::fs::write(&path, b"direct parser source").unwrap();
+        let unit = SourceUnit::sqlite_with_wal(ClientId::Hermes, path.clone()).prepare_snapshot();
+        let mut cache = crate::message_cache::SourceMessageCache::default();
+        cache.insert(crate::message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            unit.parser_version,
+            unit.source_input_policy().fingerprint().unwrap(),
+            vec![crate::UnifiedMessage::new(
+                "hermes",
+                "model",
+                "provider",
+                "cached-session",
+                1,
+                crate::TokenBreakdown {
+                    input: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )],
+            Vec::new(),
+            None,
+        ));
+
+        assert!(HERMES_ADAPTER.plan_cache_hit(unit, &cache).is_err());
+    }
 
     #[test]
     fn hermes_adapter_discovers_default_then_extra_profile_dbs() {

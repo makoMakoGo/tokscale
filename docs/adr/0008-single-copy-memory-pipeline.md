@@ -92,8 +92,10 @@ The parse pipeline must hold at most one owned copy of any message.
   pruning to remove old layouts without decoding compatibility structs. Stale
   shards rebuild instead of being decoded under incompatible assumptions.
 
-Planned follow-up (separate ADR when implemented): streaming fold aggregation,
-removing the remaining full-corpus `all_messages` materialization.
+ADR 0018 implements the planned streaming follow-up with a bounded ordered
+source-fold pipeline. Aggregation paths no longer retain adapter-wide parsed
+results; APIs whose explicit contract returns all messages still materialize
+that final output.
 
 ## Consequences
 

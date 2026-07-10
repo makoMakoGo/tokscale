@@ -7,7 +7,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, SourceUnitMeta,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceUnit, SourceUnitMeta,
 };
 use crate::clients::ClientId;
 use crate::{scanner, sessions};
@@ -99,6 +99,14 @@ impl LocalSourceAdapter for OpenCodeAdapter {
             .collect()
     }
 
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<ParsedUnit, SourceUnit> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
+    }
+
     fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
         let mut sqlite_units = Vec::new();
         let mut json_units = Vec::new();
@@ -114,6 +122,33 @@ impl LocalSourceAdapter for OpenCodeAdapter {
         let mut seen = HashSet::new();
         for unit in sqlite_units.into_iter().chain(json_units) {
             fold_opencode_unit(unit, ctx, sink, &mut seen);
+        }
+    }
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) {
+        let mut sqlite_units = Vec::new();
+        let mut json_units = Vec::new();
+        for unit in batches.take_remaining_units() {
+            match unit.meta {
+                SourceUnitMeta::OpenCodeSqlite => sqlite_units.push(unit),
+                SourceUnitMeta::OpenCodeJson => json_units.push(unit),
+                _ => unreachable!("unexpected OpenCode source unit meta"),
+            }
+        }
+
+        let mut seen = HashSet::new();
+        for units in [sqlite_units, json_units] {
+            let mut planned = ParsedBatchSource::new(self, units);
+            while let Some(parsed) = planned.next(ctx) {
+                for unit in parsed {
+                    fold_opencode_unit(unit, ctx, sink, &mut seen);
+                }
+            }
         }
     }
 }
@@ -261,5 +296,71 @@ mod tests {
 
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].session_id.as_ref(), "sqlite-session");
+    }
+
+    #[test]
+    fn opencode_batched_fold_preserves_sqlite_precedence_across_batch_boundary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = sessions::dedup_hash_str("shared-batched-message");
+        let sqlite_path = dir.path().join("opencode.db");
+        let json_path = dir.path().join("msg_001.json");
+        std::fs::write(&sqlite_path, "sqlite cache source").unwrap();
+        std::fs::write(&json_path, "json cache source").unwrap();
+        let json_unit = SourceUnit::plain_file(ClientId::OpenCode, json_path.clone())
+            .with_meta(SourceUnitMeta::OpenCodeJson)
+            .prepare_snapshot();
+        let sqlite_unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, sqlite_path.clone())
+            .with_meta(SourceUnitMeta::OpenCodeSqlite)
+            .prepare_snapshot();
+        let mut cache = message_cache::SourceMessageCache::default();
+        for (unit, session_id) in [
+            (&json_unit, "json-session"),
+            (&sqlite_unit, "sqlite-session"),
+        ] {
+            cache.insert(message_cache::CachedSourceEntry::new_with_version(
+                &unit.path,
+                unit.parser_version,
+                unit.source_input_policy().fingerprint().unwrap(),
+                vec![UnifiedMessage::new_with_dedup(
+                    "opencode",
+                    "claude-sonnet-4-5",
+                    "anthropic",
+                    session_id,
+                    1_766_000_000_000,
+                    TokenBreakdown {
+                        input: 1,
+                        ..Default::default()
+                    },
+                    0.0,
+                    Some(key),
+                )],
+                Vec::new(),
+                None,
+            ));
+        }
+
+        let messages = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut sink = Vec::new();
+                let mut batches = crate::adapters::ParsedBatchSource::new(
+                    &OPENCODE_ADAPTER,
+                    vec![json_unit, sqlite_unit],
+                );
+                OPENCODE_ADAPTER.fold_batches(
+                    &mut batches,
+                    &mut FoldContext {
+                        source_cache: &mut cache,
+                        pricing: None,
+                    },
+                    &mut sink,
+                );
+                sink
+            });
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "sqlite-session");
     }
 }

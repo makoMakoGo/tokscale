@@ -271,18 +271,25 @@ fn normalized_time_metrics_value(mut report: TimeMetricsReport) -> serde_json::V
 }
 
 #[test]
-fn cache_only_pricing_diagnostics_reports_missing_cache() {
-    let mut diagnostics = pricing::PricingDiagnostics::new();
+fn cache_only_pricing_diagnostics_append_missing_cache_in_order() {
+    let mut diagnostics = vec![
+        "first diagnostic".to_string(),
+        "second diagnostic".to_string(),
+    ];
 
     let loaded = load_cache_only_pricing_with_diagnostics(&mut diagnostics, || None);
 
     assert!(loaded.is_none());
     assert_eq!(
         diagnostics,
-        vec![format!(
-            "{}: cache-only mode and no cached pricing",
-            pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
-        )]
+        vec![
+            "first diagnostic".to_string(),
+            "second diagnostic".to_string(),
+            format!(
+                "{}: cache-only mode and no cached pricing",
+                pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
+            ),
+        ]
     );
 }
 

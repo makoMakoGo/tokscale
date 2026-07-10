@@ -87,6 +87,20 @@ impl LocalSourceAdapter for KiroAdapter {
             .collect()
     }
 
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<ParsedUnit, SourceUnit> {
+        match unit.meta {
+            SourceUnitMeta::KiroFile | SourceUnitMeta::KiroGlobalStorage => {
+                adapter_cache::plan_cache_hit(unit, source_cache)
+            }
+            SourceUnitMeta::KiroSqlite => Err(unit),
+            _ => unreachable!("unexpected Kiro source unit meta"),
+        }
+    }
+
     fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
         adapter_cache::fold_units(parsed, ctx, sink);
     }

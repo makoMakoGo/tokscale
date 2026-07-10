@@ -51,6 +51,14 @@ impl LocalSourceAdapter for OpenClawAdapter {
             .collect()
     }
 
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<ParsedUnit, SourceUnit> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
+    }
+
     fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
         adapter_cache::fold_units(parsed, ctx, sink);
     }

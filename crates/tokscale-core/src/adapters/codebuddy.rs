@@ -7,7 +7,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, CodeBuddyLogSource, FingerprintPolicy, FoldContext, LocalSourceAdapter,
-    MessageSink, ParseContext, ParsedUnit, SourceUnit, SourceUnitMeta,
+    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceUnit, SourceUnitMeta,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -72,11 +72,33 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
             .collect()
     }
 
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<ParsedUnit, SourceUnit> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
+    }
+
     fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
         let mut deduper = CodeBuddyDeduper::default();
         adapter_cache::fold_units_with_filter(parsed, ctx, sink, |unit, messages| {
             deduper.filter(unit, messages)
         });
+    }
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) {
+        let mut deduper = CodeBuddyDeduper::default();
+        while let Some(parsed) = batches.next(ctx) {
+            adapter_cache::fold_units_with_filter(parsed, ctx, sink, |unit, messages| {
+                deduper.filter(unit, messages)
+            });
+        }
     }
 }
 

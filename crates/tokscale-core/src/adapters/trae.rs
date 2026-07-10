@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -53,6 +53,23 @@ impl LocalSourceAdapter for TraeAdapter {
         }
         sink.extend_messages(crate::dedupe_latest_trae_messages(messages));
     }
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) {
+        let mut accumulator = crate::TraeMessageAccumulator::default();
+        while let Some(parsed) = batches.next(ctx) {
+            for unit in parsed {
+                if let UnitMessageSource::Fresh(messages) = unit.messages {
+                    accumulator.push_messages(messages);
+                }
+            }
+        }
+        sink.extend_messages(accumulator.finish());
+    }
 }
 
 pub(crate) static TRAE_ADAPTER: TraeAdapter = TraeAdapter;
@@ -60,7 +77,7 @@ pub(crate) static TRAE_ADAPTER: TraeAdapter = TraeAdapter;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::{FoldContext, ParseContext};
+    use crate::adapters::FoldContext;
     use crate::message_cache;
     use crate::pricing::{ModelPricing, PricingService};
 
@@ -98,25 +115,27 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
         let pricing = pricing_service();
 
-        let parsed = TRAE_ADAPTER.parse(
-            vec![
-                SourceUnit::no_message_cache(ClientId::Trae, older),
-                SourceUnit::no_message_cache(ClientId::Trae, newer),
-            ],
-            &ParseContext {
-                source_cache: &cache,
-                pricing: Some(&pricing),
-            },
-        );
-        let mut sink = Vec::new();
-        TRAE_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: Some(&pricing),
-            },
-            &mut sink,
-        );
+        let units = vec![
+            SourceUnit::no_message_cache(ClientId::Trae, older),
+            SourceUnit::no_message_cache(ClientId::Trae, newer),
+        ];
+        let sink = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut sink = Vec::new();
+                let mut batches = crate::adapters::ParsedBatchSource::new(&TRAE_ADAPTER, units);
+                TRAE_ADAPTER.fold_batches(
+                    &mut batches,
+                    &mut FoldContext {
+                        source_cache: &mut cache,
+                        pricing: Some(&pricing),
+                    },
+                    &mut sink,
+                );
+                sink
+            });
 
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].timestamp, 1_776_000_001_000);

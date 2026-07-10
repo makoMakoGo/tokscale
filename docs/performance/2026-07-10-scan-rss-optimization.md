@@ -53,7 +53,8 @@ Baseline commit: `1c7bb2ed99b0`
 | Baseline | `1c7bb2ed99b0` | Unoptimized | 1,601 | 1.60 | 16,800 | 6,011 | 6.01 | 35,828 | 0.17 | 34,924 |
 | C1 | `3cce3edb` | Explicit cache GC | 0 | 0.00 | 9,760 | 4,354 | 4.36 | 34,832 | 0.16 | 35,040 |
 | C2 | `37c7c865` | Metadata-stamp warm hits | 0 | 0.00 | 9,920 | 3,624 | 3.94 | 37,512 | 0.15 | 35,040 |
-| C3 | `C3` | Single prepared TUI inventory | 0 | 0.00 | 9,760 | 4,534 | 4.54 | 39,288 | 0.15 | 35,040 |
+| C3 | `b9d5dae2` | Single prepared TUI inventory | 0 | 0.00 | 9,760 | 4,534 | 4.54 | 39,288 | 0.15 | 35,040 |
+| C4 | `C4` | Bounded single-copy source fold | 0 | 0.00 | 9,920 | 4,290 | 4.29 | 38,700 | 0.15 | 35,040 |
 
 ## Raw samples
 
@@ -263,8 +264,8 @@ SHA-256 inventory signature, and attaches each unit's pre-parse metadata
 snapshot. Execution consumes that exact inventory instead of discovering the
 filesystem again. The TUI persists the signature in mandatory cache schema 25:
 a fresh cache can render without immediate discovery, while stale, missing, and
-explicit-refresh paths prepare once and consume the same inventory. `C3` is
-replaced with the commit hash by the next stage.
+explicit-refresh paths prepare once and consume the same inventory. The
+cumulative table records its exact commit as `b9d5dae2`.
 
 Release build:
 
@@ -378,6 +379,151 @@ A real isolated TUI launch migrated a schema-24 cache, rendered 52 models and
 status 0. Its 1m54s process duration includes deliberate interactive idle time
 and is excluded from load timing. Core/CLI all-target Clippy with `-D warnings`,
 the release build, rustfmt, and diff checks passed.
+
+### C4 — bounded single-copy source fold
+
+Candidate: plan exact cache hits once, parse only cache misses in ordered
+Rayon-width batches, and fold each message-owning batch before parsing the next.
+Adapter-specific deduplication and merge state survives every batch. OpenCode
+keeps SQLite precedence, OMP keeps its global parent-task index and hit-first
+order, and exact-hit read plans remain compact until their sequential fold.
+Codex cold, append, and cache-race paths now write a borrowed raw message slice
+and then finalize that same vector in place; the owned cache-entry variant and
+all three full-vector clones are gone. `C4` is replaced with the commit hash by
+the next stage.
+
+Release build:
+
+```text
+cargo build -p tokscale-cli --release
+Finished release profile [optimized] target(s) in 2m 49s.
+```
+
+Corpus at final measurement time:
+
+| Input | Size / count | Change from C3 |
+| --- | ---: | ---: |
+| shared isolated source-message cache | 9,227 shards / 88 MiB | +3 shards |
+| selected cold-cache result | 4,405 shards / 49 MiB | same in C3/C4 controls |
+| Claude projects | 647 MiB | unchanged |
+| Codex sessions | 725 MiB | +7 MiB |
+| OpenCode data | 429 MiB | unchanged |
+
+The fixed warm probe continued to use the isolated config introduced for C3.
+Its source directories grew, while the cache format and selected clients stayed
+unchanged.
+
+Zero-session probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    1              0.00    0.00    0.00   10080
+2    0              0.00    0.00    0.00    9920
+3    0              0.00    0.00    0.00    9920
+```
+
+Warm three-client probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    4304           4.31    0.96    1.31   36728
+2    4290           4.29    0.90    1.35   38700
+3    4282           4.28    0.92    1.34   39084
+```
+
+Aggregation probe:
+
+```text
+run  wall_s  user_s  sys_s  max_rss_kib
+1    0.15    0.15    0.00   35200
+2    0.15    0.14    0.01   35040
+3    0.15    0.13    0.02   35040
+4    0.15    0.15    0.00   35040
+5    0.15    0.14    0.02   35040
+```
+
+Against the C3 fixed medians, warm processing and wall time fell 5.4% and 5.5%
+despite the larger source corpus; RSS fell 1.5%. The aggregation path is
+unchanged and remained flat. Alternating the exact C3 and final C4 binaries on
+the later 2,615-session corpus produced noisy wall readings but no systematic
+warm regression: median processing was 4,932 ms for C3 and 4,797 ms for C4,
+while median RSS moved from 39,248 KiB to 36,864 KiB.
+
+The candidate-specific cold probe used separate empty config/cache directories,
+the same real settings, and the same 4,405 selected source files. Three exact
+C3 controls and five C4 runs were retained because cold filesystem latency had
+material variance:
+
+```text
+version  run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+C3       1    26627          28.44   9.18    3.46   158300
+C3       2    27409          27.76   9.55    3.51   161468
+C3       3    27258          27.26   9.91    3.87   164252
+C4       1    29146          31.17   6.82    3.18   100816
+C4       2    26662          25.93   6.96    2.79    99120
+C4       3    29528          29.93   7.09    2.78   101832
+C4       4    27070          27.39   6.56    2.24    94240
+C4       5    28343          28.51   6.98    2.47    96916
+```
+
+The medians were:
+
+| Version | processing ms | wall s | user s | sys s | max RSS KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| C3 | 27,258 | 27.76 | 9.55 | 3.51 | 161,468 |
+| C4 | 28,343 | 28.51 | 6.96 | 2.78 | 99,120 |
+
+Cold peak RSS fell 38.6%, and total measured CPU time fell 25.4%. Processing
+time rose 4.0% and wall time rose 2.7%, so this result is an RSS/CPU improvement,
+not a cold scan-speed claim. The C4 output contained one additional live session
+but the selected source count and resulting shard count were identical.
+
+A Codex-only cold probe isolates removal of the raw/finalized vector clone. The
+source corpus grew from 1,490 to 1,491 sessions during the controls; all final
+runs wrote about 640 valid shards, including valid empty-session shards.
+
+```text
+version  run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+C3       1    4883           4.89    4.34    0.59   81604
+C3       2    5334           5.34    4.39    0.79   77720
+C3       3    5525           5.53    4.45    0.77   78532
+C4       1    6127           6.22    3.06    0.60   53528
+C4       2    6413           6.42    3.11    0.68   56980
+C4       3    6059           6.06    3.23    0.74   53860
+C4       4    7033           7.04    3.25    0.76   54312
+C4       5    7181           7.18    3.43    0.90   54324
+```
+
+Codex median RSS fell 30.8% and total CPU time fell 23.1%, while median wall
+time rose from 5.34 s to 6.42 s. The final design deliberately keeps raw cache
+writes and in-place finalization ordered in fold. A measured attempt to
+parallelize bounded finalization did not recover wall time and raised RSS, so it
+was removed rather than retained as unproven complexity.
+
+Measurement also caught an invalid intermediate result: the first borrowed
+writer skipped 68 valid empty Codex shards and therefore made later warm work
+disappear. The shard-count mismatch led to a regression test and a fix; the
+recorded samples above all persist empty Codex results and prove their warm hit
+reads zero source bytes.
+
+Candidate-specific verification covers one-pass ordered hit planning, unchanged
+prepared snapshots on indeterminate misses, no repeated header lookup after a
+definitive miss, direct-parser adapters ignoring seeded shards, Rayon-width
+message ownership, batch release before the next parse, cross-batch dedup and
+merge state, OpenCode precedence, OMP parent attribution, and Codex raw cache,
+append, fallback-coordinate, pricing, headless, and cache-race semantics.
+
+```text
+cargo test -p tokscale-core
+1137 passed; 3 ignored
+
+cargo test -p tokscale-cli
+834 passed; 1 ignored
+```
+
+Workspace all-target Clippy with `-D warnings`, rustfmt, diff checks, and the
+release build passed. ADR 0018 records the bounded ownership, ordering, planner,
+and Codex raw-write contracts; ADR 0008 now points to that implemented follow-up.
 
 ## Interpretation rules
 

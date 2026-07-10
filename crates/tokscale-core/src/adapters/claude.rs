@@ -7,7 +7,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -75,29 +75,58 @@ impl LocalSourceAdapter for ClaudeAdapter {
             .collect()
     }
 
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<ParsedUnit, SourceUnit> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
+    }
+
     fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
         let mut seen_keys = HashSet::new();
-        for unit in parsed {
-            let ParsedUnit {
-                unit,
-                messages,
-                cache_write,
-                invalidate_cache,
-            } = unit;
-            let path = unit.path.clone();
-            let has_cache_write = cache_write.is_some();
-            let messages = adapter_cache::resolve_messages(messages, ctx);
-            adapter_cache::write_cache(cache_write, ctx, &messages);
-            sink.extend_messages(
-                messages
-                    .into_iter()
-                    .filter(|msg| msg.dedup_key.is_none_or(|key| seen_keys.insert(key)))
-                    .collect(),
-            );
+        fold_claude_units(parsed, ctx, sink, &mut seen_keys);
+    }
 
-            if !has_cache_write && invalidate_cache {
-                ctx.source_cache.remove(&path, unit.parser_version);
-            }
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) {
+        let mut seen_keys = HashSet::new();
+        while let Some(parsed) = batches.next(ctx) {
+            fold_claude_units(parsed, ctx, sink, &mut seen_keys);
+        }
+    }
+}
+
+fn fold_claude_units(
+    parsed: Vec<ParsedUnit>,
+    ctx: &mut FoldContext<'_>,
+    sink: &mut dyn MessageSink,
+    seen_keys: &mut HashSet<u64>,
+) {
+    for unit in parsed {
+        let ParsedUnit {
+            unit,
+            messages,
+            cache_write,
+            invalidate_cache,
+        } = unit;
+        let path = unit.path.clone();
+        let has_cache_write = cache_write.is_some();
+        let messages = adapter_cache::resolve_messages(messages, ctx);
+        adapter_cache::write_cache(cache_write, ctx, &messages);
+        sink.extend_messages(
+            messages
+                .into_iter()
+                .filter(|msg| msg.dedup_key.is_none_or(|key| seen_keys.insert(key)))
+                .collect(),
+        );
+
+        if !has_cache_write && invalidate_cache {
+            ctx.source_cache.remove(&path, unit.parser_version);
         }
     }
 }

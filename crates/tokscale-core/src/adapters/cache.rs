@@ -6,21 +6,30 @@ use crate::adapters::{
 };
 use crate::{message_cache, UnifiedMessage};
 
-pub(crate) fn try_cache_hit(
+pub(crate) fn plan_cache_hit(
     mut unit: SourceUnit,
     source_cache: &message_cache::SourceMessageCache,
-) -> Option<ParsedUnit> {
-    let cached = source_cache.get_meta(&unit.path, unit.parser_version)?;
+) -> Result<ParsedUnit, SourceUnit> {
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
-        return None;
+        return Err(unit);
     }
-    let snapshot = unit.take_source_input_snapshot()?;
-    let stamp = unit.source_input_policy().stamp_from_snapshot(&snapshot)?;
+    let Some(cached) = source_cache.get_meta(&unit.path, unit.parser_version) else {
+        unit.mark_cache_lookup_completed_no_hit();
+        return Err(unit);
+    };
+    let Some(snapshot) = unit.prepared_source_input_snapshot() else {
+        return Err(unit);
+    };
+    let Some(stamp) = unit.source_input_policy().stamp_from_snapshot(snapshot) else {
+        return Err(unit);
+    };
     if cached.fingerprint.stamp != stamp || !cached.has_messages {
-        return None;
+        unit.mark_cache_lookup_completed_no_hit();
+        return Err(unit);
     }
+    unit.release_prepared_snapshot();
 
-    Some(ParsedUnit {
+    Ok(ParsedUnit {
         messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
             &unit.path,
             unit.parser_version,
@@ -63,7 +72,11 @@ where
         };
     }
 
-    let cached = ctx.source_cache.get_meta(&unit.path, unit.parser_version);
+    let cached = if unit.take_cache_lookup_completed_no_hit() {
+        None
+    } else {
+        ctx.source_cache.get_meta(&unit.path, unit.parser_version)
+    };
     let input_policy = unit.source_input_policy();
     let snapshot = unit.take_source_input_snapshot();
     if let Some(cached) = cached {
@@ -106,15 +119,13 @@ where
     let cache_write = if messages.is_empty() || !cacheable || !source_unchanged {
         None
     } else {
-        Some(message_cache::CacheWrite::Borrowed(
-            message_cache::CacheWritePlan::new(
-                &unit.path,
-                unit.parser_version,
-                fingerprint,
-                Vec::new(),
-                None,
-            ),
-        ))
+        Some(Box::new(message_cache::CacheWritePlan::new(
+            &unit.path,
+            unit.parser_version,
+            fingerprint,
+            Vec::new(),
+            None,
+        )))
     };
 
     ParsedUnit {
@@ -159,18 +170,12 @@ pub(crate) fn fold_units_with_filter<F>(
 }
 
 pub(crate) fn write_cache(
-    cache_write: Option<message_cache::CacheWrite>,
+    cache_write: Option<Box<message_cache::CacheWritePlan>>,
     ctx: &mut FoldContext<'_>,
     messages: &[UnifiedMessage],
 ) {
-    match cache_write {
-        Some(message_cache::CacheWrite::Borrowed(plan)) => {
-            ctx.source_cache.write_messages(plan, messages);
-        }
-        Some(message_cache::CacheWrite::Owned(entry)) => {
-            ctx.source_cache.insert(entry);
-        }
-        None => {}
+    if let Some(plan) = cache_write {
+        ctx.source_cache.write_messages(*plan, messages);
     }
 }
 
@@ -185,7 +190,9 @@ pub(crate) fn resolve_messages(
             crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
             messages
         }
-        UnitMessageSource::CodexCacheHit { .. } | UnitMessageSource::CodexAppend(_) => {
+        UnitMessageSource::CodexFresh { .. }
+        | UnitMessageSource::CodexCacheHit { .. }
+        | UnitMessageSource::CodexAppend(_) => {
             unreachable!("codex deferred messages must be resolved by CodexAdapter")
         }
     }
@@ -231,14 +238,7 @@ mod tests {
             message_cache::reset_source_read_stats(&path);
         }
 
-        let parsed = load_or_parse_unit_with(
-            unit,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |_| panic!("an exact stamp hit must not parse the source"),
-        );
+        let parsed = plan_cache_hit(unit, &cache).expect("exact stamp should plan a cache hit");
 
         assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
         assert!(
@@ -292,6 +292,112 @@ mod tests {
             path,
             home.path().to_path_buf(),
         ));
+    }
+
+    #[test]
+    fn cache_hit_planner_preserves_prepared_snapshot_on_miss() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, b"old contents").unwrap();
+        let old_unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+        let old_fingerprint = old_unit.source_input_policy().fingerprint().unwrap();
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            old_unit.parser_version,
+            old_fingerprint,
+            vec![cached_message()],
+            Vec::new(),
+            None,
+        ));
+
+        std::fs::write(&path, b"new and larger contents").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone()).prepare_snapshot();
+        let expected_snapshot = unit.source_input_policy().snapshot().unwrap();
+        message_cache::reset_source_read_stats(&path);
+
+        let mut miss = plan_cache_hit(unit, &cache).expect_err("stale stamp must remain a miss");
+
+        assert!(miss.cache_lookup_completed_no_hit);
+        assert_eq!(
+            miss.take_source_input_snapshot(),
+            Some(expected_snapshot),
+            "planning a miss must return the prepared inventory snapshot unchanged"
+        );
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats::default(),
+            "cache-hit planning must not read source bytes"
+        );
+    }
+
+    #[test]
+    fn confirmed_no_hit_skips_cache_inserted_between_plan_and_parse() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, b"source contents").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone()).prepare_snapshot();
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let miss = plan_cache_hit(unit, &cache).expect_err("empty cache must plan a miss");
+        assert!(miss.cache_lookup_completed_no_hit);
+        assert!(miss.prepared_source_input_snapshot().is_some());
+        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            miss.parser_version,
+            miss.source_input_policy().fingerprint().unwrap(),
+            vec![cached_message()],
+            Vec::new(),
+            None,
+        ));
+        let parse_called = std::cell::Cell::new(false);
+
+        let parsed = load_or_parse_unit_with(
+            miss,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |_| {
+                parse_called.set(true);
+                vec![cached_message()]
+            },
+        );
+
+        assert!(parse_called.get());
+        assert!(matches!(parsed.messages, UnitMessageSource::Fresh(_)));
+        assert!(!parsed.unit.cache_lookup_completed_no_hit);
+    }
+
+    #[test]
+    fn unprepared_planner_miss_rechecks_cache_during_parse() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, b"source contents").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            unit.parser_version,
+            unit.source_input_policy().fingerprint().unwrap(),
+            vec![cached_message()],
+            Vec::new(),
+            None,
+        ));
+
+        let miss = plan_cache_hit(unit, &cache)
+            .expect_err("an unprepared unit cannot make a definitive stamp decision");
+        assert!(!miss.cache_lookup_completed_no_hit);
+        let parsed = load_or_parse_unit_with(
+            miss,
+            &ParseContext {
+                source_cache: &cache,
+                pricing: None,
+            },
+            |_| panic!("indeterminate planner miss must recheck the cache"),
+        );
+
+        assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
     }
 
     #[test]
