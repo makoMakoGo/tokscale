@@ -1,13 +1,16 @@
 //! Codex CLI session parser
 //!
-//! Parses JSONL files from ~/.codex/sessions/
+//! Parses the identical JSONL schema from `~/.codex/sessions/` and
+//! `~/.codex/archived_sessions/`. Scan-root discovery lives in the Codex
+//! adapter; content-derived dedup keys prevent a session present in both roots
+//! from being counted twice.
 //! Note: This parser has stateful logic to track model and delta calculations.
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::TokenBreakdown;
+use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -111,20 +114,17 @@ impl CodexTotals {
         })
     }
 
-    fn saturating_add(self, other: Self) -> Self {
+    fn checked_add(self, other: Self) -> Self {
         Self {
-            input: self.input.saturating_add(other.input),
-            output: self.output.saturating_add(other.output),
-            cached: self.cached.saturating_add(other.cached),
-            reasoning: self.reasoning.saturating_add(other.reasoning),
+            input: checked_token_add(self.input, other.input),
+            output: checked_token_add(self.output, other.output),
+            cached: checked_token_add(self.cached, other.cached),
+            reasoning: checked_token_add(self.reasoning, other.reasoning),
         }
     }
 
     fn total(self) -> i64 {
-        self.input
-            .saturating_add(self.output)
-            .saturating_add(self.cached)
-            .saturating_add(self.reasoning)
+        checked_token_sum([self.input, self.output, self.cached, self.reasoning])
     }
 
     fn is_within(self, baseline: Self) -> bool {
@@ -147,8 +147,8 @@ impl CodexTotals {
         // total regresses by roughly one recent increment, then resumes from the true
         // higher watermark on the next row. Treat those as stale snapshots rather than
         // hard resets so we do not count `last_token_usage` twice.
-        current_total.saturating_mul(100) >= previous_total.saturating_mul(98)
-            || current_total.saturating_add(last_total.saturating_mul(2)) >= previous_total
+        i128::from(current_total) * 100 >= i128::from(previous_total) * 98
+            || i128::from(current_total) + i128::from(last_total) * 2 >= i128::from(previous_total)
     }
 
     fn into_tokens(self) -> TokenBreakdown {
@@ -495,7 +495,7 @@ fn parse_codex_reader<R: BufRead>(
                             (Some(total), None, None) => (total.into_tokens(), Some(total)),
                             // Only last, have previous
                             (None, Some(last), Some(previous)) => {
-                                (last.into_tokens(), Some(previous.saturating_add(last)))
+                                (last.into_tokens(), Some(previous.checked_add(last)))
                             }
                             // Only last, no previous
                             (None, Some(last), None) => (last.into_tokens(), None),
