@@ -604,7 +604,7 @@ impl App {
     }
 
     pub fn update_data(&mut self, data: UsageData) {
-        self.data = data;
+        drop(std::mem::replace(&mut self.data, data));
         let now = Instant::now();
         self.last_refresh = now;
         self.build_model_shade_map();
@@ -635,6 +635,7 @@ impl App {
         }
 
         self.clamp_selection();
+        super::data::trim_allocator();
     }
 
     pub fn build_model_shade_map(&mut self) {

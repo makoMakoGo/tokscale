@@ -52,8 +52,14 @@ The parse pipeline must hold at most one owned copy of any message.
 - Cache writes serialize borrowed message slices when possible. They must not
   clone entries merely to build a serialized cache representation.
 - After a TUI data load completes, return freed pages to the OS
-  (`malloc_trim(0)` on Linux). Steady-state RSS tracks live aggregates,
-  not the parse high-water mark.
+  (`malloc_trim(0)` on Linux). After refreshed aggregates replace the previous
+  TUI data, drop the previous aggregate before trimming again. Steady-state RSS
+  tracks the current live aggregate, not the parse or prior-aggregate
+  high-water mark.
+- TUI aggregate cache writes serialize borrowed views directly through a
+  buffered atomic-file writer. They neither clone the aggregate into an owned
+  cache DTO nor materialize the complete JSON payload in a byte vector; schema
+  25 field order, tuple arrays, and date formatting remain unchanged.
 - Every cacheable source has one input policy that enumerates the primary
   file and all parser-relevant related files. Related inputs include SQLite
   WAL files, Claude `.meta.json` and cc-mirror variant metadata, and declared

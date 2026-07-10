@@ -56,7 +56,8 @@ Baseline commit: `1c7bb2ed99b0`
 | C3 | `b9d5dae2` | Single prepared TUI inventory | 0 | 0.00 | 9,760 | 4,534 | 4.54 | 39,288 | 0.15 | 35,040 |
 | C4 | `5f50b6f2` | Bounded single-copy source fold | 0 | 0.00 | 9,920 | 4,290 | 4.29 | 38,700 | 0.15 | 35,040 |
 | C5 | `061d5b18` | Structured aggregation identities | 0 | 0.00 | 9,760 | 3,353 | 3.35 | 37,096 | 0.10 | 32,764 |
-| C6 | `C6` | Explicit planned-read recovery | 0 | 0.00 | 9,760 | 4,139 | 4.14 | 37,304 | 0.11 | 32,920 |
+| C6 | `e5da96e6` | Explicit planned-read recovery | 0 | 0.00 | 9,760 | 4,139 | 4.14 | 37,304 | 0.11 | 32,920 |
+| C7 | `C7` | Streamed TUI cache persistence | 1 | 0.00 | 9,920 | 3,387 | 3.39 | 35,760 | 0.11 | 32,760 |
 
 ## Raw samples
 
@@ -722,7 +723,7 @@ all failed planned hits into its complete miss set before building the parent
 task index, and OpenCode preserves SQLite precedence while recovering a failed
 hit. Codex remains on its existing incremental cache path.
 
-`C6` is replaced with the exact commit hash by the next stage.
+The cumulative table records its exact commit as `e5da96e6`.
 
 Release build:
 
@@ -809,7 +810,7 @@ reparse. It returned the same normalized JSON as an exact-C5 valid warm control
 and atomically restored the valid shard:
 
 ```text
-normalized JSON SHA-256: afdeb089739ca8e8bf9bcdce460ec1fb63fbbdf0b3a087b06d34bc413ffd6ccc
+normalized JSON SHA-256: e6e68bc377ff38d04982bda82820061ff813571832f7bd4666a8390475def916
 entries: 1; input: 10; output: 2; cache read: 3; cache write: 4; messages: 1
 C5 corrupt run: wall 0.02s; RSS 9,920 KiB
 C6 repair run:  wall 0.01s; RSS 10,240 KiB
@@ -840,6 +841,190 @@ passed
 Rustfmt, `git diff --check`, the release build, and an independent semantic
 review also passed. ADR 0008 records the failure diagnostics, recovery and
 deletion evidence, OMP ordering boundary, and unchanged Codex specialization.
+
+### C7 — streamed TUI cache persistence
+
+Candidate: serialize the live `UsageData` aggregate through borrowed schema-25
+views directly into the atomic temp file. The previous writer first cloned the
+aggregate into a complete owned `CachedUsageData`, then allocated a second
+complete `Vec<u8>` with `serde_json::to_vec`; both copies remained live beside
+the source aggregate until the write finished. The new writer keeps only a
+sorted `Vec<&str>` for the bounded client key and an 8 KiB `BufWriter`, streams
+with `serde_json::to_writer`, explicitly flushes, and retains the existing file
+fsync, rename, and parent-directory fsync contract.
+
+After a TUI refresh, `App::update_data` now explicitly drops the replaced
+aggregate, rebuilds dependent view state, clamps selections, and calls the
+existing allocator trim at the end. This second lifecycle seam can return the
+old aggregate's pages; the parse-time trim cannot do so while the old aggregate
+is still live. Schema version, compact field order, tuple-array maps, sorted
+sets, date formats, nulls, read DTOs, and all cache failure behavior are
+unchanged. `C7` is replaced with the exact commit hash by the next stage.
+
+Release build:
+
+```text
+cargo build -p tokscale-cli --release
+Finished release profile [optimized] target(s) in 2m 26s.
+Binary SHA-256: 204ea59bc0efad125cee248eaf1c74ec85a3bd6452dc98da1d4489a30f42bb5d
+```
+
+Corpus at measurement time:
+
+| Input | Size / count | Change from C6 |
+| --- | ---: | ---: |
+| isolated source-message cache | 9,243 shards / 88 MiB | +3 shards / unchanged size |
+| Claude projects | 647 MiB | unchanged |
+| Codex sessions | 745 MiB | +3 MiB |
+| OpenCode data | 429 MiB | unchanged |
+
+Zero-session probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    0              0.00    0.00    0.01    9920
+2    1              0.02    0.02    0.20    9920
+3    1              0.00    0.01    0.00    9920
+```
+
+Warm three-client C7 probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    3387           3.39    0.82    1.24   36880
+2    3367           3.37    0.88    1.22   35760
+3    3789           3.79    0.97    1.12   35316
+```
+
+Exact-C6 controls bracketed the final C7 binary on the same isolated cache and
+live sources:
+
+```text
+control  run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+early    1    3385           3.39    0.86    1.20   36928
+early    2    3397           3.40    0.69    1.38   37336
+early    3    3523           5.25    0.90    1.24   39296
+late     1    3467           3.47    0.90    1.14   36516
+late     2    3473           3.47    0.75    1.32   37212
+late     3    3760           3.76    0.86    1.20   38156
+```
+
+`time-metrics` does not persist or swap a TUI aggregate. C7's 3,387 ms / 3.39 s
+/ 35,760 KiB medians therefore remain a fixed-probe regression signal only;
+their small differences from the bracketing controls are not attributed to
+this candidate.
+
+Aggregation probe (the core aggregation executable is byte-identical to C6):
+
+```text
+run  wall_s  user_s  sys_s  max_rss_kib
+1    0.15    0.10    0.00   32760
+2    0.11    0.10    0.01   32920
+3    0.10    0.09    0.01   32760
+4    0.10    0.10    0.00   32760
+5    0.11    0.10    0.00   32596
+```
+
+The candidate-specific real-corpus writer probe ran
+`--light --write-cache --no-spinner -c claude,opencode` after one unmeasured
+warm-up. C6 and C7 used hard-linked copies of the same source cache and stable
+Claude/OpenCode inputs. Five default `model` samples were:
+
+```text
+version  run  wall_s  user_s  sys_s  max_rss_kib
+C6       1    6.24    1.46    2.12   40260
+C6       2    5.79    1.54    2.07   41468
+C6       3    5.97    1.53    2.16   42212
+C6       4    5.92    1.60    2.07   41720
+C6       5    8.40    1.42    2.22   40176
+C7       1    5.20    1.38    2.17   41808
+C7       2    4.76    1.36    2.00   41912
+C7       3    4.68    1.43    1.88   40976
+C7       4    5.23    1.59    1.85   41544
+C7       5    4.99    1.49    1.91   39936
+```
+
+The 286,972-byte cache contained 27 models, 15 agents, 78 daily buckets,
+412 hourly buckets, and 4,243,768,907 tokens. C6 and C7 matched exactly after
+removing only the timestamp:
+
+```text
+normalized SHA-256: f08665a388fa29d670444130d2fe5be82771d6b08e415ea3f76e318b3537b0d8
+```
+
+The same probe with `session,model` grouping produced a 492,876-byte cache with
+357 model rows and otherwise identical aggregate counts and totals:
+
+```text
+version  run  wall_s (five runs)        max_rss_kib (five runs)
+C6       1-5  6.23 6.04 5.83 6.60 5.77 42460 42840 42800 42144 41892
+C7       1-5  5.23 5.44 4.94 5.07 4.49 44252 41984 42600 42632 41268
+normalized SHA-256: a38b87088ca01beb9c6935b1da5fcb0d8021cfbb5a46aca16180d273e88e0108
+```
+
+These real payloads are under 0.5 MiB, and the command includes two source
+scans. Their median peak RSS is effectively unchanged; their wall change is not
+isolated enough to attribute to serialization.
+
+The refresh lifecycle probe used a fresh model cache, disabled automatic
+refresh, forced one literal `r` refresh in a PTY, and sampled `/proc/<pid>/status`
+every 50 ms for 12 seconds. The footer confirmed each refresh completed:
+
+```text
+version  run  initial_rss_kib  peak_rss_kib  steady_rss_kib
+C6       1    11040            38232         30700
+C6       2    11040            38000         30508
+C6       3    11200            39484         31520
+C7       1    11040            37788         28464
+C7       2    11040            38360         29060
+C7       3    11040            38376         29168
+```
+
+Median refresh peak is unchanged at 38,232 versus 38,360 KiB. After the old
+aggregate is dropped, median steady RSS falls from 30,700 to 29,060 KiB: 1,640
+KiB, or 5.3%. This is the allocator-trim effect; it is not mislabeled as a
+lower refresh peak.
+
+The streamed writer was isolated with an identical, deterministic 100,000-row
+workspace/model harness compiled against exact C6 and C7 production code. One
+unmeasured warm-up preceded five alternating fresh processes. Message parsing
+was outside this probe; the complete aggregate stayed live during each write:
+
+```text
+version  run  wall_s  user_s  sys_s  max_rss_kib
+C6       1    0.23    0.06    0.09   122400
+C7       1    0.14    0.04    0.04    47520
+C6       2    0.18    0.08    0.04   122400
+C7       2    0.10    0.03    0.05    47200
+C6       3    0.15    0.06    0.07   122240
+C7       3    0.10    0.05    0.03    46880
+C6       4    0.14    0.08    0.05   122400
+C7       4    0.10    0.05    0.03    47200
+C6       5    0.14    0.05    0.07   122400
+C7       5    0.10    0.05    0.04    47360
+```
+
+The 38,623,922-byte schema-25 outputs were byte-identical after removing their
+timestamps (`c299731f1a309f99be8c344ace6102cf4688bc87b8ed33340b6aad5d51aef851`).
+Median wall time fell from 0.15s to 0.10s (33.3%), and peak RSS fell from
+122,400 to 47,200 KiB (61.4%, or 75,200 KiB). The temporary measurement driver
+was removed before the final build; permanent tests independently lock every
+schema-25 object field and order, multi-key tuple-array order, sorted clients,
+date formats, non-default nested values, and owned-reader round trips.
+
+Final gates:
+
+```text
+cargo test --workspace
+2005 passed; 4 ignored
+
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+passed
+```
+
+Rustfmt, `git diff --check`, the release build, focused cache/app/atomic-writer
+tests, and an independent semantic review also passed. ADR 0008 records both
+the borrowed streaming writer and the post-swap allocator lifecycle seam.
 
 ## Interpretation rules
 
