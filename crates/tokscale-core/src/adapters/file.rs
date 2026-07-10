@@ -13,6 +13,8 @@ use crate::message_cache::{ParserId, ParserVersion};
 use crate::{scanner, sessions, UnifiedMessage};
 
 const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const ZCODE_OVERLAP_NORMALIZATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 pub(crate) struct ParsedFileWithCachePolicy {
     messages: Vec<UnifiedMessage>,
@@ -235,7 +237,7 @@ pub(crate) static QWEN_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
 pub(crate) static MUX_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Mux,
     ParserId::Mux,
-    MODEL_ID_CANONICALIZATION_REVISION,
+    MUX_STABLE_DEDUP_REVISION,
     sessions::mux::parse_mux_file,
 );
 pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
@@ -247,7 +249,7 @@ pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::ne
 pub(crate) static ZCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Zcode,
     ParserId::Zcode,
-    MODEL_ID_CANONICALIZATION_REVISION,
+    ZCODE_OVERLAP_NORMALIZATION_REVISION,
     sessions::zcode::parse_zcode_file,
 );
 #[cfg(test)]
@@ -391,7 +393,7 @@ mod tests {
 
         assert_eq!(paths, vec![default_path]);
         assert!(units.iter().all(|unit| unit.parser_version
-            == ParserVersion::new(ParserId::Zcode, MODEL_ID_CANONICALIZATION_REVISION)));
+            == ParserVersion::new(ParserId::Zcode, ZCODE_OVERLAP_NORMALIZATION_REVISION)));
     }
 
     #[test]
