@@ -31,20 +31,36 @@ struct ZcodeEntry {
 
 #[derive(Debug, Deserialize)]
 struct ZcodeUsage {
-    #[serde(alias = "input_tokens")]
+    #[serde(alias = "input_tokens", alias = "inputTokens")]
     input: Option<i64>,
     #[serde(alias = "promptTokens", alias = "prompt_tokens")]
     prompt_tokens: Option<i64>,
     #[serde(alias = "promptTokensDetails", alias = "prompt_tokens_details")]
     prompt_tokens_details: Option<ZcodePromptTokensDetails>,
-    #[serde(alias = "output_tokens", alias = "completion_tokens")]
+    #[serde(
+        alias = "output_tokens",
+        alias = "completion_tokens",
+        alias = "outputTokens",
+        alias = "completionTokens"
+    )]
     output: Option<i64>,
-    #[serde(alias = "input_cache_read", alias = "cache_read_tokens")]
+    #[serde(
+        alias = "input_cache_read",
+        alias = "cache_read_tokens",
+        alias = "cacheReadTokens"
+    )]
     cache_read: Option<i64>,
-    #[serde(alias = "input_cache_creation", alias = "cache_write_tokens")]
+    #[serde(
+        alias = "input_cache_creation",
+        alias = "cache_write_tokens",
+        alias = "cacheCreationTokens",
+        alias = "cacheWriteTokens"
+    )]
     cache_write: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "reasoningTokens")]
     reasoning: Option<i64>,
+    #[serde(default, alias = "total_tokens", alias = "totalTokens")]
+    total: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,22 +78,26 @@ impl ZcodeUsage {
             .unwrap_or(0)
             .max(0);
         let raw_cache_read = self.cache_read.unwrap_or(0).max(0).max(nested_cache_read);
-        let effective_cache_read = if let Some(prompt_tokens) = self.prompt_tokens {
+        let cache_read = if let Some(prompt_tokens) = self.prompt_tokens {
             raw_cache_read.min(prompt_tokens.max(0))
         } else {
             raw_cache_read
         };
-        let input = if let Some(prompt_tokens) = self.prompt_tokens {
-            prompt_tokens.max(0).saturating_sub(effective_cache_read)
-        } else {
-            self.input.unwrap_or(0).max(0)
-        };
-        let output = self.output.unwrap_or(0).max(0);
-        let cache_read = effective_cache_read;
+        let raw_input = self.prompt_tokens.or(self.input).unwrap_or(0).max(0);
+        let raw_output = self.output.unwrap_or(0).max(0);
         let cache_write = self.cache_write.unwrap_or(0).max(0);
         let reasoning = self.reasoning.unwrap_or(0).max(0);
+        let (input, output) = normalize_input_and_output(
+            raw_input,
+            raw_output,
+            cache_read,
+            cache_write,
+            reasoning,
+            self.total,
+            self.prompt_tokens.is_some(),
+        );
 
-        if input + output + cache_read + cache_write + reasoning == 0 {
+        if checked_token_sum([input, output, cache_read, cache_write, reasoning]) == 0 {
             return None;
         }
 
@@ -88,6 +108,56 @@ impl ZcodeUsage {
             cache_write,
             reasoning,
         })
+    }
+}
+
+fn checked_token_sum<const N: usize>(values: [i64; N]) -> i64 {
+    values
+        .into_iter()
+        .try_fold(0_i64, i64::checked_add)
+        .expect("ZCode token total exceeds i64::MAX")
+}
+
+fn subtract_overlap(value: i64, overlap: i64) -> i64 {
+    value.max(0) - overlap.max(0).min(value.max(0))
+}
+
+fn normalize_input_and_output(
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+    total: Option<i64>,
+    prompt_tokens_without_total_are_inclusive: bool,
+) -> (i64, i64) {
+    let input = input.max(0);
+    let output = output.max(0);
+    let cache_read = cache_read.max(0);
+    let cache_write = cache_write.max(0);
+    let reasoning = reasoning.max(0);
+
+    if let Some(total) = total.map(|value| value.max(0)) {
+        let inclusive_total = checked_token_sum([input, output]);
+        let exclusive_total =
+            checked_token_sum([input, output, cache_read, cache_write, reasoning]);
+        if (cache_read > 0 || cache_write > 0 || reasoning > 0)
+            && total == inclusive_total
+            && total != exclusive_total
+        {
+            return (
+                subtract_overlap(input, checked_token_sum([cache_read, cache_write])),
+                subtract_overlap(output, reasoning),
+            );
+        }
+
+        return (input, output);
+    }
+
+    if prompt_tokens_without_total_are_inclusive {
+        (subtract_overlap(input, cache_read), output)
+    } else {
+        (input, output)
     }
 }
 
@@ -158,7 +228,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 } else {
                     let input = estimate_tokens(context_chars);
                     let output = estimate_tokens(chars);
-                    if input + output == 0 {
+                    if input == 0 && output == 0 {
                         context_chars += chars;
                         continue;
                     }
@@ -481,6 +551,81 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 0);
         assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 50);
+    }
+
+    #[test]
+    fn total_proves_camel_case_usage_is_overlap_inclusive() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s",
+                "content": "bye",
+                "usage": {
+                    "inputTokens": 100,
+                    "outputTokens": 50,
+                    "cacheReadTokens": 30,
+                    "cacheCreationTokens": 10,
+                    "reasoningTokens": 5,
+                    "totalTokens": 150
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "s", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 60);
+        assert_eq!(messages[0].tokens.output, 45);
+        assert_eq!(messages[0].tokens.cache_read, 30);
+        assert_eq!(messages[0].tokens.cache_write, 10);
+        assert_eq!(messages[0].tokens.reasoning, 5);
+        assert_eq!(messages[0].tokens.total(), 150);
+    }
+
+    #[test]
+    fn total_proves_exclusive_usage_is_preserved() {
+        let usage = ZcodeUsage {
+            input: Some(60),
+            prompt_tokens: None,
+            prompt_tokens_details: None,
+            output: Some(45),
+            cache_read: Some(30),
+            cache_write: Some(10),
+            reasoning: Some(5),
+            total: Some(150),
+        };
+
+        assert_eq!(
+            usage.to_breakdown(),
+            Some(TokenBreakdown {
+                input: 60,
+                output: 45,
+                cache_read: 30,
+                cache_write: 10,
+                reasoning: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn input_shape_without_total_is_not_guessed_as_inclusive() {
+        let usage = ZcodeUsage {
+            input: Some(100),
+            prompt_tokens: None,
+            prompt_tokens_details: None,
+            output: Some(50),
+            cache_read: Some(30),
+            cache_write: Some(10),
+            reasoning: Some(5),
+            total: None,
+        };
+
+        let breakdown = usage.to_breakdown().unwrap();
+        assert_eq!(breakdown.input, 100);
+        assert_eq!(breakdown.output, 50);
     }
 
     #[test]
