@@ -1,5 +1,5 @@
 use super::litellm::ModelPricing;
-use crate::{provider_identity, TokenBreakdown};
+use crate::{checked_token_add, provider_identity, TokenBreakdown};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -1064,7 +1064,7 @@ pub fn compute_cost(
     };
 
     let input_clamped = input.max(0) as f64;
-    let output_clamped = output.max(0).saturating_add(reasoning.max(0)) as f64;
+    let output_clamped = checked_token_add(output.max(0), reasoning.max(0)) as f64;
     let cache_read_clamped = cache_read.max(0) as f64;
     let cache_write_clamped = cache_write.max(0) as f64;
 

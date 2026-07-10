@@ -268,11 +268,9 @@ fn sum_request_token_usage(value: Option<&Value>) -> (TokenBreakdown, i32) {
         if usage.total() <= 0 {
             continue;
         }
-        total.input = total.input.saturating_add(usage.input);
-        total.output = total.output.saturating_add(usage.output);
-        total.cache_read = total.cache_read.saturating_add(usage.cache_read);
-        total.cache_write = total.cache_write.saturating_add(usage.cache_write);
-        total.reasoning = total.reasoning.saturating_add(usage.reasoning);
+        total = total
+            .checked_add(&usage)
+            .expect("Zed token buckets exceed i64::MAX");
         count = count.saturating_add(1);
     }
 
@@ -299,7 +297,11 @@ fn usage_field(value: &Value, field: &str) -> i64 {
 
     let parsed = value
         .as_i64()
-        .or_else(|| value.as_u64().map(|n| i64::try_from(n).unwrap_or(i64::MAX)))
+        .or_else(|| {
+            value
+                .as_u64()
+                .map(|n| i64::try_from(n).expect("Zed token count exceeds i64::MAX"))
+        })
         .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
         .unwrap_or(0);
 

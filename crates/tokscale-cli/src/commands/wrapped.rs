@@ -15,6 +15,13 @@ use tokscale_core::{
     ReportOptions, ViewSet,
 };
 
+fn checked_token_sum(values: impl IntoIterator<Item = i64>) -> i64 {
+    values
+        .into_iter()
+        .try_fold(0_i64, i64::checked_add)
+        .expect("wrapped token total exceeds i64::MAX")
+}
+
 const SCALE: i32 = 2;
 const IMAGE_WIDTH: i32 = 1200 * SCALE;
 const IMAGE_HEIGHT: i32 = 1200 * SCALE;
@@ -295,10 +302,16 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 model_entry.provider = provider;
             }
             model_entry.cost += client_contrib.cost;
-            model_entry.tokens += client_contrib.tokens.input
-                + client_contrib.tokens.output
-                + client_contrib.tokens.cache_read
-                + client_contrib.tokens.cache_write;
+            let contribution_tokens = checked_token_sum([
+                client_contrib.tokens.input,
+                client_contrib.tokens.output,
+                client_contrib.tokens.cache_read,
+                client_contrib.tokens.cache_write,
+            ]);
+            model_entry.tokens = model_entry
+                .tokens
+                .checked_add(contribution_tokens)
+                .expect("wrapped model token total exceeds i64::MAX");
 
             let client_name = client_display_name(&client_contrib.client)
                 .unwrap_or(client_contrib.client.as_str())
@@ -313,10 +326,10 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                     tokens: 0,
                 });
             client_entry.cost += client_contrib.cost;
-            client_entry.tokens += client_contrib.tokens.input
-                + client_contrib.tokens.output
-                + client_contrib.tokens.cache_read
-                + client_contrib.tokens.cache_write;
+            client_entry.tokens = client_entry
+                .tokens
+                .checked_add(contribution_tokens)
+                .expect("wrapped client token total exceeds i64::MAX");
         }
     }
 
@@ -396,7 +409,10 @@ fn build_top_agents(agent_usage: &[tokscale_core::AgentUsage]) -> Vec<WrappedAge
                 tokens: 0,
                 messages: 0,
             });
-        entry.tokens += tokens;
+        entry.tokens = entry
+            .tokens
+            .checked_add(tokens)
+            .expect("wrapped agent token total exceeds i64::MAX");
         entry.messages += agent.message_count;
     }
 

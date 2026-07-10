@@ -223,7 +223,7 @@ fn number_value(value: &Value) -> Option<i64> {
         return Some(value.max(0));
     }
     if let Some(value) = value.as_u64() {
-        return Some(value.min(i64::MAX as u64) as i64);
+        return Some(i64::try_from(value).expect("Junie token count exceeds i64::MAX"));
     }
     if let Some(value) = value.as_f64() {
         return nonnegative_f64_to_i64(value);
@@ -242,7 +242,7 @@ fn nonnegative_f64_to_i64(value: f64) -> Option<i64> {
         return Some(0);
     }
     if value >= i64::MAX as f64 {
-        return Some(i64::MAX);
+        panic!("Junie token count exceeds i64::MAX");
     }
     Some(value as i64)
 }

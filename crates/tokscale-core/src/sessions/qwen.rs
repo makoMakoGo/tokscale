@@ -128,7 +128,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
         let cache_write = 0; // Qwen CLI doesn't report cache write tokens
 
         // Skip entries with zero tokens
-        if input + output + cache_read + reasoning == 0 {
+        if input == 0 && output == 0 && cache_read == 0 && reasoning == 0 {
             continue;
         }
 

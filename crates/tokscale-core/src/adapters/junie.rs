@@ -4,8 +4,9 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit,
+    ParseContext, ParsedUnit, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::{sessions, ClientId};
 
 pub(crate) struct JunieAdapter;
@@ -21,6 +22,14 @@ impl LocalSourceAdapter for JunieAdapter {
             ctx,
             FingerprintPolicy::PlainFile,
         )
+        .into_iter()
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(
+                ParserId::Junie,
+                EXPLICIT_TOKEN_OVERFLOW_REVISION,
+            ))
+        })
+        .collect()
     }
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {

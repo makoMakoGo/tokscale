@@ -29,6 +29,8 @@ use crate::message_cache::{ParserId, ParserRevision, ParserVersion};
 use crate::{message_cache, pricing, scanner, UnifiedMessage};
 
 pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 2;
+pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
+    MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 pub(crate) trait LocalSourceAdapter: Sync {
     fn client(&self) -> ClientId;
@@ -214,7 +216,7 @@ impl SourceUnitMeta {
             ),
             Self::AntigravityCliSqlite => ParserVersion::new(
                 ParserId::AntigravityCliSqlite,
-                MODEL_ID_CANONICALIZATION_REVISION,
+                EXPLICIT_TOKEN_OVERFLOW_REVISION,
             ),
             Self::KiroFile => {
                 ParserVersion::new(ParserId::KiroFile, MODEL_ID_CANONICALIZATION_REVISION)

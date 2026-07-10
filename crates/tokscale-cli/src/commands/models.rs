@@ -16,6 +16,18 @@ use crate::tui::{
 use anyhow::Result;
 use std::io::{self, IsTerminal, Write};
 
+fn displayed_token_total(entry: &tokscale_core::ModelUsage) -> i64 {
+    [
+        entry.input,
+        entry.output,
+        entry.cache_read,
+        entry.cache_write,
+    ]
+    .into_iter()
+    .try_fold(0_i64, i64::checked_add)
+    .expect("displayed model token total exceeds i64::MAX")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_models_report(
     json: bool,
@@ -324,8 +336,7 @@ pub(crate) fn run_models_report(
                     table.set_header(header);
 
                     for entry in &report.entries {
-                        let total_tokens =
-                            entry.input + entry.output + entry.cache_read + entry.cache_write;
+                        let total_tokens = displayed_token_total(entry);
                         let session_label = entry
                             .session_id
                             .clone()
@@ -427,8 +438,7 @@ pub(crate) fn run_models_report(
                     ]);
 
                     for entry in &report.entries {
-                        let total =
-                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let total = displayed_token_total(entry);
 
                         let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
                         let display_clients = get_client_display_name(clients_str);
@@ -505,8 +515,7 @@ pub(crate) fn run_models_report(
                     table.set_header(header);
 
                     for entry in &report.entries {
-                        let total =
-                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let total = displayed_token_total(entry);
                         let session_label = entry
                             .session_id
                             .clone()
@@ -584,8 +593,7 @@ pub(crate) fn run_models_report(
                     ]);
 
                     for entry in &report.entries {
-                        let total =
-                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let total = displayed_token_total(entry);
 
                         table.add_row(vec![
                             Cell::new(get_client_display_name(&entry.client)),
@@ -662,8 +670,7 @@ pub(crate) fn run_models_report(
                     ]);
 
                     for entry in &report.entries {
-                        let total =
-                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let total = displayed_token_total(entry);
                         let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
                         let display_clients = get_client_display_name(clients_str);
 

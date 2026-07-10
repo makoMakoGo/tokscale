@@ -211,7 +211,11 @@ pub(crate) fn run_hourly_report(
                 };
 
                 let cache_hit = {
-                    let paid = (entry.input as u64).saturating_add(entry.cache_write as u64);
+                    let paid = entry
+                        .input
+                        .max(0)
+                        .checked_add(entry.cache_write.max(0))
+                        .expect("hourly paid token total exceeds i64::MAX");
                     if paid == 0 {
                         if entry.cache_read > 0 {
                             "∞".to_string()

@@ -91,7 +91,7 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 let output = estimate_tokens(chars);
                 turn_input_chars = 0;
 
-                if input + output == 0 {
+                if input == 0 && output == 0 {
                     pending_turn_start = false;
                     continue;
                 }

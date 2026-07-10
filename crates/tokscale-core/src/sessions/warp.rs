@@ -378,17 +378,11 @@ mod tests {
         assert_eq!(messages[1].provider_id.as_ref(), "openai");
         assert_eq!(messages[1].tokens.total(), 200);
 
-        let aggregate =
-            messages
-                .iter()
-                .fold(crate::TokenBreakdown::default(), |mut acc, message| {
-                    acc.input += message.tokens.input;
-                    acc.output += message.tokens.output;
-                    acc.cache_read += message.tokens.cache_read;
-                    acc.cache_write += message.tokens.cache_write;
-                    acc.reasoning += message.tokens.reasoning;
-                    acc
-                });
+        let aggregate = messages
+            .iter()
+            .fold(crate::TokenBreakdown::default(), |acc, message| {
+                acc.checked_add(&message.tokens).unwrap()
+            });
         assert_eq!(
             aggregate,
             token_imputation::impute_total_only_token_breakdown(1250)

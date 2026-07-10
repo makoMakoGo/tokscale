@@ -11,7 +11,7 @@ use crate::{
         SessionAcc,
     },
     aggregate::tui::TuiAcc,
-    AggregatedViews, AggregationConfig, ViewSet,
+    checked_token_sum, AggregatedViews, AggregationConfig, ViewSet,
 };
 use crate::{
     sessionize::SessionTimeEvent, HourlyReport, ModelReport, MonthlyReport, UnifiedMessage,
@@ -175,10 +175,10 @@ impl AggregationEngine {
 }
 
 fn wrap_model_report(entries: Vec<crate::ModelUsage>) -> ModelReport {
-    let total_input: i64 = entries.iter().map(|e| e.input).sum();
-    let total_output: i64 = entries.iter().map(|e| e.output).sum();
-    let total_cache_read: i64 = entries.iter().map(|e| e.cache_read).sum();
-    let total_cache_write: i64 = entries.iter().map(|e| e.cache_write).sum();
+    let total_input = checked_token_sum(entries.iter().map(|entry| entry.input));
+    let total_output = checked_token_sum(entries.iter().map(|entry| entry.output));
+    let total_cache_read = checked_token_sum(entries.iter().map(|entry| entry.cache_read));
+    let total_cache_write = checked_token_sum(entries.iter().map(|entry| entry.cache_write));
     let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
     ModelReport {

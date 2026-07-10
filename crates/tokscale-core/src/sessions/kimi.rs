@@ -100,7 +100,7 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
         let cache_read = usage.input_cache_read.unwrap_or(0).max(0);
         let cache_write = usage.input_cache_creation.unwrap_or(0).max(0);
 
-        if input + output + cache_read + cache_write == 0 {
+        if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
             continue;
         }
 

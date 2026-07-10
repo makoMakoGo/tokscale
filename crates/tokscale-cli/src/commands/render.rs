@@ -135,11 +135,16 @@ pub(crate) fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
 }
 
 pub(crate) fn model_entry_total_tokens(entry: &tokscale_core::ModelUsage) -> i64 {
-    entry.input.max(0)
-        + entry.output.max(0)
-        + entry.cache_read.max(0)
-        + entry.cache_write.max(0)
-        + entry.reasoning.max(0)
+    [
+        entry.input.max(0),
+        entry.output.max(0),
+        entry.cache_read.max(0),
+        entry.cache_write.max(0),
+        entry.reasoning.max(0),
+    ]
+    .into_iter()
+    .try_fold(0_i64, i64::checked_add)
+    .expect("model token total exceeds i64::MAX")
 }
 
 pub(crate) fn aggregate_model_report_performance(
@@ -152,12 +157,17 @@ pub(crate) fn aggregate_model_report_performance(
             .saturating_add(entry.performance.total_duration_ms);
         performance.timed_tokens = performance
             .timed_tokens
-            .saturating_add(entry.performance.timed_tokens);
+            .checked_add(entry.performance.timed_tokens)
+            .expect("timed token total exceeds i64::MAX");
         performance.sample_count = performance
             .sample_count
             .saturating_add(entry.performance.sample_count);
     }
-    let total_tokens = entries.iter().map(model_entry_total_tokens).sum();
+    let total_tokens = entries
+        .iter()
+        .map(model_entry_total_tokens)
+        .try_fold(0_i64, i64::checked_add)
+        .expect("report token total exceeds i64::MAX");
     performance.finalize(total_tokens);
     performance
 }

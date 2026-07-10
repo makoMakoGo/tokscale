@@ -195,11 +195,7 @@ mod tests {
 
         let mut aggregate = TokenBreakdown::default();
         for tokens in rows {
-            aggregate.input += tokens.input;
-            aggregate.output += tokens.output;
-            aggregate.cache_read += tokens.cache_read;
-            aggregate.cache_write += tokens.cache_write;
-            aggregate.reasoning += tokens.reasoning;
+            aggregate = aggregate.checked_add(&tokens).unwrap();
         }
 
         assert_eq!(
@@ -223,11 +219,7 @@ mod tests {
 
         let mut aggregate = TokenBreakdown::default();
         for tokens in rows {
-            aggregate.input += tokens.input;
-            aggregate.output += tokens.output;
-            aggregate.cache_read += tokens.cache_read;
-            aggregate.cache_write += tokens.cache_write;
-            aggregate.reasoning += tokens.reasoning;
+            aggregate = aggregate.checked_add(&tokens).unwrap();
         }
 
         assert_eq!(

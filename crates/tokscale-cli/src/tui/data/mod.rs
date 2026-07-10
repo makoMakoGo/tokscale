@@ -402,7 +402,8 @@ mod tests {
     }
 
     #[test]
-    fn test_token_breakdown_total_with_overflow() {
+    #[should_panic(expected = "TUI token total exceeds u64::MAX")]
+    fn test_token_breakdown_total_rejects_overflow() {
         let breakdown = TokenBreakdown {
             input: u64::MAX,
             output: 1,
@@ -410,8 +411,7 @@ mod tests {
             cache_write: 0,
             reasoning: 0,
         };
-        // saturating_add should prevent overflow
-        assert_eq!(breakdown.total(), u64::MAX);
+        let _ = breakdown.total();
     }
 
     #[test]

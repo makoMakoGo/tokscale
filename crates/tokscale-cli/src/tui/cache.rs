@@ -560,11 +560,10 @@ fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
             });
 
         let tokens: TokenBreakdown = cached.tokens.into();
-        entry.tokens.input = entry.tokens.input.saturating_add(tokens.input);
-        entry.tokens.output = entry.tokens.output.saturating_add(tokens.output);
-        entry.tokens.cache_read = entry.tokens.cache_read.saturating_add(tokens.cache_read);
-        entry.tokens.cache_write = entry.tokens.cache_write.saturating_add(tokens.cache_write);
-        entry.tokens.reasoning = entry.tokens.reasoning.saturating_add(tokens.reasoning);
+        entry.tokens = entry
+            .tokens
+            .checked_add(&tokens)
+            .expect("cached TUI token buckets exceed u64::MAX");
         entry.cost += cached.cost;
         entry.message_count = entry.message_count.saturating_add(cached.message_count);
         entry.instance_count = entry.instance_count.saturating_add(cached.instance_count);

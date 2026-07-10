@@ -98,7 +98,10 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                                         overview_color_key(&group_by, &info.color_key),
                                     ),
                                 });
-                        entry.tokens = entry.tokens.saturating_add(info.tokens.total());
+                        entry.tokens = entry
+                            .tokens
+                            .checked_add(info.tokens.total())
+                            .expect("overview model token total exceeds u64::MAX");
                     }
                 }
                 let models: Vec<ModelSegment> = models_by_key.into_values().collect();
