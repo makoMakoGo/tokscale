@@ -17,7 +17,7 @@ use super::table_layout::{
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name, truncate_display_width,
+    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
     truncate_model_display_name_to, viewport_scrollbar_state, MODEL_DISPLAY_MAX_WIDTH,
 };
 use crate::tui::app::{App, SortDirection, SortField};
@@ -422,7 +422,10 @@ fn top_period_model(period: &PeriodUsage) -> Option<TopPeriodModel> {
             models
                 .entry(model_key.clone())
                 .and_modify(|entry| {
-                    entry.tokens = entry.tokens.saturating_add(tokens);
+                    entry.tokens = entry
+                        .tokens
+                        .checked_add(tokens)
+                        .expect("period model token total exceeds u64::MAX");
                     entry.cost += model.cost;
                 })
                 .or_insert_with(|| TopPeriodModel {
@@ -619,7 +622,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         row.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    PeriodDetailColumn::Total => Cell::from(format_tokens(row.tokens.total())),
+                    PeriodDetailColumn::Total => total_tokens_cell(row.tokens.total(), &app.theme),
                     PeriodDetailColumn::Cost => {
                         Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green))
                     }
@@ -874,7 +877,7 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
                     period.tokens.cache_write,
                 ))
                 .style(Style::default().fg(Color::Cyan)),
-                PeriodColumn::Total => Cell::from(format_tokens(period.tokens.total())),
+                PeriodColumn::Total => total_tokens_cell(period.tokens.total(), &app.theme),
                 PeriodColumn::Cost => {
                     Cell::from(format_cost(period.cost)).style(Style::default().fg(Color::Green))
                 }

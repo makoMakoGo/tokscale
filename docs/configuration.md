@@ -47,7 +47,7 @@ usage cache today.
 
 | Setting | Type | Meaning |
 | --- | --- | --- |
-| `colorPalette` | string | TUI color theme. Known values include `green`, `halloween`, `teal`, `blue`, `pink`, `purple`, `orange`, `monochrome`, and `ylgnbu`. |
+| `colorPalette` | string | TUI color theme. Known values include `green`, `halloween`, `teal`, `blue`, `pink`, `purple`, `orange`, `monochrome`, `ylgnbu`, `graphite`, `lagoon`, and `dusk`. An explicit `--theme` overrides this saved value. |
 | `includeUnusedModels` | boolean | Show zero-token models in reports. |
 | `autoRefreshEnabled` | boolean | Enable TUI auto-refresh for local reports. |
 | `autoRefreshMs` | number | TUI auto-refresh interval in milliseconds. |

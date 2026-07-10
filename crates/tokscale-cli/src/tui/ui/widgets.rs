@@ -1,8 +1,9 @@
-use ratatui::widgets::ScrollbarState;
+use ratatui::widgets::{Cell, ScrollbarState};
 use tokscale_core::{normalize_provider_for_grouping, ClientId};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::config::TokscaleConfig;
+use crate::tui::themes::Theme;
 
 pub fn format_tokens_compact(tokens: u64) -> String {
     if tokens >= 1_000_000_000 {
@@ -18,6 +19,10 @@ pub fn format_tokens_compact(tokens: u64) -> String {
 
 pub fn format_tokens(tokens: u64) -> String {
     format_tokens_compact(tokens)
+}
+
+pub(crate) fn total_tokens_cell(total_tokens: u64, theme: &Theme) -> Cell<'static> {
+    Cell::from(format_tokens(total_tokens)).style(theme.metric_total_style())
 }
 
 pub fn format_tokens_with_commas(n: u64) -> String {
@@ -56,7 +61,9 @@ pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
 /// `cache_read / (input + cache_write)` — how many low-cost reads you
 /// got for every token you paid full price (fresh input or cache write).
 pub fn format_cache_hit_rate(cache_read: u64, input: u64, cache_write: u64) -> String {
-    let paid = input.saturating_add(cache_write);
+    let paid = input
+        .checked_add(cache_write)
+        .expect("cache reuse denominator exceeds u64::MAX");
     if paid == 0 {
         return if cache_read > 0 {
             "∞".to_string()

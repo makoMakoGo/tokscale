@@ -257,7 +257,7 @@ mod tests {
 
     fn make_usage_app() -> App {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
