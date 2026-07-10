@@ -7,7 +7,7 @@ use super::utils::{
     read_file_or_none,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::{model_aliases, provider_identity, TokenBreakdown};
+use crate::{checked_token_add, model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -164,24 +164,33 @@ fn resolve_subagent_name(
     "Claude Subagent".to_string()
 }
 
+fn is_workflow_journal(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("journal.jsonl")
+        && path.ancestors().any(|ancestor| {
+            ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents")
+        })
+}
+
 /// Locate the parent main-session JSONL for a sidechain transcript.
 ///
 /// Nested layout: `.../projects/<key>/<session>/subagents/agent-X.jsonl`
+///   → parent at `.../projects/<key>/<session>.jsonl`
+/// Workflow layout: `.../<session>/subagents/workflows/<workflow>/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session>.jsonl`
 /// Flat layout: `.../projects/<key>/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session-id>.jsonl`
 fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
     let parent_filename = format!("{}.jsonl", parent_session_id);
 
-    // Nested layout: parent dir is 3 levels up (file → subagents → session-dir → project-dir)
-    if let Some(dir) = sidechain_path.parent() {
-        if dir.file_name().and_then(|n| n.to_str()) == Some("subagents") {
-            if let Some(project_dir) = dir.parent().and_then(|d| d.parent()) {
+    for ancestor in sidechain_path.ancestors() {
+        if ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents") {
+            if let Some(project_dir) = ancestor.parent().and_then(Path::parent) {
                 let candidate = project_dir.join(&parent_filename);
                 if candidate.exists() {
                     return Some(candidate);
                 }
             }
+            break;
         }
     }
 
@@ -364,6 +373,10 @@ pub fn parse_claude_file_with_cache_and_home(
     parent_cache: &mut ParentSubagentTypeCache,
     home_dir: Option<&Path>,
 ) -> Vec<UnifiedMessage> {
+    if is_workflow_journal(path) {
+        return Vec::new();
+    }
+
     let (workspace_key, workspace_label) = claude_workspace_from_path(path);
     let is_transcript_path = is_claude_transcripts_path(path);
     let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir);
@@ -1040,7 +1053,10 @@ fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsa
         if first_dedup_id.is_none() {
             first_dedup_id = tool_result_id;
         }
-        total_tokens += extract_tool_result_input_tokens(tool_result).unwrap_or(0);
+        total_tokens = checked_token_add(
+            total_tokens,
+            extract_tool_result_input_tokens(tool_result).unwrap_or(0),
+        );
     }
 
     if total_tokens <= 0 {
@@ -3116,5 +3132,55 @@ mod tests {
             Some("Claude Plan".into()),
             "Second agent should be plan"
         );
+    }
+
+    #[test]
+    fn workflow_journal_is_never_ingested() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let journal_path = temp_dir
+            .path()
+            .join("project/session/subagents/workflows/wf/journal.jsonl");
+        std::fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &journal_path,
+            r#"{"type":"assistant","sessionId":"parent","message":{"id":"fake","model":"claude-sonnet-4.6","usage":{"input_tokens":9999,"output_tokens":9999}}}"#,
+        )
+        .unwrap();
+
+        assert!(parse_claude_file(&journal_path).is_empty());
+    }
+
+    #[test]
+    fn deep_workflow_transcript_resolves_parent_agent_and_counts_tokens() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir.path().join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let parent_session_id = "deep-parent";
+        std::fs::write(
+            project_dir.join(format!("{parent_session_id}.jsonl")),
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_deep","name":"Agent","input":{"subagent_type":"plan"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_deep","content":[{"type":"text","text":"agentId: deepagent (use SendMessage)"}]}]}}"#,
+        )
+        .unwrap();
+
+        let workflow_dir = project_dir
+            .join(parent_session_id)
+            .join("subagents/workflows/wf-deep");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        let transcript_path = workflow_dir.join("agent-deepagent.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"user","isSidechain":true,"sessionId":"deep-parent","agentId":"deepagent","message":{"content":"task"}}
+{"type":"assistant","isSidechain":true,"sessionId":"deep-parent","agentId":"deepagent","requestId":"req-deep","message":{"id":"msg-deep","model":"claude-sonnet-4.6","usage":{"input_tokens":300,"output_tokens":120,"cache_read_input_tokens":40}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_claude_file(&transcript_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), parent_session_id);
+        assert_eq!(messages[0].agent.as_deref(), Some("Claude Plan"));
+        assert_eq!(messages[0].tokens.input, 300);
+        assert_eq!(messages[0].tokens.output, 120);
+        assert_eq!(messages[0].tokens.cache_read, 40);
     }
 }
