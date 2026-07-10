@@ -39,6 +39,15 @@ The parse pipeline must hold at most one owned copy of any message.
   WAL files, Claude `.meta.json` and cc-mirror variant metadata, and declared
   sibling files. Source stamps and full fingerprints use exactly this same
   set, including absent related files so additions and deletions invalidate.
+- Discovery and its pre-parse metadata snapshot form a consumptive
+  `PreparedLocalSources` inventory. The inventory keeps selected-adapter order,
+  per-adapter unit order, and each unit's parser identity and input policy.
+  Probing freshness and executing a load must use the same inventory; execution
+  never rediscovers sources. A source added after preparation belongs to the
+  next inventory, not the current load. Prepared snapshots retain only compact
+  presence, size, mtime, and ephemeral file identity entries; labels and paths
+  remain owned by the input policy, which reconstructs a `SourceStamp` only
+  when cache comparison or fingerprinting needs one.
 - A persisted `SourceStamp` records each input's path, presence, size, and
   mtime. Cache lookup is header-first: read the cached stamp, collect current
   metadata, and load the cached body without reading or hashing source bytes
@@ -58,9 +67,21 @@ The parse pipeline must hold at most one owned copy of any message.
   append, the old full digest is the expected prefix digest; one hasher reads
   and verifies that prefix, then continues across the parsed tail. Exact hits
   use only the stamp and cached digest consistency, with no source-byte read.
-- Auto-refresh uses source metadata to skip the parse, aggregation, and cache
-  write when nothing changed. Manual refresh and filter changes still force
-  a full reload.
+- Each prepared inventory has two related keys. A versioned SHA-256
+  `SourceInventorySignature` hashes the canonical requested-client set,
+  adapter and unit order, parser/unit identity, and every declared input's
+  native path, label, presence, size, and mtime without reading source bytes.
+  This signature is persisted in the TUI cache. A process-local `u64` digest is
+  only `DefaultHasher` over those stable signature bytes and is never persisted.
+- Auto-refresh prepares once. If its process digest is unchanged, the
+  consumptive inventory is dropped and parse, aggregation, and cache writes are
+  skipped; otherwise that same inventory is executed. Forced refresh also
+  prepares once and executes the resulting inventory.
+- A fresh TUI cache establishes its initial process digest directly from the
+  persisted inventory signature, without startup discovery. Therefore the
+  first automatic refresh compares current inventory B with cached baseline A:
+  equal inventories are skipped, while different inventories reload B. Stale
+  and missing caches always prepare and execute a background load.
 - `UnifiedMessage` stores no derivable or redundant data: `date` is
   computed from `timestamp` on demand; `dedup_key` is a 64-bit hash, not
   a string; high-repetition identity fields (client, model, provider,
@@ -81,5 +102,7 @@ removing the remaining full-corpus `all_messages` materialization.
 - The total serialized shard payload shrinks roughly in half (no date
   strings, no string dedup keys, interned strings still serialize as strings).
 - Cache layout changes cause a one-time shard rebuild after the format bump.
+- TUI cache schema 25 requires `sourceInventorySignature`; schema 24 and cache
+  documents missing the field are explicit misses and rebuild once.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go
   through the new accessors; new parsers must intern identity fields.

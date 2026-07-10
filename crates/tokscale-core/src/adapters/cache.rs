@@ -7,14 +7,15 @@ use crate::adapters::{
 use crate::{message_cache, UnifiedMessage};
 
 pub(crate) fn try_cache_hit(
-    unit: SourceUnit,
+    mut unit: SourceUnit,
     source_cache: &message_cache::SourceMessageCache,
 ) -> Option<ParsedUnit> {
     let cached = source_cache.get_meta(&unit.path, unit.parser_version)?;
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
         return None;
     }
-    let stamp = unit.source_input_policy().stamp()?;
+    let snapshot = unit.take_source_input_snapshot()?;
+    let stamp = unit.source_input_policy().stamp_from_snapshot(&snapshot)?;
     if cached.fingerprint.stamp != stamp || !cached.has_messages {
         return None;
     }
@@ -43,7 +44,7 @@ where
 }
 
 pub(crate) fn load_or_parse_unit_with_policy<F>(
-    unit: SourceUnit,
+    mut unit: SourceUnit,
     ctx: &ParseContext<'_>,
     parse: F,
 ) -> ParsedUnit
@@ -51,6 +52,7 @@ where
     F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
 {
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
+        unit.release_prepared_snapshot();
         let (mut messages, _) = parse(&unit.path);
         crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
         return ParsedUnit {
@@ -63,14 +65,12 @@ where
 
     let cached = ctx.source_cache.get_meta(&unit.path, unit.parser_version);
     let input_policy = unit.source_input_policy();
-    let snapshot = input_policy.snapshot();
+    let snapshot = unit.take_source_input_snapshot();
     if let Some(cached) = cached {
-        if snapshot
+        let stamp = snapshot
             .as_ref()
-            .map(message_cache::SourceInputSnapshot::stamp)
-            == Some(&cached.fingerprint.stamp)
-            && cached.has_messages
-        {
+            .and_then(|snapshot| input_policy.stamp_from_snapshot(snapshot));
+        if stamp.as_ref() == Some(&cached.fingerprint.stamp) && cached.has_messages {
             return ParsedUnit {
                 messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
                     &unit.path,
@@ -86,7 +86,7 @@ where
 
     let Some(fingerprint) = snapshot
         .as_ref()
-        .and_then(|snapshot| input_policy.fingerprint_from_stamp(snapshot.stamp().clone()))
+        .and_then(|snapshot| input_policy.fingerprint_from_snapshot(snapshot))
     else {
         let (mut messages, _) = parse(&unit.path);
         crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
@@ -212,6 +212,7 @@ mod tests {
 
     fn assert_warm_hit_reads_no_source_bytes(unit: SourceUnit) {
         let cache_home = tempfile::TempDir::new().unwrap();
+        let unit = unit.prepare_snapshot();
         let policy = unit.source_input_policy();
         let stamp = policy.stamp().unwrap();
         let fingerprint = policy.fingerprint_from_stamp(stamp).unwrap();
@@ -240,6 +241,10 @@ mod tests {
         );
 
         assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
+        assert!(
+            parsed.unit.prepared_snapshot.is_none(),
+            "executed units must release their prepared snapshot instead of retaining a duplicate"
+        );
         for path in policy.paths() {
             assert_eq!(
                 message_cache::get_source_read_stats(&path),

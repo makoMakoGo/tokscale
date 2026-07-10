@@ -6,7 +6,10 @@ use tokio::runtime::{Handle, Runtime};
 #[cfg(test)]
 use chrono::NaiveDate;
 
-use tokscale_core::{load_usage_data_with_diagnostics, ClientId, GroupBy, LocalParseOptions};
+use tokscale_core::{
+    load_prepared_usage_data_with_diagnostics, prepare_local_sources, ClientId, GroupBy,
+    LocalParseOptions, PreparedLocalSources, SourceInventorySignature,
+};
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
 // aggregation engine can produce them directly (#37). Re-export them under the
@@ -60,6 +63,22 @@ pub struct DataLoader {
 pub struct DataLoadResult {
     pub data: UsageData,
     pub pricing_diagnostics: Vec<String>,
+    pub source_inventory_signature: SourceInventorySignature,
+    pub source_digest: u64,
+}
+
+pub struct PreparedDataLoad {
+    sources: PreparedLocalSources,
+}
+
+impl PreparedDataLoad {
+    pub fn source_inventory_signature(&self) -> SourceInventorySignature {
+        self.sources.source_inventory_signature()
+    }
+
+    pub fn source_digest(&self) -> u64 {
+        self.sources.source_digest()
+    }
 }
 
 impl DataLoader {
@@ -77,6 +96,7 @@ impl DataLoader {
         }
     }
 
+    #[allow(dead_code)]
     pub fn load(&self, enabled_clients: &[ClientId], group_by: &GroupBy) -> Result<UsageData> {
         self.load_with_diagnostics(enabled_clients, group_by)
             .map(|result| result.data)
@@ -87,6 +107,11 @@ impl DataLoader {
         enabled_clients: &[ClientId],
         group_by: &GroupBy,
     ) -> Result<DataLoadResult> {
+        let prepared = self.prepare(enabled_clients)?;
+        self.execute_with_diagnostics(prepared, group_by)
+    }
+
+    pub fn prepare(&self, enabled_clients: &[ClientId]) -> Result<PreparedDataLoad> {
         let home = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
             .to_string_lossy()
@@ -107,17 +132,37 @@ impl DataLoader {
             scanner_settings: data_loader_scanner_settings(),
         };
 
+        prepare_local_sources(opts)
+            .map(|sources| PreparedDataLoad { sources })
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub fn execute_with_diagnostics(
+        &self,
+        prepared: PreparedDataLoad,
+        group_by: &GroupBy,
+    ) -> Result<DataLoadResult> {
+        let source_inventory_signature = prepared.source_inventory_signature();
+        let source_digest = prepared.source_digest();
+        let group_by = group_by.clone();
+
         let usage_data = if Handle::try_current().is_ok() {
             std::thread::scope(|s| {
-                s.spawn(|| {
+                s.spawn(move || {
                     let rt = Runtime::new().map_err(|e| e.to_string())?;
-                    rt.block_on(load_usage_data_with_diagnostics(opts, group_by.clone()))
+                    rt.block_on(load_prepared_usage_data_with_diagnostics(
+                        prepared.sources,
+                        group_by,
+                    ))
                 })
                 .join()
                 .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
             })
         } else {
-            Runtime::new()?.block_on(load_usage_data_with_diagnostics(opts, group_by.clone()))
+            Runtime::new()?.block_on(load_prepared_usage_data_with_diagnostics(
+                prepared.sources,
+                group_by,
+            ))
         };
 
         trim_allocator();
@@ -125,25 +170,10 @@ impl DataLoader {
             .map(|result| DataLoadResult {
                 data: result.data,
                 pricing_diagnostics: result.pricing_diagnostics,
+                source_inventory_signature,
+                source_digest,
             })
             .map_err(anyhow::Error::msg)
-    }
-
-    /// Digest of the sources `load` would scan, used by the auto-refresh
-    /// probe to skip unchanged reloads (ADR 0008). Mirrors `load`'s home and
-    /// scanner-settings resolution.
-    pub fn source_digest(&self, enabled_clients: &[ClientId]) -> Option<u64> {
-        let home = dirs::home_dir()?.to_string_lossy().to_string();
-        let sources: Vec<String> = enabled_clients
-            .iter()
-            .map(|client| client.as_str().to_string())
-            .collect();
-        Some(tokscale_core::compute_source_digest(
-            &home,
-            &sources,
-            true,
-            &data_loader_scanner_settings(),
-        ))
     }
 
     #[cfg(test)]

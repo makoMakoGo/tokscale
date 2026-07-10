@@ -174,6 +174,51 @@ impl ParserVersion {
     }
 }
 
+impl ParserId {
+    pub(crate) const fn inventory_signature_name(self) -> &'static str {
+        match self {
+            Self::OpenCode => "opencode",
+            Self::OpenCodeSqlite => "opencode-sqlite",
+            Self::OpenCodeJson => "opencode-json",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Cursor => "cursor",
+            Self::Gemini => "gemini",
+            Self::Amp => "amp",
+            Self::Droid => "droid",
+            Self::OpenClaw => "openclaw",
+            Self::Pi => "pi",
+            Self::Omp => "omp",
+            Self::Kimi => "kimi",
+            Self::Qwen => "qwen",
+            Self::RooCode => "roo-code",
+            Self::KiloCode => "kilo-code",
+            Self::Mux => "mux",
+            Self::Kilo => "kilo",
+            Self::Hermes => "hermes",
+            Self::Copilot => "copilot",
+            Self::Goose => "goose",
+            Self::Codebuff => "codebuff",
+            Self::Antigravity => "antigravity",
+            Self::AntigravityCacheJsonl => "antigravity-cache-jsonl",
+            Self::AntigravityCliSqlite => "antigravity-cli-sqlite",
+            Self::Zed => "zed",
+            Self::Kiro => "kiro",
+            Self::KiroFile => "kiro-file",
+            Self::KiroSqlite => "kiro-sqlite",
+            Self::KiroGlobalStorage => "kiro-global-storage",
+            Self::Junie => "junie",
+            Self::Trae => "trae",
+            Self::Cline => "cline",
+            Self::CommandCode => "command-code",
+            Self::Grok => "grok",
+            Self::Zcode => "zcode",
+            Self::Warp => "warp",
+            Self::CodeBuddy => "codebuddy",
+        }
+    }
+}
+
 fn cache_dir() -> Option<PathBuf> {
     if crate::paths::is_config_dir_overridden()
         || dirs::config_dir().is_some()
@@ -376,19 +421,36 @@ pub(crate) fn source_file_identity(metadata: &fs::Metadata) -> SourceFileIdentit
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceInputFileSnapshot {
+    present: bool,
+    size: u64,
+    modified_ns: u64,
+    identity: Option<SourceFileIdentity>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceInputSnapshot {
-    stamp: SourceStamp,
-    identities: Vec<Option<SourceFileIdentity>>,
+    files: Vec<SourceInputFileSnapshot>,
 }
 
 impl SourceInputSnapshot {
-    pub(crate) fn stamp(&self) -> &SourceStamp {
-        &self.stamp
+    pub(crate) fn primary_identity(&self) -> Option<SourceFileIdentity> {
+        self.files.first().and_then(|file| file.identity)
     }
 
-    pub(crate) fn primary_identity(&self) -> Option<SourceFileIdentity> {
-        self.identities.first().copied().flatten()
+    pub(crate) fn primary_size(&self) -> Option<u64> {
+        self.files
+            .first()
+            .filter(|file| file.present)
+            .map(|file| file.size)
+    }
+
+    pub(crate) fn primary_modified_ms(&self) -> Option<i64> {
+        self.files.first().filter(|file| file.present).map(|file| {
+            i64::try_from(file.modified_ns / 1_000_000)
+                .expect("source mtime milliseconds exceed i64")
+        })
     }
 }
 
@@ -447,48 +509,86 @@ impl SourceInputPolicy {
         Self { inputs }
     }
 
+    #[cfg(test)]
     pub(crate) fn paths(&self) -> Vec<PathBuf> {
         self.inputs.iter().map(|(_, path)| path.clone()).collect()
     }
 
+    pub(crate) fn update_inventory_signature(
+        &self,
+        snapshot: Option<&SourceInputSnapshot>,
+        hasher: &mut Sha256,
+    ) {
+        hasher.update([u8::from(snapshot.is_some())]);
+        hash_inventory_len(hasher, self.inputs.len());
+        for (index, (policy_label, path)) in self.inputs.iter().enumerate() {
+            let file = snapshot.and_then(|snapshot| snapshot.files.get(index));
+            hash_inventory_bytes(hasher, policy_label.as_bytes());
+            hash_inventory_path(hasher, path);
+            hasher.update([u8::from(file.is_some_and(|file| file.present))]);
+            hasher.update(file.map_or(0, |file| file.size).to_le_bytes());
+            hasher.update(file.map_or(0, |file| file.modified_ns).to_le_bytes());
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn stamp(&self) -> Option<SourceStamp> {
-        Some(self.snapshot()?.stamp)
+        let snapshot = self.snapshot()?;
+        self.stamp_from_snapshot(&snapshot)
     }
 
     pub(crate) fn snapshot(&self) -> Option<SourceInputSnapshot> {
         let mut files = Vec::with_capacity(self.inputs.len());
-        let mut identities = Vec::with_capacity(self.inputs.len());
-        for (index, (label, path)) in self.inputs.iter().enumerate() {
-            let (stamp, identity) = match fs::metadata(path) {
-                Ok(metadata) => (
-                    SourceFileStamp {
-                        label: label.clone(),
-                        path: CachedPath::from_path(path),
-                        present: true,
-                        size: metadata.len(),
-                        modified_ns: modified_ns(&metadata)?,
-                    },
-                    Some(source_file_identity(&metadata)),
-                ),
-                Err(error) if index > 0 && error.kind() == std::io::ErrorKind::NotFound => (
-                    SourceFileStamp {
-                        label: label.clone(),
-                        path: CachedPath::from_path(path),
+        for (index, (_, path)) in self.inputs.iter().enumerate() {
+            let file = match fs::metadata(path) {
+                Ok(metadata) => SourceInputFileSnapshot {
+                    present: true,
+                    size: metadata.len(),
+                    modified_ns: modified_ns(&metadata)?,
+                    identity: Some(source_file_identity(&metadata)),
+                },
+                Err(error) if index > 0 && error.kind() == std::io::ErrorKind::NotFound => {
+                    SourceInputFileSnapshot {
                         present: false,
                         size: 0,
                         modified_ns: 0,
-                    },
-                    None,
-                ),
+                        identity: None,
+                    }
+                }
                 Err(_) => return None,
             };
-            files.push(stamp);
-            identities.push(identity);
+            files.push(file);
         }
-        Some(SourceInputSnapshot {
-            stamp: SourceStamp { files },
-            identities,
-        })
+        Some(SourceInputSnapshot { files })
+    }
+
+    pub(crate) fn stamp_from_snapshot(
+        &self,
+        snapshot: &SourceInputSnapshot,
+    ) -> Option<SourceStamp> {
+        if snapshot.files.len() != self.inputs.len() {
+            return None;
+        }
+        let files = self
+            .inputs
+            .iter()
+            .zip(&snapshot.files)
+            .map(|((label, path), snapshot)| SourceFileStamp {
+                label: label.clone(),
+                path: CachedPath::from_path(path),
+                present: snapshot.present,
+                size: snapshot.size,
+                modified_ns: snapshot.modified_ns,
+            })
+            .collect();
+        Some(SourceStamp { files })
+    }
+
+    pub(crate) fn fingerprint_from_snapshot(
+        &self,
+        snapshot: &SourceInputSnapshot,
+    ) -> Option<SourceFingerprint> {
+        self.fingerprint_from_stamp(self.stamp_from_snapshot(snapshot)?)
     }
 
     #[cfg(test)]
@@ -532,6 +632,46 @@ impl SourceInputPolicy {
             related_files,
         })
     }
+}
+
+pub(crate) fn hash_inventory_len(hasher: &mut Sha256, len: usize) {
+    hasher.update(
+        u64::try_from(len)
+            .expect("source inventory field length exceeds u64")
+            .to_le_bytes(),
+    );
+}
+
+pub(crate) fn hash_inventory_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+    hash_inventory_len(hasher, bytes.len());
+    hasher.update(bytes);
+}
+
+#[cfg(unix)]
+pub(crate) fn hash_inventory_path(hasher: &mut Sha256, path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+
+    hasher.update(b"unix");
+    hash_inventory_bytes(hasher, path.as_os_str().as_bytes());
+}
+
+#[cfg(windows)]
+pub(crate) fn hash_inventory_path(hasher: &mut Sha256, path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+
+    hasher.update(b"windows");
+    let path_bytes: Vec<u8> = path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    hash_inventory_bytes(hasher, &path_bytes);
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn hash_inventory_path(hasher: &mut Sha256, path: &Path) {
+    hasher.update(b"other");
+    hash_inventory_bytes(hasher, path.as_os_str().to_string_lossy().as_bytes());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1557,6 +1697,33 @@ mod tests {
         file.write_all(content).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn input_snapshot_entries_do_not_own_policy_labels_or_paths() {
+        fn assert_copy<T: Copy>() {}
+
+        assert_copy::<SourceInputFileSnapshot>();
+        assert!(!std::mem::needs_drop::<SourceInputFileSnapshot>());
+        assert_eq!(
+            std::mem::size_of::<SourceInputSnapshot>(),
+            std::mem::size_of::<Vec<SourceInputFileSnapshot>>()
+        );
+
+        let dir = TempDir::new().unwrap();
+        let primary = dir.path().join("primary.db");
+        let related = dir.path().join("primary.db-wal");
+        std::fs::write(&primary, b"primary").unwrap();
+        std::fs::write(&related, b"wal").unwrap();
+        let policy = SourceInputPolicy::sqlite_with_wal(&primary);
+        let snapshot = policy.snapshot().unwrap();
+
+        assert_eq!(snapshot.files.len(), 2);
+        let stamp = policy.stamp_from_snapshot(&snapshot).unwrap();
+        assert_eq!(stamp.files[0].label, "source");
+        assert_eq!(stamp.files[0].path, CachedPath::from_path(&primary));
+        assert_eq!(stamp.files[1].label, "-wal");
+        assert_eq!(stamp.files[1].path, CachedPath::from_path(&related));
     }
 
     #[test]

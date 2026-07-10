@@ -91,9 +91,15 @@ pub(crate) fn write_light_cache(
     // failures instead of swallowing them.
     let loader = DataLoader::with_filters(None, since.clone(), until.clone(), year.clone());
     let report_scope = CacheReportScope::new(since.clone(), until.clone(), year.clone());
-    match loader.load(&scan_clients, group_by) {
-        Ok(data) => {
-            if let Err(err) = save_cached_data(&data, &enabled_set, group_by, &report_scope) {
+    match loader.load_with_diagnostics(&scan_clients, group_by) {
+        Ok(result) => {
+            if let Err(err) = save_cached_data(
+                &result.data,
+                &enabled_set,
+                group_by,
+                &report_scope,
+                result.source_inventory_signature,
+            ) {
                 eprintln!("tokscale: --write-cache failed to save TUI cache: {err}");
             }
         }
@@ -135,12 +141,13 @@ pub(crate) fn run_warm_tui_cache() -> Result<()> {
     let mut scan_clients: Vec<ClientId> = enabled_set.iter().copied().collect();
     scan_clients.sort_by_key(|client| *client as usize);
     let loader = DataLoader::with_filters(None, None, None, None);
-    let data = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY)?;
+    let result = loader.load_with_diagnostics(&scan_clients, &TUI_DEFAULT_GROUP_BY)?;
     save_cached_data(
-        &data,
+        &result.data,
         &enabled_set,
         &TUI_DEFAULT_GROUP_BY,
         &CacheReportScope::default(),
+        result.source_inventory_signature,
     )?;
     Ok(())
 }

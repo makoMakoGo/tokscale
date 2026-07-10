@@ -4,7 +4,7 @@ use super::{
     load_aggregated_views_with_pricing, load_cache_only_pricing_with_diagnostics,
     load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
     parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-    parse_local_unified_messages_resolved, positive_token_total, pricing,
+    parse_prepared_local_unified_messages, positive_token_total, pricing,
     retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
     AggregationConfig, ClientContribution, ClientCounts, ClientId, DailyTotals, DateRange,
     GraphResult, GroupBy, LocalParseOptions, ReportOptions, SessionContribution, TimeMetricsReport,
@@ -26,8 +26,8 @@ fn load_local_messages_for_test(
     options: LocalParseOptions,
 ) -> Result<LocalMessagesForTest, String> {
     let counts = super::count_local_client_messages(options.clone())?.counts;
-    let (home_dir, clients) = super::resolve_local_parse_request(&options)?;
-    let messages = parse_local_unified_messages_resolved(options, &home_dir, &clients, None)?;
+    let prepared = super::prepare_local_sources(options)?;
+    let messages = parse_prepared_local_unified_messages(prepared, None)?;
     Ok(LocalMessagesForTest { messages, counts })
 }
 
@@ -1996,139 +1996,361 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
     }
 }
 
-#[test]
-#[serial_test::serial]
-fn test_compute_source_digest_stable_and_sensitive() {
-    let source_home = tempfile::TempDir::new().unwrap();
-    let message_dir = source_home
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&message_dir).unwrap();
-    let first = message_dir.join("msg_001.json");
-    std::fs::write(&first, r#"{"id":"msg-1"}"#).unwrap();
+fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
+    LocalParseOptions {
+        home_dir: Some(home.to_string_lossy().into_owned()),
+        use_env_roots: false,
+        clients: Some(clients.iter().map(|client| (*client).to_string()).collect()),
+        scanner_settings: scanner::ScannerSettings::default(),
+        ..LocalParseOptions::default()
+    }
+}
 
-    let home = source_home.path().to_str().unwrap();
-    let clients = ["opencode".to_string()];
-    let settings = scanner::ScannerSettings::default();
+fn signature_for_test_units(
+    requested_clients: &[String],
+    client: ClientId,
+    units: Vec<crate::adapters::SourceUnit>,
+) -> super::SourceInventorySignature {
+    let group = prepared_test_group(client, units);
+    super::source_inventory_signature(requested_clients, &[group])
+}
 
-    let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
-    let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
-    assert_eq!(digest_one, digest_two, "unchanged sources must hash equal");
-
-    std::fs::write(&first, r#"{"id":"msg-1","grew":true}"#).unwrap();
-    let digest_changed = crate::compute_source_digest(home, &clients, false, &settings);
-    assert_ne!(
-        digest_one, digest_changed,
-        "content growth must change digest"
-    );
-
-    std::fs::write(message_dir.join("msg_002.json"), r#"{"id":"msg-2"}"#).unwrap();
-    let digest_added = crate::compute_source_digest(home, &clients, false, &settings);
-    assert_ne!(digest_changed, digest_added, "new files must change digest");
-
-    let digest_other_clients =
-        crate::compute_source_digest(home, &["claude".to_string()], false, &settings);
-    assert_ne!(
-        digest_added, digest_other_clients,
-        "client set is part of the digest"
-    );
+fn prepared_test_group(
+    client: ClientId,
+    units: Vec<crate::adapters::SourceUnit>,
+) -> crate::adapters::PreparedAdapterSources {
+    crate::adapters::PreparedAdapterSources {
+        adapter: crate::adapters::adapter_for(client).unwrap(),
+        units: units
+            .into_iter()
+            .map(crate::adapters::SourceUnit::prepare_snapshot)
+            .collect(),
+    }
 }
 
 #[test]
-fn test_compute_source_digest_does_not_guess_wal_for_plain_db_source() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("plain-history.db");
-    let wal_path = dir.path().join("plain-history.db-wal");
-    std::fs::write(&db_path, b"plain source").unwrap();
-    std::fs::write(&wal_path, b"wal-before").unwrap();
-    let clients = ["amp".to_string()];
-    let unit = crate::adapters::SourceUnit::plain_file(ClientId::Amp, db_path);
-
-    let before = crate::compute_source_digest_for_units(vec![unit.clone()], &clients);
-    std::fs::write(&wal_path, b"wal-after-and-different").unwrap();
-    let after = crate::compute_source_digest_for_units(vec![unit], &clients);
-
-    assert_eq!(
-        before, after,
-        "plain .db sources must not acquire an undeclared WAL dependency"
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn test_compute_source_digest_tracks_adapter_zed_wal() {
-    let source_home = tempfile::TempDir::new().unwrap();
-    let threads_dir = source_home.path().join("zed-fixture/threads");
-    std::fs::create_dir_all(&threads_dir).unwrap();
-    let threads_db = threads_dir.join("threads.db");
-    std::fs::write(&threads_db, b"sqlite-placeholder").unwrap();
-    let wal_path = threads_dir.join("threads.db-wal");
-    std::fs::write(&wal_path, b"wal-1").unwrap();
-
-    let home = source_home.path().to_str().unwrap();
-    let clients = ["zed".to_string()];
-    let settings = scanner_settings_for_zed_threads_dir(threads_dir);
-
-    let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
-    std::fs::write(&wal_path, b"wal-contents-changed").unwrap();
-    let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
-
-    assert_ne!(
-        digest_one, digest_two,
-        "adapter-discovered Zed WAL changes must affect the source digest"
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn test_compute_source_digest_tracks_adapter_plain_file() {
-    let source_home = tempfile::TempDir::new().unwrap();
-    let amp_dir = source_home.path().join(".local/share/amp/threads");
+fn prepared_inventory_is_stable_sensitive_and_reads_no_source_bytes() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
-    let amp_file = amp_dir.join("T-digest.json");
-    std::fs::write(&amp_file, r#"{"id":"amp-digest"}"#).unwrap();
+    let first = amp_dir.join("T-first.json");
+    std::fs::write(&first, r#"{"id":"amp-first"}"#).unwrap();
+    message_cache::reset_source_read_stats(&first);
 
-    let home = source_home.path().to_str().unwrap();
-    let clients = ["amp".to_string()];
-    let settings = scanner::ScannerSettings::default();
+    let first_inventory =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let first_signature = first_inventory.source_inventory_signature();
+    let second_signature = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_eq!(first_signature, second_signature);
+    assert_eq!(
+        message_cache::get_source_read_stats(&first),
+        message_cache::SourceReadStats::default(),
+        "inventory signatures must use metadata only"
+    );
 
-    let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
-    std::fs::write(&amp_file, r#"{"id":"amp-digest","changed":true}"#).unwrap();
-    let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
+    std::fs::write(&first, r#"{"id":"amp-first","grew":true}"#).unwrap();
+    let changed = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_ne!(first_signature, changed);
 
+    std::fs::write(amp_dir.join("T-second.json"), r#"{"id":"amp-second"}"#).unwrap();
+    let added = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_ne!(changed, added);
+
+    let other_client = super::prepare_local_sources(inventory_options(home.path(), &["claude"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_ne!(added, other_client);
+}
+
+#[test]
+fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let first = dir.path().join("first.db");
+    let second = dir.path().join("second.db");
+    let wal = dir.path().join("first.db-wal");
+    std::fs::write(&first, b"first").unwrap();
+    std::fs::write(&second, b"second").unwrap();
+    std::fs::write(&wal, b"wal-one").unwrap();
+    let clients = vec!["zed".to_string(), "amp".to_string()];
+
+    let ordered = signature_for_test_units(
+        &clients,
+        ClientId::Amp,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first.clone()),
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, second.clone()),
+        ],
+    );
+    let reordered = signature_for_test_units(
+        &clients,
+        ClientId::Amp,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, second),
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first.clone()),
+        ],
+    );
+    assert_ne!(ordered, reordered, "unit discovery order is significant");
+
+    let canonical_clients = signature_for_test_units(
+        &["amp".to_string(), "zed".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            first.clone(),
+        )],
+    );
+    let reversed_clients = signature_for_test_units(
+        &["zed".to_string(), "amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            first.clone(),
+        )],
+    );
+    assert_eq!(canonical_clients, reversed_clients);
+
+    let sqlite_before = signature_for_test_units(
+        &["zed".to_string()],
+        ClientId::Zed,
+        vec![crate::adapters::SourceUnit::sqlite_with_wal(
+            ClientId::Zed,
+            first.clone(),
+        )],
+    );
+    std::fs::write(&wal, b"wal-two-and-longer").unwrap();
+    let sqlite_after = signature_for_test_units(
+        &["zed".to_string()],
+        ClientId::Zed,
+        vec![crate::adapters::SourceUnit::sqlite_with_wal(
+            ClientId::Zed,
+            first.clone(),
+        )],
+    );
     assert_ne!(
-        digest_one, digest_two,
-        "adapter-discovered plain file changes must affect the source digest"
+        sqlite_before, sqlite_after,
+        "related WAL stamp is significant"
+    );
+
+    let parser_changed = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first).with_parser_version(
+                message_cache::ParserVersion::new(message_cache::ParserId::Amp, 999),
+            ),
+        ],
+    );
+    assert_ne!(canonical_clients, parser_changed);
+
+    let codebuddy_path = dir.path().join("codebuddy.jsonl");
+    std::fs::write(&codebuddy_path, b"codebuddy").unwrap();
+    let jsonl_meta = signature_for_test_units(
+        &["codebuddy".to_string()],
+        ClientId::CodeBuddy,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
+                .with_meta(crate::adapters::SourceUnitMeta::CodeBuddyJsonl),
+        ],
+    );
+    let extension_meta = signature_for_test_units(
+        &["codebuddy".to_string()],
+        ClientId::CodeBuddy,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
+                .with_meta(crate::adapters::SourceUnitMeta::CodeBuddyExtensionLog {
+                    source: crate::adapters::CodeBuddyLogSource::Extension,
+                }),
+        ],
+    );
+    assert_ne!(jsonl_meta, extension_meta, "unit subtype is significant");
+
+    let plain_policy = signature_for_test_units(
+        &["codebuddy".to_string()],
+        ClientId::CodeBuddy,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::CodeBuddy,
+            codebuddy_path.clone(),
+        )],
+    );
+    let no_cache_policy = signature_for_test_units(
+        &["codebuddy".to_string()],
+        ClientId::CodeBuddy,
+        vec![crate::adapters::SourceUnit::no_message_cache(
+            ClientId::CodeBuddy,
+            codebuddy_path,
+        )],
+    );
+    assert_ne!(plain_policy, no_cache_policy, "input policy is significant");
+
+    let amp_group = || {
+        prepared_test_group(
+            ClientId::Amp,
+            vec![crate::adapters::SourceUnit::plain_file(
+                ClientId::Amp,
+                dir.path().join("amp-group.json"),
+            )],
+        )
+    };
+    let codebuddy_group = || {
+        prepared_test_group(
+            ClientId::CodeBuddy,
+            vec![crate::adapters::SourceUnit::plain_file(
+                ClientId::CodeBuddy,
+                dir.path().join("codebuddy-group.json"),
+            )],
+        )
+    };
+    let group_order = super::source_inventory_signature(
+        &["amp".to_string(), "codebuddy".to_string()],
+        &[amp_group(), codebuddy_group()],
+    );
+    let reversed_group_order = super::source_inventory_signature(
+        &["amp".to_string(), "codebuddy".to_string()],
+        &[codebuddy_group(), amp_group()],
+    );
+    assert_ne!(
+        group_order, reversed_group_order,
+        "adapter order is significant"
     );
 }
 
 #[test]
-#[serial_test::serial]
-fn test_compute_source_digest_tracks_adapter_no_message_cache_file() {
-    let source_home = tempfile::TempDir::new().unwrap();
-    let trae_dir = source_home
+fn inventory_signature_keeps_units_with_unavailable_snapshots() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let missing_a = dir.path().join("missing-a.json");
+    let missing_b = dir.path().join("missing-b.json");
+    let absent_a = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            missing_a.clone(),
+        )],
+    );
+    let absent_b = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            missing_b,
+        )],
+    );
+    assert_ne!(
+        absent_a, absent_b,
+        "snapshot=None units retain their path identity"
+    );
+
+    std::fs::write(&missing_a, b"now present").unwrap();
+    let present_a = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            missing_a,
+        )],
+    );
+    assert_ne!(
+        absent_a, present_a,
+        "the explicit None/Some snapshot marker differs"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_signature_hashes_native_non_utf8_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let first = dir
         .path()
-        .join(".config/tokscale/trae-cache/sessions");
-    std::fs::create_dir_all(&trae_dir).unwrap();
-    let trae_file = trae_dir.join("usage.json");
-    std::fs::write(&trae_file, r#"[{"session_id":"trae-digest"}]"#).unwrap();
+        .join(std::ffi::OsString::from_vec(b"source-\x80.json".to_vec()));
+    let second = dir
+        .path()
+        .join(std::ffi::OsString::from_vec(b"source-\x81.json".to_vec()));
+    assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+    std::fs::write(&first, b"same").unwrap();
+    std::fs::write(&second, b"same").unwrap();
 
-    let home = source_home.path().to_str().unwrap();
-    let clients = ["trae".to_string()];
-    let settings = scanner::ScannerSettings::default();
+    let first_signature = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            first,
+        )],
+    );
+    let second_signature = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            second,
+        )],
+    );
+    assert_ne!(first_signature, second_signature);
+}
 
-    let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
+#[test]
+fn prepare_discovers_once_and_execute_consumes_the_same_inventory() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    super::reset_prepare_discovery_count();
+
+    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    assert_eq!(super::prepare_discovery_count(), 1);
+
     std::fs::write(
-        &trae_file,
-        r#"[{"session_id":"trae-digest","changed":true}]"#,
+        amp_dir.join("T-added-after-prepare.json"),
+        r#"{
+            "id": "added-after-prepare",
+            "messages": [{
+                "role": "assistant",
+                "messageId": 1,
+                "usage": {
+                    "timestamp": "2026-05-21T04:00:00Z",
+                    "model": "claude-opus-4-7",
+                    "inputTokens": 10,
+                    "outputTokens": 2
+                }
+            }]
+        }"#,
     )
     .unwrap();
-    let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
 
-    assert_ne!(
-        digest_one, digest_two,
-        "adapter-discovered no-message-cache file changes must affect the source digest"
-    );
+    let frozen =
+        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
+    assert_eq!(super::prepare_discovery_count(), 1);
+    assert_eq!(frozen.total_tokens, 0);
+
+    let ordinary = super::load_usage_data_with_pricing(
+        inventory_options(home.path(), &["amp"]),
+        GroupBy::Model,
+        None,
+    )
+    .unwrap();
+    assert_eq!(ordinary.total_tokens, 12);
+}
+
+#[test]
+fn ordinary_and_explicit_prepare_usage_loads_match() {
+    let home = tempfile::TempDir::new().unwrap();
+    let options = inventory_options(home.path(), &["amp"]);
+    let ordinary =
+        super::load_usage_data_with_pricing(options.clone(), GroupBy::Model, None).unwrap();
+    let prepared = super::prepare_local_sources(options).unwrap();
+    let explicit =
+        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
+
+    assert_eq!(ordinary.total_tokens, explicit.total_tokens);
+    assert_eq!(ordinary.total_cost, explicit.total_cost);
+    assert_eq!(ordinary.models.len(), explicit.models.len());
 }
 
 #[test]

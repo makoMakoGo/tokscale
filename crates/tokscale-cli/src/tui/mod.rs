@@ -48,11 +48,13 @@ use tokscale_core::{
     ClientId,
 };
 
-fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool) {
+fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool, Option<u64>) {
     match load_result {
-        CacheResult::Fresh(data) => (Some(data), false),
-        CacheResult::Stale(data) => (Some(data), true),
-        CacheResult::Miss => (None, true),
+        CacheResult::Fresh(data, signature) => {
+            (Some(data), false, Some(signature.process_digest()))
+        }
+        CacheResult::Stale(data) => (Some(data), true, None),
+        CacheResult::Miss => (None, true, None),
     }
 }
 
@@ -69,9 +71,32 @@ enum BackgroundLoad {
     Unchanged,
     Loaded {
         data: Box<UsageData>,
-        digest: Option<u64>,
+        digest: u64,
+        source_inventory_signature: tokscale_core::SourceInventorySignature,
         pricing_diagnostics: Vec<String>,
     },
+}
+
+fn load_background_data(
+    loader: &DataLoader,
+    clients: &[ClientId],
+    group_by: &tokscale_core::GroupBy,
+    force: bool,
+    last_digest: Option<u64>,
+) -> Result<BackgroundLoad> {
+    let prepared = loader.prepare(clients)?;
+    let digest = prepared.source_digest();
+    if !force && last_digest == Some(digest) {
+        return Ok(BackgroundLoad::Unchanged);
+    }
+    loader
+        .execute_with_diagnostics(prepared, group_by)
+        .map(|result| BackgroundLoad::Loaded {
+            data: Box::new(result.data),
+            digest: result.source_digest,
+            source_inventory_signature: result.source_inventory_signature,
+            pricing_diagnostics: result.pricing_diagnostics,
+        })
 }
 
 fn pricing_diagnostics_status(diagnostics: &[String]) -> Option<&'static str> {
@@ -158,11 +183,9 @@ pub fn run(
     // Single file read: load cache and check freshness in one pass.
     let initial_group_by = TUI_DEFAULT_GROUP_BY;
     let initial_report_scope = background_cache_scope(&since, &until, &year);
-    let (cached_data, needs_background_load) = decide_initial_data(load_cache(
-        &enabled_clients,
-        &initial_group_by,
-        &initial_report_scope,
-    ));
+    let (cached_data, needs_background_load, initial_source_digest) = decide_initial_data(
+        load_cache(&enabled_clients, &initial_group_by, &initial_report_scope),
+    );
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -198,6 +221,7 @@ pub fn run(
             return Err(e);
         }
     };
+    app.last_source_digest = initial_source_digest;
 
     let (bg_tx, bg_rx) = mpsc::channel::<Result<BackgroundLoad>>();
 
@@ -216,30 +240,26 @@ pub fn run(
 
         thread::spawn(move || {
             let loader = background_data_loader(bg_since, bg_until, bg_year);
-            // Digest before the load: changes landing mid-parse stay visible
-            // to the next probe instead of being masked by a post-load hash.
-            let digest = loader.source_digest(&bg_clients);
-            let result = loader.load_with_diagnostics(&bg_clients, &bg_group_by);
+            let result = load_background_data(&loader, &bg_clients, &bg_group_by, true, None);
 
-            if let Ok(ref result) = result {
+            if let Ok(BackgroundLoad::Loaded {
+                data,
+                source_inventory_signature,
+                ..
+            }) = &result
+            {
                 if let Err(err) = save_cached_data(
-                    &result.data,
+                    data,
                     &bg_enabled_clients,
                     &bg_group_by,
                     &bg_report_scope,
+                    *source_inventory_signature,
                 ) {
                     tracing::error!("failed to save TUI cache: {err}");
                 }
             }
 
-            send_background_result(
-                &tx,
-                result.map(|result| BackgroundLoad::Loaded {
-                    data: Box::new(result.data),
-                    digest,
-                    pricing_diagnostics: result.pricing_diagnostics,
-                }),
-            );
+            send_background_result(&tx, result);
         });
     }
 
@@ -321,10 +341,11 @@ fn run_loop_with_background(
                     Ok(BackgroundLoad::Loaded {
                         data,
                         digest,
+                        source_inventory_signature: _,
                         pricing_diagnostics,
                     }) => {
                         app.update_data(*data);
-                        app.last_source_digest = digest;
+                        app.last_source_digest = Some(digest);
                         app.set_status(
                             pricing_diagnostics_status(&pricing_diagnostics)
                                 .unwrap_or("Data loaded"),
@@ -366,29 +387,24 @@ fn run_loop_with_background(
 
             thread::spawn(move || {
                 let loader = background_data_loader(since, until, year);
-                // Digest before the load: changes landing mid-parse stay
-                // visible to the next probe (ADR 0008).
-                let digest = loader.source_digest(&clients);
-                if !force && digest.is_some() && digest == last_digest {
-                    send_background_result(&tx, Ok(BackgroundLoad::Unchanged));
-                    return;
-                }
-                let result = loader.load_with_diagnostics(&clients, &group_by);
-                if let Ok(ref result) = result {
-                    if let Err(err) =
-                        save_cached_data(&result.data, &enabled_clients, &group_by, &report_scope)
-                    {
+                let result = load_background_data(&loader, &clients, &group_by, force, last_digest);
+                if let Ok(BackgroundLoad::Loaded {
+                    data,
+                    source_inventory_signature,
+                    ..
+                }) = &result
+                {
+                    if let Err(err) = save_cached_data(
+                        data,
+                        &enabled_clients,
+                        &group_by,
+                        &report_scope,
+                        *source_inventory_signature,
+                    ) {
                         tracing::error!("failed to save TUI cache: {err}");
                     }
                 }
-                send_background_result(
-                    &tx,
-                    result.map(|result| BackgroundLoad::Loaded {
-                        data: Box::new(result.data),
-                        digest,
-                        pricing_diagnostics: result.pricing_diagnostics,
-                    }),
-                );
+                send_background_result(&tx, result);
             });
         }
 
@@ -419,31 +435,97 @@ fn run_loop_with_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use tempfile::TempDir;
+
+    struct EnvGuard {
+        home: Option<OsString>,
+        pricing_cache_only: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(home: &std::path::Path) -> Self {
+            let guard = Self {
+                home: std::env::var_os("HOME"),
+                pricing_cache_only: std::env::var_os("TOKSCALE_PRICING_CACHE_ONLY"),
+            };
+            unsafe {
+                std::env::set_var("HOME", home);
+                std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", "1");
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.home.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.pricing_cache_only.take() {
+                    Some(value) => std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", value),
+                    None => std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY"),
+                }
+            }
+        }
+    }
+
+    fn write_amp_source(home: &std::path::Path, input_tokens: u64) {
+        let directory = home.join(".local/share/amp/threads");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("T-refresh.json"),
+            format!(
+                r#"{{
+                    "id": "refresh-thread",
+                    "messages": [{{
+                        "role": "assistant",
+                        "messageId": 1,
+                        "usage": {{
+                            "timestamp": "2026-05-21T04:00:00Z",
+                            "model": "claude-opus-4-7",
+                            "inputTokens": {input_tokens},
+                            "outputTokens": 2
+                        }}
+                    }}]
+                }}"#
+            ),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn launches_with_fresh_cache_skips_immediate_background_load() {
-        let (cached_data, needs_background_load) =
-            decide_initial_data(CacheResult::Fresh(UsageData::default()));
+        let (cached_data, needs_background_load, digest) = decide_initial_data(CacheResult::Fresh(
+            UsageData::default(),
+            tokscale_core::SourceInventorySignature::from_bytes([1; 32]),
+        ));
 
         assert!(cached_data.is_some());
         assert!(!needs_background_load);
+        assert!(digest.is_some());
     }
 
     #[test]
     fn launches_with_24h_old_cache_renders_immediately() {
-        let (cached_data, needs_background_load) =
+        let (cached_data, needs_background_load, digest) =
             decide_initial_data(CacheResult::Stale(UsageData::default()));
 
         assert!(cached_data.is_some());
         assert!(needs_background_load);
+        assert!(digest.is_none());
     }
 
     #[test]
     fn miss_renders_empty_until_background_completes() {
-        let (cached_data, needs_background_load) = decide_initial_data(CacheResult::Miss);
+        let (cached_data, needs_background_load, digest) = decide_initial_data(CacheResult::Miss);
 
         assert!(cached_data.is_none());
         assert!(needs_background_load);
+        assert!(digest.is_none());
     }
 
     #[test]
@@ -457,6 +539,77 @@ mod tests {
         assert_eq!(loader.since.as_deref(), Some("2026-05-01"));
         assert_eq!(loader.until.as_deref(), Some("2026-05-19"));
         assert_eq!(loader.year.as_deref(), Some("2026"));
+    }
+
+    #[test]
+    #[serial]
+    fn fresh_cache_baseline_skips_a_and_reloads_changed_b() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(home.path());
+        write_amp_source(home.path(), 10);
+        let loader = background_data_loader(None, None, None);
+        let clients = [ClientId::Amp];
+        let signature_a = loader
+            .prepare(&clients)
+            .unwrap()
+            .source_inventory_signature();
+        let (_, needs_load, baseline) =
+            decide_initial_data(CacheResult::Fresh(UsageData::default(), signature_a));
+        assert!(!needs_load);
+
+        assert!(matches!(
+            load_background_data(
+                &loader,
+                &clients,
+                &tokscale_core::GroupBy::Model,
+                false,
+                baseline
+            )
+            .unwrap(),
+            BackgroundLoad::Unchanged
+        ));
+
+        write_amp_source(home.path(), 1000);
+        let changed = load_background_data(
+            &loader,
+            &clients,
+            &tokscale_core::GroupBy::Model,
+            false,
+            baseline,
+        )
+        .unwrap();
+        match changed {
+            BackgroundLoad::Loaded { data, digest, .. } => {
+                assert_ne!(Some(digest), baseline);
+                assert_eq!(data.total_tokens, 1002);
+            }
+            BackgroundLoad::Unchanged => panic!("changed source B must consume its inventory"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn force_stale_and_miss_paths_execute_the_prepared_inventory() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(home.path());
+        write_amp_source(home.path(), 10);
+        let loader = background_data_loader(None, None, None);
+        let clients = [ClientId::Amp];
+        let baseline = Some(loader.prepare(&clients).unwrap().source_digest());
+
+        for last_digest in [baseline, None, None] {
+            assert!(matches!(
+                load_background_data(
+                    &loader,
+                    &clients,
+                    &tokscale_core::GroupBy::Model,
+                    true,
+                    last_digest,
+                )
+                .unwrap(),
+                BackgroundLoad::Loaded { .. }
+            ));
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokscale_core::{sessions, GroupBy, ModelPerformance};
+use tokscale_core::{sessions, GroupBy, ModelPerformance, SourceInventorySignature};
 
 use tokscale_core::ClientId;
 
@@ -22,7 +22,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 24;
+const CACHE_SCHEMA_VERSION: u32 = 25;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +76,7 @@ struct CachedTUIData {
     enabled_clients: Vec<String>,
     group_by: String,
     report_scope: CacheReportScope,
+    source_inventory_signature: SourceInventorySignature,
     data: CachedUsageData,
 }
 
@@ -629,7 +630,7 @@ fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
 /// to avoid double file I/O (previously is_cache_stale + load_cached_data both parsed the file).
 pub enum CacheResult {
     /// Cache exists, is fresh (within TTL), and clients match exactly
-    Fresh(UsageData),
+    Fresh(UsageData, SourceInventorySignature),
     /// Cache exists and clients match exactly, but needs background refresh
     Stale(UsageData),
     /// Cache missing, unreadable, unparseable, or clients don't match
@@ -721,7 +722,7 @@ pub fn load_cache(
     if cache_age > CACHE_STALE_THRESHOLD_MS {
         CacheResult::Stale(data)
     } else {
-        CacheResult::Fresh(data)
+        CacheResult::Fresh(data, cached.source_inventory_signature)
     }
 }
 
@@ -747,6 +748,7 @@ pub fn save_cached_data(
     enabled_clients: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
+    source_inventory_signature: SourceInventorySignature,
 ) -> anyhow::Result<()> {
     let cache_path = cache_file().ok_or_else(|| anyhow::anyhow!("TUI cache path unavailable"))?;
 
@@ -767,6 +769,7 @@ pub fn save_cached_data(
         enabled_clients: clients_vec,
         group_by: group_by.to_string(),
         report_scope: report_scope.clone(),
+        source_inventory_signature,
         data: data.into(),
     };
 
@@ -813,6 +816,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
+    }
+
+    fn test_signature() -> SourceInventorySignature {
+        SourceInventorySignature::from_bytes([0x5a; 32])
     }
 
     #[test]
@@ -880,6 +887,7 @@ mod tests {
             enabled_clients: vec!["opencode".to_string()],
             group_by: GroupBy::Model.to_string(),
             report_scope: CacheReportScope::default(),
+            source_inventory_signature: test_signature(),
             data: CachedUsageData {
                 models: Vec::new(),
                 agents: vec![
@@ -1009,7 +1017,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 24,
+  "schemaVersion": 25,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
@@ -1018,6 +1026,7 @@ mod tests {
     "until": null,
     "year": null
   },
+	"sourceInventorySignature": [90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90],
 	  "data": {
 	    "models": [],
 	    "agents": [],
@@ -1069,6 +1078,7 @@ mod tests {
             &clients,
             &GroupBy::Model,
             &filtered_scope,
+            test_signature(),
         )
         .unwrap();
 
@@ -1079,7 +1089,7 @@ mod tests {
 
         assert!(matches!(
             load_cache(&clients, &GroupBy::Model, &filtered_scope),
-            CacheResult::Fresh(_)
+            CacheResult::Fresh(_, _)
         ));
 
         match previous_home {
@@ -1099,7 +1109,14 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         let scope = CacheReportScope::default();
-        save_cached_data(&UsageData::default(), &clients, &GroupBy::Model, &scope).unwrap();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
 
         let cache_path = cache_file().unwrap();
         let mut cached: CachedTUIData = serde_json::from_slice(&fs::read(&cache_path).unwrap())
@@ -1113,6 +1130,109 @@ mod tests {
             "expected Stale for future cache timestamp, got {}",
             other_variant_name(&result)
         );
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn source_inventory_signature_round_trips_in_schema_25() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+        let clients = make_filters(&[ClientId::Claude]);
+        let scope = CacheReportScope::default();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+
+        match load_cache(&clients, &GroupBy::Model, &scope) {
+            CacheResult::Fresh(_, signature) => assert_eq!(signature, test_signature()),
+            result => panic!("expected fresh cache, got {}", other_variant_name(&result)),
+        }
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn schema_24_cache_is_an_explicit_miss() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+        let clients = make_filters(&[ClientId::Claude]);
+        let scope = CacheReportScope::default();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["schemaVersion"] = serde_json::json!(24);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn schema_25_without_source_inventory_signature_is_a_miss() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+        let clients = make_filters(&[ClientId::Claude]);
+        let scope = CacheReportScope::default();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("sourceInventorySignature");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
 
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
@@ -1354,11 +1474,14 @@ mod tests {
         )
         .unwrap();
         cached["timestamp"] = serde_json::Value::from(fresh_timestamp_ms());
+        cached["schemaVersion"] = serde_json::Value::from(CACHE_SCHEMA_VERSION);
+        cached["sourceInventorySignature"] = serde_json::json!(vec![0x5a_u8; 32]);
         fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
         let clients = make_filters(&[ClientId::Claude, ClientId::Cursor]);
         match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
-            CacheResult::Fresh(data) => {
+            CacheResult::Fresh(data, signature) => {
+                assert_eq!(signature, test_signature());
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
                 let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
                 let model = cursor.models.get("claude-sonnet-4").unwrap();
@@ -1673,6 +1796,7 @@ mod tests {
             &clients,
             &GroupBy::Model,
             &CacheReportScope::default(),
+            test_signature(),
         )
         .unwrap();
 
@@ -1693,7 +1817,7 @@ mod tests {
 
     fn other_variant_name(result: &CacheResult) -> &'static str {
         match result {
-            CacheResult::Fresh(_) => "Fresh",
+            CacheResult::Fresh(_, _) => "Fresh",
             CacheResult::Stale(_) => "Stale",
             CacheResult::Miss => "Miss",
         }
@@ -1739,6 +1863,7 @@ mod tests {
             &enabled,
             &TUI_DEFAULT_GROUP_BY,
             &scope,
+            test_signature(),
         )
         .unwrap();
 
@@ -1748,7 +1873,7 @@ mod tests {
         // while the reader used `GroupBy::Model`.
         let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope);
         assert!(
-            matches!(result, CacheResult::Fresh(_)),
+            matches!(result, CacheResult::Fresh(_, _)),
             "expected Fresh after writing with TUI_DEFAULT_GROUP_BY, got {}",
             other_variant_name(&result)
         );
@@ -1783,7 +1908,14 @@ mod tests {
         let scope = CacheReportScope::default();
 
         // Pre-fix: writer used `GroupBy::default()`.
-        save_cached_data(&UsageData::default(), &enabled, &GroupBy::default(), &scope).unwrap();
+        save_cached_data(
+            &UsageData::default(),
+            &enabled,
+            &GroupBy::default(),
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
 
         // Reader uses the canonical key. If `GroupBy::default()` and
         // `TUI_DEFAULT_GROUP_BY` ever coincide (e.g. someone changes

@@ -41,6 +41,7 @@ impl LocalSourceAdapter for OmpAdapter {
         let mut miss_units = Vec::new();
 
         for unit in units {
+            let unit = unit.prepare_snapshot();
             if let Some(hit) = adapter_cache::try_cache_hit(unit.clone(), ctx.source_cache) {
                 hit_units.push(hit);
             } else {

@@ -81,6 +81,7 @@ pub(crate) struct SourceUnit {
     pub fingerprint_policy: FingerprintPolicy,
     pub meta: SourceUnitMeta,
     pub parser_version: ParserVersion,
+    prepared_snapshot: Option<Option<message_cache::SourceInputSnapshot>>,
 }
 
 impl SourceUnit {
@@ -91,6 +92,7 @@ impl SourceUnit {
             fingerprint_policy: FingerprintPolicy::PlainFile,
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
+            prepared_snapshot: None,
         }
     }
 
@@ -101,6 +103,7 @@ impl SourceUnit {
             fingerprint_policy: FingerprintPolicy::SqliteWithWal,
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
+            prepared_snapshot: None,
         }
     }
 
@@ -111,6 +114,7 @@ impl SourceUnit {
             fingerprint_policy: FingerprintPolicy::NoMessageCache,
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
+            prepared_snapshot: None,
         }
     }
 
@@ -125,6 +129,7 @@ impl SourceUnit {
             },
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
+            prepared_snapshot: None,
         }
     }
 
@@ -139,8 +144,107 @@ impl SourceUnit {
         self
     }
 
+    pub(crate) fn prepare_snapshot(mut self) -> Self {
+        if self.prepared_snapshot.is_none() {
+            self.prepared_snapshot = Some(self.source_input_policy().snapshot());
+        }
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn digest_paths(&self) -> Vec<PathBuf> {
         self.source_input_policy().paths()
+    }
+
+    pub(crate) fn take_source_input_snapshot(
+        &mut self,
+    ) -> Option<message_cache::SourceInputSnapshot> {
+        match self.prepared_snapshot.take() {
+            Some(snapshot) => snapshot,
+            None => self.source_input_policy().snapshot(),
+        }
+    }
+
+    pub(crate) fn release_prepared_snapshot(&mut self) {
+        self.prepared_snapshot = None;
+    }
+
+    pub(crate) fn update_inventory_signature(&self, hasher: &mut sha2::Sha256) {
+        use sha2::Digest;
+
+        let snapshot = self
+            .prepared_snapshot
+            .as_ref()
+            .expect("inventory units must carry a prepared source snapshot");
+        message_cache::hash_inventory_bytes(hasher, self.client.as_str().as_bytes());
+        message_cache::hash_inventory_bytes(
+            hasher,
+            self.parser_version
+                .parser_id
+                .inventory_signature_name()
+                .as_bytes(),
+        );
+        hasher.update(self.parser_version.revision.to_le_bytes());
+        self.update_meta_inventory_signature(hasher);
+        self.update_policy_inventory_signature(hasher);
+        self.source_input_policy()
+            .update_inventory_signature(snapshot.as_ref(), hasher);
+    }
+
+    fn update_meta_inventory_signature(&self, hasher: &mut sha2::Sha256) {
+        let (name, detail) = match self.meta {
+            SourceUnitMeta::None => ("none", None),
+            SourceUnitMeta::OpenCodeSqlite => ("opencode-sqlite", None),
+            SourceUnitMeta::OpenCodeJson => ("opencode-json", None),
+            SourceUnitMeta::AntigravityCacheJsonl => ("antigravity-cache-jsonl", None),
+            SourceUnitMeta::AntigravityCliSqlite => ("antigravity-cli-sqlite", None),
+            SourceUnitMeta::KiroFile => ("kiro-file", None),
+            SourceUnitMeta::KiroSqlite => ("kiro-sqlite", None),
+            SourceUnitMeta::KiroGlobalStorage => ("kiro-global-storage", None),
+            SourceUnitMeta::CodeBuddyJsonl => ("codebuddy-jsonl", None),
+            SourceUnitMeta::CodeBuddyExtensionLog { source } => (
+                "codebuddy-extension-log",
+                Some(match source {
+                    CodeBuddyLogSource::Extension => "extension",
+                    CodeBuddyLogSource::Host => "host",
+                }),
+            ),
+            SourceUnitMeta::Codex { is_headless } => (
+                "codex",
+                Some(if is_headless {
+                    "headless"
+                } else {
+                    "interactive"
+                }),
+            ),
+        };
+        message_cache::hash_inventory_bytes(hasher, name.as_bytes());
+        message_cache::hash_inventory_bytes(hasher, detail.unwrap_or("").as_bytes());
+    }
+
+    fn update_policy_inventory_signature(&self, hasher: &mut sha2::Sha256) {
+        match &self.fingerprint_policy {
+            FingerprintPolicy::PlainFile => {
+                message_cache::hash_inventory_bytes(hasher, b"plain-file");
+            }
+            FingerprintPolicy::SqliteWithWal => {
+                message_cache::hash_inventory_bytes(hasher, b"sqlite-with-wal");
+            }
+            FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
+                message_cache::hash_inventory_bytes(hasher, b"claude-code-with-home");
+                message_cache::hash_inventory_path(hasher, home_dir);
+            }
+            FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
+                message_cache::hash_inventory_bytes(hasher, b"primary-with-siblings");
+                message_cache::hash_inventory_len(hasher, sibling_names.len());
+                for name in *sibling_names {
+                    message_cache::hash_inventory_bytes(hasher, name.as_bytes());
+                }
+            }
+            FingerprintPolicy::NoMessageCache => {
+                message_cache::hash_inventory_bytes(hasher, b"no-message-cache");
+            }
+        }
     }
 
     pub(crate) fn source_input_policy(&self) -> message_cache::SourceInputPolicy {
@@ -360,15 +464,18 @@ pub(crate) fn selected_adapters(clients: &[String]) -> Vec<&'static dyn LocalSou
         .collect()
 }
 
-pub(crate) fn run_local_source_adapters(
-    adapters: &[&'static dyn LocalSourceAdapter],
-    scan_ctx: &AdapterScanContext<'_>,
+pub(crate) struct PreparedAdapterSources {
+    pub adapter: &'static dyn LocalSourceAdapter,
+    pub units: Vec<SourceUnit>,
+}
+
+pub(crate) fn run_prepared_local_source_adapters(
+    prepared: Vec<PreparedAdapterSources>,
     source_cache: &mut message_cache::SourceMessageCache,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn MessageSink,
 ) {
-    for adapter in adapters {
-        let units = adapter.discover(scan_ctx);
+    for PreparedAdapterSources { adapter, units } in prepared {
         let parsed = {
             let parse_ctx = ParseContext {
                 source_cache,

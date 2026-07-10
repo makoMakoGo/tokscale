@@ -120,10 +120,13 @@ fn parse_full_log_source(
     unit: SourceUnit,
     pricing: Option<&pricing::PricingService>,
     is_headless: bool,
+    source_snapshot: Option<message_cache::SourceInputSnapshot>,
 ) -> ParsedUnit {
     let path = unit.path.clone();
-    let source_snapshot = unit.source_input_policy().snapshot();
-    let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
+    let fallback_timestamp = source_snapshot
+        .as_ref()
+        .and_then(message_cache::SourceInputSnapshot::primary_modified_ms)
+        .unwrap_or_else(|| sessions::utils::file_modified_timestamp_ms(&path));
     let parsed = sessions::codex::parse_codex_file_incremental(
         &path,
         0,
@@ -231,10 +234,8 @@ fn build_codex_cache_metadata(
     {
         return None;
     }
-    let fingerprint = message_cache::SourceFingerprint::from_main_digest(
-        source_snapshot.stamp().clone(),
-        content_hash,
-    )?;
+    let stamp = input_policy.stamp_from_snapshot(&source_snapshot)?;
+    let fingerprint = message_cache::SourceFingerprint::from_main_digest(stamp, content_hash)?;
     if fingerprint.size != consumed_offset {
         return None;
     }
@@ -248,26 +249,37 @@ fn build_codex_cache_metadata(
 }
 
 fn load_or_parse_codex_unit(
-    unit: SourceUnit,
+    mut unit: SourceUnit,
     source_cache: &message_cache::SourceMessageCache,
     pricing: Option<&pricing::PricingService>,
     is_headless: bool,
 ) -> ParsedUnit {
     let path = unit.path.clone();
     let cached = source_cache.get_meta(&path, unit.parser_version);
-    let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
+    let source_snapshot = unit.take_source_input_snapshot();
+    let fallback_timestamp = source_snapshot
+        .as_ref()
+        .and_then(message_cache::SourceInputSnapshot::primary_modified_ms)
+        .unwrap_or_else(|| sessions::utils::file_modified_timestamp_ms(&path));
 
     if let Some(cached) = cached {
+        let reparse_snapshot = source_snapshot.clone();
         let reparse_from_start = |invalidate_cache: bool| {
-            let mut parsed = parse_full_log_source(unit.clone(), pricing, is_headless);
+            let mut parsed =
+                parse_full_log_source(unit.clone(), pricing, is_headless, reparse_snapshot.clone());
             parsed.invalidate_cache = invalidate_cache && parsed.cache_write.is_none();
             parsed
         };
-        let Some(snapshot) = unit.source_input_policy().snapshot() else {
+        let Some(snapshot) = source_snapshot else {
+            return reparse_from_start(true);
+        };
+        let Some(stamp) =
+            message_cache::SourceInputPolicy::plain(&path).stamp_from_snapshot(&snapshot)
+        else {
             return reparse_from_start(true);
         };
 
-        if cached.fingerprint.stamp == *snapshot.stamp() {
+        if cached.fingerprint.stamp == stamp {
             if message_cache::codex_cache_meta_is_consistent(&cached) {
                 let read_plan = message_cache::CacheReadPlan::new(
                     &path,
@@ -290,7 +302,7 @@ fn load_or_parse_codex_unit(
         }
 
         if let Some(codex_incremental) = cached.codex_incremental.as_ref() {
-            if snapshot.stamp().primary_size().is_some_and(|size| {
+            if snapshot.primary_size().is_some_and(|size| {
                 size > codex_incremental.consumed_offset && codex_incremental.ends_with_newline
             }) {
                 let parsed = sessions::codex::parse_codex_file_incremental_verified(
@@ -342,7 +354,7 @@ fn load_or_parse_codex_unit(
         return reparse_from_start(true);
     }
 
-    parse_full_log_source(unit, pricing, is_headless)
+    parse_full_log_source(unit, pricing, is_headless, source_snapshot)
 }
 
 fn resolve_codex_messages(
@@ -805,7 +817,10 @@ mod tests {
         std::fs::rename(&replacement, &path).unwrap();
 
         let after = input_policy.snapshot().unwrap();
-        assert_eq!(before.stamp(), after.stamp());
+        assert_eq!(
+            input_policy.stamp_from_snapshot(&before),
+            input_policy.stamp_from_snapshot(&after)
+        );
         assert_ne!(before.primary_identity(), after.primary_identity());
         assert!(build_codex_cache_metadata(
             &path,
