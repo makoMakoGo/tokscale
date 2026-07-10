@@ -8,6 +8,9 @@ import sys
 ROOT = pathlib.Path.cwd()
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish-cli.yml"
 BUILD_NATIVE_WORKFLOW = ROOT / ".github/workflows/build-native.yml"
+CORE_CI_WORKFLOW = ROOT / ".github/workflows/core_ci.yml"
+TEST_COVERAGE_WORKFLOW = ROOT / ".github/workflows/test_coverage.yml"
+RELEASE_TOOLING_SCRIPT = ROOT / "scripts/test-release-tooling.sh"
 REQUIRED_ENV_KEYS = ("MACOSX_DEPLOYMENT_TARGET", "CARGO_TERM_COLOR", "CARGO_INCREMENTAL")
 COMMON_BUILD_FIELDS = ("host", "target", "build", "strip", "bin_name")
 TARGET_PACKAGES = {
@@ -17,6 +20,14 @@ TARGET_PACKAGES = {
 }
 DEFAULT_RELEASE_BRANCH = "personal/local-clients"
 RELEASE_TRIGGER_PATH = "packages/cli/package.json"
+RELEASE_TOOLING_COMMAND = "bash scripts/test-release-tooling.sh"
+RELEASE_VALIDATION_PATHS = {
+    "scripts/**",
+    ".github/workflows/build-native.yml",
+    ".github/workflows/core_ci.yml",
+    ".github/workflows/publish-cli.yml",
+    ".github/workflows/test_coverage.yml",
+}
 
 
 def fail(message: str) -> None:
@@ -123,6 +134,11 @@ def nested_list_values(lines: list[str], key: str) -> list[str]:
     return values
 
 
+def exact_run_command_count(lines: list[str], command: str) -> int:
+    pattern = re.compile(rf"\s+(?:-\s+)?run:\s*{re.escape(command)}\s*$")
+    return sum(1 for line in lines if pattern.fullmatch(line))
+
+
 def matrix_settings(lines: list[str], job_name: str) -> list[dict[str, str]]:
     block = job_block(lines, job_name)
     settings_start = None
@@ -188,7 +204,36 @@ def package_manifest_name(package_dir: str) -> str:
 def main() -> None:
     publish_lines = read_lines(PUBLISH_WORKFLOW)
     native_lines = read_lines(BUILD_NATIVE_WORKFLOW)
+    core_ci_lines = read_lines(CORE_CI_WORKFLOW)
+    test_coverage_lines = read_lines(TEST_COVERAGE_WORKFLOW)
     errors: list[str] = []
+
+    if not RELEASE_TOOLING_SCRIPT.is_file():
+        errors.append(f"missing release tooling entrypoint: {RELEASE_TOOLING_SCRIPT}")
+    elif RELEASE_TOOLING_SCRIPT.stat().st_mode & 0o111 == 0:
+        errors.append(f"release tooling entrypoint is not executable: {RELEASE_TOOLING_SCRIPT}")
+
+    for label, workflow_lines in (
+        ("Core CI", core_ci_lines),
+        ("Test & Coverage", test_coverage_lines),
+    ):
+        command_count = exact_run_command_count(workflow_lines, RELEASE_TOOLING_COMMAND)
+        if command_count != 1:
+            errors.append(
+                f"{label} must call {RELEASE_TOOLING_COMMAND!r} exactly once, found {command_count}"
+            )
+
+    for event_name in ("push", "pull_request"):
+        block = event_block(test_coverage_lines, event_name)
+        if block is None:
+            errors.append(f"Test & Coverage must run on {event_name}")
+            continue
+        configured_paths = set(nested_list_values(block, "paths"))
+        missing_paths = sorted(RELEASE_VALIDATION_PATHS - configured_paths)
+        if missing_paths:
+            errors.append(
+                f"Test & Coverage {event_name} paths are missing release inputs: {missing_paths}"
+            )
 
     push_block = event_block(publish_lines, "push")
     if push_block is None:

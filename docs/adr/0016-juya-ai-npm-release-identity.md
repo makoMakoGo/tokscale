@@ -53,18 +53,17 @@ Manual recovery requires both the version and the exact version-bump commit.
 This prevents a later default-branch commit with the same manifest version from
 being published under an already selected version.
 
+Core CI and Test & Coverage share `scripts/test-release-tooling.sh` as the
+single release-tooling validation entrypoint. Individual release checks are not
+duplicated in workflow YAML.
+
 Before publishing, validate the launcher and release scripts:
 
 ```bash
 bun install
 bun run build:cli
-bash scripts/check-version-coherence.sh
 bash scripts/test-package-launchers.sh
-bash scripts/test-check-version-coherence.sh
-bash scripts/test-bump-release-version.sh
-bash scripts/test-check-release-commit.sh
-bash scripts/test-npm-release-state.sh
-bash scripts/test-release-workflow-safety.sh
+bash scripts/test-release-tooling.sh
 ```
 
 If a publish partially succeeds, use the existing recovery mode with the same

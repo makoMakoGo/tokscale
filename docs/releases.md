@@ -70,10 +70,9 @@ Release; it is not granted permission to push the default branch.
 Before changing release infrastructure, run:
 
 ```bash
-bash scripts/check-version-coherence.sh
-bash scripts/test-check-version-coherence.sh
-bash scripts/test-bump-release-version.sh
-bash scripts/test-check-release-commit.sh
-bash scripts/test-npm-release-state.sh
-bash scripts/test-release-workflow-safety.sh
+bash scripts/test-release-tooling.sh
 ```
+
+This script is the canonical release-tooling suite used by both Core CI and
+Test & Coverage. Add or remove release checks there instead of maintaining
+separate command lists in workflow YAML.

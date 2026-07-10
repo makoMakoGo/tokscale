@@ -8,7 +8,12 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 
 write_good_workflows() {
   local work="$1"
-  mkdir -p "${work}/.github/workflows" "${work}/packages/cli-linux-x64-gnu"
+  mkdir -p "${work}/.github/workflows" "${work}/packages/cli-linux-x64-gnu" "${work}/scripts"
+  cat > "${work}/scripts/test-release-tooling.sh" <<'EOF_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+EOF_SCRIPT
+  chmod +x "${work}/scripts/test-release-tooling.sh"
   cat > "${work}/packages/cli-linux-x64-gnu/package.json" <<'EOF_MANIFEST'
 {
   "name": "@juya-ai/tokscale-cli-linux-x64-gnu",
@@ -85,6 +90,38 @@ jobs:
   authorize-publish:
     steps:
       - run: bash scripts/check-release-commit.sh
+EOF_YAML
+  cat > "${work}/.github/workflows/core_ci.yml" <<'EOF_YAML'
+name: Core CI (Test Only)
+
+jobs:
+  lint:
+    steps:
+      - run: bash scripts/test-release-tooling.sh
+EOF_YAML
+  cat > "${work}/.github/workflows/test_coverage.yml" <<'EOF_YAML'
+name: Test & Coverage (Test Only)
+
+on:
+  push:
+    paths:
+      - scripts/**
+      - .github/workflows/build-native.yml
+      - .github/workflows/core_ci.yml
+      - .github/workflows/publish-cli.yml
+      - .github/workflows/test_coverage.yml
+  pull_request:
+    paths:
+      - scripts/**
+      - .github/workflows/build-native.yml
+      - .github/workflows/core_ci.yml
+      - .github/workflows/publish-cli.yml
+      - .github/workflows/test_coverage.yml
+
+jobs:
+  lint:
+    steps:
+      - run: bash scripts/test-release-tooling.sh
 EOF_YAML
 }
 
@@ -301,6 +338,79 @@ test_rejects_branch_pushes_in_publish_workflow() {
   grep -q "publish workflow contains unexpected git push commands" "${output}"
 }
 
+test_rejects_release_tooling_command_drift() {
+  local work="${TMP_DIR}/release-tooling-command-drift"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/test_coverage.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "bash scripts/test-release-tooling.sh",
+    "bash scripts/test-calculate-release-version.sh",
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/release-tooling-command-drift-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject release tooling command drift" >&2
+    return 1
+  fi
+
+  grep -q "Test & Coverage must call 'bash scripts/test-release-tooling.sh' exactly once" "${output}"
+}
+
+test_rejects_missing_release_tooling_entrypoint() {
+  local work="${TMP_DIR}/missing-release-tooling-entrypoint"
+  write_good_workflows "${work}"
+  rm "${work}/scripts/test-release-tooling.sh"
+
+  local output="${TMP_DIR}/missing-release-tooling-entrypoint-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a missing release tooling entrypoint" >&2
+    return 1
+  fi
+
+  grep -q "missing release tooling entrypoint" "${output}"
+}
+
+test_rejects_non_executable_release_tooling_entrypoint() {
+  local work="${TMP_DIR}/non-executable-release-tooling-entrypoint"
+  write_good_workflows "${work}"
+  chmod -x "${work}/scripts/test-release-tooling.sh"
+
+  local output="${TMP_DIR}/non-executable-release-tooling-entrypoint-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject a non-executable release tooling entrypoint" >&2
+    return 1
+  fi
+
+  grep -q "release tooling entrypoint is not executable" "${output}"
+}
+
+test_rejects_release_validation_path_drift() {
+  local work="${TMP_DIR}/release-validation-path-drift"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/test_coverage.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace("      - scripts/**\n", "", 1)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/release-validation-path-drift-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject release validation path drift" >&2
+    return 1
+  fi
+
+  grep -q "Test & Coverage push paths are missing release inputs" "${output}"
+}
+
 test_accepts_matching_publish_and_native_workflows
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
@@ -311,5 +421,9 @@ test_rejects_platform_publish_matrix_drift
 test_rejects_missing_default_branch_push_trigger
 test_rejects_version_commits_in_publish_workflow
 test_rejects_branch_pushes_in_publish_workflow
+test_rejects_release_tooling_command_drift
+test_rejects_missing_release_tooling_entrypoint
+test_rejects_non_executable_release_tooling_entrypoint
+test_rejects_release_validation_path_drift
 
 echo "release workflow safety tests passed"

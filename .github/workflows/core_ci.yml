@@ -42,13 +42,7 @@ jobs:
             core-ci-${{ runner.os }}-cargo-
 
       - name: Validate release tooling
-        run: |
-          bash scripts/check-version-coherence.sh
-          bash scripts/test-check-version-coherence.sh
-          bash scripts/test-bump-release-version.sh
-          bash scripts/test-check-release-commit.sh
-          bash scripts/test-npm-release-state.sh
-          bash scripts/test-release-workflow-safety.sh
+        run: bash scripts/test-release-tooling.sh
 
       - name: Validate release pull request
         if: github.event_name == 'pull_request'

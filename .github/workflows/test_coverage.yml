@@ -11,7 +11,9 @@ on:
       - 'packages/cli/package.json'
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
-      - 'scripts/*.sh'
+      - 'scripts/**'
+      - '.github/workflows/build-native.yml'
+      - '.github/workflows/core_ci.yml'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
@@ -23,7 +25,9 @@ on:
       - 'packages/cli/package.json'
       - 'packages/tokscale/package.json'
       - 'packages/cli-*/package.json'
-      - 'scripts/*.sh'
+      - 'scripts/**'
+      - '.github/workflows/build-native.yml'
+      - '.github/workflows/core_ci.yml'
       - '.github/workflows/publish-cli.yml'
       - '.github/workflows/test_coverage.yml'
 
@@ -45,14 +49,8 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy, rustfmt
-      - name: Verify version coherence
-        run: bash scripts/check-version-coherence.sh
-      - name: Run release helper tests
-        run: |
-          bash scripts/test-calculate-release-version.sh
-          bash scripts/test-check-version-coherence.sh
-          bash scripts/test-npm-release-state.sh
-          bash scripts/test-prepare-release-provenance.sh
+      - name: Validate release tooling
+        run: bash scripts/test-release-tooling.sh
       - name: Cache cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
