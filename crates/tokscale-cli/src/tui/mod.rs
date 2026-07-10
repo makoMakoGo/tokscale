@@ -115,7 +115,7 @@ fn background_cache_scope(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    theme: &str,
+    theme: Option<&str>,
     refresh: u64,
     debug: bool,
     clients: Option<Vec<String>>,
@@ -131,7 +131,7 @@ pub fn run(
     }
 
     let config = TuiConfig {
-        theme: theme.to_string(),
+        theme: theme.map(str::to_string),
         refresh,
         sessions_path: None,
         clients: clients.clone(),

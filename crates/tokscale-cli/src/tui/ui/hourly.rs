@@ -11,7 +11,7 @@ use super::table_layout::{
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, truncate_display_width, viewport_scrollbar_state,
+    get_client_display_name, total_tokens_cell, truncate_display_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
@@ -360,7 +360,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     hour.tokens.cache_write,
                 ))
                 .style(Style::default().fg(Color::Cyan)),
-                HourlyColumn::Total => Cell::from(format_tokens(hour.tokens.total())),
+                HourlyColumn::Total => total_tokens_cell(hour.tokens.total(), &app.theme),
                 HourlyColumn::Cost => {
                     Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green))
                 }
@@ -462,7 +462,7 @@ mod tests {
 
     fn make_hourly_app(width: u16) -> App {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,

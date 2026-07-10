@@ -500,7 +500,7 @@ mod tests {
 
     fn make_app_on(tab: Tab) -> App {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,

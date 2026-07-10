@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalColorMode {
@@ -56,6 +56,9 @@ pub enum ThemeName {
     Orange,
     Monochrome,
     YlGnBu,
+    Graphite,
+    Lagoon,
+    Dusk,
 }
 
 impl ThemeName {
@@ -70,6 +73,9 @@ impl ThemeName {
             ThemeName::Orange,
             ThemeName::Monochrome,
             ThemeName::YlGnBu,
+            ThemeName::Graphite,
+            ThemeName::Lagoon,
+            ThemeName::Dusk,
         ]
     }
 
@@ -90,6 +96,9 @@ impl ThemeName {
             ThemeName::Orange => "orange",
             ThemeName::Monochrome => "monochrome",
             ThemeName::YlGnBu => "ylgnbu",
+            ThemeName::Graphite => "graphite",
+            ThemeName::Lagoon => "lagoon",
+            ThemeName::Dusk => "dusk",
         }
     }
 }
@@ -108,6 +117,9 @@ impl std::str::FromStr for ThemeName {
             "orange" => Ok(ThemeName::Orange),
             "monochrome" => Ok(ThemeName::Monochrome),
             "ylgnbu" => Ok(ThemeName::YlGnBu),
+            "graphite" => Ok(ThemeName::Graphite),
+            "lagoon" => Ok(ThemeName::Lagoon),
+            "dusk" => Ok(ThemeName::Dusk),
             _ => Err(()),
         }
     }
@@ -124,6 +136,8 @@ pub struct Theme {
     pub muted: Color,
     pub accent: Color,
     pub selection: Color,
+    striped_row: Color,
+    current_row: Color,
     color_mode: TerminalColorMode,
 }
 
@@ -201,6 +215,27 @@ impl Theme {
                 Color::Rgb(44, 127, 184),  // grade3: #2c7fb8
                 Color::Rgb(37, 52, 148),   // grade4: #253494
             ],
+            ThemeName::Graphite => [
+                Color::Rgb(24, 27, 34),
+                Color::Rgb(148, 163, 184),
+                Color::Rgb(125, 211, 252),
+                Color::Rgb(56, 189, 248),
+                Color::Rgb(14, 116, 144),
+            ],
+            ThemeName::Lagoon => [
+                Color::Rgb(6, 32, 36),
+                Color::Rgb(153, 246, 228),
+                Color::Rgb(94, 234, 212),
+                Color::Rgb(45, 212, 191),
+                Color::Rgb(15, 118, 110),
+            ],
+            ThemeName::Dusk => [
+                Color::Rgb(27, 24, 38),
+                Color::Rgb(196, 181, 253),
+                Color::Rgb(167, 139, 250),
+                Color::Rgb(139, 92, 246),
+                Color::Rgb(109, 40, 217),
+            ],
         };
 
         let mut theme = Self {
@@ -213,8 +248,44 @@ impl Theme {
             muted: Color::Rgb(139, 148, 158),
             accent: Color::Cyan,
             selection: Color::Rgb(48, 54, 61),
+            striped_row: Color::Rgb(20, 24, 30),
+            current_row: Color::Rgb(28, 42, 34),
             color_mode,
         };
+
+        match name {
+            ThemeName::Graphite => {
+                theme.background = Color::Rgb(10, 12, 16);
+                theme.foreground = Color::Rgb(226, 232, 240);
+                theme.border = Color::Rgb(55, 65, 81);
+                theme.muted = Color::Rgb(148, 163, 184);
+                theme.accent = Color::Rgb(125, 211, 252);
+                theme.selection = Color::Rgb(31, 41, 55);
+                theme.striped_row = Color::Rgb(15, 18, 24);
+                theme.current_row = Color::Rgb(24, 39, 38);
+            }
+            ThemeName::Lagoon => {
+                theme.background = Color::Rgb(5, 20, 23);
+                theme.foreground = Color::Rgb(216, 241, 238);
+                theme.border = Color::Rgb(31, 83, 88);
+                theme.muted = Color::Rgb(133, 177, 175);
+                theme.accent = Color::Rgb(94, 234, 212);
+                theme.selection = Color::Rgb(15, 54, 58);
+                theme.striped_row = Color::Rgb(7, 26, 30);
+                theme.current_row = Color::Rgb(18, 54, 42);
+            }
+            ThemeName::Dusk => {
+                theme.background = Color::Rgb(17, 16, 26);
+                theme.foreground = Color::Rgb(232, 226, 238);
+                theme.border = Color::Rgb(63, 57, 82);
+                theme.muted = Color::Rgb(166, 154, 184);
+                theme.accent = Color::Rgb(196, 181, 253);
+                theme.selection = Color::Rgb(43, 37, 58);
+                theme.striped_row = Color::Rgb(22, 20, 32);
+                theme.current_row = Color::Rgb(40, 45, 36);
+            }
+            _ => {}
+        }
 
         if color_mode == TerminalColorMode::Compatible {
             theme.colors = [
@@ -231,6 +302,8 @@ impl Theme {
             theme.muted = Color::DarkGray;
             theme.accent = Color::Cyan;
             theme.selection = Color::DarkGray;
+            theme.striped_row = Color::Black;
+            theme.current_row = Color::DarkGray;
         }
 
         theme
@@ -259,6 +332,12 @@ impl Theme {
         Style::default().fg(self.color(Color::Rgb(200, 150, 100)))
     }
 
+    pub(crate) fn metric_total_style(&self) -> Style {
+        Style::default()
+            .fg(self.foreground)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub(crate) fn secondary_text_style(&self) -> Style {
         Style::default().fg(self.color(Color::Rgb(170, 170, 170)))
     }
@@ -271,7 +350,7 @@ impl Theme {
         if self.color_mode == TerminalColorMode::Compatible {
             Style::default()
         } else {
-            Style::default().bg(Color::Rgb(20, 24, 30))
+            Style::default().bg(self.striped_row)
         }
     }
 
@@ -279,7 +358,7 @@ impl Theme {
         if self.color_mode == TerminalColorMode::Compatible {
             Style::default().bg(self.selection)
         } else {
-            Style::default().bg(Color::Rgb(28, 42, 34))
+            Style::default().bg(self.current_row)
         }
     }
 }
@@ -364,6 +443,52 @@ mod tests {
     }
 
     #[test]
+    fn theme_names_round_trip_through_settings_values() {
+        for theme in ThemeName::all() {
+            assert_eq!(theme.as_str().parse::<ThemeName>(), Ok(*theme));
+        }
+    }
+
+    #[test]
+    fn surface_themes_customize_background_and_row_colors() {
+        let cases = [
+            (
+                ThemeName::Graphite,
+                Color::Rgb(10, 12, 16),
+                Color::Rgb(226, 232, 240),
+                Color::Rgb(31, 41, 55),
+                Color::Rgb(15, 18, 24),
+                Color::Rgb(24, 39, 38),
+            ),
+            (
+                ThemeName::Lagoon,
+                Color::Rgb(5, 20, 23),
+                Color::Rgb(216, 241, 238),
+                Color::Rgb(15, 54, 58),
+                Color::Rgb(7, 26, 30),
+                Color::Rgb(18, 54, 42),
+            ),
+            (
+                ThemeName::Dusk,
+                Color::Rgb(17, 16, 26),
+                Color::Rgb(232, 226, 238),
+                Color::Rgb(43, 37, 58),
+                Color::Rgb(22, 20, 32),
+                Color::Rgb(40, 45, 36),
+            ),
+        ];
+
+        for (name, background, foreground, selection, striped, current) in cases {
+            let theme = Theme::from_name_with_color_mode(name, TerminalColorMode::FullColor);
+            assert_eq!(theme.background, background);
+            assert_eq!(theme.foreground, foreground);
+            assert_eq!(theme.selection, selection);
+            assert_eq!(theme.striped_row_style().bg, Some(striped));
+            assert_eq!(theme.current_row_style().bg, Some(current));
+        }
+    }
+
+    #[test]
     fn compatible_theme_preserves_name_and_avoids_rgb_palette() {
         let theme =
             Theme::from_name_with_color_mode(ThemeName::Green, TerminalColorMode::Compatible);
@@ -400,6 +525,7 @@ mod tests {
             theme.metric_output_style(),
             theme.metric_cache_read_style(),
             theme.metric_cache_write_style(),
+            theme.metric_total_style(),
             theme.secondary_text_style(),
             theme.subtle_text_style(),
             theme.striped_row_style(),

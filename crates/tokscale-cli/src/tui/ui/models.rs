@@ -13,7 +13,7 @@ use super::table_layout::{
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
-    get_client_display_name, get_provider_display_name, truncate_display_width,
+    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
     truncate_model_display_name_to, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
@@ -248,7 +248,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         model.tokens.cache_write,
                     ))
                     .style(Style::default().fg(Color::Cyan)),
-                    ModelsColumn::Total => Cell::from(format_tokens(model.tokens.total())),
+                    ModelsColumn::Total => total_tokens_cell(model.tokens.total(), &app.theme),
                     ModelsColumn::Performance => {
                         Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
                             .style(Style::default().fg(Color::Yellow))

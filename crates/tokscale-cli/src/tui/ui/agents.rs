@@ -8,7 +8,7 @@ use super::table_layout::{
     ResponsiveColumn, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
 };
 use super::widgets::{
-    format_cost, format_tokens, get_client_display_name, truncate_display_width,
+    format_cost, get_client_display_name, total_tokens_cell, truncate_display_width,
     viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
@@ -164,7 +164,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                             table_layout.width_for(AgentColumn::Source),
                         ))
                         .style(Style::default().fg(theme_muted)),
-                        AgentColumn::Tokens => Cell::from(format_tokens(agent.tokens.total())),
+                        AgentColumn::Tokens => total_tokens_cell(agent.tokens.total(), &app.theme),
                         AgentColumn::Cost => Cell::from(format_cost(agent.cost))
                             .style(Style::default().fg(Color::Green)),
                         AgentColumn::Messages => Cell::from(agent.message_count.to_string())
@@ -369,7 +369,7 @@ mod tests {
     fn make_app(clients: Vec<ClientId>) -> App {
         let app = App::new_with_cached_data(
             TuiConfig {
-                theme: "tokscale".to_string(),
+                theme: Some("blue".to_string()),
                 refresh: 0,
                 sessions_path: None,
                 clients: None,

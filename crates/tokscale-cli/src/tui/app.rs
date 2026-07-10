@@ -26,7 +26,7 @@ use super::ui::dialog::{ClientPickerDialog, DialogStack};
 
 /// Configuration for TUI initialization
 pub struct TuiConfig {
-    pub theme: String,
+    pub theme: Option<String>,
     pub refresh: u64,
     pub sessions_path: Option<String>,
     pub clients: Option<Vec<String>>,
@@ -224,11 +224,9 @@ fn move_command_from_key(key: KeyCode) -> Option<MoveCommand> {
 }
 
 fn add_detail_tokens(target: &mut TokenBreakdown, source: &TokenBreakdown) {
-    target.input = target.input.saturating_add(source.input);
-    target.output = target.output.saturating_add(source.output);
-    target.cache_read = target.cache_read.saturating_add(source.cache_read);
-    target.cache_write = target.cache_write.saturating_add(source.cache_write);
-    target.reasoning = target.reasoning.saturating_add(source.reasoning);
+    *target = target
+        .checked_add(source)
+        .expect("TUI detail token buckets exceed u64::MAX");
 }
 
 fn merge_provider_label(target: &mut String, provider: &str) {
@@ -275,7 +273,8 @@ fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Ve
             });
             source_total.total_tokens = source_total
                 .total_tokens
-                .saturating_add(model_info.tokens.total());
+                .checked_add(model_info.tokens.total())
+                .expect("TUI source token total exceeds u64::MAX");
 
             merge_provider_label(&mut row.provider, &model_info.provider);
             add_detail_tokens(&mut row.tokens, &model_info.tokens);
@@ -420,10 +419,17 @@ impl App {
         cached_data: Option<UsageData>,
         settings: Settings,
     ) -> Result<Self> {
-        let theme_name: ThemeName = config
-            .theme
-            .parse()
-            .unwrap_or_else(|_| settings.theme_name());
+        let theme_name = match config.theme.as_deref() {
+            Some(theme) => theme.parse::<ThemeName>().map_err(|_| {
+                let valid = ThemeName::all()
+                    .iter()
+                    .map(ThemeName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::anyhow!("invalid theme `{theme}`; expected one of: {valid}")
+            })?,
+            None => settings.theme_name(),
+        };
         let theme = Theme::from_name_for_current_terminal(theme_name);
 
         let enabled_clients: HashSet<ClientId> = if let Some(ref cli_clients) = config.clients {
@@ -2104,6 +2110,64 @@ mod tests {
 
     type SourceModelCosts<'a> = Vec<(&'a str, Vec<(&'a str, &'a str, f64)>)>;
 
+    fn config_with_theme(theme: Option<&str>) -> TuiConfig {
+        TuiConfig {
+            theme: theme.map(str::to_string),
+            refresh: 0,
+            sessions_path: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        }
+    }
+
+    #[test]
+    fn saved_theme_is_used_when_cli_theme_is_absent() {
+        let settings = Settings {
+            color_palette: "lagoon".to_string(),
+            ..Settings::default()
+        };
+
+        let app = App::new_with_cached_data_and_settings(config_with_theme(None), None, settings)
+            .unwrap();
+
+        assert_eq!(app.theme.name, ThemeName::Lagoon);
+    }
+
+    #[test]
+    fn explicit_cli_theme_overrides_saved_theme() {
+        let settings = Settings {
+            color_palette: "lagoon".to_string(),
+            ..Settings::default()
+        };
+
+        let app = App::new_with_cached_data_and_settings(
+            config_with_theme(Some("graphite")),
+            None,
+            settings,
+        )
+        .unwrap();
+
+        assert_eq!(app.theme.name, ThemeName::Graphite);
+    }
+
+    #[test]
+    fn invalid_explicit_cli_theme_is_an_error() {
+        let error = App::new_with_cached_data_and_settings(
+            config_with_theme(Some("ultraviolet-potato")),
+            None,
+            Settings::default(),
+        )
+        .err()
+        .expect("invalid explicit theme should fail");
+
+        assert!(error
+            .to_string()
+            .contains("invalid theme `ultraviolet-potato`"));
+    }
+
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
@@ -2172,7 +2236,7 @@ mod tests {
     #[test]
     fn test_move_selection_up() {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -2221,7 +2285,7 @@ mod tests {
     #[test]
     fn test_move_selection_down() {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -2270,7 +2334,7 @@ mod tests {
     #[test]
     fn test_clamp_selection() {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -2310,7 +2374,7 @@ mod tests {
     #[test]
     fn test_set_sort() {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -2344,7 +2408,7 @@ mod tests {
     #[test]
     fn test_should_quit() {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -2370,7 +2434,7 @@ mod tests {
 
     fn make_app() -> App {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -2400,7 +2464,7 @@ mod tests {
 
     fn make_app_with_settings(settings: Settings) -> App {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -2636,7 +2700,7 @@ mod tests {
     #[test]
     fn test_initial_usage_tab_clamps_to_overview_when_flag_off() {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -3300,7 +3364,7 @@ mod tests {
     #[test]
     fn test_initial_models_tab_uses_token_sort_default() {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -3368,7 +3432,7 @@ mod tests {
     #[test]
     fn test_initial_hourly_tab_uses_hourly_sort_default() {
         let config = TuiConfig {
-            theme: "blue".to_string(),
+            theme: Some("blue".to_string()),
             refresh: 0,
             sessions_path: None,
             clients: None,
@@ -3640,7 +3704,7 @@ mod tests {
             "theme save must use the isolated test settings file"
         );
 
-        for _ in 0..8 {
+        for _ in 1..ThemeName::all().len() {
             app.handle_key_event(key(KeyCode::Char('p')));
         }
         assert_eq!(app.theme.name, initial_theme);

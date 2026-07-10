@@ -54,8 +54,8 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    #[arg(short, long, default_value = "blue")]
-    theme: String,
+    #[arg(short, long)]
+    theme: Option<String>,
 
     #[arg(short, long, default_value = "0")]
     refresh: u64,
@@ -499,7 +499,7 @@ fn main() -> Result<()> {
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
-                    &cli.theme,
+                    cli.theme.as_deref(),
                     cli.refresh,
                     cli.debug,
                     clients,
@@ -542,7 +542,7 @@ fn main() -> Result<()> {
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
-                    &cli.theme,
+                    cli.theme.as_deref(),
                     cli.refresh,
                     cli.debug,
                     clients,
@@ -585,7 +585,7 @@ fn main() -> Result<()> {
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
-                    &cli.theme,
+                    cli.theme.as_deref(),
                     cli.refresh,
                     cli.debug,
                     clients,
@@ -640,7 +640,7 @@ fn main() -> Result<()> {
             let clients = build_client_filter(clients, &cli.home)?;
             auto_sync_cursor_before_tui(&cli.home, &clients)?;
             tui::run(
-                &cli.theme,
+                cli.theme.as_deref(),
                 cli.refresh,
                 cli.debug,
                 clients,
@@ -781,7 +781,7 @@ fn main() -> Result<()> {
                 ensure_home_supported_for_tui(&cli.home)?;
                 auto_sync_cursor_before_tui(&cli.home, &clients)?;
                 tui::run(
-                    &cli.theme,
+                    cli.theme.as_deref(),
                     cli.refresh,
                     cli.debug,
                     clients,
