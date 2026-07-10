@@ -15,6 +15,8 @@ TARGET_PACKAGES = {
     "x86_64-unknown-linux-gnu": "cli-linux-x64-gnu",
     "x86_64-pc-windows-msvc": "cli-win32-x64-msvc",
 }
+DEFAULT_RELEASE_BRANCH = "personal/local-clients"
+RELEASE_TRIGGER_PATH = "packages/cli/package.json"
 
 
 def fail(message: str) -> None:
@@ -68,6 +70,57 @@ def job_block(lines: list[str], job_name: str) -> list[str]:
             end = index
             break
     return lines[start:end]
+
+
+def event_block(lines: list[str], event_name: str) -> list[str] | None:
+    in_events = False
+    start = None
+    for index, line in enumerate(lines):
+        if line == "on:":
+            in_events = True
+            continue
+        if in_events and line and not line.startswith(" "):
+            break
+        if in_events and re.match(rf"\s{{2}}{re.escape(event_name)}:\s*$", line):
+            start = index + 1
+            break
+    if start is None:
+        return None
+
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if re.match(r"\s{2}[A-Za-z0-9_-]+:\s*$", lines[index]):
+            end = index
+            break
+        if lines[index] and not lines[index].startswith(" "):
+            end = index
+            break
+    return lines[start:end]
+
+
+def nested_list_values(lines: list[str], key: str) -> list[str]:
+    start = None
+    key_indent = 0
+    for index, line in enumerate(lines):
+        match = re.match(rf"(\s*){re.escape(key)}:\s*$", line)
+        if match:
+            start = index + 1
+            key_indent = len(match.group(1))
+            break
+    if start is None:
+        return []
+
+    values: list[str] = []
+    for line in lines[start:]:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= key_indent:
+            break
+        match = re.match(r"\s*-\s*(.*)$", line)
+        if match:
+            values.append(strip_yaml_scalar(match.group(1)))
+    return values
 
 
 def matrix_settings(lines: list[str], job_name: str) -> list[dict[str, str]]:
@@ -136,6 +189,47 @@ def main() -> None:
     publish_lines = read_lines(PUBLISH_WORKFLOW)
     native_lines = read_lines(BUILD_NATIVE_WORKFLOW)
     errors: list[str] = []
+
+    push_block = event_block(publish_lines, "push")
+    if push_block is None:
+        errors.append("publish workflow must run on default-branch pushes")
+    else:
+        branches = nested_list_values(push_block, "branches")
+        paths = nested_list_values(push_block, "paths")
+        if branches != [DEFAULT_RELEASE_BRANCH]:
+            errors.append(
+                f"publish push branches must be [{DEFAULT_RELEASE_BRANCH!r}], found {branches}"
+            )
+        if paths != [RELEASE_TRIGGER_PATH]:
+            errors.append(
+                f"publish push paths must be [{RELEASE_TRIGGER_PATH!r}], found {paths}"
+            )
+
+    dispatch_block = event_block(publish_lines, "workflow_dispatch")
+    dispatch_text = "\n".join(dispatch_block or [])
+    if dispatch_block is None:
+        errors.append("publish workflow must retain manual recovery dispatch")
+    else:
+        for input_name in ("version", "commit"):
+            if not re.search(rf"^\s{{6}}{input_name}:\s*$", dispatch_text, re.MULTILINE):
+                errors.append(f"manual recovery is missing required input {input_name}")
+
+    publish_text = "\n".join(publish_lines)
+    if re.search(r"\bgit\s+commit\b", publish_text):
+        errors.append("publish workflow must not create version commits")
+    unexpected_pushes = [
+        line.strip()
+        for line in publish_lines
+        if "git push " in line and 'git push origin "v$NEW_VERSION"' not in line
+    ]
+    if unexpected_pushes:
+        errors.append(f"publish workflow contains unexpected git push commands: {unexpected_pushes}")
+    if re.search(r"^\s{2}bump-versions:\s*$", publish_text, re.MULTILINE):
+        errors.append("publish workflow must consume committed versions, not bump them")
+    if publish_text.count("bash scripts/check-release-commit.sh") < 2:
+        errors.append("release commit must be validated before and after native builds")
+    if "cancel-in-progress: false" not in publish_text:
+        errors.append("publish workflow must serialize releases without cancelling in progress")
 
     publish_env = top_level_env(publish_lines)
     native_env = top_level_env(native_lines)

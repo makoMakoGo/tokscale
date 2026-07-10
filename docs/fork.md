@@ -77,8 +77,8 @@ Fork npm releases use the `@juya-ai` organization:
 - The installed command remains `tokscale`.
 
 See [ADR 0016](adr/0016-juya-ai-npm-release-identity.md) for the release
-identity decision. Source builds remain the safest validation path until a fork
-release is explicitly published.
+identity decision and [the fork release process](releases.md) for version PR,
+direct maintainer release, and recovery procedures.
 
 ## Wrapped identity and assets
 

@@ -37,12 +37,32 @@ EOF_YAML
   cat > "${work}/.github/workflows/publish-cli.yml" <<'EOF_YAML'
 name: Publish
 
+on:
+  push:
+    branches:
+      - personal/local-clients
+    paths:
+      - packages/cli/package.json
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+      commit:
+        required: true
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 env:
   MACOSX_DEPLOYMENT_TARGET: "10.13"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
+  prepare-release:
+    steps:
+      - run: bash scripts/check-release-commit.sh
   build-cli-binary:
     strategy:
       matrix:
@@ -62,6 +82,9 @@ jobs:
             package_dir: cli-linux-x64-gnu
             artifact_name: cli-binary-x86_64-unknown-linux-gnu
             binary_name: tokscale
+  authorize-publish:
+    steps:
+      - run: bash scripts/check-release-commit.sh
 EOF_YAML
 }
 
@@ -218,6 +241,66 @@ PY
   grep -q "publish platform artifact drift" "${output}"
 }
 
+test_rejects_missing_default_branch_push_trigger() {
+  local work="${TMP_DIR}/missing-push-trigger"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace("      - personal/local-clients", "      - main", 1)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/missing-push-trigger-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject the wrong release branch" >&2
+    return 1
+  fi
+
+  grep -q "publish push branches must be" "${output}"
+}
+
+test_rejects_version_commits_in_publish_workflow() {
+  local work="${TMP_DIR}/version-commit"
+  write_good_workflows "${work}"
+  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text().replace(
+    "      - run: bash scripts/check-release-commit.sh",
+    "      - run: bash scripts/check-release-commit.sh\n      - run: git commit -am release",
+    1,
+)
+path.write_text(text)
+PY
+
+  local output="${TMP_DIR}/version-commit-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject version commits" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow must not create version commits" "${output}"
+}
+
+test_rejects_branch_pushes_in_publish_workflow() {
+  local work="${TMP_DIR}/branch-push"
+  write_good_workflows "${work}"
+  printf '      - run: git push origin personal/local-clients\n' >> "${work}/.github/workflows/publish-cli.yml"
+
+  local output="${TMP_DIR}/branch-push-output.txt"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "Expected workflow safety check to reject branch pushes" >&2
+    return 1
+  fi
+
+  grep -q "publish workflow contains unexpected git push commands" "${output}"
+}
+
 test_accepts_matching_publish_and_native_workflows
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
@@ -225,5 +308,8 @@ test_rejects_publish_matrix_target_without_native_coverage
 test_rejects_release_env_drift
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift
+test_rejects_missing_default_branch_push_trigger
+test_rejects_version_commits_in_publish_workflow
+test_rejects_branch_pushes_in_publish_workflow
 
 echo "release workflow safety tests passed"
