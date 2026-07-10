@@ -517,8 +517,33 @@ impl From<&UsageData> for CachedUsageData {
     }
 }
 
+#[derive(Debug)]
+enum CacheDataError {
+    InvalidDate(chrono::ParseError),
+    AgentTokenOverflow,
+}
+
+impl std::fmt::Display for CacheDataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDate(err) => err.fmt(f),
+            Self::AgentTokenOverflow => {
+                f.write_str("cached TUI agent token buckets exceed u64::MAX")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CacheDataError {}
+
+impl From<chrono::ParseError> for CacheDataError {
+    fn from(err: chrono::ParseError) -> Self {
+        Self::InvalidDate(err)
+    }
+}
+
 impl TryFrom<CachedUsageData> for UsageData {
-    type Error = chrono::ParseError;
+    type Error = CacheDataError;
 
     fn try_from(u: CachedUsageData) -> Result<Self, Self::Error> {
         let daily: Result<Vec<DailyUsage>, _> = u.daily.into_iter().map(|d| d.try_into()).collect();
@@ -528,7 +553,7 @@ impl TryFrom<CachedUsageData> for UsageData {
 
         Ok(Self {
             models: u.models.into_iter().map(|m| m.into()).collect(),
-            agents: normalize_cached_agents(u.agents),
+            agents: normalize_cached_agents(u.agents)?,
             daily: daily?,
             hourly: hourly?,
             graph: graph.transpose()?,
@@ -542,7 +567,9 @@ impl TryFrom<CachedUsageData> for UsageData {
     }
 }
 
-fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
+fn normalize_cached_agents(
+    agents: Vec<CachedAgentUsage>,
+) -> Result<Vec<AgentUsage>, CacheDataError> {
     let mut merged: BTreeMap<String, AgentUsage> = BTreeMap::new();
     let mut clients_by_agent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
@@ -563,7 +590,7 @@ fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
         entry.tokens = entry
             .tokens
             .checked_add(&tokens)
-            .expect("cached TUI token buckets exceed u64::MAX");
+            .ok_or(CacheDataError::AgentTokenOverflow)?;
         entry.cost += cached.cost;
         entry.message_count = entry.message_count.saturating_add(cached.message_count);
         entry.instance_count = entry.instance_count.saturating_add(cached.instance_count);
@@ -584,7 +611,7 @@ fn normalize_cached_agents(agents: Vec<CachedAgentUsage>) -> Vec<AgentUsage> {
             agent.clients = clients.iter().cloned().collect::<Vec<_>>().join(", ");
         }
     }
-    agents
+    Ok(agents)
 }
 
 fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
@@ -798,7 +825,8 @@ mod tests {
                 "opencode",
                 30,
             ),
-        ]);
+        ])
+        .unwrap();
 
         assert_eq!(agents.len(), 2);
         let sisyphus = agents
@@ -822,7 +850,8 @@ mod tests {
         let agents = normalize_cached_agents(vec![
             cached_agent("Default", "copilot", 10),
             cached_agent("   ", "copilot", 20),
-        ]);
+        ])
+        .unwrap();
 
         assert_eq!(agents.len(), 1);
         let copilot = agents
@@ -832,6 +861,52 @@ mod tests {
         assert_eq!(copilot.clients, "copilot");
         assert_eq!(copilot.message_count, 2);
         assert_eq!(copilot.tokens.input, 30);
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_misses_when_agent_token_normalization_overflows() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let cached = CachedTUIData {
+            schema_version: CACHE_SCHEMA_VERSION,
+            timestamp: fresh_timestamp_ms(),
+            enabled_clients: vec!["opencode".to_string()],
+            group_by: GroupBy::Model.to_string(),
+            report_scope: CacheReportScope::default(),
+            data: CachedUsageData {
+                models: Vec::new(),
+                agents: vec![
+                    cached_agent("Sisyphus", "opencode", u64::MAX),
+                    cached_agent("Sisyphus", "opencode", 1),
+                ],
+                daily: Vec::new(),
+                hourly: Vec::new(),
+                graph: None,
+                total_tokens: 0,
+                total_cost: 0.0,
+                current_streak: 0,
+                longest_streak: 0,
+            },
+        };
+        fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
+
+        let clients = make_filters(&[ClientId::OpenCode]);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
     }
 
     // ── cache_clients_match_exact ──────────────────────────────────

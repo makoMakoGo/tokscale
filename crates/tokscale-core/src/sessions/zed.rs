@@ -302,7 +302,13 @@ fn usage_field(value: &Value, field: &str) -> i64 {
                 .as_u64()
                 .map(|n| i64::try_from(n).expect("Zed token count exceeds i64::MAX"))
         })
-        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+        .or_else(|| {
+            value.as_str().map(|text| {
+                text.parse::<i64>().unwrap_or_else(|err| {
+                    panic!("Zed {field} token count is invalid or exceeds i64::MAX: {err}")
+                })
+            })
+        })
         .unwrap_or(0);
 
     parsed.max(0)
@@ -359,6 +365,24 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    #[should_panic(expected = "Zed input_tokens token count is invalid or exceeds i64::MAX")]
+    fn string_token_overflow_fails_explicitly() {
+        let usage = serde_json::json!({
+            "input_tokens": (i64::MAX as u64 + 1).to_string()
+        });
+
+        let _ = usage_field(&usage, "input_tokens");
+    }
+
+    #[test]
+    #[should_panic(expected = "Zed input_tokens token count is invalid or exceeds i64::MAX")]
+    fn invalid_string_token_count_fails_explicitly() {
+        let usage = serde_json::json!({"input_tokens": "not-a-token-count"});
+
+        let _ = usage_field(&usage, "input_tokens");
+    }
 
     fn create_threads_db(dir: &TempDir) -> (std::path::PathBuf, Connection) {
         let db_path = dir.path().join("threads.db");

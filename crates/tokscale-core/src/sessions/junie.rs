@@ -228,10 +228,14 @@ fn number_value(value: &Value) -> Option<i64> {
     if let Some(value) = value.as_f64() {
         return nonnegative_f64_to_i64(value);
     }
-    value
-        .as_str()
-        .and_then(|value| value.trim().parse::<f64>().ok())
-        .and_then(nonnegative_f64_to_i64)
+    let value = value.as_str()?.trim();
+    if let Ok(value) = value.parse::<i64>() {
+        return Some(value.max(0));
+    }
+    if let Ok(value) = value.parse::<u64>() {
+        return Some(i64::try_from(value).expect("Junie token count exceeds i64::MAX"));
+    }
+    value.parse::<f64>().ok().and_then(nonnegative_f64_to_i64)
 }
 
 fn nonnegative_f64_to_i64(value: f64) -> Option<i64> {
@@ -252,6 +256,20 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn string_encoded_i64_max_is_accepted() {
+        assert_eq!(
+            number_value(&Value::String(i64::MAX.to_string())),
+            Some(i64::MAX)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Junie token count exceeds i64::MAX")]
+    fn string_encoded_value_above_i64_max_fails_explicitly() {
+        let _ = number_value(&Value::String((i64::MAX as u64 + 1).to_string()));
+    }
 
     fn parse_events(content: &str) -> Vec<UnifiedMessage> {
         let dir = TempDir::new().unwrap();

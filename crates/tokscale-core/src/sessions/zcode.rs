@@ -6,7 +6,7 @@
 
 use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
 use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::TokenBreakdown;
+use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -109,13 +109,6 @@ impl ZcodeUsage {
             reasoning,
         })
     }
-}
-
-fn checked_token_sum<const N: usize>(values: [i64; N]) -> i64 {
-    values
-        .into_iter()
-        .try_fold(0_i64, i64::checked_add)
-        .expect("ZCode token total exceeds i64::MAX")
 }
 
 fn subtract_overlap(value: i64, overlap: i64) -> i64 {

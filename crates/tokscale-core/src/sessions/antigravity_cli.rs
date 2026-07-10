@@ -87,6 +87,15 @@ fn parse_gen_metadata(
     let chat_model = message_field(blob, 1)?;
     let fields = chat_model_fields(chat_model);
     let usage = fields.usage?;
+    let response_id = string_field(usage, 11)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string);
+    if response_id
+        .as_ref()
+        .is_some_and(|response_id| seen_response_ids.contains(response_id))
+    {
+        return None;
+    }
 
     let timestamp = fields
         .generation
@@ -111,10 +120,6 @@ fn parse_gen_metadata(
     if input == 0 && cache_read == 0 && output == 0 && reasoning == 0 {
         return None;
     }
-
-    let response_id = string_field(usage, 11)
-        .filter(|text| !text.trim().is_empty())
-        .map(str::to_string);
 
     let model_id = match fields.display_model {
         Some(display_model) => canonical_antigravity_display_model(display_model)
@@ -141,9 +146,7 @@ fn parse_gen_metadata(
         .to_string();
 
     if let Some(response_id) = &response_id {
-        if !seen_response_ids.insert(response_id.clone()) {
-            return None;
-        }
+        seen_response_ids.insert(response_id.clone());
     }
 
     let dedup_key = response_id
@@ -682,6 +685,42 @@ mod tests {
 
         let mut seen = HashSet::new();
         let _ = parse_gen_metadata(&blob, "session", 1_000, &mut seen);
+    }
+
+    #[test]
+    fn duplicate_response_id_is_discarded_before_token_conversion() {
+        let mut seen = HashSet::new();
+        assert!(
+            parse_gen_metadata(&gen_metadata(b"resp-overflow"), "session", 1_000, &mut seen,)
+                .is_some()
+        );
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, u64::MAX));
+        usage.extend(enc_len(11, b"resp-overflow"));
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(21, b"Gemini 3.5 Flash (Medium)"));
+        let duplicate = enc_len(1, &chat_model);
+
+        assert!(parse_gen_metadata(&duplicate, "session", 1_000, &mut seen).is_none());
+    }
+
+    #[test]
+    fn zero_usage_row_does_not_reserve_response_id() {
+        let mut usage = Vec::new();
+        usage.extend(enc_len(11, b"resp-retried"));
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(21, b"Gemini 3.5 Flash (Medium)"));
+        let zero_usage = enc_len(1, &chat_model);
+
+        let mut seen = HashSet::new();
+        assert!(parse_gen_metadata(&zero_usage, "session", 1_000, &mut seen).is_none());
+        assert!(
+            parse_gen_metadata(&gen_metadata(b"resp-retried"), "session", 1_000, &mut seen,)
+                .is_some()
+        );
     }
 
     #[test]
