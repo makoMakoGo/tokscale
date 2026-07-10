@@ -492,7 +492,6 @@ pub(crate) fn local_source_adapters() -> &'static [&'static dyn LocalSourceAdapt
     &LOCAL_SOURCE_ADAPTERS
 }
 
-#[cfg(test)]
 pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalSourceAdapter> {
     local_source_adapters()
         .iter()

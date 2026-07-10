@@ -56,7 +56,55 @@ impl LocalSourceAdapter for OmpAdapter {
     }
 
     fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
+        let mut hit_units = Vec::new();
+        let mut parsed_misses = Vec::new();
+        for unit in parsed {
+            if matches!(
+                unit.messages,
+                crate::adapters::UnitMessageSource::CacheHit(_)
+            ) {
+                hit_units.push(unit);
+            } else {
+                parsed_misses.push(unit);
+            }
+        }
+
+        let failed_hits = fold_omp_cache_hits(hit_units, ctx, sink);
+        if !failed_hits.is_empty() {
+            let failed_hit_count = failed_hits.len();
+            let recovery_invalidations: Vec<_> = failed_hits
+                .iter()
+                .map(|failed| failed.invalidate_cache)
+                .collect();
+            let mut all_miss_units: Vec<_> =
+                failed_hits.into_iter().map(|failed| failed.unit).collect();
+            all_miss_units.extend(parsed_misses.into_iter().map(|parsed| parsed.unit));
+            let miss_paths: Vec<PathBuf> = all_miss_units
+                .iter()
+                .map(|unit| unit.path.clone())
+                .collect();
+            let parent_index = sessions::pi::build_omp_parent_task_agent_index(&miss_paths);
+            let mut reparsed = {
+                let parse_ctx = ParseContext {
+                    source_cache: &*ctx.source_cache,
+                    pricing: ctx.pricing,
+                };
+                parse_omp_miss_units(all_miss_units, &parse_ctx, &parent_index)
+            };
+            for (unit, invalidate_cache) in reparsed
+                .iter_mut()
+                .take(failed_hit_count)
+                .zip(recovery_invalidations)
+            {
+                unit.invalidate_cache = adapter_cache::combine_recovery_invalidation(
+                    invalidate_cache,
+                    unit.invalidate_cache,
+                );
+            }
+            adapter_cache::fold_units(reparsed, ctx, sink);
+            return;
+        }
+        adapter_cache::fold_units(parsed_misses, ctx, sink);
     }
 
     fn fold_batches(
@@ -76,14 +124,14 @@ impl LocalSourceAdapter for OmpAdapter {
         }
 
         let batch_width = batches.batch_width();
-        let mut hit_units = hit_units.into_iter();
-        loop {
-            let parsed: Vec<_> = hit_units.by_ref().take(batch_width).collect();
-            if parsed.is_empty() {
-                break;
-            }
-            adapter_cache::fold_units(parsed, ctx, sink);
-        }
+        let failed_hits = fold_omp_cache_hits(hit_units, ctx, sink);
+        let mut remaining_failed_hits = failed_hits.len();
+        let recovery_invalidations: Vec<_> = failed_hits
+            .iter()
+            .map(|failed| failed.invalidate_cache)
+            .collect();
+        let mut recovery_invalidations = recovery_invalidations.into_iter();
+        miss_units.splice(0..0, failed_hits.into_iter().map(|failed| failed.unit));
 
         let miss_paths: Vec<PathBuf> = miss_units.iter().map(|unit| unit.path.clone()).collect();
         let parent_index = sessions::pi::build_omp_parent_task_agent_index(&miss_paths);
@@ -93,16 +141,80 @@ impl LocalSourceAdapter for OmpAdapter {
             if units.is_empty() {
                 break;
             }
-            let parsed = {
+            let mut parsed = {
                 let parse_ctx = ParseContext {
                     source_cache: &*ctx.source_cache,
                     pricing: ctx.pricing,
                 };
                 parse_omp_miss_units(units, &parse_ctx, &parent_index)
             };
+            let recovered_in_batch = remaining_failed_hits.min(parsed.len());
+            for unit in parsed.iter_mut().take(recovered_in_batch) {
+                unit.invalidate_cache = adapter_cache::combine_recovery_invalidation(
+                    recovery_invalidations
+                        .next()
+                        .expect("OMP cache recovery disposition disappeared"),
+                    unit.invalidate_cache,
+                );
+            }
+            remaining_failed_hits -= recovered_in_batch;
             adapter_cache::fold_units(parsed, ctx, sink);
         }
+        assert!(
+            recovery_invalidations.next().is_none(),
+            "OMP cache recovery returned fewer parsed units than failed hits"
+        );
     }
+}
+
+struct OmpFailedCacheHit {
+    unit: SourceUnit,
+    invalidate_cache: bool,
+}
+
+fn fold_omp_cache_hits(
+    hit_units: Vec<ParsedUnit>,
+    ctx: &mut FoldContext<'_>,
+    sink: &mut dyn MessageSink,
+) -> Vec<OmpFailedCacheHit> {
+    let mut failed_units = Vec::new();
+    for parsed in hit_units {
+        let ParsedUnit {
+            mut unit,
+            messages,
+            cache_write,
+            invalidate_cache,
+        } = parsed;
+        assert!(
+            cache_write.is_none() && !invalidate_cache,
+            "planned OMP cache hits must not carry cache mutations"
+        );
+        match adapter_cache::resolve_messages(messages, ctx) {
+            Ok(messages) => sink.extend_messages(messages),
+            Err(failure) => {
+                assert!(
+                    failure.is_recoverable_body_fault(),
+                    "non-recoverable OMP source-cache pipeline failure: {failure}"
+                );
+                debug_assert_eq!(failure.source_path, unit.path);
+                debug_assert_eq!(failure.parser_version, unit.parser_version);
+                adapter_cache::report_cache_read_failure(&failure);
+                let remove_failed_shard = failure.requires_shard_removal();
+                if remove_failed_shard {
+                    ctx.source_cache.remove(&unit.path, unit.parser_version);
+                } else {
+                    ctx.source_cache
+                        .invalidate_read(&unit.path, unit.parser_version);
+                }
+                unit.mark_cache_lookup_completed_no_hit();
+                failed_units.push(OmpFailedCacheHit {
+                    unit,
+                    invalidate_cache: remove_failed_shard,
+                });
+            }
+        }
+    }
+    failed_units
 }
 
 fn parse_omp_miss_units(
@@ -178,6 +290,34 @@ mod tests {
             &mut sink,
         );
         sink
+    }
+
+    fn omp_content(session_id: &str) -> String {
+        OMP_CHILD_CONTENT.replace("child-session", session_id)
+    }
+
+    fn seed_omp_disk_cache(cache_dir: &Path, unit: &SourceUnit, session_id: &str) {
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir);
+        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+            &unit.path,
+            unit.parser_version,
+            unit.source_input_policy().fingerprint().unwrap(),
+            vec![crate::UnifiedMessage::new(
+                "omp",
+                "gpt-5.5",
+                "openai",
+                session_id,
+                1_767_225_600_000,
+                crate::TokenBreakdown {
+                    input: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )],
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
     }
 
     #[test]
@@ -307,5 +447,95 @@ mod tests {
             ["cached-session", "child-session", "root-session"]
         );
         assert_eq!(messages[1].agent.as_deref(), Some("OMP Reviewer"));
+    }
+
+    #[test]
+    fn omp_body_faults_join_full_miss_set_before_parent_index_across_batches() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+
+        let first_root = dir.path().join("project/first-root");
+        let first_parent = first_root.with_extension("jsonl");
+        let first_child = first_root.join("0-ReviewFindings.jsonl");
+        write_file(&first_parent, OMP_PARENT_CONTENT);
+        write_file(&first_child, &omp_content("failed-child-a"));
+
+        let second_root = dir.path().join("project/second-root");
+        let second_parent = second_root.with_extension("jsonl");
+        let second_child = second_root.join("0-ReviewFindings.jsonl");
+        write_file(&second_parent, OMP_PARENT_CONTENT);
+        write_file(&second_child, &omp_content("failed-child-b"));
+
+        let successful_path = dir.path().join("successful.jsonl");
+        let ordinary_a = dir.path().join("ordinary-a.jsonl");
+        let ordinary_b = dir.path().join("ordinary-b.jsonl");
+        write_file(&successful_path, &omp_content("successful-source"));
+        write_file(&ordinary_a, &omp_content("ordinary-a"));
+        write_file(&ordinary_b, &omp_content("ordinary-b"));
+
+        let make_unit = |path: PathBuf| {
+            SourceUnit::plain_file(ClientId::Omp, path)
+                .with_parser_version(ParserVersion::new(ParserId::Omp, OMP_TITLE_SLOT_REVISION))
+        };
+        let first_child_unit = make_unit(first_child.clone());
+        let second_child_unit = make_unit(second_child.clone());
+        let successful_unit = make_unit(successful_path.clone());
+        seed_omp_disk_cache(cache_dir.path(), &first_child_unit, "stale-child-a");
+        seed_omp_disk_cache(cache_dir.path(), &second_child_unit, "stale-child-b");
+        seed_omp_disk_cache(cache_dir.path(), &successful_unit, "cached-success");
+        message_cache::truncate_shard_after_header_for_test(
+            cache_dir.path(),
+            &first_child,
+            first_child_unit.parser_version,
+        );
+        message_cache::truncate_shard_after_header_for_test(
+            cache_dir.path(),
+            &second_child,
+            second_child_unit.parser_version,
+        );
+
+        let units = vec![
+            first_child_unit,
+            successful_unit,
+            make_unit(ordinary_a),
+            second_child_unit,
+            make_unit(ordinary_b),
+        ];
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let messages = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut sink = Vec::new();
+                let mut batches = crate::adapters::ParsedBatchSource::new(&OMP_ADAPTER, units);
+                OMP_ADAPTER.fold_batches(
+                    &mut batches,
+                    &mut FoldContext {
+                        source_cache: &mut cache,
+                        pricing: None,
+                    },
+                    &mut sink,
+                );
+                sink
+            });
+
+        let sessions: Vec<_> = messages
+            .iter()
+            .map(|message| message.session_id.as_ref())
+            .collect();
+        assert_eq!(
+            sessions,
+            [
+                "cached-success",
+                "failed-child-a",
+                "failed-child-b",
+                "ordinary-a",
+                "ordinary-b"
+            ],
+            "valid hits must stay first, then every repaired hit and original miss across batches"
+        );
+        assert_eq!(messages[1].agent.as_deref(), Some("OMP Reviewer"));
+        assert_eq!(messages[2].agent.as_deref(), Some("OMP Reviewer"));
     }
 }

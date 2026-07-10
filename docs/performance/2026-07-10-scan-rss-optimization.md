@@ -55,7 +55,8 @@ Baseline commit: `1c7bb2ed99b0`
 | C2 | `37c7c865` | Metadata-stamp warm hits | 0 | 0.00 | 9,920 | 3,624 | 3.94 | 37,512 | 0.15 | 35,040 |
 | C3 | `b9d5dae2` | Single prepared TUI inventory | 0 | 0.00 | 9,760 | 4,534 | 4.54 | 39,288 | 0.15 | 35,040 |
 | C4 | `5f50b6f2` | Bounded single-copy source fold | 0 | 0.00 | 9,920 | 4,290 | 4.29 | 38,700 | 0.15 | 35,040 |
-| C5 | `C5` | Structured aggregation identities | 0 | 0.00 | 9,760 | 3,353 | 3.35 | 37,096 | 0.10 | 32,764 |
+| C5 | `061d5b18` | Structured aggregation identities | 0 | 0.00 | 9,760 | 3,353 | 3.35 | 37,096 | 0.10 | 32,764 |
+| C6 | `C6` | Explicit planned-read recovery | 0 | 0.00 | 9,760 | 4,139 | 4.14 | 37,304 | 0.11 | 32,920 |
 
 ## Raw samples
 
@@ -543,8 +544,8 @@ structured keys distinguish delimiter collisions. Only keys that can actually
 alias the historical text (delimiter-bearing composite fields and the
 unknown-workspace sentinel pair) enter an explicit first-seen compatibility
 merge; provably injective keys materialize directly. This avoids both hot-path
-formatting and a corpus-sized finish-time compatibility table. `C5` is replaced
-with the exact commit hash by the next stage.
+formatting and a corpus-sized finish-time compatibility table. The cumulative
+table records its exact commit as `061d5b18`.
 
 Release build:
 
@@ -700,6 +701,145 @@ Rustfmt, `git diff --check`, the release CLI build, and an independent semantic
 review also passed. ADR 0008 now records weak interner ownership, the local-load
 prune boundary, structured aggregation identities, singleton collections, and
 the explicit legacy-key collision boundary.
+
+### C6 — explicit planned cache-read recovery
+
+Candidate: remove the generic adapter path that converted a planned cache hit's
+body-read failure into an empty message list. A planned hit is now successful
+only after its shard body is opened, identity-checked, decoded, and matched to
+the header message count. Failures retain their I/O or decode cause and identify
+the source, parser revision, and shard in an always-visible stderr diagnostic.
+The failed plan is discarded and the current source is reparsed in the same
+scan; this is observable recovery, not a silent fallback.
+
+The repair policy distinguishes evidence. Structurally malformed, truncated,
+undecodable, identity-invalid, or message-count-invalid derived shards are
+deleted if an atomic replacement cannot be written. Transient open/metadata
+I/O failures and atomic-replacement fingerprint races do not delete a possibly
+valid replacement. Internal pipeline states such as double consumption remain
+explicit failures instead of being reinterpreted as source misses. OMP gathers
+all failed planned hits into its complete miss set before building the parent
+task index, and OpenCode preserves SQLite precedence while recovering a failed
+hit. Codex remains on its existing incremental cache path.
+
+`C6` is replaced with the exact commit hash by the next stage.
+
+Release build:
+
+```text
+cargo build -p tokscale-cli --release
+Finished release profile [optimized] target(s) in 2m 37s.
+Binary SHA-256: 19ae07c06c27bde20a879423872d42883eba86624423220ce993af78fc275cd7
+```
+
+Corpus at measurement time:
+
+| Input | Size / count | Change from C5 |
+| --- | ---: | ---: |
+| isolated source-message cache | 9,240 shards / 88 MiB | +3 shards / unchanged size |
+| Claude projects | 647 MiB | unchanged |
+| Codex sessions | 742 MiB | +7 MiB |
+| OpenCode data | 429 MiB | unchanged |
+
+Zero-session probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    0              0.00    0.00    0.00    9760
+2    0              0.00    0.00    0.00    9760
+3    0              0.00    0.00    0.00   10240
+```
+
+Warm three-client C6 probe:
+
+```text
+run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+1    3856           3.86    0.86    1.38   37100
+2    4139           4.14    0.98    1.30   38312
+3    5026           5.03    0.88    1.35   37304
+```
+
+Exact-C5 controls bracketed the C6 samples on the same cache and live sources:
+
+```text
+control  run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
+early    1    4017           4.02    0.88    1.34   36640
+early    2    3534           3.54    0.84    1.32   38696
+early    3    3936           6.65    0.94    1.26   38504
+late     1    4708           4.71    0.95    1.38   36996
+late     2    4002           4.00    0.99    1.29   37564
+late     3    4415           4.42    0.92    1.33   38796
+```
+
+The C6 medians fall between the two C5 controls for processing and wall time;
+its 37,304 KiB median RSS differs by less than one percent from the later C5
+control. Ordinary warm scans do not exercise recovery, so these measurements
+support a performance-neutral conclusion rather than a speedup claim.
+
+Aggregation probe:
+
+```text
+run  wall_s  user_s  sys_s  max_rss_kib
+1    0.11    0.10    0.00   32760
+2    0.12    0.12    0.00   32920
+3    0.11    0.12    0.00   32920
+4    0.11    0.11    0.00   32920
+5    0.11    0.10    0.01   32920
+```
+
+The aggregation path is unchanged; its one-centisecond wall difference and
+156 KiB RSS difference from C5 are measurement resolution/noise, not an
+attributed regression.
+
+The deciding candidate-specific probe used one valid AMP source and one v2
+shard with a complete 264-byte header but a body truncated to zero bytes. The
+source stayed byte-identical throughout:
+
+```text
+source SHA-256: cd1c5ef067863a41142d9b792c816eb666826e22a2576c0619eb35c2c6ebb184
+corrupt shard:  284 bytes; SHA-256 514cf5453776fad03dba69cbebbdea2c56dd6574ed58859abb7a57b3a0421fb5
+valid shard:    358 bytes; SHA-256 4a06d4a380b03c9011559232c38c42e71aeb968a9ea15cc19c028058b633a6e0
+```
+
+Exact C5 exited zero with empty stderr, returned no entries and zero token and
+message totals, and left the corrupt shard unchanged. C6 emitted exactly one
+warning containing the source, `Amp` parser revision, shard path, retained
+`UnexpectedEof` decode cause, discarded planned read, and current-source
+reparse. It returned the same normalized JSON as an exact-C5 valid warm control
+and atomically restored the valid shard:
+
+```text
+normalized JSON SHA-256: afdeb089739ca8e8bf9bcdce460ec1fb63fbbdf0b3a087b06d34bc413ffd6ccc
+entries: 1; input: 10; output: 2; cache read: 3; cache write: 4; messages: 1
+C5 corrupt run: wall 0.02s; RSS 9,920 KiB
+C6 repair run:  wall 0.01s; RSS 10,240 KiB
+C6 second warm: wall 0.00s; RSS 10,560 KiB
+```
+
+The second C6 run had empty stderr, the same normalized output hash, and the
+same repaired shard hash. Focused instrumentation also proves that this normal
+second warm hit reads and hashes zero source bytes; the repair is persistent,
+not a one-run in-memory success.
+
+Candidate-specific tests cover truncated and undecodable bodies, declared/body
+message-count mismatch, deleted shards, atomic replacement races, failed repair
+writes, persistent second warm hits, double-read exposure, OMP multi-batch
+recovery and agent attribution, and OpenCode SQLite/JSON precedence.
+
+```text
+cargo test -p tokscale-core
+1170 passed; 3 ignored
+
+cargo test --workspace
+2004 passed; 4 ignored
+
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+passed
+```
+
+Rustfmt, `git diff --check`, the release build, and an independent semantic
+review also passed. ADR 0008 records the failure diagnostics, recovery and
+deletion evidence, OMP ordering boundary, and unchanged Codex specialization.
 
 ## Interpretation rules
 

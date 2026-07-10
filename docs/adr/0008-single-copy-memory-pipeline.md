@@ -29,6 +29,26 @@ The parse pipeline must hold at most one owned copy of any message.
   header and body. Cache discovery reads only the header; a confirmed hit
   loads and moves the body once, without cloning it through an in-memory
   cache store.
+- A planned generic cache hit is not a successful read until its body has been
+  opened, identity-checked, decoded, and matched against the header message
+  count. Body failures are typed with the source path, parser version, shard
+  path, and retained root cause. The CLI emits an explicit stderr diagnostic;
+  it never converts the failure into an empty message list.
+- Generic body-fault recovery invalidates that read for the rest of the scan
+  and reparses the current source through its registered adapter. A successful
+  cacheable parse atomically replaces the shard. A definitively missing,
+  malformed, undecodable, or identity-invalid shard is removed when no atomic
+  replacement can be written. Fingerprint mismatches caused by an in-memory or
+  on-disk atomic replacement are non-destructive: the stale plan is bypassed,
+  but a potentially valid replacement shard is retained if reparsing cannot
+  produce a new one, unless that reparse independently detects a source race or
+  non-cacheable result that requires invalidation.
+- OMP consumes planned-hit bodies before it builds the parent-task agent index.
+  Every failed hit joins the complete miss set before one index is built, so
+  repaired child sessions retain the same attribution as ordinary misses while
+  valid hits are still folded one at a time. Codex remains on its dedicated
+  incremental read/reparse path because its cached fallback-timestamp state and
+  append-prefix validation are not the generic adapter contract.
 - Cache writes serialize borrowed message slices when possible. They must not
   clone entries merely to build a serialized cache representation.
 - After a TUI data load completes, return freed pages to the OS
@@ -124,6 +144,9 @@ that final output.
 - The total serialized shard payload shrinks roughly in half (no date
   strings, no string dedup keys, interned strings still serialize as strings).
 - Cache layout changes cause a one-time shard rebuild after the format bump.
+- A corrupt generic shard produces one visible warning and a same-run source
+  reparse instead of silently suppressing usage. Normal exact hits still read
+  no source bytes and do not eagerly materialize adapter-wide cache bodies.
 - TUI cache schema 25 requires `sourceInventorySignature`; schema 24 and cache
   documents missing the field are explicit misses and rebuild once.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go

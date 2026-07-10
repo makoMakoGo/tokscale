@@ -107,17 +107,15 @@ fn fold_claude_units(
     sink: &mut dyn MessageSink,
     seen_keys: &mut HashSet<u64>,
 ) {
-    for unit in parsed {
-        let ParsedUnit {
+    for parsed_unit in parsed {
+        let adapter_cache::ResolvedUnit {
             unit,
             messages,
             cache_write,
             invalidate_cache,
-        } = unit;
+        } = adapter_cache::resolve_unit(parsed_unit, ctx);
         let path = unit.path.clone();
-        let has_cache_write = cache_write.is_some();
-        let messages = adapter_cache::resolve_messages(messages, ctx);
-        adapter_cache::write_cache(cache_write, ctx, &messages);
+        let cache_write_succeeded = adapter_cache::write_cache(cache_write, ctx, &messages);
         sink.extend_messages(
             messages
                 .into_iter()
@@ -125,7 +123,7 @@ fn fold_claude_units(
                 .collect(),
         );
 
-        if !has_cache_write && invalidate_cache {
+        if !cache_write_succeeded && invalidate_cache {
             ctx.source_cache.remove(&path, unit.parser_version);
         }
     }

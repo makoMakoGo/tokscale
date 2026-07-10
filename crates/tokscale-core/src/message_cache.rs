@@ -760,6 +760,157 @@ pub(crate) struct CacheReadPlan {
     fingerprint: SourceFingerprint,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CacheReadFailureReason {
+    #[error("cache directory is unavailable")]
+    CacheDirectoryUnavailable,
+    #[error("cache shard path could not be derived")]
+    ShardPathUnavailable,
+    #[error("cache shard was invalidated before its body was read")]
+    Invalidated,
+    #[error("cache shard body was already consumed during this scan")]
+    AlreadyConsumed,
+    #[error("in-memory cache fingerprint no longer matches the read plan")]
+    FingerprintMismatch,
+    #[error("failed to open shard: {source}")]
+    Open {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to inspect shard: {source}")]
+    Metadata {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("shard size {actual} exceeds the {limit}-byte limit")]
+    TooLarge { actual: u64, limit: u64 },
+    #[error("failed to read shard header: {source}")]
+    HeaderRead {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid shard magic")]
+    InvalidMagic,
+    #[error("unsupported shard format version {actual}")]
+    UnsupportedFormat { actual: u32 },
+    #[error("invalid shard header length {actual}")]
+    InvalidHeaderLength { actual: u64 },
+    #[error("failed to decode shard header: {source}")]
+    HeaderDecode {
+        #[source]
+        source: bincode::Error,
+    },
+    #[error("shard source path no longer matches the read plan")]
+    SourcePathMismatch,
+    #[error("shard parser version no longer matches the read plan")]
+    ParserVersionMismatch,
+    #[error("shard fingerprint no longer matches the read plan")]
+    ShardFingerprintMismatch,
+    #[error("failed to decode shard body: {source}")]
+    BodyDecode {
+        #[source]
+        source: bincode::Error,
+    },
+    #[error("shard header declares {declared} messages but body contains {actual}")]
+    MessageCountMismatch { declared: usize, actual: usize },
+}
+
+#[derive(Debug)]
+pub(crate) struct CacheReadFailure {
+    pub(crate) source_path: PathBuf,
+    pub(crate) parser_version: ParserVersion,
+    pub(crate) shard_path: Option<PathBuf>,
+    pub(crate) reason: CacheReadFailureReason,
+}
+
+impl CacheReadFailure {
+    pub(crate) fn is_recoverable_body_fault(&self) -> bool {
+        matches!(
+            self.reason,
+            CacheReadFailureReason::FingerprintMismatch
+                | CacheReadFailureReason::Open { .. }
+                | CacheReadFailureReason::Metadata { .. }
+                | CacheReadFailureReason::TooLarge { .. }
+                | CacheReadFailureReason::HeaderRead { .. }
+                | CacheReadFailureReason::InvalidMagic
+                | CacheReadFailureReason::UnsupportedFormat { .. }
+                | CacheReadFailureReason::InvalidHeaderLength { .. }
+                | CacheReadFailureReason::HeaderDecode { .. }
+                | CacheReadFailureReason::SourcePathMismatch
+                | CacheReadFailureReason::ParserVersionMismatch
+                | CacheReadFailureReason::ShardFingerprintMismatch
+                | CacheReadFailureReason::BodyDecode { .. }
+                | CacheReadFailureReason::MessageCountMismatch { .. }
+        )
+    }
+
+    pub(crate) fn requires_shard_removal(&self) -> bool {
+        match &self.reason {
+            CacheReadFailureReason::TooLarge { .. }
+            | CacheReadFailureReason::InvalidMagic
+            | CacheReadFailureReason::UnsupportedFormat { .. }
+            | CacheReadFailureReason::InvalidHeaderLength { .. }
+            | CacheReadFailureReason::HeaderDecode { .. }
+            | CacheReadFailureReason::SourcePathMismatch
+            | CacheReadFailureReason::ParserVersionMismatch
+            | CacheReadFailureReason::MessageCountMismatch { .. } => true,
+            CacheReadFailureReason::HeaderRead { source } => {
+                source.kind() == std::io::ErrorKind::UnexpectedEof
+            }
+            CacheReadFailureReason::BodyDecode { source } => match source.as_ref() {
+                bincode::ErrorKind::Io(source) => {
+                    source.kind() == std::io::ErrorKind::UnexpectedEof
+                }
+                _ => true,
+            },
+            CacheReadFailureReason::CacheDirectoryUnavailable
+            | CacheReadFailureReason::ShardPathUnavailable
+            | CacheReadFailureReason::Invalidated
+            | CacheReadFailureReason::AlreadyConsumed
+            | CacheReadFailureReason::FingerprintMismatch
+            | CacheReadFailureReason::Open { .. }
+            | CacheReadFailureReason::Metadata { .. }
+            | CacheReadFailureReason::ShardFingerprintMismatch => false,
+        }
+    }
+}
+
+impl std::fmt::Display for CacheReadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "source cache body read failed for `{}` with parser {:?}",
+            self.source_path.display(),
+            self.parser_version
+        )?;
+        if let Some(shard_path) = &self.shard_path {
+            write!(formatter, " at `{}`", shard_path.display())?;
+        }
+        write!(formatter, ": {}", self.reason)
+    }
+}
+
+impl std::error::Error for CacheReadFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.reason)
+    }
+}
+
+impl CacheReadFailure {
+    fn new(
+        plan: &CacheReadPlan,
+        shard_path: Option<PathBuf>,
+        reason: CacheReadFailureReason,
+    ) -> Self {
+        Self {
+            source_path: plan.path(),
+            parser_version: plan.parser_version(),
+            shard_path,
+            reason,
+        }
+    }
+}
+
 impl CacheReadPlan {
     pub(crate) fn new(
         path: &Path,
@@ -933,6 +1084,7 @@ pub(crate) struct SourceMessageCache {
     cache_dir: Option<PathBuf>,
     dirty_entries: HashMap<CachedSourceKey, CachedSourceEntry>,
     deleted_paths: HashSet<CachedSourceKey>,
+    invalidated_read_paths: HashSet<CachedSourceKey>,
     taken_paths: HashSet<CachedSourceKey>,
     dirty: bool,
 }
@@ -952,6 +1104,7 @@ impl SourceMessageCache {
             cache_dir,
             dirty_entries: HashMap::new(),
             deleted_paths: HashSet::new(),
+            invalidated_read_paths: HashSet::new(),
             taken_paths: HashSet::new(),
             dirty: false,
         }
@@ -966,6 +1119,7 @@ impl SourceMessageCache {
             cache_dir,
             dirty_entries: HashMap::new(),
             deleted_paths: HashSet::new(),
+            invalidated_read_paths: HashSet::new(),
             taken_paths: HashSet::new(),
             dirty: false,
         }
@@ -976,6 +1130,7 @@ impl SourceMessageCache {
         let key = entry.key();
         self.dirty_entries.insert(key.clone(), entry);
         self.deleted_paths.remove(&key);
+        self.invalidated_read_paths.remove(&key);
         self.taken_paths.remove(&key);
         self.dirty = true;
     }
@@ -1003,43 +1158,84 @@ impl SourceMessageCache {
         Some(meta_from_header(header))
     }
 
-    pub(crate) fn write_messages(&mut self, plan: CacheWritePlan, messages: &[UnifiedMessage]) {
+    pub(crate) fn write_messages(
+        &mut self,
+        plan: CacheWritePlan,
+        messages: &[UnifiedMessage],
+    ) -> bool {
         let key = plan.key();
         let Some(dir) = self.cache_dir.clone() else {
-            return;
+            return false;
         };
         if ensure_cache_dir(&dir).is_err() {
-            return;
+            return false;
         }
 
         if write_shard_borrowed(&dir, &plan, messages).is_ok() {
             self.dirty_entries.remove(&key);
             self.deleted_paths.remove(&key);
+            self.invalidated_read_paths.remove(&key);
             self.taken_paths.remove(&key);
+            return true;
         }
+        false
     }
 
     /// Move the messages out of a cache entry, leaving it empty. Safe for
     /// clean entries because shards are read lazily and callers must not
     /// re-read the same path's messages within one parse run.
-    pub(crate) fn take_messages(&mut self, plan: &CacheReadPlan) -> Option<Vec<UnifiedMessage>> {
+    pub(crate) fn take_messages(
+        &mut self,
+        plan: &CacheReadPlan,
+    ) -> Result<Vec<UnifiedMessage>, CacheReadFailure> {
         let key = plan.key.clone();
-        if self.deleted_paths.contains(&key) || self.taken_paths.contains(&key) {
-            return None;
+        if self.deleted_paths.contains(&key) {
+            return Err(CacheReadFailure::new(
+                plan,
+                self.shard_path_for_source_key(&key),
+                CacheReadFailureReason::Invalidated,
+            ));
+        }
+        if self.taken_paths.contains(&key) {
+            let reason = if self.invalidated_read_paths.contains(&key) {
+                CacheReadFailureReason::Invalidated
+            } else {
+                CacheReadFailureReason::AlreadyConsumed
+            };
+            return Err(CacheReadFailure::new(
+                plan,
+                self.shard_path_for_source_key(&key),
+                reason,
+            ));
         }
 
         if let Some(entry) = self.dirty_entries.get_mut(&key) {
             if entry.fingerprint != plan.fingerprint {
-                return None;
+                return Err(CacheReadFailure::new(
+                    plan,
+                    self.shard_path_for_source_key(&key),
+                    CacheReadFailureReason::FingerprintMismatch,
+                ));
             }
             let messages = std::mem::take(&mut entry.messages);
             self.taken_paths.insert(key);
-            return Some(messages);
+            return Ok(messages);
         }
 
-        let entry = read_shard_entry_with_plan(&self.shard_path_for_source_key(&key)?, plan)?;
+        let cache_dir = self.cache_dir.as_ref().ok_or_else(|| {
+            CacheReadFailure::new(
+                plan,
+                None,
+                CacheReadFailureReason::CacheDirectoryUnavailable,
+            )
+        })?;
+        let shard_path = shard_path_for_source_key(cache_dir, &key).ok_or_else(|| {
+            CacheReadFailure::new(plan, None, CacheReadFailureReason::ShardPathUnavailable)
+        })?;
+        let entry = read_shard_entry_with_plan(&shard_path, plan)
+            .map_err(|reason| CacheReadFailure::new(plan, Some(shard_path), reason))?;
         self.taken_paths.insert(key);
-        Some(entry.messages)
+        Ok(entry.messages)
     }
 
     /// Codex variant of [`Self::take_messages`]: also moves out the
@@ -1063,7 +1259,8 @@ impl SourceMessageCache {
             return Some((messages, fallback_timestamp_indices));
         }
 
-        let entry = read_shard_entry_with_plan(&self.shard_path_for_source_key(&key)?, plan)?;
+        let entry =
+            read_shard_entry_with_plan(&self.shard_path_for_source_key(&key)?, plan).ok()?;
         self.taken_paths.insert(key);
         Some((entry.messages, entry.fallback_timestamp_indices))
     }
@@ -1071,9 +1268,16 @@ impl SourceMessageCache {
     pub(crate) fn remove(&mut self, path: &Path, parser_version: ParserVersion) {
         let key = CachedSourceKey::new(path, parser_version);
         self.dirty_entries.remove(&key);
+        self.invalidated_read_paths.remove(&key);
         self.taken_paths.remove(&key);
         self.deleted_paths.insert(key);
         self.dirty = true;
+    }
+
+    pub(crate) fn invalidate_read(&mut self, path: &Path, parser_version: ParserVersion) {
+        let key = CachedSourceKey::new(path, parser_version);
+        self.invalidated_read_paths.insert(key.clone());
+        self.taken_paths.insert(key);
     }
 
     pub(crate) fn save_if_dirty(&mut self) {
@@ -1258,6 +1462,76 @@ fn shard_path_for_source_key(cache_dir: &Path, key: &CachedSourceKey) -> Option<
     )
 }
 
+#[cfg(test)]
+pub(crate) fn shard_path_for_test(
+    cache_dir: &Path,
+    source_path: &Path,
+    parser_version: ParserVersion,
+) -> PathBuf {
+    shard_path_for_source_key(
+        cache_dir,
+        &CachedSourceKey::new(source_path, parser_version),
+    )
+    .expect("test cache shard path must be derivable")
+}
+
+#[cfg(test)]
+pub(crate) fn truncate_shard_after_header_for_test(
+    cache_dir: &Path,
+    source_path: &Path,
+    parser_version: ParserVersion,
+) -> PathBuf {
+    let shard_path = shard_path_for_test(cache_dir, source_path, parser_version);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&shard_path)
+        .expect("test cache shard must exist");
+    let mut prefix = [0_u8; 20];
+    file.read_exact(&mut prefix)
+        .expect("test cache shard prefix must be readable");
+    assert_eq!(&prefix[..8], &SHARD_MAGIC);
+    assert_eq!(
+        u32::from_le_bytes(prefix[8..12].try_into().unwrap()),
+        CACHE_FORMAT_VERSION
+    );
+    let header_len = u64::from_le_bytes(prefix[12..20].try_into().unwrap());
+    file.set_len(20 + header_len)
+        .expect("test cache shard body must be truncatable");
+    shard_path
+}
+
+#[cfg(test)]
+pub(crate) fn replace_shard_message_count_for_test(
+    cache_dir: &Path,
+    source_path: &Path,
+    parser_version: ParserVersion,
+    message_count: usize,
+) -> PathBuf {
+    let shard_path = shard_path_for_test(cache_dir, source_path, parser_version);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&shard_path)
+        .expect("test cache shard must exist");
+    let header =
+        read_shard_header_from_file_result(&mut file).expect("test cache shard header must decode");
+    let header_start = file.stream_position().unwrap();
+    let original_header_len = header_start - 20;
+    let mut replacement = header;
+    replacement.message_count = message_count;
+    let replacement_bytes = bincode::options().serialize(&replacement).unwrap();
+    assert_eq!(
+        replacement_bytes.len() as u64,
+        original_header_len,
+        "test replacement count must preserve encoded header length"
+    );
+    file.seek(SeekFrom::Start(20)).unwrap();
+    file.write_all(&replacement_bytes).unwrap();
+    file.flush().unwrap();
+    shard_path
+}
+
 fn hex_sha256(bytes: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
@@ -1289,29 +1563,43 @@ fn read_shard_header(path: &Path) -> Option<CachedShardHeader> {
     read_shard_header_from_file(&mut file)
 }
 
-fn read_shard_entry_with_plan(path: &Path, plan: &CacheReadPlan) -> Option<CachedSourceEntry> {
-    let mut file = File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
+fn read_shard_entry_with_plan(
+    path: &Path,
+    plan: &CacheReadPlan,
+) -> Result<CachedSourceEntry, CacheReadFailureReason> {
+    let mut file = File::open(path).map_err(|source| CacheReadFailureReason::Open { source })?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| CacheReadFailureReason::Metadata { source })?;
     if metadata.len() > MAX_CACHE_FILE_BYTES {
-        return None;
+        return Err(CacheReadFailureReason::TooLarge {
+            actual: metadata.len(),
+            limit: MAX_CACHE_FILE_BYTES,
+        });
     }
 
-    let header = read_shard_header_from_file(&mut file)?;
-    if header.path != plan.key.path
-        || header.parser_version != plan.key.parser_version
-        || header.fingerprint != plan.fingerprint
-    {
-        return None;
+    let header = read_shard_header_from_file_result(&mut file)?;
+    if header.path != plan.key.path {
+        return Err(CacheReadFailureReason::SourcePathMismatch);
+    }
+    if header.parser_version != plan.key.parser_version {
+        return Err(CacheReadFailureReason::ParserVersionMismatch);
+    }
+    if header.fingerprint != plan.fingerprint {
+        return Err(CacheReadFailureReason::ShardFingerprintMismatch);
     }
     let body: CachedShardBody = bincode::options()
         .with_limit(MAX_CACHE_FILE_BYTES)
         .deserialize_from(&mut file)
-        .ok()?;
+        .map_err(|source| CacheReadFailureReason::BodyDecode { source })?;
     if body.messages.len() != header.message_count {
-        return None;
+        return Err(CacheReadFailureReason::MessageCountMismatch {
+            declared: header.message_count,
+            actual: body.messages.len(),
+        });
     }
 
-    Some(CachedSourceEntry {
+    Ok(CachedSourceEntry {
         path: header.path,
         parser_version: header.parser_version,
         fingerprint: header.fingerprint,
@@ -1322,29 +1610,40 @@ fn read_shard_entry_with_plan(path: &Path, plan: &CacheReadPlan) -> Option<Cache
 }
 
 fn read_shard_header_from_file(file: &mut File) -> Option<CachedShardHeader> {
+    read_shard_header_from_file_result(file).ok()
+}
+
+fn read_shard_header_from_file_result(
+    file: &mut File,
+) -> Result<CachedShardHeader, CacheReadFailureReason> {
     let mut magic = [0_u8; 8];
-    file.read_exact(&mut magic).ok()?;
+    file.read_exact(&mut magic)
+        .map_err(|source| CacheReadFailureReason::HeaderRead { source })?;
     if magic != SHARD_MAGIC {
-        return None;
+        return Err(CacheReadFailureReason::InvalidMagic);
     }
     let mut version_bytes = [0_u8; 4];
-    file.read_exact(&mut version_bytes).ok()?;
-    if u32::from_le_bytes(version_bytes) != CACHE_FORMAT_VERSION {
-        return None;
+    file.read_exact(&mut version_bytes)
+        .map_err(|source| CacheReadFailureReason::HeaderRead { source })?;
+    let version = u32::from_le_bytes(version_bytes);
+    if version != CACHE_FORMAT_VERSION {
+        return Err(CacheReadFailureReason::UnsupportedFormat { actual: version });
     }
     let mut len_bytes = [0_u8; 8];
-    file.read_exact(&mut len_bytes).ok()?;
+    file.read_exact(&mut len_bytes)
+        .map_err(|source| CacheReadFailureReason::HeaderRead { source })?;
     let header_len = u64::from_le_bytes(len_bytes);
     if header_len == 0 || header_len > MAX_SHARD_HEADER_BYTES {
-        return None;
+        return Err(CacheReadFailureReason::InvalidHeaderLength { actual: header_len });
     }
 
     let mut header_bytes = vec![0_u8; header_len as usize];
-    file.read_exact(&mut header_bytes).ok()?;
+    file.read_exact(&mut header_bytes)
+        .map_err(|source| CacheReadFailureReason::HeaderRead { source })?;
     bincode::options()
         .with_limit(MAX_SHARD_HEADER_BYTES)
         .deserialize(&header_bytes)
-        .ok()
+        .map_err(|source| CacheReadFailureReason::HeaderDecode { source })
 }
 
 fn write_shard_entry(cache_dir: &Path, entry: &CachedSourceEntry) -> std::io::Result<()> {
@@ -1683,6 +1982,77 @@ mod tests {
 
     fn test_parser_version(revision: ParserRevision) -> ParserVersion {
         ParserVersion::new(ParserId::OpenCode, revision)
+    }
+
+    fn test_cache_read_failure(reason: CacheReadFailureReason) -> CacheReadFailure {
+        CacheReadFailure {
+            source_path: PathBuf::from("/test/source"),
+            parser_version: test_parser_version(1),
+            shard_path: Some(PathBuf::from("/test/shard")),
+            reason,
+        }
+    }
+
+    #[test]
+    fn cache_read_removal_classification_preserves_transient_io() {
+        for reason in [
+            CacheReadFailureReason::Open {
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+            CacheReadFailureReason::Metadata {
+                source: std::io::Error::from(std::io::ErrorKind::Other),
+            },
+            CacheReadFailureReason::HeaderRead {
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+            CacheReadFailureReason::BodyDecode {
+                source: Box::new(bincode::ErrorKind::Io(std::io::Error::from(
+                    std::io::ErrorKind::Other,
+                ))),
+            },
+            CacheReadFailureReason::FingerprintMismatch,
+            CacheReadFailureReason::ShardFingerprintMismatch,
+        ] {
+            assert!(
+                !test_cache_read_failure(reason).requires_shard_removal(),
+                "transient or replacement-race failures must not delete the shard"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_read_removal_classification_removes_proven_corruption() {
+        for reason in [
+            CacheReadFailureReason::HeaderRead {
+                source: std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+            },
+            CacheReadFailureReason::BodyDecode {
+                source: Box::new(bincode::ErrorKind::Io(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                ))),
+            },
+            CacheReadFailureReason::BodyDecode {
+                source: Box::new(bincode::ErrorKind::Custom(
+                    "invalid body structure".to_string(),
+                )),
+            },
+            CacheReadFailureReason::HeaderDecode {
+                source: Box::new(bincode::ErrorKind::Custom(
+                    "invalid header structure".to_string(),
+                )),
+            },
+            CacheReadFailureReason::SourcePathMismatch,
+            CacheReadFailureReason::ParserVersionMismatch,
+            CacheReadFailureReason::MessageCountMismatch {
+                declared: 2,
+                actual: 1,
+            },
+        ] {
+            assert!(
+                test_cache_read_failure(reason).requires_shard_removal(),
+                "structural corruption must remove the derived shard"
+            );
+        }
     }
 
     fn write_temp_file(content: &[u8]) -> NamedTempFile {
@@ -2780,7 +3150,13 @@ mod tests {
         writer.save_if_dirty();
 
         assert!(
-            reader.take_messages(&read_plan).is_none(),
+            matches!(
+                reader.take_messages(&read_plan),
+                Err(CacheReadFailure {
+                    reason: CacheReadFailureReason::ShardFingerprintMismatch,
+                    ..
+                })
+            ),
             "stale read plan must not return messages from a rewritten shard"
         );
         let replacement_messages = reader

@@ -2452,11 +2452,12 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
                     ),
                     fingerprint.clone(),
                 ))
-                .map(|messages| messages.len()),
-            Some(1),
+                .expect("saved warm cache shard must remain readable")
+                .len(),
+            1,
             "warm parses must leave the cached entry intact on disk"
         );
-        assert_eq!(
+        assert!(matches!(
             cache.take_messages(&message_cache::CacheReadPlan::new(
                 std::path::Path::new("/nonexistent/source.json"),
                 message_cache::ParserVersion::new(
@@ -2465,8 +2466,11 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
                 ),
                 fingerprint,
             )),
-            None
-        );
+            Err(message_cache::CacheReadFailure {
+                reason: message_cache::CacheReadFailureReason::Open { .. },
+                ..
+            })
+        ));
     }
 
     match original_home {

@@ -159,16 +159,14 @@ fn fold_opencode_unit(
     sink: &mut dyn MessageSink,
     seen: &mut HashSet<u64>,
 ) {
-    let ParsedUnit {
+    let adapter_cache::ResolvedUnit {
         unit,
         messages,
         cache_write,
         invalidate_cache,
-    } = parsed;
+    } = adapter_cache::resolve_unit(parsed, ctx);
     let path = unit.path.clone();
-    let has_cache_write = cache_write.is_some();
-    let messages = adapter_cache::resolve_messages(messages, ctx);
-    adapter_cache::write_cache(cache_write, ctx, &messages);
+    let cache_write_succeeded = adapter_cache::write_cache(cache_write, ctx, &messages);
     sink.extend_messages(
         messages
             .into_iter()
@@ -176,7 +174,7 @@ fn fold_opencode_unit(
             .collect(),
     );
 
-    if !has_cache_write && invalidate_cache {
+    if !cache_write_succeeded && invalidate_cache {
         ctx.source_cache.remove(&path, unit.parser_version);
     }
 }
@@ -362,5 +360,96 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id.as_ref(), "sqlite-session");
+    }
+
+    #[test]
+    fn opencode_corrupt_sqlite_hit_recovers_before_legacy_json_dedup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let sqlite_path = dir.path().join("opencode.db");
+        let json_path = dir.path().join("msg_shared.json");
+        let conn = rusqlite::Connection::open(&sqlite_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "shared-message",
+                "sqlite-session",
+                r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        std::fs::write(
+            &json_path,
+            r#"{"id":"shared-message","sessionID":"json-session","role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":20,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1766000001000}}"#,
+        )
+        .unwrap();
+
+        let sqlite_unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, sqlite_path.clone())
+            .with_meta(SourceUnitMeta::OpenCodeSqlite);
+        let fingerprint = sqlite_unit.source_input_policy().fingerprint().unwrap();
+        let mut seed = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        seed.insert(message_cache::CachedSourceEntry::new_with_version(
+            &sqlite_path,
+            sqlite_unit.parser_version,
+            fingerprint,
+            vec![UnifiedMessage::new(
+                "opencode",
+                "gpt-5.5",
+                "openai",
+                "stale-sqlite-cache",
+                1,
+                TokenBreakdown {
+                    input: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )],
+            Vec::new(),
+            None,
+        ));
+        seed.save_if_dirty();
+        message_cache::truncate_shard_after_header_for_test(
+            cache_dir.path(),
+            &sqlite_path,
+            sqlite_unit.parser_version,
+        );
+
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let sqlite_hit = adapter_cache::plan_cache_hit(sqlite_unit.prepare_snapshot(), &cache)
+            .expect("valid SQLite shard header must plan a hit before body recovery");
+        let json_message = sessions::opencode::parse_opencode_file(&json_path).unwrap();
+        let json_fresh = ParsedUnit {
+            unit: SourceUnit::plain_file(ClientId::OpenCode, json_path)
+                .with_meta(SourceUnitMeta::OpenCodeJson),
+            messages: UnitMessageSource::Fresh(vec![json_message]),
+            cache_write: None,
+            invalidate_cache: false,
+        };
+        let mut sink = Vec::new();
+
+        OPENCODE_ADAPTER.fold(
+            vec![json_fresh, sqlite_hit],
+            &mut FoldContext {
+                source_cache: &mut cache,
+                pricing: None,
+            },
+            &mut sink,
+        );
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].session_id.as_ref(), "sqlite-session");
+        assert_eq!(
+            sink[0].dedup_key,
+            Some(sessions::dedup_hash_str("shared-message"))
+        );
     }
 }
