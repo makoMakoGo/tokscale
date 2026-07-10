@@ -7,10 +7,13 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit,
+    ParseContext, ParsedUnit, SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
+
+const CLAUDE_WORKFLOW_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 pub(crate) struct ClaudeAdapter;
 
@@ -46,6 +49,14 @@ impl LocalSourceAdapter for ClaudeAdapter {
                 home_dir: PathBuf::from(ctx.home_dir),
             },
         )
+        .into_iter()
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(
+                ParserId::Claude,
+                CLAUDE_WORKFLOW_REVISION,
+            ))
+        })
+        .collect()
     }
 
     fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
@@ -120,13 +131,22 @@ mod tests {
     fn claude_adapter_discovers_default_transcripts_extra_and_cc_mirror_roots() {
         let home = tempfile::TempDir::new().unwrap();
         let default_file = home.path().join(".claude/projects/project-a/default.jsonl");
+        let workflow_file = home
+            .path()
+            .join(".claude/projects/project-a/session/subagents/workflows/wf/agent-a.jsonl");
         let transcript_file = home.path().join(".claude/transcripts/transcript.jsonl");
         let extra_root = home.path().join("extra-claude");
         let extra_file = extra_root.join("extra.jsonl");
         let mirror_variant = home.path().join(".cc-mirror/kimi-code");
         let mirror_file = mirror_variant.join("config/projects/mirror-project/mirror.jsonl");
 
-        for path in [&default_file, &transcript_file, &extra_file, &mirror_file] {
+        for path in [
+            &default_file,
+            &workflow_file,
+            &transcript_file,
+            &extra_file,
+            &mirror_file,
+        ] {
             write_file(path, "");
         }
         write_file(
@@ -143,7 +163,13 @@ mod tests {
 
         let units = CLAUDE_ADAPTER.discover(&scan_context(home.path(), &settings));
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
-        let mut expected = vec![default_file, transcript_file, extra_file, mirror_file];
+        let mut expected = vec![
+            default_file,
+            workflow_file,
+            transcript_file,
+            extra_file,
+            mirror_file,
+        ];
         expected.sort_unstable();
 
         assert_eq!(paths, expected);
