@@ -321,6 +321,7 @@ mod tests {
 
     #[test]
     fn provider_display_formats_each_segment_in_merged_list() {
+        TokscaleConfig::initialize_default_for_tests();
         assert_eq!(
             get_provider_display_name("openai, openai-codex, amazon-bedrock"),
             "OpenAI, AWS"
@@ -329,6 +330,7 @@ mod tests {
 
     #[test]
     fn provider_display_formats_coding_plan_aliases() {
+        TokscaleConfig::initialize_default_for_tests();
         let cases = [
             ("zai", "Z.AI"),
             ("zai-coding-plan", "Z.AI"),
@@ -410,6 +412,7 @@ mod tests {
 
     #[test]
     fn provider_display_dedups_after_formatting_merged_aliases() {
+        TokscaleConfig::initialize_default_for_tests();
         assert_eq!(
             get_provider_display_name("xiaomi, xiaomi-token-plan-cn, xiaomi-token-plan-sgp"),
             "XiaoMi"
@@ -446,6 +449,7 @@ mod tests {
 
     #[test]
     fn client_display_formats_each_segment_in_merged_list() {
+        TokscaleConfig::initialize_default_for_tests();
         assert_eq!(get_client_display_name("openclaw"), "OpenClaw");
         assert_eq!(
             get_client_display_name("opencode, codex, kiro, unknown-client"),

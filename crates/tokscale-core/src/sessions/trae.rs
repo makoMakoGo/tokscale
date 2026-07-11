@@ -66,7 +66,7 @@ fn parse_session(
     let provider = provider_for_model(&model_id);
     // Records without a real `session_id` cannot be deduplicated correctly
     // (every "missing-id" record would collide on the same key); records
-    // without a positive `usage_time` would land at epoch 0. Drop them
+    // without a positive `usage_time` would land at epoch 0. Reject them
     // rather than fabricating placeholders.
     let session_id = session["session_id"]
         .as_str()
@@ -80,7 +80,7 @@ fn parse_session(
     let usage_time = session["usage_time"].as_i64().ok_or_else(|| {
         SessionParseError::invalid("validate Trae session", "session is missing usage_time")
     })?;
-    if session_id.is_empty() || usage_time <= 0 {
+    if usage_time <= 0 {
         return Err(SessionParseError::invalid(
             "validate Trae session",
             "session usage_time must be positive",
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn test_reject_session_without_session_id() {
         // A record without `session_id` would otherwise dedup to the same
-        // key as every other malformed record. Drop it instead.
+        // key as every other malformed record. Reject it instead.
         let json = serde_json::json!([{
             "model_name": "GPT-5.4",
             "usage_time": 1776000000,
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_reject_session_without_usage_time() {
-        // No `usage_time` → would land at epoch 0. Drop it.
+        // No `usage_time` → would land at epoch 0. Reject it.
         let json = serde_json::json!([{
             "model_name": "GPT-5.4",
             "session_id": "abc",

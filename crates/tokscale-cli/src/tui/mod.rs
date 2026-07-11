@@ -109,21 +109,34 @@ fn persist_background_load(
     group_by: &tokscale_core::GroupBy,
     report_scope: &CacheReportScope,
 ) -> Result<BackgroundLoad> {
-    let mut result = result?;
-    if let BackgroundLoad::Loaded {
-        data,
-        source_inventory_signature,
-        cache_persistence_warning,
-        ..
-    } = &mut result
-    {
-        if let Err(error) = save_cached_data(
+    let result = result?;
+    let persistence_result = match &result {
+        BackgroundLoad::Loaded {
+            data,
+            source_inventory_signature,
+            ..
+        } => save_cached_data(
             data,
             enabled_clients,
             group_by,
             report_scope,
             *source_inventory_signature,
-        ) {
+        ),
+        BackgroundLoad::Unchanged => Ok(()),
+    };
+    Ok(record_cache_persistence_result(result, persistence_result))
+}
+
+fn record_cache_persistence_result(
+    mut result: BackgroundLoad,
+    persistence_result: Result<()>,
+) -> BackgroundLoad {
+    if let BackgroundLoad::Loaded {
+        cache_persistence_warning,
+        ..
+    } = &mut result
+    {
+        if let Err(error) = persistence_result {
             let diagnostic = format!("{error:#}");
             tracing::warn!(
                 error = %diagnostic,
@@ -132,7 +145,7 @@ fn persist_background_load(
             *cache_persistence_warning = Some(format!("Cache persistence warning: {diagnostic}"));
         }
     }
-    Ok(result)
+    result
 }
 
 fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
@@ -492,32 +505,6 @@ mod tests {
         }
     }
 
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.previous.take() {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
     fn write_amp_source(home: &std::path::Path, input_tokens: u64) {
         let directory = home.join(".local/share/amp/threads");
         std::fs::create_dir_all(&directory).unwrap();
@@ -699,13 +686,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn cache_save_failure_keeps_successfully_loaded_background_data() {
-        let directory = TempDir::new().unwrap();
-        let blocked_config_root = directory.path().join("not-a-directory");
-        std::fs::write(&blocked_config_root, "blocked").unwrap();
-        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", blocked_config_root.as_os_str());
-        let clients = HashSet::from([ClientId::Amp]);
         let signature = tokscale_core::SourceInventorySignature::from_bytes([7; 32]);
         let digest = signature.process_digest();
         let loaded = BackgroundLoad::Loaded {
@@ -719,13 +700,12 @@ mod tests {
             cache_persistence_warning: None,
         };
 
-        let persisted = persist_background_load(
-            Ok(loaded),
-            &clients,
-            &tokscale_core::GroupBy::Model,
-            &CacheReportScope::default(),
-        )
-        .expect("cache persistence failure must not discard loaded data");
+        let persisted = record_cache_persistence_result(
+            loaded,
+            Err(anyhow::anyhow!(
+                "failed to persist TUI cache `/blocked/tui-data-cache.json`: Not a directory"
+            )),
+        );
 
         match persisted {
             BackgroundLoad::Loaded {

@@ -406,6 +406,7 @@ mod tests {
 
     #[test]
     fn client_labels_display_width_counts_rendered_labels_without_joining() {
+        crate::tui::config::TokscaleConfig::initialize_default_for_tests();
         assert_eq!(
             client_labels_display_width("codex, opencode"),
             super::display_width("Codex, OpenCode")

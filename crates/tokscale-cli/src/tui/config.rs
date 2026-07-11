@@ -65,16 +65,14 @@ impl TokscaleConfig {
     /// Return the display configuration already initialized at the command
     /// boundary. Rendering is deliberately I/O-free.
     pub fn initialized() -> &'static TokscaleConfig {
-        #[cfg(test)]
-        {
-            CONFIG.get_or_init(Self::default)
-        }
-        #[cfg(not(test))]
-        {
-            CONFIG
-                .get()
-                .expect("display config must be initialized before rendering")
-        }
+        CONFIG
+            .get()
+            .expect("display config must be initialized before rendering")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn initialize_default_for_tests() -> &'static TokscaleConfig {
+        CONFIG.get_or_init(Self::default)
     }
 
     pub fn get_provider_color_hex(&self, provider_key: &str) -> Option<&str> {

@@ -36,7 +36,12 @@ pub(crate) fn variant_file_path(variant_dir: &Path) -> PathBuf {
     variant_dir.join("variant.json")
 }
 
-pub(crate) fn discover_claude_project_roots(home_dir: &Path) -> SessionParseResult<Vec<PathBuf>> {
+struct ResolvedVariant {
+    variant_dir: PathBuf,
+    projects_dir: PathBuf,
+}
+
+fn resolved_variants(home_dir: &Path) -> SessionParseResult<Vec<ResolvedVariant>> {
     let root = home_dir.join(".cc-mirror");
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -50,7 +55,7 @@ pub(crate) fn discover_claude_project_roots(home_dir: &Path) -> SessionParseResu
         }
     };
 
-    let mut roots = Vec::new();
+    let mut variants = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| {
             SessionParseError::at_path(&root, "read cc-mirror variant entry", source)
@@ -69,7 +74,18 @@ pub(crate) fn discover_claude_project_roots(home_dir: &Path) -> SessionParseResu
         };
         let config_dir =
             config_dir_from_variant_metadata(&metadata, &variant_path, home_dir, &variant_dir)?;
-        let projects_dir = config_dir.join("projects");
+        variants.push(ResolvedVariant {
+            variant_dir,
+            projects_dir: config_dir.join("projects"),
+        });
+    }
+    Ok(variants)
+}
+
+pub(crate) fn discover_claude_project_roots(home_dir: &Path) -> SessionParseResult<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    for variant in resolved_variants(home_dir)? {
+        let projects_dir = variant.projects_dir;
         match std::fs::metadata(&projects_dir) {
             Ok(metadata) if metadata.is_dir() => roots.push(projects_dir),
             Ok(_) => {
@@ -112,43 +128,14 @@ pub(crate) fn variant_dir_from_session_path_checked(
         return Ok(None);
     };
 
-    let root = home_dir.join(".cc-mirror");
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(SessionParseError::at_path(
-                &root,
-                "read cc-mirror variant directory",
-                source,
-            ));
-        }
-    };
     let normal_claude_projects = home_dir.join(".claude").join("projects");
     let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| {
-            SessionParseError::at_path(&root, "read cc-mirror variant entry", source)
-        })?;
-        let variant_dir = entry.path();
-        let file_type = entry.file_type().map_err(|source| {
-            SessionParseError::at_path(&variant_dir, "read cc-mirror variant entry type", source)
-        })?;
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let variant_path = variant_file_path(&variant_dir);
-        let Some(metadata) = read_variant_file_checked(&variant_path)? else {
-            continue;
-        };
-        let config_dir =
-            config_dir_from_variant_metadata(&metadata, &variant_path, home_dir, &variant_dir)?;
-        let projects_dir = config_dir.join("projects");
+    for variant in resolved_variants(home_dir)? {
+        let projects_dir = variant.projects_dir;
         if projects_dir == normal_claude_projects || !path.starts_with(&projects_dir) {
             continue;
         }
-        candidates.push((projects_dir.components().count(), variant_dir));
+        candidates.push((projects_dir.components().count(), variant.variant_dir));
     }
 
     candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
