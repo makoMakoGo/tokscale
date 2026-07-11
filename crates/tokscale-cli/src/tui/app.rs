@@ -1525,11 +1525,16 @@ impl App {
     }
 
     fn open_client_picker(&mut self) {
-        let dialog = ClientPickerDialog::new(
+        match ClientPickerDialog::new(
             self.enabled_clients.clone(),
             self.dialog_needs_reload.clone(),
-        );
-        self.dialog_stack.show(Box::new(dialog));
+        ) {
+            Ok(dialog) => self.dialog_stack.show(Box::new(dialog)),
+            Err(client) => self.set_status(&format!(
+                "Client picker state contains non-local client `{}`",
+                client.as_str()
+            )),
+        }
     }
 
     pub fn scan_clients(&self) -> Vec<ClientId> {
