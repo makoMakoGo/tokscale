@@ -4017,18 +4017,25 @@ fn test_parse_all_messages_with_pricing_prices_canonical_gpt_5_6_factory_model()
         },
     );
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
-    let messages = parse_all_messages_with_pricing(
+    let cold_messages = parse_all_messages_with_pricing(
+        source_home.path().to_str().unwrap(),
+        &["droid".to_string()],
+        Some(&pricing),
+    )
+    .unwrap();
+    let warm_messages = parse_all_messages_with_pricing(
         source_home.path().to_str().unwrap(),
         &["droid".to_string()],
         Some(&pricing),
     )
     .unwrap();
 
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].model_id.as_ref(), "gpt-5.6-sol");
-    assert_eq!(messages[0].provider_id.as_ref(), "openai");
-    assert_eq!(messages[0].tokens.reasoning, 2);
-    assert_eq!(messages[0].cost, 0.024);
+    assert_eq!(cold_messages, warm_messages);
+    assert_eq!(warm_messages.len(), 1);
+    assert_eq!(warm_messages[0].model_id.as_ref(), "gpt-5.6-sol");
+    assert_eq!(warm_messages[0].provider_id.as_ref(), "openai");
+    assert_eq!(warm_messages[0].tokens.reasoning, 2);
+    assert_eq!(warm_messages[0].cost, 0.024);
 }
 
 #[test]
