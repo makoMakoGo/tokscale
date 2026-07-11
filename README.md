@@ -169,6 +169,10 @@ a private guessed price. Details: [pricing semantics](docs/pricing.md).
 - [Architecture decisions](docs/adr/)
 - [Upstream port logs](docs/upstream/)
 
+The scan performance helper in `scripts/measure-scan-performance.sh` requires
+`jq` and GNU time. It prefers `gtime`; otherwise, it uses `/usr/bin/time` only
+after verifying support for GNU `-f` and `-o` options.
+
 ## Upstream relationship
 
 This repository intentionally remains in GitHub's fork network to preserve

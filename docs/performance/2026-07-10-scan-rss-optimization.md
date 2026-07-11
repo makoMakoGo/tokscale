@@ -1273,3 +1273,57 @@ production path with deterministic output and resource measurements.
   errors, disabled work, or an unreported cache rebuild.
 - Candidate-specific probes supplement the fixed real-corpus probes when the
   fixed commands do not exercise the changed path.
+
+## Post-review correctness follow-up (2026-07-11)
+
+A full-PR review found that the C8 metadata-only warm-hit contract could return
+stale data after a same-size/same-mtime atomic replacement. It also found
+remaining success-shaped parser, cache-I/O, settings, and compatibility paths.
+ADR 0020 replaces those contracts; the historical measurements above remain
+unchanged and must not be read as validation of the corrected formats.
+
+The corrected implementation persists Unix or Windows file identity in every
+source stamp, uses shard format v4 and inventory-signature domain v2, and
+revalidates prepared snapshots at the cache-hit boundary after asynchronous
+pricing initialization. TUI schema 27 stores the final confirmed inventory.
+Exact unchanged warm hits still perform metadata/identity queries without
+reading source bodies. Explicit cache pruning recognizes frozen v1, v2, and v3
+envelopes for deletion; ordinary reads accept only v4.
+
+Local adapters now expose only fallible discovery and parse seams. Parser,
+cache lookup/write/finalization, and settings errors carry their operation,
+path, underlying source, and client/parser context. A failed recovery parse no
+longer prevents a corrupt-shard removal from being finalized. Legacy
+delimiter-key coalescing and the retired local-format branches listed in ADR
+0020 were removed instead of retained as compatibility tables.
+
+OpenCode assistant payload classification was changed from a role-envelope
+pass followed by a full assistant decode to one streaming serde visitor. It
+does not materialize `serde_json::Value` for large non-assistant payloads. An
+ignored release microbenchmark, alternating five samples, measured:
+
+| Fixture | Iterations | Previous two-pass median | Single-pass median | Change |
+|---|---:|---:|---:|---:|
+| assistant row | 50,000 | 27.878867 ms | 17.104790 ms | -38.6% |
+| 10 MiB user row | 8 | 7.676608 ms | 7.246387 ms | -5.6% |
+
+These microbenchmarks establish the local parser effect only. End-to-end scan
+and RSS claims still require the fixed-corpus procedure described above.
+
+The final release-build verification repeated the same ignored benchmark five
+times after all strict-parser changes. The assistant path remained materially
+faster, while the 10 MiB non-assistant path was consistently slower; therefore
+there is no credible large-user-payload speedup claim:
+
+| Run | Assistant two-pass | Assistant single-pass | 10 MiB user two-pass | 10 MiB user single-pass |
+|---:|---:|---:|---:|---:|
+| 1 | 27.000215 ms | 16.137327 ms | 8.945099 ms | 10.076578 ms |
+| 2 | 26.880812 ms | 16.065344 ms | 8.276137 ms | 8.556350 ms |
+| 3 | 27.824335 ms | 16.638068 ms | 9.234428 ms | 9.931303 ms |
+| 4 | 27.455245 ms | 17.294224 ms | 7.721483 ms | 8.417629 ms |
+| 5 | 25.248690 ms | 15.117962 ms | 6.429077 ms | 7.124775 ms |
+
+Across those runs, assistant decoding improved by 37.0–40.2%, whereas the
+large user fixture regressed by 3.4–12.6%. The single-pass visitor is retained
+for its one-decode contract and bounded materialization, not because it speeds
+up the large-user fixture.
