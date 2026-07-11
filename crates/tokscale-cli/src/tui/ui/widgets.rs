@@ -170,7 +170,7 @@ pub(crate) fn get_client_display_name(client: &str) -> String {
 }
 
 fn get_single_client_display_name(client: &str) -> String {
-    let config = TokscaleConfig::load();
+    let config = TokscaleConfig::initialized();
     if let Some(name) = config.get_client_display_name(client) {
         return name.to_string();
     }
@@ -186,7 +186,7 @@ pub(crate) fn get_provider_display_name(provider: &str) -> String {
 }
 
 fn get_single_provider_display_name(provider: &str) -> String {
-    let config = TokscaleConfig::load();
+    let config = TokscaleConfig::initialized();
     if let Some(name) = config.get_provider_display_name(provider) {
         return name.to_string();
     }

@@ -3401,6 +3401,73 @@ fn test_root_light_output() {
 }
 
 #[test]
+fn light_report_surfaces_malformed_display_config_without_panicking() {
+    let tmp = create_temp_fixture_dir();
+    let config_path = tmp.path().join(".tokscale");
+    fs::write(&config_path, "[display_names.providers\n").unwrap();
+
+    cmd_with_home(tmp.path())
+        .args(["--light", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("failed to parse TOML config")
+                .and(predicate::str::contains(config_path.display().to_string()))
+                .and(predicate::str::contains("panicked").not())
+                .and(predicate::str::contains("backtrace").not()),
+        );
+}
+
+#[test]
+fn home_write_cache_conflict_fails_before_report_output() {
+    let tmp = create_temp_fixture_dir();
+    let scoped_home = tmp.path().join("scoped-home");
+    fs::create_dir_all(&scoped_home).unwrap();
+
+    cmd_with_home(tmp.path())
+        .args([
+            "--home",
+            scoped_home.to_str().unwrap(),
+            "--light",
+            "--write-cache",
+            "--client",
+            "opencode",
+            "--no-spinner",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "--write-cache cannot be combined with --home",
+        ));
+}
+
+#[test]
+fn home_settings_write_cache_conflict_fails_before_report_output() {
+    let tmp = create_temp_fixture_dir();
+    let scoped_home = tmp.path().join("scoped-home");
+    fs::create_dir_all(&scoped_home).unwrap();
+    write_settings_json(tmp.path(), r#"{"light":{"writeCache":true}}"#);
+
+    cmd_with_home(tmp.path())
+        .args([
+            "--home",
+            scoped_home.to_str().unwrap(),
+            "--light",
+            "--client",
+            "opencode",
+            "--no-spinner",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "--write-cache cannot be combined with --home",
+        ));
+}
+
+#[test]
 fn light_with_write_cache_writes_to_canonical_path() {
     let tmp = create_temp_fixture_dir();
     let config_dir = tmp.path().join("custom-config-root");

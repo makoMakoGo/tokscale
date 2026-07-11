@@ -3395,6 +3395,7 @@ dependencies = [
  "imageproc",
  "indicatif",
  "libc",
+ "once_cell",
  "predicates",
  "ratatui",
  "rayon",

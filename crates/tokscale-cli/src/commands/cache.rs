@@ -63,7 +63,6 @@ pub(crate) fn resolve_light_cache_filter_set(
 }
 
 pub(crate) fn write_light_cache(
-    home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
     since: &Option<String>,
     until: &Option<String>,
@@ -71,15 +70,6 @@ pub(crate) fn write_light_cache(
     group_by: &tokscale_core::GroupBy,
 ) -> Result<()> {
     use crate::tui::{save_cached_data, CacheReportScope, DataLoader};
-
-    // The TUI cache key includes date filters, but not `--home`. Writing
-    // home-scoped data would still poison the default cache, so keep that
-    // guard until home is part of the cache key.
-    if !can_write_light_cache(home_dir) {
-        anyhow::bail!(
-            "--write-cache cannot be combined with --home because the TUI cache key does not include that filter"
-        );
-    }
 
     let enabled_set = resolve_light_cache_filter_set(clients);
     let mut scan_clients: Vec<tokscale_core::ClientId> = enabled_set.iter().copied().collect();
@@ -95,6 +85,18 @@ pub(crate) fn write_light_cache(
         &report_scope,
         result.source_inventory_signature,
     )?;
+    Ok(())
+}
+
+pub(crate) fn validate_light_cache_write(home_dir: &Option<String>) -> Result<()> {
+    // The TUI cache key includes date filters, but not `--home`. Validate this
+    // before scanning or rendering so a rejected write intent cannot emit a
+    // successful-looking report first.
+    if !can_write_light_cache(home_dir) {
+        anyhow::bail!(
+            "--write-cache cannot be combined with --home because the TUI cache key does not include that filter"
+        );
+    }
     Ok(())
 }
 

@@ -30,7 +30,7 @@ pub fn get_model_color(_model: &str) -> Color {
 /// a 7-step lighten-to-white palette from the override base color.
 pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
     let provider_key = provider.to_lowercase();
-    if let Some(base) = TokscaleConfig::load()
+    if let Some(base) = TokscaleConfig::initialized()
         .get_provider_color_hex(&provider_key)
         .and_then(parse_hex_color)
     {
@@ -163,7 +163,7 @@ pub fn provider_color_key(provider: &str) -> &str {
 
 pub fn get_client_color(client: &str) -> Color {
     let client_key = client.trim().to_lowercase();
-    if let Some(color) = TokscaleConfig::load()
+    if let Some(color) = TokscaleConfig::initialized()
         .get_client_color_hex(&client_key)
         .and_then(parse_hex_color)
     {

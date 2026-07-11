@@ -1,5 +1,7 @@
 use crate::claude_diagnostics;
-use crate::commands::cache::{resolve_should_write_cache, write_light_cache};
+use crate::commands::cache::{
+    resolve_should_write_cache, validate_light_cache_write, write_light_cache,
+};
 use crate::commands::render::{
     aggregate_model_report_performance, dim_borders, format_currency, format_model_name,
     format_ms_per_1k, format_tokens_with_commas, LightSpinner, TABLE_PRESET,
@@ -48,6 +50,21 @@ pub(crate) fn run_models_report(
     use std::time::Instant;
     use tokio::runtime::Runtime;
     use tokscale_core::{get_model_report, GroupBy, ReportOptions};
+
+    if !json {
+        tui::config::TokscaleConfig::initialize()?;
+    }
+    let should_write_cache = if json {
+        false
+    } else {
+        let settings = tui::settings::Settings::load()?;
+        let should_write =
+            resolve_should_write_cache(cli_write_cache, cli_no_write_cache, &settings);
+        if should_write {
+            validate_light_cache_write(&home_dir)?;
+        }
+        should_write
+    };
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
     let effective_home_dir = resolve_effective_home_dir(&home_dir);
@@ -763,9 +780,8 @@ pub(crate) fn run_models_report(
 
         io::stdout().flush()?;
 
-        let settings = tui::settings::Settings::load()?;
-        if resolve_should_write_cache(cli_write_cache, cli_no_write_cache, &settings) {
-            write_light_cache(&home_dir, &clients, &since, &until, &year, &group_by)?;
+        if should_write_cache {
+            write_light_cache(&clients, &since, &until, &year, &group_by)?;
         }
     }
 

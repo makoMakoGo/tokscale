@@ -29,6 +29,10 @@ pub(crate) fn run_hourly_report(
     use tokio::runtime::Runtime;
     use tokscale_core::{get_hourly_report, GroupBy, ReportOptions};
 
+    if !json {
+        tui::config::TokscaleConfig::initialize()?;
+    }
+
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);

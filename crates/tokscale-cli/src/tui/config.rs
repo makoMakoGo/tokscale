@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use once_cell::sync::OnceCell;
 use serde::Deserialize;
 
-static CONFIG: OnceLock<TokscaleConfig> = OnceLock::new();
+static CONFIG: OnceCell<TokscaleConfig> = OnceCell::new();
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TokscaleConfig {
@@ -59,18 +59,22 @@ impl TokscaleConfig {
     }
 
     pub fn initialize() -> Result<&'static TokscaleConfig> {
-        if let Some(config) = CONFIG.get() {
-            return Ok(config);
-        }
-        let config = Self::load_from_disk()?;
-        let _ = CONFIG.set(config);
-        Ok(CONFIG
-            .get()
-            .expect("Tokscale config must be initialized after a successful load"))
+        initialize_cell_with(&CONFIG, Self::load_from_disk)
     }
 
-    pub fn load() -> &'static TokscaleConfig {
-        Self::initialize().expect("Tokscale config must be initialized before rendering")
+    /// Return the display configuration already initialized at the command
+    /// boundary. Rendering is deliberately I/O-free.
+    pub fn initialized() -> &'static TokscaleConfig {
+        #[cfg(test)]
+        {
+            CONFIG.get_or_init(Self::default)
+        }
+        #[cfg(not(test))]
+        {
+            CONFIG
+                .get()
+                .expect("display config must be initialized before rendering")
+        }
     }
 
     pub fn get_provider_color_hex(&self, provider_key: &str) -> Option<&str> {
@@ -99,9 +103,18 @@ impl TokscaleConfig {
     }
 }
 
+fn initialize_cell_with(
+    cell: &OnceCell<TokscaleConfig>,
+    load: impl FnOnce() -> Result<TokscaleConfig>,
+) -> Result<&TokscaleConfig> {
+    cell.get_or_try_init(load)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn missing_optional_config_is_the_only_default_case() {
@@ -128,5 +141,37 @@ mod tests {
         assert!(read_diagnostic.contains("failed to read"));
         assert!(read_diagnostic.contains(&directory.path().display().to_string()));
         assert!(read_error.source().is_some());
+    }
+
+    #[test]
+    fn concurrent_initialization_loads_once() {
+        const THREADS: usize = 8;
+        let cell = Arc::new(OnceCell::new());
+        let load_count = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let cell = Arc::clone(&cell);
+                let load_count = Arc::clone(&load_count);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    initialize_cell_with(&cell, || {
+                        load_count.fetch_add(1, Ordering::SeqCst);
+                        for _ in 0..32 {
+                            std::thread::yield_now();
+                        }
+                        Ok(TokscaleConfig::default())
+                    })
+                    .map(|_| ())
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        assert_eq!(load_count.load(Ordering::SeqCst), 1);
     }
 }
