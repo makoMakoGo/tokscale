@@ -123,6 +123,10 @@ jobs:
     steps:
       - run: bash scripts/test-release-tooling.sh
 EOF_YAML
+
+  git -C "${work}" init -q
+  git -C "${work}" add .
+  git -C "${work}" update-index --chmod=+x scripts/test-release-tooling.sh
 }
 
 test_accepts_matching_publish_and_native_workflows() {
@@ -376,10 +380,24 @@ test_rejects_missing_release_tooling_entrypoint() {
   grep -q "missing release tooling entrypoint" "${output}"
 }
 
+test_accepts_executable_git_mode_without_worktree_execute_bits() {
+  local work="${TMP_DIR}/executable-git-mode"
+  write_good_workflows "${work}"
+  chmod -x "${work}/scripts/test-release-tooling.sh"
+
+  (
+    cd "${work}"
+    python3 "${SCRIPT_UNDER_TEST}" >"${TMP_DIR}/executable-git-mode-output.txt" 2>&1
+  )
+
+  grep -q "Release workflow safety OK" "${TMP_DIR}/executable-git-mode-output.txt"
+}
+
 test_rejects_non_executable_release_tooling_entrypoint() {
   local work="${TMP_DIR}/non-executable-release-tooling-entrypoint"
   write_good_workflows "${work}"
   chmod -x "${work}/scripts/test-release-tooling.sh"
+  git -C "${work}" update-index --chmod=-x scripts/test-release-tooling.sh
 
   local output="${TMP_DIR}/non-executable-release-tooling-entrypoint-output.txt"
   if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
@@ -423,6 +441,7 @@ test_rejects_version_commits_in_publish_workflow
 test_rejects_branch_pushes_in_publish_workflow
 test_rejects_release_tooling_command_drift
 test_rejects_missing_release_tooling_entrypoint
+test_accepts_executable_git_mode_without_worktree_execute_bits
 test_rejects_non_executable_release_tooling_entrypoint
 test_rejects_release_validation_path_drift
 
