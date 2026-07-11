@@ -442,10 +442,10 @@ impl App {
                 .filter_map(|s| ClientId::from_str(&s.to_lowercase()))
                 .collect()
         } else {
-            // No filter → use the canonical default set. MUST stay in sync with
-            // `run_warm_tui_cache()` so a fresh cache warm produces a
-            // fresh hit on the next no-filter launch.
-            ClientId::iter().collect()
+            // No filter → use the canonical local-parser set. This remains in
+            // lockstep with `tui::run` and `run_warm_tui_cache` so cache keys
+            // match without selecting identity-only clients such as Crush.
+            super::local_parser_clients().collect()
         };
 
         let auto_refresh_interval = if config.refresh > 0 {
@@ -2489,20 +2489,18 @@ mod tests {
     }
 
     #[test]
-    fn test_app_no_filter_default_matches_default_set() {
-        // Regression for an Oracle-flagged HIGH bug: the no-filter TUI
-        // default and the `submit` warm-cache filter set drifted apart,
-        // making every TUI launch after submit a stale-cache reuse
-        // instead of a fresh hit. Both paths now go through
-        // `ClientId::iter().collect()`; assert it stays that way.
+    fn test_app_no_filter_default_uses_local_parse_policy() {
         let app = make_app();
         let actual = app.enabled_clients.borrow().clone();
-        let expected: HashSet<ClientId> = ClientId::iter().collect();
+        let expected: HashSet<ClientId> = ClientId::iter()
+            .filter(|client| client.supports_local_parsing())
+            .collect();
         assert_eq!(
             actual, expected,
-            "no-filter App default drifted from ClientId::iter() — \
-             warm cache and TUI launch will mismatch"
+            "no-filter TUI must select exactly the clients accepted by local parsing"
         );
+        assert!(actual.contains(&ClientId::Cursor));
+        assert!(!actual.contains(&ClientId::Crush));
     }
 
     fn make_app_with_models(n: usize) -> App {

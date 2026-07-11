@@ -101,10 +101,6 @@ pub(crate) fn parse_persisted_default_client_id(raw: &str) -> Option<ClientId> {
     ClientId::from_str(&normalized)
 }
 
-pub(crate) fn client_id_set_all() -> std::collections::HashSet<ClientId> {
-    ClientId::iter().collect()
-}
-
 pub(crate) fn parse_client_id_set(clients: &[String]) -> std::collections::HashSet<ClientId> {
     clients
         .iter()

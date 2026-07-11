@@ -36,7 +36,7 @@ fn local_def(client_id: ClientId) -> &'static LocalClientDef {
 }
 
 fn scanner_enabled_client(client: ClientId) -> bool {
-    !matches!(client, ClientId::Crush)
+    client.supports_local_parsing()
 }
 
 /// User-controlled scanner settings loaded from a config file.

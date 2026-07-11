@@ -2086,6 +2086,16 @@ fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
     }
 }
 
+#[test]
+fn explicit_crush_request_remains_a_hard_error() {
+    let home = tempfile::TempDir::new().unwrap();
+    let error = super::prepare_local_sources(inventory_options(home.path(), &["crush"]))
+        .err()
+        .expect("identity-only clients must not enter the local parser pipeline");
+
+    assert_eq!(error, "client `crush` does not support local parsing");
+}
+
 fn signature_for_test_units(
     requested_clients: &[String],
     client: ClientId,

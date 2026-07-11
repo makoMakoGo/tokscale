@@ -23,8 +23,8 @@ use super::{DialogContent, DialogResult};
 /// toggles propagate without a separate sync step.
 pub struct ClientPickerDialog {
     /// Every selectable filter in the same order they appear on screen.
-    /// Mirrors `ClientId::ALL` so the listing order is
-    /// the canonical chronological order across the whole CLI/TUI.
+    /// Retains the catalog's canonical order after excluding clients that do
+    /// not have a local parser.
     sources: Vec<ClientId>,
     enabled: Rc<RefCell<HashSet<ClientId>>>,
     needs_reload: Rc<RefCell<bool>>,
@@ -46,7 +46,7 @@ struct SourcePickerAreas {
 
 impl ClientPickerDialog {
     pub fn new(enabled: Rc<RefCell<HashSet<ClientId>>>, needs_reload: Rc<RefCell<bool>>) -> Self {
-        let sources: Vec<ClientId> = ClientId::ALL.to_vec();
+        let sources: Vec<ClientId> = crate::tui::local_parser_clients().collect();
         let filtered_indices: Vec<usize> = (0..sources.len()).collect();
         Self {
             sources,
@@ -366,16 +366,30 @@ mod tests {
     }
 
     fn make_dialog() -> ClientPickerDialog {
-        let enabled = Rc::new(RefCell::new(ClientId::iter().collect::<HashSet<_>>()));
+        let enabled = Rc::new(RefCell::new(
+            crate::tui::local_parser_clients().collect::<HashSet<_>>(),
+        ));
         let needs_reload = Rc::new(RefCell::new(false));
         ClientPickerDialog::new(enabled, needs_reload)
     }
 
     fn first_hotkey_client() -> (ClientId, char) {
-        let client = ClientId::iter()
+        let client = crate::tui::local_parser_clients()
             .find(|client| client.hotkey().is_some())
             .expect("catalog should expose at least one picker hotkey");
         (client, hotkey(client))
+    }
+
+    #[test]
+    fn source_picker_lists_only_clients_with_local_parsers() {
+        let dialog = make_dialog();
+        let expected = ClientId::iter()
+            .filter(|client| client.supports_local_parsing())
+            .collect::<Vec<_>>();
+
+        assert_eq!(dialog.sources, expected);
+        assert!(dialog.sources.contains(&ClientId::Cursor));
+        assert!(!dialog.sources.contains(&ClientId::Crush));
     }
 
     #[test]
