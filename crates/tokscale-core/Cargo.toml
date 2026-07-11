@@ -39,6 +39,9 @@ sha2 = { workspace = true }
 libc = { workspace = true }
 fs2 = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+winapi-util = { workspace = true }
+
 [dev-dependencies]
 codspeed-criterion-compat = { workspace = true }
 tempfile = { workspace = true }

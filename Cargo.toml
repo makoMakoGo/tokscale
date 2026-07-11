@@ -78,6 +78,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 fs2 = "0.4"
+winapi-util = "0.1"
 
 # Benchmarking
 codspeed-criterion-compat = "4.7.0"

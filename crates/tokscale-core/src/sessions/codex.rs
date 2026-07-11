@@ -995,10 +995,7 @@ fn parse_codex_file_incremental_hashed(
             };
         }
     };
-    let source_identity = file
-        .metadata()
-        .ok()
-        .map(|metadata| crate::message_cache::source_file_identity(&metadata));
+    let source_identity = crate::message_cache::source_file_identity_from_open_file(&file).ok();
 
     #[cfg(test)]
     crate::message_cache::record_source_hash_start(path);

@@ -433,18 +433,18 @@ pub(crate) fn source_file_identity(metadata: &fs::Metadata) -> SourceFileIdentit
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SourceFileIdentity {
-    volume_serial_number: Option<u32>,
-    file_index: Option<u64>,
+    volume_serial_number: u64,
+    file_index: u64,
 }
 
 #[cfg(windows)]
-pub(crate) fn source_file_identity(metadata: &fs::Metadata) -> SourceFileIdentity {
-    use std::os::windows::fs::MetadataExt;
+fn source_file_identity(file: &File) -> std::io::Result<SourceFileIdentity> {
+    let information = winapi_util::file::information(file)?;
 
-    SourceFileIdentity {
-        volume_serial_number: metadata.volume_serial_number(),
-        file_index: metadata.file_index(),
-    }
+    Ok(SourceFileIdentity {
+        volume_serial_number: information.volume_serial_number(),
+        file_index: information.file_index(),
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -459,6 +459,39 @@ pub(crate) fn source_file_identity(metadata: &fs::Metadata) -> SourceFileIdentit
     SourceFileIdentity {
         size: metadata.len(),
         modified_ns: modified_ns(metadata).unwrap_or(0),
+    }
+}
+
+#[cfg(windows)]
+fn source_metadata_and_identity(
+    path: &Path,
+) -> std::io::Result<(fs::Metadata, SourceFileIdentity)> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    let identity = source_file_identity(&file)?;
+    Ok((metadata, identity))
+}
+
+#[cfg(not(windows))]
+fn source_metadata_and_identity(
+    path: &Path,
+) -> std::io::Result<(fs::Metadata, SourceFileIdentity)> {
+    let metadata = fs::metadata(path)?;
+    let identity = source_file_identity(&metadata);
+    Ok((metadata, identity))
+}
+
+pub(crate) fn source_file_identity_from_open_file(
+    file: &File,
+) -> std::io::Result<SourceFileIdentity> {
+    #[cfg(windows)]
+    {
+        source_file_identity(file)
+    }
+    #[cfg(not(windows))]
+    {
+        let metadata = file.metadata()?;
+        Ok(source_file_identity(&metadata))
     }
 }
 
@@ -581,12 +614,12 @@ impl SourceInputPolicy {
     pub(crate) fn snapshot(&self) -> Option<SourceInputSnapshot> {
         let mut files = Vec::with_capacity(self.inputs.len());
         for (index, (_, path)) in self.inputs.iter().enumerate() {
-            let file = match fs::metadata(path) {
-                Ok(metadata) => SourceInputFileSnapshot {
+            let file = match source_metadata_and_identity(path) {
+                Ok((metadata, identity)) => SourceInputFileSnapshot {
                     present: true,
                     size: metadata.len(),
                     modified_ns: modified_ns(&metadata)?,
-                    identity: Some(source_file_identity(&metadata)),
+                    identity: Some(identity),
                 },
                 Err(error) if index > 0 && error.kind() == std::io::ErrorKind::NotFound => {
                     SourceInputFileSnapshot {
@@ -2351,6 +2384,28 @@ mod tests {
         file.write_all(content).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn source_file_identity_matches_hard_links_and_distinguishes_files() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("source.jsonl");
+        let hard_link = dir.path().join("hard-link.jsonl");
+        let distinct = dir.path().join("distinct.jsonl");
+        std::fs::write(&source, b"same-size").unwrap();
+        std::fs::hard_link(&source, &hard_link).unwrap();
+        std::fs::write(&distinct, b"same-size").unwrap();
+
+        let identity = |path: &Path| {
+            SourceInputPolicy::plain(path)
+                .snapshot()
+                .unwrap()
+                .primary_identity()
+                .unwrap()
+        };
+
+        assert_eq!(identity(&source), identity(&hard_link));
+        assert_ne!(identity(&source), identity(&distinct));
     }
 
     #[test]

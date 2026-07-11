@@ -3441,6 +3441,7 @@ dependencies = [
  "toml",
  "tracing",
  "walkdir",
+ "winapi-util",
  "zstd",
 ]
 
