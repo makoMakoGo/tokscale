@@ -1095,6 +1095,22 @@ fn test_normalize_model_for_grouping_canonicalizes_gpt_5_6_family_efforts() {
 }
 
 #[test]
+fn test_normalize_model_for_grouping_canonicalizes_gpt_5_6_sol_alias() {
+    let cases = [
+        "gpt-5.6",
+        "gpt-5.6-high",
+        "gpt-5.6-max",
+        "gpt-5.6(max)",
+        "custom:gpt-5.6-max",
+        "gpt-5.6-sol-max",
+    ];
+
+    for raw in cases {
+        assert_eq!(normalize_model_for_grouping(raw), "gpt-5.6-sol");
+    }
+}
+
+#[test]
 fn test_group_by_from_str_valid_values() {
     assert_eq!(GroupBy::from_str("model").unwrap(), GroupBy::Model);
     assert_eq!(
@@ -3994,8 +4010,8 @@ fn test_parse_all_messages_with_pricing_prices_canonical_gpt_5_6_factory_model()
     std::fs::write(
         session_dir.join("factory-session.settings.json"),
         r#"{
-            "model": "custom:gpt-5.6-sol-xhigh",
-            "reasoningEffort": "xhigh",
+            "model": "custom:gpt-5.6-max",
+            "reasoningEffort": "max",
             "providerLock": "openai",
             "providerLockTimestamp": "2026-07-11T13:38:03.820Z",
             "tokenUsage": {

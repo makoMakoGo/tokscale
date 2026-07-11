@@ -4,7 +4,6 @@ pub(crate) const DEEPSEEK_V4_PRO_BETA_ALIAS: &str = "model1";
 pub(crate) const DEEPSEEK_V4_FLASH_BETA_ALIAS: &str = "model2";
 
 const CLAUDE_FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable"];
-const OPENAI_GPT_5_6_FAMILY: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const OPENAI_REASONING_TIERS: &[&str] =
     &["minimal", "low", "medium", "high", "xhigh", "auto", "none"];
 
@@ -228,11 +227,12 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
 
     if let Some(base) = strip_full_release_date_suffix(model) {
-        if base == "gpt-4.1"
-            || is_openai_gpt_4o_source_base_model(base)
-            || is_openai_gpt_source_base_model(base)
+        let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
+        if canonical_base == "gpt-4.1"
+            || is_openai_gpt_4o_source_base_model(canonical_base)
+            || is_openai_gpt_source_base_model(canonical_base)
         {
-            return Some(base.to_string());
+            return Some(canonical_base.to_string());
         }
     }
 
@@ -248,14 +248,17 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
         } else {
             base
         };
-        if (tier == "fast" || is_openai_reasoning_effort_for_model(base, tier))
-            && is_openai_gpt_source_base_model(base)
+        let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
+        if (tier == "fast" || is_openai_reasoning_effort_for_model(canonical_base, tier))
+            && is_openai_gpt_source_base_model(canonical_base)
         {
-            return Some(base.to_string());
+            return Some(canonical_base.to_string());
         }
     }
 
-    None
+    canonical_gpt_5_6_base(model)
+        .filter(|canonical| *canonical != model)
+        .map(str::to_string)
 }
 
 fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
@@ -263,8 +266,11 @@ fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
     let tier = tier.strip_suffix(')')?;
     let base =
         base.trim_end_matches(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '-' | '_'));
-    if is_openai_reasoning_effort_for_model(base, tier) && is_openai_gpt_source_base_model(base) {
-        Some(base)
+    let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
+    if is_openai_reasoning_effort_for_model(canonical_base, tier)
+        && is_openai_gpt_source_base_model(canonical_base)
+    {
+        Some(canonical_base)
     } else {
         None
     }
@@ -272,7 +278,16 @@ fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
 
 fn is_openai_reasoning_effort_for_model(model: &str, effort: &str) -> bool {
     OPENAI_REASONING_TIERS.contains(&effort)
-        || (effort == "max" && OPENAI_GPT_5_6_FAMILY.contains(&model))
+        || (effort == "max" && canonical_gpt_5_6_base(model).is_some())
+}
+
+fn canonical_gpt_5_6_base(model: &str) -> Option<&'static str> {
+    match model {
+        "gpt-5.6" | "gpt-5.6-sol" => Some("gpt-5.6-sol"),
+        "gpt-5.6-terra" => Some("gpt-5.6-terra"),
+        "gpt-5.6-luna" => Some("gpt-5.6-luna"),
+        _ => None,
+    }
 }
 
 fn is_openai_gpt_4o_source_base_model(model: &str) -> bool {
@@ -280,7 +295,7 @@ fn is_openai_gpt_4o_source_base_model(model: &str) -> bool {
 }
 
 fn is_openai_gpt_source_base_model(model: &str) -> bool {
-    if OPENAI_GPT_5_6_FAMILY.contains(&model) {
+    if canonical_gpt_5_6_base(model).is_some() {
         return true;
     }
 

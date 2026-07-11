@@ -2026,6 +2026,21 @@ mod tests {
     }
 
     #[test]
+    fn test_wrapped_merges_gpt_5_6_alias_with_sol() {
+        let mut model_map = HashMap::new();
+        for raw_model_id in ["gpt-5.6", "gpt-5.6-sol"] {
+            let model_id = tokscale_core::normalize_model_for_grouping(raw_model_id);
+            accumulate_wrapped_model(&mut model_map, &model_id, 1.0, 1);
+        }
+
+        assert_eq!(model_map.len(), 1);
+        let model = model_map.values().next().unwrap();
+        assert_eq!(model.name, "GPT-5.6 Sol");
+        assert_eq!(model.cost, 2.0);
+        assert_eq!(model.tokens, 2);
+    }
+
+    #[test]
     fn test_format_model_name_claude() {
         assert_eq!(
             format_model_name("claude-sonnet-4-20250514"),
