@@ -342,7 +342,6 @@ mod tests {
         assert_eq!(ClientId::short_name(ClientId::KiloCode), "KiloCode");
         assert_eq!(ClientId::short_name(ClientId::Mux), "Mux");
         assert_eq!(ClientId::short_name(ClientId::Kilo), "Kilo CLI");
-        assert_eq!(ClientId::short_name(ClientId::Crush), "Crush");
         assert_eq!(ClientId::short_name(ClientId::Hermes), "Hermes Agent");
         assert_eq!(ClientId::short_name(ClientId::Codebuff), "Codebuff");
         assert_eq!(ClientId::short_name(ClientId::CodeBuddy), "CodeBuddy");
@@ -373,7 +372,6 @@ mod tests {
         assert_eq!(ClientId::hotkey(ClientId::KiloCode), Some('k'));
         assert_eq!(ClientId::hotkey(ClientId::Mux), Some('x'));
         assert_eq!(ClientId::hotkey(ClientId::Kilo), Some('l'));
-        assert_eq!(ClientId::hotkey(ClientId::Crush), Some('h'));
         assert_eq!(ClientId::hotkey(ClientId::Hermes), Some('e'));
         assert_eq!(ClientId::hotkey(ClientId::Codebuff), Some('b'));
         assert_eq!(ClientId::hotkey(ClientId::CodeBuddy), Some('f'));
@@ -404,7 +402,6 @@ mod tests {
         assert_eq!(ClientId::from_hotkey('k'), Some(ClientId::KiloCode));
         assert_eq!(ClientId::from_hotkey('l'), Some(ClientId::Kilo));
         assert_eq!(ClientId::from_hotkey('x'), Some(ClientId::Mux));
-        assert_eq!(ClientId::from_hotkey('h'), Some(ClientId::Crush));
         assert_eq!(ClientId::from_hotkey('e'), Some(ClientId::Hermes));
         assert_eq!(ClientId::from_hotkey('b'), Some(ClientId::Codebuff));
         assert_eq!(ClientId::from_hotkey('f'), Some(ClientId::CodeBuddy));

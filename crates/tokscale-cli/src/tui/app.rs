@@ -444,7 +444,7 @@ impl App {
         } else {
             // No filter → use the canonical local-parser set. This remains in
             // lockstep with `tui::run` and `run_warm_tui_cache` so cache keys
-            // match without selecting identity-only clients such as Crush.
+            // match without selecting catalog entries that lack an adapter.
             super::local_parser_clients().collect()
         };
 
@@ -2500,7 +2500,6 @@ mod tests {
             "no-filter TUI must select exactly the clients accepted by local parsing"
         );
         assert!(actual.contains(&ClientId::Cursor));
-        assert!(!actual.contains(&ClientId::Crush));
     }
 
     fn make_app_with_models(n: usize) -> App {

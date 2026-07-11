@@ -389,7 +389,6 @@ mod tests {
 
         assert_eq!(dialog.sources, expected);
         assert!(dialog.sources.contains(&ClientId::Cursor));
-        assert!(!dialog.sources.contains(&ClientId::Crush));
     }
 
     #[test]

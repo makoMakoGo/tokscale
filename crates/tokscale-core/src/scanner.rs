@@ -2869,7 +2869,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_all_clients_rejects_crush_and_scans_warp_sqlite() {
+    fn test_scan_all_clients_scans_warp_sqlite() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         let settings = ScannerSettings {
@@ -2897,27 +2897,14 @@ mod tests {
             &settings,
         )
         .unwrap();
-        let explicit_crush = scan_all_clients_with_scanner_settings(
-            home.to_str().unwrap(),
-            &["crush".to_string()],
-            false,
-            &settings,
-        )
-        .unwrap_err();
-
         assert_eq!(
             all_clients.get(ClientId::Warp),
             &vec![default_warp_db.clone(), extra_warp_db.clone()]
         );
-        assert!(all_clients.get(ClientId::Crush).is_empty());
         assert_eq!(
             explicit_warp.get(ClientId::Warp),
             &vec![default_warp_db, extra_warp_db]
         );
-        assert!(matches!(
-            explicit_crush,
-            ScannerError::UnsupportedClient { client } if client == "crush"
-        ));
     }
 
     #[test]

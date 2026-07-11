@@ -121,7 +121,6 @@ fn test_resolve_default_tui_filter_set_falls_back_when_empty() {
         .collect();
     assert_eq!(set, expected);
     assert!(set.contains(&ClientId::Cursor));
-    assert!(!set.contains(&ClientId::Crush));
 }
 
 #[test]
@@ -132,7 +131,6 @@ fn test_light_cache_no_filter_uses_local_parse_policy() {
         .collect();
     assert_eq!(set, expected);
     assert!(set.contains(&ClientId::Cursor));
-    assert!(!set.contains(&ClientId::Crush));
 }
 
 #[test]
@@ -321,6 +319,13 @@ fn test_client_flag_accepts_uppercase() {
 fn test_client_flag_rejects_unknown_and_empty_values() {
     assert!(Cli::try_parse_from(["tokscale", "--client", "unknown"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "--client", ""]).is_err());
+
+    let error = Cli::try_parse_from(["tokscale", "--client", "crush"])
+        .err()
+        .expect("excluded clients must not remain valid CLI values")
+        .to_string();
+    assert!(error.contains("invalid client id `crush`"), "{error}");
+    assert!(!error.contains("does not support local parsing"), "{error}");
 }
 
 #[test]

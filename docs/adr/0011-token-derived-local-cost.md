@@ -33,7 +33,7 @@ reports look precise while measuring different things.
   credits-only records are dropped instead of being converted into zero-token
   cost.
 - Aggregate-only clients without a token-level source do not contribute usage
-  rows. Crush remains disabled under this rule.
+  rows. Crush local client integration is excluded under ADR 0012.
 - Total-only token sources with accepted local attribution may contribute usage
   rows by applying the fixed bucket allocation from ADR 0017. These rows still
   ignore app-reported spend and credits.

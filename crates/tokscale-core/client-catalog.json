@@ -145,15 +145,6 @@
     "color": "#F59E0B"
   },
   {
-    "variant": "Crush",
-    "id": "crush",
-    "displayName": "Crush",
-    "shortName": "Crush",
-    "hotkey": "h",
-    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-crush.png",
-    "color": "#DC2626"
-  },
-  {
     "variant": "Hermes",
     "id": "hermes",
     "displayName": "Hermes Agent",

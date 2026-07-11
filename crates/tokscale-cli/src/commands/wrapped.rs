@@ -2241,7 +2241,6 @@ mod tests {
         assert!(clients.iter().any(|client| client == "kiro"));
         assert!(clients.iter().any(|client| client == "trae"));
         assert!(clients.iter().any(|client| client == "warp"));
-        assert!(!clients.iter().any(|client| client == "crush"));
     }
 
     #[test]

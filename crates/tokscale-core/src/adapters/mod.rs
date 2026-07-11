@@ -475,9 +475,6 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::CommandCode => ParserId::CommandCode,
         ClientId::Grok => ParserId::Grok,
         ClientId::Warp => ParserId::Warp,
-        ClientId::Crush => {
-            unreachable!("excluded clients do not create local source units")
-        }
     }
 }
 
@@ -1257,14 +1254,6 @@ mod tests {
             batches.confirmed_inventory_digests[0],
             unit.inventory_signature_digest()
         );
-    }
-
-    #[test]
-    fn crush_is_not_registered_as_local_adapter() {
-        assert!(adapter_for(ClientId::Crush).is_none());
-        assert!(selected_adapters(&["crush".to_string()])
-            .unwrap()
-            .is_empty());
     }
 
     #[test]

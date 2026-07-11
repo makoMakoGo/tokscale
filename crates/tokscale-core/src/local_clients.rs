@@ -263,16 +263,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
     LocalClientEntry {
-        client: ClientId::Crush,
-        def: LocalClientDef {
-            root: PathRoot::XdgData,
-            relative_path: "crush/projects.json",
-            pattern: "projects.json",
-            headless: false,
-            parse_local: false,
-        },
-    },
-    LocalClientEntry {
         client: ClientId::Hermes,
         def: LocalClientDef {
             root: PathRoot::EnvVar {
@@ -521,8 +511,7 @@ impl ClientId {
 
     /// Whether the client has an adapter that can parse an explicitly
     /// selected local source. This differs from [`Self::parse_local`]: Cursor
-    /// is opt-in for normal reports but remains a valid TUI source, while
-    /// identity-only clients such as Crush have no local parser at all.
+    /// is opt-in for normal reports but remains a valid TUI source.
     pub fn supports_local_parsing(self) -> bool {
         crate::adapters::adapter_for(self).is_some()
     }
@@ -564,14 +553,6 @@ mod tests {
         assert_eq!(def.pattern, "usage*.csv");
         assert!(!ClientId::Cursor.parse_local());
         assert!(ClientId::Cursor.supports_local_parsing());
-    }
-
-    #[test]
-    fn crush_is_registered_but_not_locally_parsed() {
-        let crush = ClientId::Crush.local_def().expect("crush has scan policy");
-        assert_eq!(crush.relative_path, "crush/projects.json");
-        assert!(!ClientId::Crush.parse_local());
-        assert!(!ClientId::Crush.supports_local_parsing());
     }
 
     #[test]
