@@ -171,7 +171,7 @@ fn test_build_client_filter_with_defaults_when_no_flags() {
 }
 
 #[test]
-fn test_build_client_filter_maps_legacy_antigravity_cli_default() {
+fn test_build_client_filter_canonicalizes_persisted_antigravity_cli_default() {
     let flags = ClientFlags::default();
     let defaults = vec![
         "antigravity-cli".to_string(),

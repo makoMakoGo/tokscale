@@ -48,8 +48,14 @@ Local source ingestion uses one strict contract:
   persisted map keys use `v1` variant-tagged, length-prefixed encoding. Legacy
   delimiter-collision coalescing is removed; and
 - retired local-format branches are removed rather than hidden behind
-  compatibility paths, including the legacy OpenClaw index, Antigravity CLI
-  channel, pre-`created_at` Zed schema, and legacy Block/Goose roots.
+  compatibility paths, including the legacy OpenClaw index, the separate
+  Antigravity CLI client and legacy extra-root keys, pre-`created_at` Zed
+  schema, and legacy Block/Goose roots.
+
+The current Antigravity adapter still reads the accepted
+`~/.gemini/antigravity-cli/conversations/*.db` source under the canonical
+`antigravity` identity. ADR 0021 separately owns the exact persisted
+`defaultClients` identity migration from the former `antigravity-cli` client.
 
 This decision supersedes ADR 0008's metadata-only persisted stamp, transient-
 identity-only race check, same-size/same-mtime limitation, legacy public-key
