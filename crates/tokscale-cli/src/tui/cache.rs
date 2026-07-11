@@ -10,6 +10,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize, Serializer};
 use tokscale_core::{sessions, GroupBy, ModelPerformance, SourceInventorySignature};
 
@@ -1042,7 +1043,8 @@ pub fn save_cached_data(
         let mut writer = BufWriter::new(file);
         serde_json::to_writer(&mut writer, &cached).map_err(std::io::Error::other)?;
         writer.flush()
-    })?;
+    })
+    .with_context(|| format!("failed to persist TUI cache `{}`", cache_path.display()))?;
     Ok(())
 }
 
@@ -1051,10 +1053,37 @@ mod tests {
     use super::*;
     use serde::de::{MapAccess, SeqAccess, Visitor};
     use serial_test::serial;
+    use std::ffi::{OsStr, OsString};
     use std::fmt;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
     use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &OsStr) -> Self {
+            let previous = env::var_os(key);
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => env::set_var(self.key, value),
+                    None => env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[derive(Debug)]
     enum OrderedJson {
@@ -1588,10 +1617,7 @@ mod tests {
     #[serial]
     fn structured_model_map_keys_round_trip_without_coalescing() {
         let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
 
         let mut data = complete_usage_data();
         let daily_models = &mut data.daily[0]
@@ -1634,11 +1660,6 @@ mod tests {
         assert_eq!(loaded_hourly.len(), 2);
         assert!(loaded_hourly.contains_key("v1|pm|3:b:c1:d"));
         assert!(loaded_hourly.contains_key("v1|pm|1:b3:c:d"));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
     }
 
     #[test]

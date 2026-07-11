@@ -74,6 +74,7 @@ enum BackgroundLoad {
         digest: u64,
         source_inventory_signature: tokscale_core::SourceInventorySignature,
         pricing_diagnostics: Vec<String>,
+        cache_persistence_warning: Option<String>,
     },
 }
 
@@ -98,6 +99,7 @@ fn load_background_data(
             digest: result.source_digest,
             source_inventory_signature: result.source_inventory_signature,
             pricing_diagnostics: result.pricing_diagnostics,
+            cache_persistence_warning: None,
         })
 }
 
@@ -107,22 +109,57 @@ fn persist_background_load(
     group_by: &tokscale_core::GroupBy,
     report_scope: &CacheReportScope,
 ) -> Result<BackgroundLoad> {
-    let result = result?;
+    let mut result = result?;
     if let BackgroundLoad::Loaded {
         data,
         source_inventory_signature,
+        cache_persistence_warning,
         ..
-    } = &result
+    } = &mut result
     {
-        save_cached_data(
+        if let Err(error) = save_cached_data(
             data,
             enabled_clients,
             group_by,
             report_scope,
             *source_inventory_signature,
-        )?;
+        ) {
+            let diagnostic = format!("{error:#}");
+            tracing::warn!(
+                error = %diagnostic,
+                "TUI background data loaded but cache persistence failed"
+            );
+            *cache_persistence_warning = Some(format!("Cache persistence warning: {diagnostic}"));
+        }
     }
     Ok(result)
+}
+
+fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
+    app.set_background_loading(false);
+    match result {
+        Ok(BackgroundLoad::Loaded {
+            data,
+            digest,
+            source_inventory_signature: _,
+            pricing_diagnostics,
+            cache_persistence_warning,
+        }) => {
+            app.update_data(*data);
+            app.last_source_digest = Some(digest);
+            app.set_cache_persistence_warning(cache_persistence_warning);
+            app.set_status(
+                pricing_diagnostics_status(&pricing_diagnostics).unwrap_or("Data loaded"),
+            );
+        }
+        Ok(BackgroundLoad::Unchanged) => {
+            app.mark_refresh_checked();
+        }
+        Err(error) => {
+            app.set_error(Some(error.to_string()));
+            app.set_status(&format!("Error: {error}"));
+        }
+    }
 }
 
 fn pricing_diagnostics_status(diagnostics: &[String]) -> Option<&'static str> {
@@ -351,29 +388,7 @@ fn run_loop_with_background(
 
         match bg_rx.try_recv() {
             Ok(result) => {
-                app.set_background_loading(false);
-                match result {
-                    Ok(BackgroundLoad::Loaded {
-                        data,
-                        digest,
-                        source_inventory_signature: _,
-                        pricing_diagnostics,
-                    }) => {
-                        app.update_data(*data);
-                        app.last_source_digest = Some(digest);
-                        app.set_status(
-                            pricing_diagnostics_status(&pricing_diagnostics)
-                                .unwrap_or("Data loaded"),
-                        );
-                    }
-                    Ok(BackgroundLoad::Unchanged) => {
-                        app.mark_refresh_checked();
-                    }
-                    Err(e) => {
-                        app.set_error(Some(e.to_string()));
-                        app.set_status(&format!("Error: {}", e));
-                    }
-                }
+                apply_background_result(app, result);
             }
             Err(TryRecvError::Disconnected) => {
                 if app.background_loading {
@@ -472,6 +487,32 @@ mod tests {
                 match self.pricing_cache_only.take() {
                     Some(value) => std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", value),
                     None => std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY"),
+                }
+            }
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
                 }
             }
         }
@@ -655,5 +696,101 @@ mod tests {
             pricing_diagnostics_status(&diagnostics),
             Some("Pricing refreshed with warnings")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn cache_save_failure_keeps_successfully_loaded_background_data() {
+        let directory = TempDir::new().unwrap();
+        let blocked_config_root = directory.path().join("not-a-directory");
+        std::fs::write(&blocked_config_root, "blocked").unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", blocked_config_root.as_os_str());
+        let clients = HashSet::from([ClientId::Amp]);
+        let signature = tokscale_core::SourceInventorySignature::from_bytes([7; 32]);
+        let digest = signature.process_digest();
+        let loaded = BackgroundLoad::Loaded {
+            data: Box::new(UsageData {
+                total_tokens: 42,
+                ..UsageData::default()
+            }),
+            digest,
+            source_inventory_signature: signature,
+            pricing_diagnostics: Vec::new(),
+            cache_persistence_warning: None,
+        };
+
+        let persisted = persist_background_load(
+            Ok(loaded),
+            &clients,
+            &tokscale_core::GroupBy::Model,
+            &CacheReportScope::default(),
+        )
+        .expect("cache persistence failure must not discard loaded data");
+
+        match persisted {
+            BackgroundLoad::Loaded {
+                data,
+                digest: actual_digest,
+                cache_persistence_warning,
+                ..
+            } => {
+                assert_eq!(data.total_tokens, 42);
+                assert_eq!(actual_digest, digest);
+                let warning = cache_persistence_warning
+                    .as_deref()
+                    .expect("cache persistence warning must be retained");
+                assert!(warning.contains("failed to persist TUI cache"));
+                assert!(warning.contains("Not a directory"));
+            }
+            BackgroundLoad::Unchanged => panic!("loaded data must not become unchanged"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn cache_save_warning_does_not_block_app_data_or_digest_update() {
+        let home = TempDir::new().unwrap();
+        let _home = EnvGuard::set(home.path());
+        let mut app = App::new_with_cached_data_and_settings(
+            TuiConfig {
+                theme: Some("blue".to_string()),
+                refresh: 0,
+                sessions_path: None,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                initial_tab: None,
+            },
+            None,
+            settings::Settings::default(),
+        )
+        .unwrap();
+        let signature = tokscale_core::SourceInventorySignature::from_bytes([9; 32]);
+        let digest = signature.process_digest();
+
+        apply_background_result(
+            &mut app,
+            Ok(BackgroundLoad::Loaded {
+                data: Box::new(UsageData {
+                    total_tokens: 99,
+                    ..UsageData::default()
+                }),
+                digest,
+                source_inventory_signature: signature,
+                pricing_diagnostics: Vec::new(),
+                cache_persistence_warning: Some(
+                    "Cache persistence warning: permission denied".to_string(),
+                ),
+            }),
+        );
+
+        assert_eq!(app.data.total_tokens, 99);
+        assert_eq!(app.last_source_digest, Some(digest));
+        assert_eq!(
+            app.cache_persistence_warning(),
+            Some("Cache persistence warning: permission denied")
+        );
+        assert!(app.data.error.is_none());
     }
 }

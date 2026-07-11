@@ -367,6 +367,7 @@ pub struct App {
     pub status_message: Option<String>,
     pub status_message_time: Option<Instant>,
     status_message_kind: StatusMessageKind,
+    cache_persistence_warning: Option<String>,
     pub subscription_status_message: Option<String>,
     pub subscription_status_message_time: Option<Instant>,
 
@@ -520,6 +521,7 @@ impl App {
             } else {
                 StatusMessageKind::General
             },
+            cache_persistence_warning: None,
             subscription_status_message: None,
             subscription_status_message_time: None,
             terminal_width: 80,
@@ -676,6 +678,14 @@ impl App {
 
     pub fn set_error(&mut self, error: Option<String>) {
         self.data.error = error;
+    }
+
+    pub(crate) fn set_cache_persistence_warning(&mut self, warning: Option<String>) {
+        self.cache_persistence_warning = warning;
+    }
+
+    pub(crate) fn cache_persistence_warning(&self) -> Option<&str> {
+        self.cache_persistence_warning.as_deref()
     }
 
     fn refresh_current_tab_if_overdue(&mut self) {
