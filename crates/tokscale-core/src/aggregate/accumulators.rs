@@ -540,7 +540,7 @@ impl Default for SessionAcc {
 
 /// Ordering used when selecting the representative identity for a session.
 /// Larger comparable costs rank first; NaN ranks after every comparable value,
-/// including negative infinity. Equal ranks retain the later first-seen and
+/// including negative infinity. Equal ranks retain the earlier first-seen and
 /// structured-identity tie breakers at the call site.
 fn compare_session_cost_rank(left: f64, right: f64) -> std::cmp::Ordering {
     match (left.is_nan(), right.is_nan()) {

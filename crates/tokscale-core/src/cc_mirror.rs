@@ -111,9 +111,6 @@ pub(crate) fn variant_dir_from_session_path_checked(
     let Some(home_dir) = home_dir else {
         return Ok(None);
     };
-    if path.starts_with(home_dir.join(".claude")) {
-        return Ok(None);
-    }
 
     let root = home_dir.join(".cc-mirror");
     let entries = match std::fs::read_dir(&root) {
@@ -216,5 +213,82 @@ fn expand_config_dir(raw: &str, home_dir: &Path, variant_dir: &Path) -> Option<P
         Some(path)
     } else {
         Some(variant_dir.join(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_variant(home: &Path, name: &str, config_dir: &str) -> PathBuf {
+        let variant_dir = home.join(".cc-mirror").join(name);
+        std::fs::create_dir_all(&variant_dir).unwrap();
+        std::fs::write(
+            variant_file_path(&variant_dir),
+            serde_json::json!({ "configDir": config_dir }).to_string(),
+        )
+        .unwrap();
+        variant_dir
+    }
+
+    #[test]
+    fn normal_claude_projects_are_not_mapped_to_a_mirror_variant() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_variant(home.path(), "normal-alias", "~/.claude");
+        let session = home.path().join(".claude/projects/workspace/session.jsonl");
+
+        assert_eq!(
+            variant_dir_from_session_path_checked(&session, Some(home.path())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn normal_claude_transcripts_are_not_mapped_to_a_mirror_variant() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_variant(home.path(), "custom", "~/.claude/custom");
+        let transcript = home.path().join(".claude/transcripts/session.jsonl");
+
+        assert_eq!(
+            variant_dir_from_session_path_checked(&transcript, Some(home.path())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn custom_config_dir_inside_dot_claude_maps_to_its_variant() {
+        let home = tempfile::TempDir::new().unwrap();
+        let variant = write_variant(home.path(), "custom", "~/.claude/custom");
+        let session = home
+            .path()
+            .join(".claude/custom/projects/workspace/session.jsonl");
+
+        assert_eq!(
+            variant_dir_from_session_path_checked(&session, Some(home.path())).unwrap(),
+            Some(variant)
+        );
+    }
+
+    #[test]
+    fn nested_custom_config_dirs_choose_the_longest_matching_variant() {
+        let home = tempfile::TempDir::new().unwrap();
+        let outer_config = home.path().join(".claude/custom");
+        let inner_config = outer_config.join("projects/team");
+        write_variant(
+            home.path(),
+            "outer",
+            outer_config.to_str().expect("temp path must be UTF-8"),
+        );
+        let inner = write_variant(
+            home.path(),
+            "inner",
+            inner_config.to_str().expect("temp path must be UTF-8"),
+        );
+        let session = inner_config.join("projects/workspace/session.jsonl");
+
+        assert_eq!(
+            variant_dir_from_session_path_checked(&session, Some(home.path())).unwrap(),
+            Some(inner)
+        );
     }
 }
