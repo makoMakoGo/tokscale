@@ -384,20 +384,15 @@ fn accumulate_wrapped_model(
     cost: f64,
     tokens: i64,
 ) {
-    let model_name = format_model_name(model_id);
-    let provider = get_provider_from_model(model_id);
     let model_entry = model_map
         .entry(model_id.to_string())
         .or_insert_with(|| WrappedRankedEntry {
-            name: model_name,
+            name: format_model_name(model_id),
             client_id: None,
-            provider,
+            provider: get_provider_from_model(model_id),
             cost: 0.0,
             tokens: 0,
         });
-    if model_entry.provider.is_none() {
-        model_entry.provider = provider;
-    }
     model_entry.cost += cost;
     model_entry.tokens = model_entry
         .tokens
