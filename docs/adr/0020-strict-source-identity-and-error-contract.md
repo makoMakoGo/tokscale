@@ -54,7 +54,7 @@ Local source ingestion uses one strict contract:
 
 The current Antigravity adapter still reads the accepted
 `~/.gemini/antigravity-cli/conversations/*.db` source under the canonical
-`antigravity` identity. ADR 0021 separately owns the exact persisted
+`antigravity` identity. ADR 0007 owns the exact persisted
 `defaultClients` identity migration from the former `antigravity-cli` client.
 
 This decision supersedes ADR 0008's metadata-only persisted stamp, transient-
@@ -73,4 +73,6 @@ can be removed only through explicit maintenance.
 
 The parser and cache APIs are intentionally breaking. Adding a client now
 requires a fallible current-format parser and explicit handling of every I/O,
-decode, and semantic failure; compatibility imports require a separate ADR.
+decode, and semantic failure. Compatibility imports must be explicitly
+enumerated in the ADR that owns the affected identity or storage contract;
+generic alias tables and fallback parsing remain prohibited.

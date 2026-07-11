@@ -40,6 +40,19 @@ while opting out of the ordinary no-filter report set.
 `ClientId` is the only Rust client identity type. Do not add a second enum,
 hand-written base-client list, or hidden per-client CLI flag set.
 
+## Persisted client ID migrations
+
+The persisted `settings.json.defaultClients` reader performs one explicit,
+one-way identity migration:
+
+- `antigravity-cli` -> `antigravity`
+
+This applies only to persisted defaults written before the Antigravity identity
+unification. It is not a catalog ID, CLI alias, scanner key, adapter identity,
+TUI source, cache identity, or general alias mechanism.
+
+Additional persisted identity migrations must be explicitly enumerated here.
+
 ## Client Additions
 
 Adding a base client requires:

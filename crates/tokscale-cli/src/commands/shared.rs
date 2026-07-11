@@ -95,7 +95,7 @@ pub(crate) fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<Cl
 
 pub(crate) fn parse_persisted_default_client_id(raw: &str) -> Option<ClientId> {
     let normalized = raw.trim().to_ascii_lowercase();
-    // ADR 0021 retains this exact former ClientId only for persisted
+    // ADR 0007 retains this exact former ClientId only for persisted
     // `defaultClients`. It is not a catalog, CLI, or scanner-key alias.
     if normalized == "antigravity-cli" {
         return Some(ClientId::Antigravity);
