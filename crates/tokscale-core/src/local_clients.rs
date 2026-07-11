@@ -1,19 +1,6 @@
 use crate::client_catalog::ClientId;
+use crate::paths::configured_path_env;
 use std::path::PathBuf;
-
-fn configured_path_env(variable: &'static str) -> Option<PathBuf> {
-    let value = std::env::var_os(variable)?;
-    if value.is_empty() {
-        return None;
-    }
-    match value.to_str() {
-        Some(value) => {
-            let trimmed = value.trim();
-            (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
-        }
-        None => Some(PathBuf::from(value)),
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathRoot {

@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 
 use crate::clients::ClientId;
 use crate::local_clients;
+use crate::paths::configured_path_env;
 use crate::LocalClientDef;
 use serde::{Deserialize, Serialize};
 
@@ -222,20 +223,6 @@ impl ScanResult {
         }
 
         paths
-    }
-}
-
-fn configured_path_env(variable: &'static str) -> Option<PathBuf> {
-    let value = std::env::var_os(variable)?;
-    if value.is_empty() {
-        return None;
-    }
-    match value.to_str() {
-        Some(value) => {
-            let trimmed = value.trim();
-            (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
-        }
-        None => Some(PathBuf::from(value)),
     }
 }
 
