@@ -13,7 +13,8 @@ use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{open_readonly_sqlite, parse_epoch_f64_millis, read_file};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
-use serde::Deserialize;
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -78,7 +79,79 @@ struct KiroJsonlData {
 #[derive(Debug, Deserialize)]
 struct KiroContentPart {
     kind: Option<String>,
-    data: Option<String>,
+    data: Option<KiroContentData>,
+}
+
+// Keep report text, but consume structured tool payloads without materializing them.
+#[derive(Debug)]
+enum KiroContentData {
+    String(String),
+    NonString,
+}
+
+impl<'de> Deserialize<'de> for KiroContentData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct KiroContentDataVisitor;
+
+        impl<'de> Visitor<'de> for KiroContentDataVisitor {
+            type Value = KiroContentData;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a Kiro content value")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(KiroContentData::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(KiroContentData::String(value))
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(KiroContentData::NonString)
+            }
+        }
+
+        deserializer.deserialize_any(KiroContentDataVisitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,7 +275,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
                         )
                     })?;
 
-                let text_chars = text_char_count(data.content.as_deref());
+                let text_chars = text_char_count(data.content.as_deref(), &jsonl_path)?;
 
                 match entry.kind.as_str() {
                     "Prompt" => {
@@ -369,15 +442,23 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
         .collect()
 }
 
-fn text_char_count(content: Option<&[KiroContentPart]>) -> usize {
-    content
-        .unwrap_or_default()
-        .iter()
-        .filter(|part| part.kind.as_deref() == Some("text"))
-        .filter_map(|part| part.data.as_deref())
-        .map(str::chars)
-        .map(Iterator::count)
-        .sum()
+fn text_char_count(content: Option<&[KiroContentPart]>, path: &Path) -> SessionParseResult<usize> {
+    let mut chars = 0;
+    for part in content.unwrap_or_default() {
+        if part.kind.as_deref() != Some("text") {
+            continue;
+        }
+
+        let Some(KiroContentData::String(text)) = part.data.as_ref() else {
+            return Err(invalid_at_path(
+                path,
+                "validate Kiro text content",
+                "text content data must be a string",
+            ));
+        };
+        chars += text.chars().count();
+    }
+    Ok(chars)
 }
 
 fn estimate_tokens(chars: usize) -> i64 {
@@ -757,6 +838,35 @@ mod tests {
         assert_eq!(messages[0].duration_ms, Some(580));
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/tmp/project"));
         assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn test_parse_kiro_accepts_structured_non_text_content() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-tools","cwd":"/tmp/project","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"end_timestamp":1770983427,"message_ids":["prompt-tools","assistant-tools"]}]}}}"#;
+        let jsonl = r#"{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-tools","content":[{"kind":"text","data":"hello world"}],"meta":{"timestamp":1770983426.0}}}
+{"version":"v1","kind":"AssistantMessage","data":{"message_id":"assistant-tools","content":[{"kind":"toolUse","data":{"name":"read","input":{"path":"README.md"}}},{"kind":"text","data":"response"}]}}
+{"version":"v1","kind":"ToolResults","data":{"message_id":"tool-result","content":[{"kind":"toolResult","data":{"status":"success"}}]}}"#;
+        let path = create_session_files(&dir, "session-tools", json, jsonl);
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 3);
+        assert_eq!(messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_parse_kiro_rejects_structured_text_content() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-bad-text","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[]}}}"#;
+        let jsonl = r#"{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-bad-text","content":[{"kind":"text","data":{"unexpected":true}}]}}"#;
+        let path = create_session_files(&dir, "session-bad-text", json, jsonl);
+
+        let error = super::parse_kiro_file(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Kiro text content");
+        assert_eq!(error.path(), Some(path.with_extension("jsonl").as_path()));
     }
 
     #[test]
