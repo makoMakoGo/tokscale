@@ -4,11 +4,12 @@
 //! shares the same VS Code globalStorage task-log format and reuses the same
 //! parser helper.
 
+use super::error::SessionParseResult;
 use super::roocode::parse_roo_kilo_file;
 use super::UnifiedMessage;
 use std::path::Path;
 
-pub fn parse_cline_file(path: &Path) -> Vec<UnifiedMessage> {
+pub fn parse_cline_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
     parse_roo_kilo_file(path, "cline")
 }
 
@@ -17,6 +18,10 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn parse_cline_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_cline_file(path).unwrap()
+    }
 
     #[test]
     fn test_parse_cline_valid_api_req_started() {

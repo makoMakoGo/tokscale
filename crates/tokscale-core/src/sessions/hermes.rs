@@ -7,11 +7,11 @@
 //! App-reported estimated and actual costs are ignored. Tokscale reports cost
 //! only from token usage and its own pricing table.
 
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
-use rusqlite::Connection;
 use std::path::Path;
-use tracing::warn;
 
 const HERMES_AGENT_NAME: &str = "Hermes Agent";
 
@@ -31,21 +31,8 @@ fn resolved_provider(billing_provider: Option<String>, model_id: &str) -> String
         .unwrap_or_else(|| "hermes".to_string())
 }
 
-pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to open Hermes state database"
-            );
-            return Vec::new();
-        }
-    };
+pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let conn = open_readonly_sqlite(db_path)?;
 
     let query = r#"
         SELECT
@@ -71,56 +58,29 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
           )
     "#;
 
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Hermes session query"
-            );
-            return Vec::new();
-        }
-    };
+    let mut stmt = conn
+        .prepare(query)
+        .map_err(|error| SessionParseError::new("prepare Hermes session query", error))?;
 
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, f64>(3)?,
-            row.get::<_, Option<i32>>(4)?.unwrap_or(0),
-            row.get::<_, Option<i64>>(5)?.unwrap_or(0),
-            row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-            row.get::<_, Option<i64>>(7)?.unwrap_or(0),
-            row.get::<_, Option<i64>>(8)?.unwrap_or(0),
-            row.get::<_, Option<i64>>(9)?.unwrap_or(0),
-        ))
-    }) {
-        Ok(r) => r,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Hermes session query"
-            );
-            return Vec::new();
-        }
-    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, Option<i32>>(4)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(8)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(9)?.unwrap_or(0),
+            ))
+        })
+        .map_err(|error| SessionParseError::new("execute Hermes session query", error))?;
 
-    rows.filter_map(|row| match row {
-        Ok(row) => Some(row),
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to decode Hermes session row"
-            );
-            None
-        }
-    })
-    .map(
-        |(
+    rows.map(|row| {
+        let (
             session_id,
             model_id,
             billing_provider,
@@ -131,28 +91,27 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             cache_read,
             cache_write,
             reasoning,
-        )| {
-            let provider = resolved_provider(billing_provider, &model_id);
-            let mut msg = UnifiedMessage::new_with_agent(
-                "hermes",
-                model_id,
-                provider,
-                session_id.clone(),
-                timestamp_secs_to_ms(started_at),
-                TokenBreakdown {
-                    input: input.max(0),
-                    output: output.max(0),
-                    cache_read: cache_read.max(0),
-                    cache_write: cache_write.max(0),
-                    reasoning: reasoning.max(0),
-                },
-                0.0,
-                Some(HERMES_AGENT_NAME.to_string()),
-            );
-            msg.message_count = message_count.max(0);
-            msg.dedup_key = Some(crate::sessions::dedup_hash_str(&session_id));
-            msg
-        },
-    )
+        ) = row.map_err(|error| SessionParseError::new("decode Hermes session row", error))?;
+        let provider = resolved_provider(billing_provider, &model_id);
+        let mut msg = UnifiedMessage::new_with_agent(
+            "hermes",
+            model_id,
+            provider,
+            session_id.clone(),
+            timestamp_secs_to_ms(started_at),
+            TokenBreakdown {
+                input: input.max(0),
+                output: output.max(0),
+                cache_read: cache_read.max(0),
+                cache_write: cache_write.max(0),
+                reasoning: reasoning.max(0),
+            },
+            0.0,
+            Some(HERMES_AGENT_NAME.to_string()),
+        );
+        msg.message_count = message_count.max(0);
+        msg.dedup_key = Some(crate::sessions::dedup_hash_str(&session_id));
+        Ok(msg)
+    })
     .collect()
 }

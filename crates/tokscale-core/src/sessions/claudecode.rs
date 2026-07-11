@@ -2,15 +2,14 @@
 //!
 //! Parses JSONL files from ~/.claude/projects/
 
-use super::utils::{
-    extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
-    read_file_or_none,
-};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::{extract_i64, extract_string, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{checked_token_add, model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -125,23 +124,55 @@ fn resolve_subagent_name(
     parent_session_id: Option<&str>,
     entry_agent_id: Option<&str>,
     parent_cache: &mut ParentSubagentTypeCache,
-) -> String {
+) -> SessionParseResult<String> {
     let stem = match path.file_stem().and_then(|s| s.to_str()) {
         Some(s) => s,
-        None => return "Claude Subagent".to_string(),
+        None => {
+            return Err(SessionParseError::at_path(
+                path,
+                "validate Claude sidechain source path",
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "source file name is not valid UTF-8",
+                ),
+            ));
+        }
     };
 
     // Tier 1: sibling meta.json (e.g. agent-abc123.meta.json next to agent-abc123.jsonl)
     let meta_path = path.with_file_name(format!("{}.meta.json", stem));
-    if let Ok(text) = std::fs::read_to_string(&meta_path) {
-        if let Ok(meta) = serde_json::from_str::<AgentMetaFile>(&text) {
-            if let Some(ref agent_type) = meta.agent_type {
-                if !agent_type.trim().is_empty() {
-                    return normalize_claude_agent_label(agent_type)
-                        .unwrap_or_else(|| "Claude Subagent".to_string());
-                }
-            }
+    let meta_text = match std::fs::read_to_string(&meta_path) {
+        Ok(text) => Some(text),
+        Err(source) if source.kind() == ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(SessionParseError::at_path(
+                &meta_path,
+                "read Claude sidechain metadata",
+                source,
+            ));
         }
+    };
+    if let Some(text) = meta_text {
+        let meta: AgentMetaFile = serde_json::from_str(&text).map_err(|source| {
+            SessionParseError::at_path(&meta_path, "decode Claude sidechain metadata", source)
+        })?;
+        let agent_type = meta.agent_type.as_deref().ok_or_else(|| {
+            SessionParseError::at_path(
+                &meta_path,
+                "validate Claude sidechain metadata",
+                std::io::Error::new(ErrorKind::InvalidData, "missing agentType"),
+            )
+        })?;
+        let agent_type = agent_type.trim();
+        if agent_type.is_empty() {
+            return Err(SessionParseError::at_path(
+                &meta_path,
+                "validate Claude sidechain metadata",
+                std::io::Error::new(ErrorKind::InvalidData, "agentType is blank"),
+            ));
+        }
+        return Ok(normalize_claude_agent_label(agent_type)
+            .unwrap_or_else(|| super::normalize_agent_name(agent_type)));
     }
 
     // Tier 2: parent session tool_use inference
@@ -150,18 +181,26 @@ fn resolve_subagent_name(
         .map(|agent_id| agent_id.to_string())
         .or_else(|| sidechain_agent_id_from_stem(stem));
     if let (Some(parent_id), Some(agent_id)) = (parent_session_id, lookup_agent_id.as_deref()) {
-        if let Some(parent_path) = find_parent_session_path(path, parent_id) {
+        if let Some(parent_path) = find_parent_session_path(path, parent_id)? {
             if let Some(subagent_type) =
-                lookup_subagent_type_in_parent(&parent_path, agent_id, parent_cache)
+                lookup_subagent_type_in_parent(&parent_path, agent_id, parent_cache)?
             {
-                return normalize_claude_agent_label(&subagent_type)
-                    .unwrap_or_else(|| "Claude Subagent".to_string());
+                let subagent_type = subagent_type.trim();
+                if subagent_type.is_empty() {
+                    return Err(SessionParseError::at_path(
+                        &parent_path,
+                        "validate Claude parent sidechain type",
+                        std::io::Error::new(ErrorKind::InvalidData, "subagent_type is blank"),
+                    ));
+                }
+                return Ok(normalize_claude_agent_label(subagent_type)
+                    .unwrap_or_else(|| super::normalize_agent_name(subagent_type)));
             }
         }
     }
 
     // Tier 3: generic fallback (still visible in the Agents tab)
-    "Claude Subagent".to_string()
+    Ok("Claude Subagent".to_string())
 }
 
 fn is_workflow_journal(path: &Path) -> bool {
@@ -179,15 +218,26 @@ fn is_workflow_journal(path: &Path) -> bool {
 ///   → parent at `.../projects/<key>/<session>.jsonl`
 /// Flat layout: `.../projects/<key>/agent-X.jsonl`
 ///   → parent at `.../projects/<key>/<session-id>.jsonl`
-fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> Option<PathBuf> {
+fn find_parent_session_path(
+    sidechain_path: &Path,
+    parent_session_id: &str,
+) -> SessionParseResult<Option<PathBuf>> {
     let parent_filename = format!("{}.jsonl", parent_session_id);
 
     for ancestor in sidechain_path.ancestors() {
         if ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents") {
             if let Some(project_dir) = ancestor.parent().and_then(Path::parent) {
                 let candidate = project_dir.join(&parent_filename);
-                if candidate.exists() {
-                    return Some(candidate);
+                match std::fs::metadata(&candidate) {
+                    Ok(_) => return Ok(Some(candidate)),
+                    Err(source) if source.kind() == ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(SessionParseError::at_path(
+                            &candidate,
+                            "inspect Claude parent session",
+                            source,
+                        ));
+                    }
                 }
             }
             break;
@@ -197,12 +247,20 @@ fn find_parent_session_path(sidechain_path: &Path, parent_session_id: &str) -> O
     // Flat layout: parent dir is 1 level up
     if let Some(project_dir) = sidechain_path.parent() {
         let candidate = project_dir.join(&parent_filename);
-        if candidate.exists() {
-            return Some(candidate);
+        match std::fs::metadata(&candidate) {
+            Ok(_) => return Ok(Some(candidate)),
+            Err(source) if source.kind() == ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(SessionParseError::at_path(
+                    &candidate,
+                    "inspect Claude parent session",
+                    source,
+                ));
+            }
         }
     }
 
-    None
+    Ok(None)
 }
 
 /// Scan a parent session JSONL to recover `subagent_type` for a given `agent_id`.
@@ -216,7 +274,7 @@ fn lookup_subagent_type_in_parent(
     parent_path: &Path,
     target_agent_id: &str,
     parent_cache: &mut ParentSubagentTypeCache,
-) -> Option<String> {
+) -> SessionParseResult<Option<String>> {
     if !parent_cache.contains_key(parent_path) {
         parent_cache.insert(
             parent_path.to_path_buf(),
@@ -224,13 +282,17 @@ fn lookup_subagent_type_in_parent(
         );
     }
 
-    parent_cache
+    Ok(parent_cache
         .get(parent_path)
-        .and_then(|lookup| lookup.get(target_agent_id).cloned())
+        .and_then(|lookup| lookup.get(target_agent_id).cloned()))
 }
 
-fn build_parent_subagent_type_lookup(parent_path: &Path) -> Option<HashMap<String, String>> {
-    let file = std::fs::File::open(parent_path).ok()?;
+fn build_parent_subagent_type_lookup(
+    parent_path: &Path,
+) -> SessionParseResult<HashMap<String, String>> {
+    let file = std::fs::File::open(parent_path).map_err(|source| {
+        SessionParseError::at_path(parent_path, "open Claude parent session", source)
+    })?;
     let reader = BufReader::new(file);
 
     // tool_use.id → subagent_type
@@ -238,27 +300,34 @@ fn build_parent_subagent_type_lookup(parent_path: &Path) -> Option<HashMap<Strin
     // tool_use_id → agentId (from tool_result text)
     let mut agent_id_links: HashMap<String, String> = HashMap::new();
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|source| {
+            SessionParseError::at_path(
+                parent_path,
+                "read Claude parent session line",
+                std::io::Error::new(source.kind(), format!("line {}: {source}", line_index + 1)),
+            )
+        })?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        // Quick pre-filter: skip lines that can't contain what we need
         let has_subagent_type = trimmed.contains("subagent_type");
         let has_agent_id_text = trimmed.contains("agentId:");
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|source| {
+            SessionParseError::at_path(
+                parent_path,
+                "decode Claude parent session line",
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("line {}: {source}", line_index + 1),
+                ),
+            )
+        })?;
         if !has_subagent_type && !has_agent_id_text {
             continue;
         }
-
-        let value: serde_json::Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
 
         let content = match value
             .get("message")
@@ -270,37 +339,122 @@ fn build_parent_subagent_type_lookup(parent_path: &Path) -> Option<HashMap<Strin
         };
 
         for block in content {
-            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let block_type = block
+                .get("type")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    SessionParseError::at_path(
+                        parent_path,
+                        "validate Claude parent session line",
+                        std::io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!(
+                                "line {}: message content block is missing type",
+                                line_index + 1
+                            ),
+                        ),
+                    )
+                })?;
 
             match block_type {
                 "tool_use" if has_subagent_type => {
-                    if let (Some(id), Some(subagent_type)) = (
-                        block.get("id").and_then(|i| i.as_str()),
-                        block
-                            .get("input")
-                            .and_then(|inp| inp.get("subagent_type"))
-                            .and_then(|s| s.as_str()),
-                    ) {
-                        tool_use_types.insert(id.to_string(), subagent_type.to_string());
+                    let Some(subagent_type) = block
+                        .get("input")
+                        .and_then(|input| input.get("subagent_type"))
+                        .and_then(|value| value.as_str())
+                    else {
+                        continue;
+                    };
+                    let id = block
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| {
+                            SessionParseError::at_path(
+                                parent_path,
+                                "validate Claude parent session line",
+                                std::io::Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!(
+                                        "line {}: subagent tool_use is missing id",
+                                        line_index + 1
+                                    ),
+                                ),
+                            )
+                        })?;
+                    if subagent_type.trim().is_empty() {
+                        return Err(SessionParseError::at_path(
+                            parent_path,
+                            "validate Claude parent session line",
+                            std::io::Error::new(
+                                ErrorKind::InvalidData,
+                                format!("line {}: subagent_type is blank", line_index + 1),
+                            ),
+                        ));
                     }
+                    tool_use_types.insert(id.to_string(), subagent_type.to_string());
                 }
                 "tool_result" if has_agent_id_text => {
+                    let block_contains_agent_id = block
+                        .get("content")
+                        .is_some_and(|content| content.to_string().contains("agentId:"));
+                    if !block_contains_agent_id {
+                        continue;
+                    }
                     let tool_use_id = match block.get("tool_use_id").and_then(|i| i.as_str()) {
                         Some(id) => id.to_string(),
-                        None => continue,
+                        None => {
+                            return Err(SessionParseError::at_path(
+                                parent_path,
+                                "validate Claude parent session line",
+                                std::io::Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!(
+                                        "line {}: agent tool_result is missing tool_use_id",
+                                        line_index + 1
+                                    ),
+                                ),
+                            ));
+                        }
                     };
                     // Walk content blocks looking for "agentId: <hex>" in text
-                    let result_content = match block.get("content").and_then(|c| c.as_array()) {
-                        Some(arr) => arr,
-                        None => continue,
-                    };
+                    let result_content = block
+                        .get("content")
+                        .and_then(|content| content.as_array())
+                        .ok_or_else(|| {
+                            SessionParseError::at_path(
+                                parent_path,
+                                "validate Claude parent session line",
+                                std::io::Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!(
+                                        "line {}: agent tool_result content is not an array",
+                                        line_index + 1
+                                    ),
+                                ),
+                            )
+                        })?;
+                    let mut linked_agent = false;
                     for cb in result_content {
                         if let Some(text) = cb.get("text").and_then(|t| t.as_str()) {
                             if let Some(aid) = extract_agent_id_from_text(text) {
                                 agent_id_links.insert(tool_use_id.clone(), aid);
+                                linked_agent = true;
                                 break;
                             }
                         }
+                    }
+                    if !linked_agent {
+                        return Err(SessionParseError::at_path(
+                            parent_path,
+                            "validate Claude parent session line",
+                            std::io::Error::new(
+                                ErrorKind::InvalidData,
+                                format!(
+                                    "line {}: agent tool_result contains no valid agentId",
+                                    line_index + 1
+                                ),
+                            ),
+                        ));
                     }
                 }
                 _ => {}
@@ -315,7 +469,7 @@ fn build_parent_subagent_type_lookup(parent_path: &Path) -> Option<HashMap<Strin
         }
     }
 
-    Some(subagent_types)
+    Ok(subagent_types)
 }
 
 fn sidechain_agent_id_from_stem(stem: &str) -> Option<String> {
@@ -350,12 +504,15 @@ fn extract_agent_id_from_text(text: &str) -> Option<String> {
 }
 
 /// Parse a Claude Code JSONL file
-pub fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
+pub fn parse_claude_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
     let home_dir = dirs::home_dir();
     parse_claude_file_with_home(path, home_dir.as_deref())
 }
 
-pub fn parse_claude_file_with_home(path: &Path, home_dir: Option<&Path>) -> Vec<UnifiedMessage> {
+pub fn parse_claude_file_with_home(
+    path: &Path,
+    home_dir: Option<&Path>,
+) -> SessionParseResult<Vec<UnifiedMessage>> {
     let mut parent_cache = ParentSubagentTypeCache::new();
     parse_claude_file_with_cache_and_home(path, &mut parent_cache, home_dir)
 }
@@ -363,7 +520,7 @@ pub fn parse_claude_file_with_home(path: &Path, home_dir: Option<&Path>) -> Vec<
 pub fn parse_claude_file_with_cache(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
-) -> Vec<UnifiedMessage> {
+) -> SessionParseResult<Vec<UnifiedMessage>> {
     let home_dir = dirs::home_dir();
     parse_claude_file_with_cache_and_home(path, parent_cache, home_dir.as_deref())
 }
@@ -372,14 +529,14 @@ pub fn parse_claude_file_with_cache_and_home(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
     home_dir: Option<&Path>,
-) -> Vec<UnifiedMessage> {
+) -> SessionParseResult<Vec<UnifiedMessage>> {
     if is_workflow_journal(path) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let (workspace_key, workspace_label) = claude_workspace_from_path(path);
     let is_transcript_path = is_claude_transcripts_path(path);
-    let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir);
+    let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir)?;
     let client_id = cc_mirror_metadata
         .as_ref()
         .map(CcMirrorVariantMetadata::client_id)
@@ -390,30 +547,31 @@ pub fn parse_claude_file_with_cache_and_home(
     let mut session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
+        .ok_or_else(|| {
+            SessionParseError::at_path(
+                path,
+                "validate Claude session source path",
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "source file stem is missing or not valid UTF-8",
+                ),
+            )
+        })?
         .to_string();
 
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-
     if path.extension().and_then(|s| s.to_str()) == Some("json") {
-        let json_messages = parse_claude_headless_json(
+        return parse_claude_headless_json(
             path,
             &session_id,
-            fallback_timestamp,
             workspace_key.clone(),
             workspace_label.clone(),
             &client_id,
             metadata_provider_hint,
         );
-        if !json_messages.is_empty() {
-            return json_messages;
-        }
     }
 
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
+    let file = std::fs::File::open(path)
+        .map_err(|source| SessionParseError::at_path(path, "open Claude session", source))?;
 
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
@@ -438,11 +596,14 @@ pub fn parse_claude_file_with_cache_and_home(
     let mut sidechain_agent_instance: Option<String> = None;
     let mut sidechain_detected = false;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|source| {
+            SessionParseError::at_path(
+                path,
+                "read Claude session line",
+                std::io::Error::new(source.kind(), format!("line {}: {source}", line_index + 1)),
+            )
+        })?;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -452,18 +613,57 @@ pub fn parse_claude_file_with_cache_and_home(
         let mut handled = false;
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
-        if let Ok(entry) = simd_json::from_slice::<ClaudeEntry>(&mut buffer) {
+        let entry = simd_json::from_slice::<ClaudeEntry>(&mut buffer).map_err(|source| {
+            SessionParseError::at_path(
+                path,
+                "decode Claude session line",
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("line {}: {source}", line_index + 1),
+                ),
+            )
+        })?;
+        {
             let entry_workspace = entry.cwd.as_deref().and_then(workspace_parts_from_key);
+            if entry.entry_type.trim().is_empty() {
+                return Err(SessionParseError::at_path(
+                    path,
+                    "validate Claude session entry",
+                    std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("line {}: entry type is blank", line_index + 1),
+                    ),
+                ));
+            }
+            let entry_timestamp = parse_claude_entry_timestamp_checked(
+                path,
+                line_index + 1,
+                entry.timestamp.as_deref(),
+            )?;
 
             // Detect sidechain on the first parseable entry (any type).
             // All lines in a subagent file carry isSidechain: true.
             if !sidechain_detected {
                 sidechain_detected = true;
                 if entry.is_sidechain {
-                    // Use parent session ID to fix inflated session counts
-                    if let Some(ref parent_id) = entry.session_id {
-                        session_id = parent_id.clone();
-                    }
+                    let parent_id = entry
+                        .session_id
+                        .as_deref()
+                        .filter(|parent_id| !parent_id.trim().is_empty())
+                        .ok_or_else(|| {
+                            SessionParseError::at_path(
+                                path,
+                                "validate Claude sidechain session",
+                                std::io::Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!(
+                                        "line {}: sidechain entry is missing sessionId",
+                                        line_index + 1
+                                    ),
+                                ),
+                            )
+                        })?;
+                    session_id = parent_id.to_string();
                     let stem_agent_id = path
                         .file_stem()
                         .and_then(|stem| stem.to_str())
@@ -474,7 +674,7 @@ pub fn parse_claude_file_with_cache_and_home(
                         entry.session_id.as_deref(),
                         entry.agent_id.as_deref(),
                         parent_cache,
-                    ));
+                    )?);
                 }
             }
 
@@ -485,18 +685,19 @@ pub fn parse_claude_file_with_cache_and_home(
                     &workspace_label,
                 );
                 let tool_result_message = if is_transcript_path {
-                    None
+                    Ok(None)
                 } else {
                     extract_claude_tool_result_message(
                         trimmed,
                         ClaudeToolResultContext {
+                            source_path: path,
+                            line_number: line_index + 1,
                             entry: &entry,
                             last_model: last_model.as_deref(),
                             last_provider_hint: last_provider_hint.as_deref(),
                             client_id: &client_id,
                             default_provider_hint: metadata_provider_hint,
                             session_id: &session_id,
-                            fallback_timestamp,
                             suppress_unattributed: suppress_unattributed_tool_results,
                             workspace_key: context_workspace_key,
                             workspace_label: context_workspace_label,
@@ -504,10 +705,9 @@ pub fn parse_claude_file_with_cache_and_home(
                             sidechain_agent_instance: sidechain_agent_instance.clone(),
                         },
                     )
-                };
+                }?;
 
-                if let Some(timestamp_ms) = parse_claude_entry_timestamp(entry.timestamp.as_deref())
-                {
+                if let Some(timestamp_ms) = entry_timestamp {
                     pending_request_start_timestamp_ms = Some(timestamp_ms);
                 }
 
@@ -566,6 +766,19 @@ pub fn parse_claude_file_with_cache_and_home(
                     Some(u) => u,
                     None => continue,
                 };
+                let parsed_timestamp = entry_timestamp.ok_or_else(|| {
+                    SessionParseError::at_path(
+                        path,
+                        "validate Claude assistant timestamp",
+                        std::io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!(
+                                "line {}: token-bearing assistant message is missing timestamp",
+                                line_index + 1
+                            ),
+                        ),
+                    )
+                })?;
 
                 let provider_hint = message
                     .provider_id
@@ -593,7 +806,7 @@ pub fn parse_claude_file_with_cache_and_home(
                             merge_claude_duplicate(
                                 &mut messages[existing_idx],
                                 &usage,
-                                parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                                parsed_timestamp,
                                 pending_request_start_timestamp_ms,
                             );
                             if let Some(workspace) = entry_workspace.as_ref() {
@@ -623,7 +836,7 @@ pub fn parse_claude_file_with_cache_and_home(
                             merge_claude_duplicate(
                                 &mut messages[existing_idx],
                                 &usage,
-                                parse_claude_entry_timestamp(entry.timestamp.as_deref()),
+                                parsed_timestamp,
                                 pending_request_start_timestamp_ms,
                             );
                             if let Some(workspace) = entry_workspace.as_ref() {
@@ -645,17 +858,37 @@ pub fn parse_claude_file_with_cache_and_home(
 
                 let raw_model = match message.model {
                     Some(m) => m,
-                    None => continue,
+                    None => {
+                        return Err(SessionParseError::at_path(
+                            path,
+                            "validate Claude assistant message",
+                            std::io::Error::new(
+                                ErrorKind::InvalidData,
+                                format!(
+                                    "line {}: token-bearing assistant message is missing model",
+                                    line_index + 1
+                                ),
+                            ),
+                        ));
+                    }
                 };
+                if raw_model.trim().is_empty() {
+                    return Err(SessionParseError::at_path(
+                        path,
+                        "validate Claude assistant message",
+                        std::io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!("line {}: assistant model is blank", line_index + 1),
+                        ),
+                    ));
+                }
                 let model = canonicalize_claude_model(&raw_model);
                 let provider_choice =
                     claude_provider_choice_for_models(&raw_model, &model, provider_hint.as_deref());
                 let provider_confidence = provider_choice.confidence;
 
-                let parsed_timestamp = parse_claude_entry_timestamp(entry.timestamp.as_deref());
-                let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
                 let duration_ms =
-                    duration_between_ms(pending_request_start_timestamp_ms, parsed_timestamp);
+                    duration_between_ms(pending_request_start_timestamp_ms, Some(parsed_timestamp));
 
                 // Insert dedup index only after all checks pass, right before push
                 let dedup_key = pending_hash.inspect(|hash| {
@@ -667,7 +900,7 @@ pub fn parse_claude_file_with_cache_and_home(
                     model,
                     provider_choice.id,
                     session_id.clone(),
-                    timestamp,
+                    parsed_timestamp,
                     TokenBreakdown {
                         input: usage.input_tokens.unwrap_or(0).max(0),
                         output: usage.output_tokens.unwrap_or(0).max(0),
@@ -713,12 +946,15 @@ pub fn parse_claude_file_with_cache_and_home(
 
         if let Some(message) = process_claude_headless_line(
             trimmed,
-            &session_id,
+            ClaudeHeadlessContext {
+                path,
+                line_number: Some(line_index + 1),
+                session_id: &session_id,
+                client_id: &client_id,
+                default_provider_hint: metadata_provider_hint,
+            },
             &mut headless_state,
-            fallback_timestamp,
-            &client_id,
-            metadata_provider_hint,
-        ) {
+        )? {
             let mut message = message;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
             let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
@@ -729,11 +965,14 @@ pub fn parse_claude_file_with_cache_and_home(
 
     if let Some(message) = finalize_headless_state(
         &mut headless_state,
-        &session_id,
-        fallback_timestamp,
-        &client_id,
-        metadata_provider_hint,
-    ) {
+        ClaudeHeadlessContext {
+            path,
+            line_number: None,
+            session_id: &session_id,
+            client_id: &client_id,
+            default_provider_hint: metadata_provider_hint,
+        },
+    )? {
         let mut message = message;
         message.set_workspace(workspace_key, workspace_label);
         let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
@@ -741,7 +980,7 @@ pub fn parse_claude_file_with_cache_and_home(
         provider_confidences.push(provider_confidence);
     }
 
-    messages
+    Ok(messages)
 }
 
 fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
@@ -857,35 +1096,87 @@ fn cc_mirror_provider_id(raw: &str) -> Option<String> {
 fn cc_mirror_variant_metadata_from_path(
     path: &Path,
     home_dir: Option<&Path>,
-) -> Option<CcMirrorVariantMetadata> {
-    let variant_dir = crate::cc_mirror::variant_dir_from_session_path(path, home_dir)?;
-    let variant_name = variant_dir.file_name()?.to_string_lossy().to_string();
+) -> SessionParseResult<Option<CcMirrorVariantMetadata>> {
+    let Some(variant_dir) =
+        crate::cc_mirror::variant_dir_from_session_path_checked(path, home_dir)?
+    else {
+        return Ok(None);
+    };
+    let variant_name = variant_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            SessionParseError::at_path(
+                &variant_dir,
+                "validate cc-mirror variant path",
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "variant directory name is missing or not valid UTF-8",
+                ),
+            )
+        })?
+        .to_string();
     let variant_path = crate::cc_mirror::variant_file_path(&variant_dir);
-    let metadata = crate::cc_mirror::read_variant_file(&variant_path);
+    let metadata = crate::cc_mirror::read_variant_file_checked(&variant_path)?;
 
-    let name = metadata
+    let name = match metadata
         .as_ref()
         .and_then(|metadata| metadata.name.as_deref())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or(&variant_name)
-        .to_string();
-    let provider_id = metadata
-        .as_ref()
-        .and_then(|metadata| {
-            metadata
-                .provider_id
-                .as_deref()
-                .or(metadata.provider.as_deref())
-        })
-        .and_then(cc_mirror_provider_id);
+    {
+        Some(name) if !name.trim().is_empty() => name.to_string(),
+        Some(_) => {
+            return Err(SessionParseError::at_path(
+                &variant_path,
+                "validate cc-mirror variant metadata",
+                std::io::Error::new(ErrorKind::InvalidData, "variant name is blank"),
+            ));
+        }
+        None => variant_name,
+    };
+    let provider_id = match metadata.as_ref().and_then(|metadata| {
+        metadata
+            .provider_id
+            .as_deref()
+            .or(metadata.provider.as_deref())
+    }) {
+        Some(provider) => Some(cc_mirror_provider_id(provider).ok_or_else(|| {
+            SessionParseError::at_path(
+                &variant_path,
+                "validate cc-mirror variant metadata",
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("unsupported provider `{provider}`"),
+                ),
+            )
+        })?),
+        None => None,
+    };
 
-    Some(CcMirrorVariantMetadata { name, provider_id })
+    Ok(Some(CcMirrorVariantMetadata { name, provider_id }))
 }
 
-fn parse_claude_entry_timestamp(timestamp: Option<&str>) -> Option<i64> {
-    timestamp
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.timestamp_millis())
+fn parse_claude_entry_timestamp_checked(
+    path: &Path,
+    line_number: usize,
+    timestamp: Option<&str>,
+) -> SessionParseResult<Option<i64>> {
+    match timestamp {
+        None => Ok(None),
+        Some(timestamp) => chrono::DateTime::parse_from_rfc3339(timestamp)
+            .map(|parsed| Some(parsed.timestamp_millis()))
+            .map_err(|source| {
+                SessionParseError::at_path(
+                    path,
+                    "validate Claude session timestamp",
+                    std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "line {line_number}: invalid RFC 3339 timestamp `{timestamp}`: {source}"
+                        ),
+                    ),
+                )
+            }),
+    }
 }
 
 fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
@@ -896,7 +1187,7 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
 fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
     usage: &ClaudeUsage,
-    parsed_timestamp: Option<i64>,
+    parsed_timestamp: i64,
     request_start_timestamp_ms: Option<i64>,
 ) {
     // Per-field max merge: each token field is updated independently.
@@ -910,24 +1201,22 @@ fn merge_claude_duplicate(
         .cache_write
         .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
 
-    if let Some(timestamp_ms) = parsed_timestamp {
-        if timestamp_ms >= existing.timestamp {
-            // Recover the original request-start timestamp from the existing
-            // message's recorded duration. The parent loop clears
-            // `pending_request_start_timestamp_ms` after the first chunk of a
-            // message commits (so a NEW message with no preceding user doesn't
-            // inflate by reusing a stale start), which would otherwise blank
-            // out streaming duplicates' duration. Recovering from
-            // `existing.timestamp - existing.duration_ms` keeps the duration
-            // honest for late chunks of the same logical message.
-            let recovered_start = existing
-                .duration_ms
-                .map(|d| existing.timestamp - d)
-                .or(request_start_timestamp_ms);
-            existing.set_timestamp(timestamp_ms);
-            if let Some(new_duration) = duration_between_ms(recovered_start, Some(timestamp_ms)) {
-                existing.duration_ms = Some(new_duration);
-            }
+    if parsed_timestamp >= existing.timestamp {
+        // Recover the original request-start timestamp from the existing
+        // message's recorded duration. The parent loop clears
+        // `pending_request_start_timestamp_ms` after the first chunk of a
+        // message commits (so a NEW message with no preceding user doesn't
+        // inflate by reusing a stale start), which would otherwise blank
+        // out streaming duplicates' duration. Recovering from
+        // `existing.timestamp - existing.duration_ms` keeps the duration
+        // honest for late chunks of the same logical message.
+        let recovered_start = existing
+            .duration_ms
+            .map(|d| existing.timestamp - d)
+            .or(request_start_timestamp_ms);
+        existing.set_timestamp(parsed_timestamp);
+        if let Some(new_duration) = duration_between_ms(recovered_start, Some(parsed_timestamp)) {
+            existing.duration_ms = Some(new_duration);
         }
     }
 }
@@ -949,13 +1238,14 @@ struct ClaudeToolResultUsage {
 }
 
 struct ClaudeToolResultContext<'a> {
+    source_path: &'a Path,
+    line_number: usize,
     entry: &'a ClaudeEntry,
     last_model: Option<&'a str>,
     last_provider_hint: Option<&'a str>,
     client_id: &'a str,
     default_provider_hint: Option<&'a str>,
     session_id: &'a str,
-    fallback_timestamp: i64,
     suppress_unattributed: bool,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
@@ -966,9 +1256,20 @@ struct ClaudeToolResultContext<'a> {
 fn extract_claude_tool_result_message(
     line: &str,
     context: ClaudeToolResultContext<'_>,
-) -> Option<UnifiedMessage> {
-    let value: Value = serde_json::from_str(line).ok()?;
-    let usage = extract_claude_tool_result_usage(&value)?;
+) -> SessionParseResult<Option<UnifiedMessage>> {
+    let value: Value = serde_json::from_str(line).map_err(|source| {
+        SessionParseError::at_path(
+            context.source_path,
+            "decode Claude tool-result line",
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("line {}: {source}", context.line_number),
+            ),
+        )
+    })?;
+    let Some(usage) = extract_claude_tool_result_usage(&value) else {
+        return Ok(None);
+    };
 
     let explicit_model = extract_claude_model(&value).or_else(|| {
         context
@@ -979,14 +1280,23 @@ fn extract_claude_tool_result_message(
     });
     let raw_model = match explicit_model {
         Some(model) => model,
-        None if context.suppress_unattributed => return None,
-        None => context
-            .last_model
-            .map(str::to_string)
-            .unwrap_or_else(|| "unknown".to_string()),
+        None if context.suppress_unattributed => return Ok(None),
+        None => context.last_model.map(str::to_string).ok_or_else(|| {
+            SessionParseError::at_path(
+                context.source_path,
+                "validate Claude tool-result model",
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "line {}: token-bearing tool result has no model context",
+                        context.line_number
+                    ),
+                ),
+            )
+        })?,
     };
     if is_claude_synthetic_placeholder_model(&raw_model) {
-        return None;
+        return Ok(None);
     }
     let provider_hint = extract_claude_provider(&value)
         .or_else(|| {
@@ -1003,9 +1313,30 @@ fn extract_claude_tool_result_message(
     let model = canonicalize_claude_model(&raw_model);
     let provider_choice =
         claude_provider_choice_for_models(&raw_model, &model, provider_hint.as_deref());
-    let timestamp = parse_claude_entry_timestamp(context.entry.timestamp.as_deref())
-        .or_else(|| extract_claude_timestamp(&value))
-        .unwrap_or(context.fallback_timestamp);
+    let timestamp = parse_claude_entry_timestamp_checked(
+        context.source_path,
+        context.line_number,
+        context.entry.timestamp.as_deref(),
+    )?
+    .or(extract_claude_timestamp_checked(
+        &value,
+        context.source_path,
+        Some(context.line_number),
+        "validate Claude tool-result timestamp",
+    )?)
+    .ok_or_else(|| {
+        SessionParseError::at_path(
+            context.source_path,
+            "validate Claude tool-result timestamp",
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "line {}: token-bearing tool result is missing timestamp",
+                    context.line_number
+                ),
+            ),
+        )
+    })?;
 
     let mut message = UnifiedMessage::new_with_dedup(
         context.client_id,
@@ -1035,7 +1366,7 @@ fn extract_claude_tool_result_message(
         .map(crate::sessions::intern::intern);
     message.set_agent_instance(context.sidechain_agent_instance);
     message.set_workspace(context.workspace_key, context.workspace_label);
-    Some(message)
+    Ok(Some(message))
 }
 
 fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsage> {
@@ -1230,66 +1561,76 @@ struct ClaudeHeadlessState {
     cache_read: i64,
     cache_write: i64,
     timestamp_ms: Option<i64>,
+    source_line_number: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct ClaudeHeadlessContext<'a> {
+    path: &'a Path,
+    line_number: Option<usize>,
+    session_id: &'a str,
+    client_id: &'a str,
+    default_provider_hint: Option<&'a str>,
 }
 
 fn parse_claude_headless_json(
     path: &Path,
     session_id: &str,
-    fallback_timestamp: i64,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
     client_id: &str,
     default_provider_hint: Option<&str>,
-) -> Vec<UnifiedMessage> {
-    let Some(data) = read_file_or_none(path) else {
-        return Vec::new();
-    };
-
-    let mut bytes = data;
-    let value: Value = match simd_json::from_slice(&mut bytes) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let mut bytes = std::fs::read(path)
+        .map_err(|source| SessionParseError::at_path(path, "read Claude JSON source", source))?;
+    let value: Value = simd_json::from_slice(&mut bytes)
+        .map_err(|source| SessionParseError::at_path(path, "decode Claude JSON source", source))?;
 
     let mut messages = Vec::with_capacity(1);
     if let Some(message) = extract_claude_headless_message(
         &value,
-        session_id,
-        fallback_timestamp,
-        client_id,
-        default_provider_hint,
-    ) {
+        ClaudeHeadlessContext {
+            path,
+            line_number: None,
+            session_id,
+            client_id,
+            default_provider_hint,
+        },
+    )? {
         let mut message = message;
         message.set_workspace(workspace_key, workspace_label);
         messages.push(message);
     }
 
-    messages
+    Ok(messages)
 }
 
 fn process_claude_headless_line(
     line: &str,
-    session_id: &str,
+    context: ClaudeHeadlessContext<'_>,
     state: &mut ClaudeHeadlessState,
-    fallback_timestamp: i64,
-    client_id: &str,
-    default_provider_hint: Option<&str>,
-) -> Option<UnifiedMessage> {
+) -> SessionParseResult<Option<UnifiedMessage>> {
     let mut bytes = line.as_bytes().to_vec();
-    let value: Value = simd_json::from_slice(&mut bytes).ok()?;
+    let value: Value = simd_json::from_slice(&mut bytes).map_err(|source| {
+        SessionParseError::at_path(
+            context.path,
+            "decode Claude headless event",
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{}: {source}",
+                    claude_headless_location(context.line_number)
+                ),
+            ),
+        )
+    })?;
 
-    let event_type = value.get("type").and_then(|val| val.as_str()).unwrap_or("");
+    let event_type = value.get("type").and_then(|val| val.as_str());
     let mut completed_message: Option<UnifiedMessage> = None;
 
     match event_type {
-        "message_start" => {
-            completed_message = finalize_headless_state(
-                state,
-                session_id,
-                fallback_timestamp,
-                client_id,
-                default_provider_hint,
-            );
+        Some("message_start") => {
+            completed_message = finalize_headless_state(state, context)?;
 
             let model = extract_claude_model(&value);
             if model
@@ -1297,11 +1638,17 @@ fn process_claude_headless_line(
                 .is_some_and(is_claude_synthetic_placeholder_model)
             {
                 *state = ClaudeHeadlessState::default();
-                return completed_message;
+                return Ok(completed_message);
             }
             state.model = model;
             state.provider_id = extract_claude_provider(&value);
-            state.timestamp_ms = extract_claude_timestamp(&value).or(state.timestamp_ms);
+            state.timestamp_ms = extract_claude_timestamp_checked(
+                &value,
+                context.path,
+                context.line_number,
+                "validate Claude headless timestamp",
+            )?;
+            state.source_line_number = context.line_number;
             if let Some(usage) = value
                 .get("message")
                 .and_then(|msg| msg.get("usage"))
@@ -1310,7 +1657,7 @@ fn process_claude_headless_line(
                 update_claude_usage(state, usage);
             }
         }
-        "message_delta" => {
+        Some("message_delta") => {
             if let Some(usage) = value
                 .get("usage")
                 .or_else(|| value.get("delta").and_then(|delta| delta.get("usage")))
@@ -1318,59 +1665,77 @@ fn process_claude_headless_line(
                 update_claude_usage(state, usage);
             }
         }
-        "message_stop" => {
-            completed_message = finalize_headless_state(
-                state,
-                session_id,
-                fallback_timestamp,
-                client_id,
-                default_provider_hint,
-            );
+        Some("message_stop") => {
+            completed_message = finalize_headless_state(state, context)?;
         }
         _ => {
-            if let Some(message) = extract_claude_headless_message(
-                &value,
-                session_id,
-                fallback_timestamp,
-                client_id,
-                default_provider_hint,
-            ) {
+            if let Some(message) = extract_claude_headless_message(&value, context)? {
                 completed_message = Some(message);
             }
         }
     }
 
-    completed_message
+    Ok(completed_message)
 }
 
 fn extract_claude_headless_message(
     value: &Value,
-    session_id: &str,
-    fallback_timestamp: i64,
-    client_id: &str,
-    default_provider_hint: Option<&str>,
-) -> Option<UnifiedMessage> {
-    let usage = value
+    context: ClaudeHeadlessContext<'_>,
+) -> SessionParseResult<Option<UnifiedMessage>> {
+    let Some(usage) = value
         .get("usage")
-        .or_else(|| value.get("message").and_then(|msg| msg.get("usage")))?;
-    let raw_model = extract_claude_model(value)?;
+        .or_else(|| value.get("message").and_then(|msg| msg.get("usage")))
+    else {
+        return Ok(None);
+    };
+    let raw_model = extract_claude_model(value).ok_or_else(|| {
+        SessionParseError::at_path(
+            context.path,
+            "validate Claude headless message",
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{}: token-bearing headless message is missing model",
+                    claude_headless_location(context.line_number)
+                ),
+            ),
+        )
+    })?;
     if is_claude_synthetic_placeholder_model(&raw_model) {
-        return None;
+        return Ok(None);
     }
     let provider_hint = extract_claude_provider(value);
     let model = canonicalize_claude_model(&raw_model);
     let provider_id = claude_provider_id_for_models(
         &raw_model,
         &model,
-        provider_hint.as_deref().or(default_provider_hint),
+        provider_hint.as_deref().or(context.default_provider_hint),
     );
-    let timestamp = extract_claude_timestamp(value).unwrap_or(fallback_timestamp);
+    let timestamp = extract_claude_timestamp_checked(
+        value,
+        context.path,
+        context.line_number,
+        "validate Claude headless timestamp",
+    )?
+    .ok_or_else(|| {
+        SessionParseError::at_path(
+            context.path,
+            "validate Claude headless timestamp",
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{}: token-bearing headless message is missing timestamp",
+                    claude_headless_location(context.line_number)
+                ),
+            ),
+        )
+    })?;
 
-    Some(UnifiedMessage::new(
-        client_id,
+    Ok(Some(UnifiedMessage::new(
+        context.client_id,
         model,
         provider_id,
-        session_id,
+        context.session_id,
         timestamp,
         TokenBreakdown {
             input: extract_i64(usage.get("input_tokens")).unwrap_or(0).max(0),
@@ -1384,7 +1749,7 @@ fn extract_claude_headless_message(
             reasoning: 0,
         },
         0.0,
-    ))
+    )))
 }
 
 /// Internal Claude Code system/tool tags that should NOT be counted as human turns.
@@ -1586,12 +1951,45 @@ fn provider_from_model_prefix(model: &str) -> Option<String> {
     }
 }
 
-fn extract_claude_timestamp(value: &Value) -> Option<i64> {
-    value
+fn extract_claude_timestamp_checked(
+    value: &Value,
+    path: &Path,
+    line_number: Option<usize>,
+    operation: &'static str,
+) -> SessionParseResult<Option<i64>> {
+    let Some(raw_timestamp) = value
         .get("timestamp")
         .or_else(|| value.get("created_at"))
-        .or_else(|| value.get("message").and_then(|msg| msg.get("created_at")))
-        .and_then(parse_timestamp_value)
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("created_at"))
+        })
+    else {
+        return Ok(None);
+    };
+
+    parse_timestamp_value(raw_timestamp)
+        .map(Some)
+        .ok_or_else(|| {
+            SessionParseError::at_path(
+                path,
+                operation,
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "{}: invalid timestamp value {raw_timestamp}",
+                        claude_headless_location(line_number)
+                    ),
+                ),
+            )
+        })
+}
+
+fn claude_headless_location(line_number: Option<usize>) -> String {
+    line_number
+        .map(|line_number| format!("line {line_number}"))
+        .unwrap_or_else(|| "JSON source".to_string())
 }
 
 fn update_claude_usage(state: &mut ClaudeHeadlessState, usage: &Value) {
@@ -1611,33 +2009,59 @@ fn update_claude_usage(state: &mut ClaudeHeadlessState, usage: &Value) {
 
 fn finalize_headless_state(
     state: &mut ClaudeHeadlessState,
-    session_id: &str,
-    fallback_timestamp: i64,
-    client_id: &str,
-    default_provider_hint: Option<&str>,
-) -> Option<UnifiedMessage> {
-    let raw_model = state.model.clone()?;
+    context: ClaudeHeadlessContext<'_>,
+) -> SessionParseResult<Option<UnifiedMessage>> {
+    if state.input == 0 && state.output == 0 && state.cache_read == 0 && state.cache_write == 0 {
+        *state = ClaudeHeadlessState::default();
+        return Ok(None);
+    }
+
+    let source_line_number = state.source_line_number.or(context.line_number);
+    let raw_model = state.model.clone().ok_or_else(|| {
+        SessionParseError::at_path(
+            context.path,
+            "validate Claude headless message",
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{}: token-bearing headless message is missing model",
+                    claude_headless_location(source_line_number)
+                ),
+            ),
+        )
+    })?;
     if is_claude_synthetic_placeholder_model(&raw_model) {
         *state = ClaudeHeadlessState::default();
-        return None;
+        return Ok(None);
     }
     let model = canonicalize_claude_model(&raw_model);
     let provider_id = claude_provider_id_for_models(
         &raw_model,
         &model,
-        state.provider_id.as_deref().or(default_provider_hint),
+        state
+            .provider_id
+            .as_deref()
+            .or(context.default_provider_hint),
     );
-    let timestamp = state.timestamp_ms.unwrap_or(fallback_timestamp);
-    if state.input == 0 && state.output == 0 && state.cache_read == 0 && state.cache_write == 0 {
-        *state = ClaudeHeadlessState::default();
-        return None;
-    }
+    let timestamp = state.timestamp_ms.ok_or_else(|| {
+        SessionParseError::at_path(
+            context.path,
+            "validate Claude headless timestamp",
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{}: token-bearing headless message is missing timestamp",
+                    claude_headless_location(source_line_number)
+                ),
+            ),
+        )
+    })?;
 
     let message = UnifiedMessage::new(
-        client_id,
+        context.client_id,
         model,
         provider_id,
-        session_id,
+        context.session_id,
         timestamp,
         TokenBreakdown {
             input: state.input.max(0),
@@ -1650,7 +2074,7 @@ fn finalize_headless_state(
     );
 
     *state = ClaudeHeadlessState::default();
-    Some(message)
+    Ok(Some(message))
 }
 
 #[cfg(test)]
@@ -1744,13 +2168,148 @@ mod tests {
     }
 
     #[test]
+    fn missing_primary_source_reports_its_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("missing.jsonl");
+
+        let error = parse_claude_file_with_home(&path, Some(temp_dir.path())).unwrap_err();
+
+        assert_eq!(error.path(), Some(path.as_path()));
+        assert_eq!(error.operation(), "open Claude session");
+        assert!(error.to_string().contains("missing.jsonl"));
+    }
+
+    #[test]
+    fn malformed_primary_jsonl_reports_decode_error() {
+        let file = create_test_file("{not-json\n");
+
+        let error = parse_claude_file(file.path()).unwrap_err();
+
+        assert_eq!(error.path(), Some(file.path()));
+        assert_eq!(error.operation(), "decode Claude session line");
+        assert!(error.to_string().contains("line 1"));
+    }
+
+    #[test]
+    fn token_bearing_headless_json_without_model_reports_semantic_error() {
+        let mut file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        writeln!(
+            file,
+            r#"{{"usage":{{"input_tokens":1,"output_tokens":1}}}}"#
+        )
+        .unwrap();
+
+        let error = parse_claude_file(file.path()).unwrap_err();
+
+        assert_eq!(error.path(), Some(file.path()));
+        assert_eq!(error.operation(), "validate Claude headless message");
+    }
+
+    #[test]
+    fn token_bearing_assistant_without_timestamp_reports_semantic_error() {
+        let file = create_test_file(
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        );
+
+        let error = parse_claude_file(file.path()).unwrap_err();
+
+        assert_eq!(error.path(), Some(file.path()));
+        assert_eq!(error.operation(), "validate Claude assistant timestamp");
+        assert!(error.to_string().contains("line 1"));
+    }
+
+    #[test]
+    fn token_bearing_headless_json_without_timestamp_reports_semantic_error() {
+        let mut file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"message","message":{{"model":"claude-sonnet-4.6","usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+        )
+        .unwrap();
+
+        let error = parse_claude_file(file.path()).unwrap_err();
+
+        assert_eq!(error.path(), Some(file.path()));
+        assert_eq!(error.operation(), "validate Claude headless timestamp");
+        assert!(error.to_string().contains("JSON source"));
+    }
+
+    #[test]
+    fn token_bearing_tool_result_without_timestamp_reports_semantic_error() {
+        let file = create_test_file(
+            r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1,"output_tokens":1}}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_missing_timestamp","tool_output":{"output":"abcdefghijklmnop"}}]}}"#,
+        );
+
+        let error = parse_claude_file(file.path()).unwrap_err();
+
+        assert_eq!(error.path(), Some(file.path()));
+        assert_eq!(error.operation(), "validate Claude tool-result timestamp");
+        assert!(error.to_string().contains("line 2"));
+    }
+
+    #[test]
+    fn token_bearing_headless_stream_without_timestamp_reports_semantic_error() {
+        let file = create_test_file(
+            r#"{"type":"message_start","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1}}}
+{"type":"message_stop"}"#,
+        );
+
+        let error = parse_claude_file(file.path()).unwrap_err();
+
+        assert_eq!(error.path(), Some(file.path()));
+        assert_eq!(error.operation(), "validate Claude headless timestamp");
+        assert!(error.to_string().contains("line 1"));
+    }
+
+    #[test]
+    fn malformed_sidechain_meta_reports_sidecar_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir.path().join(".claude/projects/project-a");
+        let path = project_dir.join("session/subagents/agent-badmeta.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","isSidechain":true,"sessionId":"session","agentId":"badmeta","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        )
+        .unwrap();
+        let meta_path = path.with_file_name("agent-badmeta.meta.json");
+        std::fs::write(&meta_path, "{not-json").unwrap();
+
+        let error = parse_claude_file_with_home(&path, Some(temp_dir.path())).unwrap_err();
+
+        assert_eq!(error.path(), Some(meta_path.as_path()));
+        assert_eq!(error.operation(), "decode Claude sidechain metadata");
+    }
+
+    #[test]
+    fn malformed_cc_mirror_variant_reports_variant_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let variant_dir = temp_dir.path().join(".cc-mirror/zai/config");
+        let path = variant_dir.join("projects/project-a/session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        )
+        .unwrap();
+        let variant_path = temp_dir.path().join(".cc-mirror/zai/variant.json");
+        std::fs::write(&variant_path, "{not-json").unwrap();
+
+        let error = parse_claude_file_with_home(&path, Some(temp_dir.path())).unwrap_err();
+
+        assert_eq!(error.path(), Some(variant_path.as_path()));
+        assert_eq!(error.operation(), "decode cc-mirror variant metadata");
+    }
+
+    #[test]
     fn test_deduplication_skips_duplicate_entries() {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(
             messages.len(),
@@ -1773,7 +2332,7 @@ mod tests {
             "session.jsonl",
         );
 
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
@@ -1812,7 +2371,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:00.200Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":300}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(
             messages.len(),
@@ -1833,7 +2392,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":50,"output_tokens":100,"cache_read_input_tokens":20}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.output, 100);
@@ -1854,7 +2413,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -1873,7 +2432,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","provider":"openrouter/anthropic","model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":75}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
@@ -1887,7 +2446,7 @@ mod tests {
 {"type":"assistant","provider":"openrouter/anthropic","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":120,"output_tokens":75}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
@@ -1901,7 +2460,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":75}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
@@ -1910,21 +2469,16 @@ mod tests {
     }
 
     #[test]
-    fn test_deduplication_skips_model_none_without_stale_index() {
-        // First entry has id+requestId+usage but model=null → skipped, no push.
-        // Second entry is a valid duplicate. Must not panic on stale index.
+    fn test_deduplication_rejects_token_bearing_entry_without_model() {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":10,"output_tokens":50}}}
 {"type":"assistant","timestamp":"2024-12-01T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let error = parse_claude_file(file.path()).unwrap_err();
 
-        assert_eq!(
-            messages.len(),
-            1,
-            "Only the entry with model should be kept"
-        );
-        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(error.operation(), "validate Claude assistant message");
+        assert_eq!(error.path(), Some(file.path()));
+        assert!(error.to_string().contains("missing model"));
     }
 
     #[test]
@@ -1933,7 +2487,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_002","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":150,"output_tokens":75}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(
             messages.len(),
@@ -1949,7 +2503,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:03.500Z","message":{"id":"msg_stream","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":250}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.output, 250);
@@ -1973,7 +2527,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:01:30.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 2);
         assert_eq!(
@@ -1994,7 +2548,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(
             messages.len(),
@@ -2009,7 +2563,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1, "User messages should be ignored");
         assert_eq!(messages[0].tokens.input, 100);
@@ -2028,7 +2582,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:05.000Z","requestId":"req_003","message":{"id":"msg_003","model":"claude-sonnet-4.6","usage":{"input_tokens":300,"output_tokens":120}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(
             messages.len(),
@@ -2074,7 +2628,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:03.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 2);
         assert!(
@@ -2097,7 +2651,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":100}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 2);
         assert!(!messages[0].is_turn_start);
@@ -2109,7 +2663,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200,"cache_creation_input_tokens":100}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 1000);
@@ -2124,7 +2678,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"2026-04-16T10:00:00.000Z","requestId":"req_opus47","message":{"id":"msg_opus47","model":"claude-opus-4-7","usage":{"input_tokens":321,"output_tokens":654,"cache_read_input_tokens":987,"cache_creation_input_tokens":111}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.7");
@@ -2140,7 +2694,7 @@ mod tests {
         let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_input","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
@@ -2168,7 +2722,7 @@ mod tests {
             "project-one",
             "session.jsonl",
         );
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
@@ -2184,7 +2738,7 @@ mod tests {
 {"type":"tool_result","timestamp":"2026-05-27T10:00:00.100Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd"}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
@@ -2197,7 +2751,7 @@ mod tests {
         let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 4);
@@ -2208,7 +2762,7 @@ mod tests {
         let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","content":[{"type":"tool_result","tool_use_id":"toolu_metadata","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd","input_tokens":3}}]}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 3);
@@ -2219,7 +2773,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"id":"msg_tool_use","model":"claude-sonnet-4.6","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/tmp/large.txt"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 100);
@@ -2231,7 +2785,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"anthropic/claude-4-6-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
@@ -2243,7 +2797,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"2026-06-04T19:32:18.247Z","message":{"model":"deepseek-ai/deepseek-v4-flash","usage":{"input_tokens":1008,"output_tokens":0}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "deepseek");
@@ -2262,7 +2816,7 @@ mod tests {
 {"type":"assistant","timestamp":"2026-02-18T10:00:08.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":900,"output_tokens":90}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 8);
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
@@ -2285,7 +2839,7 @@ mod tests {
 {"type":"assistant","timestamp":"2026-02-18T10:00:02.000Z","message":{"model":"glm-5.1","usage":{"input_tokens":123,"output_tokens":45}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "glm-5.1");
@@ -2304,7 +2858,7 @@ mod tests {
 {"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:06.000Z","message":{"model":"model2","usage":{"input_tokens":800,"output_tokens":80}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 7);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.3-codex");
@@ -2330,7 +2884,7 @@ mod tests {
 {"type":"assistant","provider":"some-reseller","timestamp":"2026-02-18T10:00:01.000Z","message":{"model":"model2","usage":{"input_tokens":800,"output_tokens":80}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].provider_id.as_ref(), "deepseek");
@@ -2343,7 +2897,7 @@ mod tests {
 {"type":"assistant","provider":"anthropic","timestamp":"2026-02-18T10:00:00.100Z","requestId":"req_001","message":{"id":"msg_001","usage":{"input_tokens":120,"output_tokens":15}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "zai");
@@ -2356,7 +2910,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"2026-02-18T10:00:00.000Z","message":{"provider":"openrouter/anthropic","model":"claude-opus-4.6","usage":{"input_tokens":100,"output_tokens":10}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
@@ -2365,11 +2919,11 @@ mod tests {
 
     #[test]
     fn test_headless_json_output() {
-        let content = r#"{"type":"message","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let content = r#"{"type":"message","timestamp":"2025-01-01T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
         let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
         std::fs::write(file.path(), content).unwrap();
 
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
@@ -2380,11 +2934,11 @@ mod tests {
 
     #[test]
     fn test_headless_json_output_infers_subprovider() {
-        let content = r#"{"type":"message","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let content = r#"{"type":"message","timestamp":"2025-01-01T00:00:00Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
         let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
         std::fs::write(file.path(), content).unwrap();
 
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.3-codex");
@@ -2393,10 +2947,10 @@ mod tests {
 
     #[test]
     fn test_headless_json_output_keeps_workspace_metadata() {
-        let content = r#"{"type":"message","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
+        let content = r#"{"type":"message","timestamp":"2025-01-01T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
         let (_dir, path) = create_project_file(content, "myproject", "session.json");
 
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key.as_deref(), Some("myproject"));
@@ -2409,7 +2963,7 @@ mod tests {
 {"type":"message_delta","usage":{"output_tokens":80}}
 {"type":"message_stop"}"#;
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
@@ -2425,7 +2979,7 @@ mod tests {
 {"type":"message_delta","usage":{"output_tokens":80}}
 {"type":"message_stop"}"#;
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gemini-3-pro-preview");
@@ -2439,7 +2993,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let (_dir, path) = create_project_file(content, "myproject", "session.jsonl");
 
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key.as_deref(), Some("myproject"));
@@ -2455,7 +3009,7 @@ mod tests {
             "session.jsonl",
         );
 
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2483,7 +3037,7 @@ mod tests {
             "session.jsonl",
         );
 
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 120);
@@ -2500,7 +3054,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"C:\\Users\\Travis\\Desktop","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let (_dir, path) = create_project_file(content, "C--Users-Travis-Desktop", "session.jsonl");
 
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2516,7 +3070,7 @@ mod tests {
 {"type":"assistant","timestamp":"2026-04-01T10:00:01.000Z","requestId":"req_wrapper","message":{"id":"msg_wrapper","model":"claude-sonnet-4","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":67,"cache_creation_input_tokens":8}}}"#;
         let (_dir, path) = create_transcript_file(content, "ses_123456789012345678901234567.jsonl");
 
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2539,7 +3093,7 @@ mod tests {
 {"type":"tool_result","timestamp":"2026-04-01T10:00:02.000Z","tool_use_id":"toolu_wrapper","content":"Tool result with root-level output text"}"#;
         let (_dir, path) = create_transcript_file(content, "ses_765432109876543210987654321.jsonl");
 
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert!(
             messages.is_empty(),
@@ -2591,7 +3145,7 @@ mod tests {
             jsonl,
             Some(meta),
         );
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2610,7 +3164,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sidechain_temporary_meta_agent_type_is_generic() {
+    fn test_sidechain_temporary_meta_agent_type_preserves_custom_identity() {
         let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"parent-temp-001","agentId":"temp1","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Scan auth"}}
 {"type":"assistant","isSidechain":true,"sessionId":"parent-temp-001","agentId":"temp1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_temp","message":{"id":"msg_temp","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
         let meta = r#"{"agentType":"auth-scanner"}"#;
@@ -2622,10 +3176,10 @@ mod tests {
             jsonl,
             Some(meta),
         );
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent.as_deref(), Some("Claude Subagent"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Auth Scanner"));
     }
 
     #[test]
@@ -2635,7 +3189,7 @@ mod tests {
 
         let (_dir, path) =
             create_sidechain_files("myproject", "parent-uuid-002", "agent-def456", jsonl, None);
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2653,7 +3207,7 @@ mod tests {
 {"type":"assistant","isSidechain":true,"sessionId":"legacy-session-001","agentId":"ac0c74c","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_l01","message":{"id":"msg_l01","model":"claude-sonnet-4.6","usage":{"input_tokens":150,"output_tokens":60}}}"#;
 
         let (_dir, path) = create_project_file(jsonl, "myproject", "agent-ac0c74c.jsonl");
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2700,9 +3254,9 @@ mod tests {
             None,
         );
 
-        let msgs1 = parse_claude_file(&path1);
-        let msgs2 = parse_claude_file(&path2);
-        let msgs3 = parse_claude_file(&path3);
+        let msgs1 = parse_claude_file(&path1).unwrap();
+        let msgs2 = parse_claude_file(&path2).unwrap();
+        let msgs3 = parse_claude_file(&path3).unwrap();
 
         // All three should share the parent session ID
         assert_eq!(msgs1[0].session_id.as_ref(), "shared-parent-uuid");
@@ -2729,7 +3283,7 @@ mod tests {
             sidechain_jsonl,
             Some(r#"{"agentType":"code-reviewer"}"#),
         );
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 2);
 
@@ -2744,8 +3298,8 @@ mod tests {
         assert_eq!(total_cache_write, 150, "cache_write: 100 + 50");
 
         // Both messages should have the same agent
-        assert_eq!(messages[0].agent.as_deref(), Some("Claude Subagent"));
-        assert_eq!(messages[1].agent.as_deref(), Some("Claude Subagent"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Code Reviewer"));
+        assert_eq!(messages[1].agent.as_deref(), Some("Code Reviewer"));
     }
 
     #[test]
@@ -2756,7 +3310,7 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_m02","message":{"id":"msg_m02","model":"claude-sonnet-4.6","usage":{"input_tokens":600,"output_tokens":250}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 2);
         assert_eq!(
@@ -2772,7 +3326,7 @@ mod tests {
         let content = r#"{"type":"assistant","isSidechain":false,"timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(content);
-        let messages = parse_claude_file(file.path());
+        let messages = parse_claude_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2795,7 +3349,7 @@ mod tests {
             jsonl,
             Some(r#"{"agentType":"architect"}"#),
         );
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(
             messages.len(),
@@ -2808,8 +3362,8 @@ mod tests {
         );
         assert_eq!(
             messages[0].agent,
-            Some("Claude Subagent".into()),
-            "Deduped message should retain agent"
+            Some("Architect".into()),
+            "Deduped message should retain the custom agent identity"
         );
         assert_eq!(messages[0].session_id.as_ref(), "parent-dedup");
     }
@@ -2827,7 +3381,7 @@ mod tests {
             jsonl,
             Some(r#"{"agentType":"oh-my-claudecode:general-purpose"}"#),
         );
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2838,29 +3392,16 @@ mod tests {
     }
 
     #[test]
-    fn test_sidechain_without_session_id_uses_filename() {
-        // Edge case: sidechain entry without sessionId should fall back to filename stem
+    fn test_sidechain_without_session_id_is_rejected() {
         let jsonl = r#"{"type":"user","isSidechain":true,"agentId":"noid","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"task"}}
 {"type":"assistant","isSidechain":true,"agentId":"noid","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_no","message":{"id":"msg_no","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(jsonl);
-        let messages = parse_claude_file(file.path());
+        let error = parse_claude_file(file.path()).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0].agent,
-            Some("Claude Subagent".into()),
-            "Still detected as sidechain"
-        );
-        // session_id should be the file stem (fallback)
-        let expected_stem = file
-            .path()
-            .file_stem()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        assert_eq!(messages[0].session_id.as_ref(), expected_stem);
+        assert_eq!(error.path(), Some(file.path()));
+        assert_eq!(error.operation(), "validate Claude sidechain session");
+        assert!(error.to_string().contains("missing sessionId"));
     }
 
     // --- Tier 2: parent session tool_use inference tests ---
@@ -2891,13 +3432,13 @@ mod tests {
         let sidechain_path = subagents_dir.join("agent-t2agent1.jsonl");
         std::fs::write(&sidechain_path, sidechain_content).unwrap();
 
-        let messages = parse_claude_file(&sidechain_path);
+        let messages = parse_claude_file(&sidechain_path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Subagent".into()),
-            "Tier 2 should keep unknown parent subagent types generic"
+            Some("Document Specialist".into()),
+            "Tier 2 should retain custom parent subagent identity"
         );
         assert_eq!(messages[0].session_id.as_ref(), parent_session_id);
     }
@@ -2930,7 +3471,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_claude_file(&project_dir.join("agent-flatagent1.jsonl"));
+        let messages = parse_claude_file(&project_dir.join("agent-flatagent1.jsonl")).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -2976,7 +3517,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_claude_file(&subagents_dir.join("agent-precagent1.jsonl"));
+        let messages = parse_claude_file(&subagents_dir.join("agent-precagent1.jsonl")).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -3044,7 +3585,7 @@ mod tests {
         let sidechain_path = subagents_dir.join("agent-aside_question-0320a3d71bc1d01e.jsonl");
         std::fs::write(&sidechain_path, sidechain_content).unwrap();
 
-        let messages = parse_claude_file(&sidechain_path);
+        let messages = parse_claude_file(&sidechain_path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent.as_deref(), Some("Claude Plan"));
@@ -3060,7 +3601,7 @@ mod tests {
 
         let mut parent_cache = ParentSubagentTypeCache::new();
         assert_eq!(
-            lookup_subagent_type_in_parent(&parent_path, "cacheA", &mut parent_cache),
+            lookup_subagent_type_in_parent(&parent_path, "cacheA", &mut parent_cache).unwrap(),
             Some("explore".to_string())
         );
 
@@ -3071,7 +3612,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            lookup_subagent_type_in_parent(&parent_path, "cacheB", &mut parent_cache),
+            lookup_subagent_type_in_parent(&parent_path, "cacheB", &mut parent_cache).unwrap(),
             Some("executor".to_string())
         );
     }
@@ -3119,8 +3660,8 @@ mod tests {
         )
         .unwrap();
 
-        let msgs_a = parse_claude_file(&subagents_dir.join("agent-multiA1.jsonl"));
-        let msgs_b = parse_claude_file(&subagents_dir.join("agent-multiB2.jsonl"));
+        let msgs_a = parse_claude_file(&subagents_dir.join("agent-multiA1.jsonl")).unwrap();
+        let msgs_b = parse_claude_file(&subagents_dir.join("agent-multiB2.jsonl")).unwrap();
 
         assert_eq!(
             msgs_a[0].agent,
@@ -3147,7 +3688,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(parse_claude_file(&journal_path).is_empty());
+        assert!(parse_claude_file(&journal_path).unwrap().is_empty());
     }
 
     #[test]
@@ -3170,12 +3711,12 @@ mod tests {
         let transcript_path = workflow_dir.join("agent-deepagent.jsonl");
         std::fs::write(
             &transcript_path,
-            r#"{"type":"user","isSidechain":true,"sessionId":"deep-parent","agentId":"deepagent","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"sessionId":"deep-parent","agentId":"deepagent","requestId":"req-deep","message":{"id":"msg-deep","model":"claude-sonnet-4.6","usage":{"input_tokens":300,"output_tokens":120,"cache_read_input_tokens":40}}}"#,
+            r#"{"type":"user","isSidechain":true,"sessionId":"deep-parent","agentId":"deepagent","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"task"}}
+{"type":"assistant","isSidechain":true,"sessionId":"deep-parent","agentId":"deepagent","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req-deep","message":{"id":"msg-deep","model":"claude-sonnet-4.6","usage":{"input_tokens":300,"output_tokens":120,"cache_read_input_tokens":40}}}"#,
         )
         .unwrap();
 
-        let messages = parse_claude_file(&transcript_path);
+        let messages = parse_claude_file(&transcript_path).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id.as_ref(), parent_session_id);
         assert_eq!(messages[0].agent.as_deref(), Some("Claude Plan"));

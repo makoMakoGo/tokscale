@@ -367,6 +367,7 @@ pub struct App {
     pub status_message: Option<String>,
     pub status_message_time: Option<Instant>,
     status_message_kind: StatusMessageKind,
+    cache_persistence_warning: Option<String>,
     pub subscription_status_message: Option<String>,
     pub subscription_status_message_time: Option<Instant>,
 
@@ -410,7 +411,7 @@ pub struct App {
 
 impl App {
     pub fn new_with_cached_data(config: TuiConfig, cached_data: Option<UsageData>) -> Result<Self> {
-        let settings = Settings::load();
+        let settings = Settings::load()?;
         Self::new_with_cached_data_and_settings(config, cached_data, settings)
     }
 
@@ -419,6 +420,7 @@ impl App {
         cached_data: Option<UsageData>,
         settings: Settings,
     ) -> Result<Self> {
+        super::config::TokscaleConfig::initialize()?;
         let theme_name = match config.theme.as_deref() {
             Some(theme) => theme.parse::<ThemeName>().map_err(|_| {
                 let valid = ThemeName::all()
@@ -428,7 +430,7 @@ impl App {
                     .join(", ");
                 anyhow::anyhow!("invalid theme `{theme}`; expected one of: {valid}")
             })?,
-            None => settings.theme_name(),
+            None => settings.theme_name()?,
         };
         let theme = Theme::from_name_for_current_terminal(theme_name);
 
@@ -440,9 +442,8 @@ impl App {
                 .filter_map(|s| ClientId::from_str(&s.to_lowercase()))
                 .collect()
         } else {
-            // No filter → use the canonical default set. MUST stay in sync with
-            // `run_warm_tui_cache()` so a fresh cache warm produces a
-            // fresh hit on the next no-filter launch.
+            // No filter → use the complete accepted client catalog. ADR 0007
+            // requires every catalog client to have one local adapter.
             ClientId::iter().collect()
         };
 
@@ -519,6 +520,7 @@ impl App {
             } else {
                 StatusMessageKind::General
             },
+            cache_persistence_warning: None,
             subscription_status_message: None,
             subscription_status_message_time: None,
             terminal_width: 80,
@@ -604,7 +606,7 @@ impl App {
     }
 
     pub fn update_data(&mut self, data: UsageData) {
-        self.data = data;
+        drop(std::mem::replace(&mut self.data, data));
         let now = Instant::now();
         self.last_refresh = now;
         self.build_model_shade_map();
@@ -635,6 +637,7 @@ impl App {
         }
 
         self.clamp_selection();
+        super::data::trim_allocator();
     }
 
     pub fn build_model_shade_map(&mut self) {
@@ -674,6 +677,14 @@ impl App {
 
     pub fn set_error(&mut self, error: Option<String>) {
         self.data.error = error;
+    }
+
+    pub(crate) fn set_cache_persistence_warning(&mut self, warning: Option<String>) {
+        self.cache_persistence_warning = warning;
+    }
+
+    pub(crate) fn cache_persistence_warning(&self) -> Option<&str> {
+        self.cache_persistence_warning.as_deref()
     }
 
     fn refresh_current_tab_if_overdue(&mut self) {
@@ -2477,20 +2488,15 @@ mod tests {
     }
 
     #[test]
-    fn test_app_no_filter_default_matches_default_set() {
-        // Regression for an Oracle-flagged HIGH bug: the no-filter TUI
-        // default and the `submit` warm-cache filter set drifted apart,
-        // making every TUI launch after submit a stale-cache reuse
-        // instead of a fresh hit. Both paths now go through
-        // `ClientId::iter().collect()`; assert it stays that way.
+    fn test_app_no_filter_default_uses_catalog() {
         let app = make_app();
         let actual = app.enabled_clients.borrow().clone();
         let expected: HashSet<ClientId> = ClientId::iter().collect();
         assert_eq!(
             actual, expected,
-            "no-filter App default drifted from ClientId::iter() — \
-             warm cache and TUI launch will mismatch"
+            "no-filter TUI must select exactly the accepted client catalog"
         );
+        assert!(actual.contains(&ClientId::Cursor));
     }
 
     fn make_app_with_models(n: usize) -> App {

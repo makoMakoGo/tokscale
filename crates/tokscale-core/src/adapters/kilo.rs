@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FoldContext, LocalSourceAdapter, MessageSink, ParseContext, ParsedUnit,
-    SourceUnit, UnitMessageSource,
+    SourceDiscoveryError, SourceParseError, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -15,35 +15,49 @@ impl LocalSourceAdapter for KiloAdapter {
         ClientId::Kilo
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::Kilo
             .local_def()
             .expect("Kilo adapter must have local scan policy");
         let mut paths = Vec::new();
         adapter_discover::push_existing_file(
-            std::path::PathBuf::from(
-                def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
-            ),
+            ClientId::Kilo,
+            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
             &mut paths,
-        );
-        paths
+        )?;
+        Ok(paths
             .into_iter()
             .map(|path| SourceUnit::sqlite_with_wal(ClientId::Kilo, path))
-            .collect()
+            .collect())
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages = sessions::kilo::parse_kilo_sqlite(&unit.path);
+                let mut messages =
+                    sessions::kilo::parse_kilo_sqlite(&unit.path).map_err(|source| {
+                        SourceParseError::from_session(
+                            unit.client,
+                            &unit.path,
+                            unit.parser_version.parser_id,
+                            source,
+                        )
+                    })?;
                 crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                ParsedUnit {
+                Ok(ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
                     cache_write: None,
                     invalidate_cache: false,
-                }
+                })
             })
             .collect()
     }
@@ -53,12 +67,13 @@ impl LocalSourceAdapter for KiloAdapter {
         parsed: Vec<ParsedUnit>,
         _ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         for unit in parsed {
             if let UnitMessageSource::Fresh(messages) = unit.messages {
                 sink.extend_messages(messages);
             }
         }
+        Ok(())
     }
 }
 
@@ -81,7 +96,7 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = KILO_ADAPTER.discover(&ctx);
+        let units = KILO_ADAPTER.discover_checked(&ctx).unwrap();
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, db_path);

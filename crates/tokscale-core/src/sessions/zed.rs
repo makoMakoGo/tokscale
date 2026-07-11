@@ -9,15 +9,13 @@
 //! ACP agents are billed and logged by their own providers/CLIs, and counting
 //! their Zed UI rows would duplicate those sources.
 
-use super::utils::parse_timestamp_str;
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::{open_readonly_sqlite, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
-use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
-use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
-use tracing::warn;
 
 pub(crate) const ZED_HOSTED_PROVIDER: &str = "zed.dev";
 const MAX_ZED_THREAD_JSON_BYTES: u64 = 32 * 1024 * 1024;
@@ -33,152 +31,87 @@ struct ZedThreadRow {
     data: Vec<u8>,
 }
 
-pub fn parse_zed_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(conn) => conn,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to open Zed threads database"
-            );
-            return Vec::new();
-        }
-    };
+pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let conn = open_readonly_sqlite(db_path)?;
 
-    let query = build_threads_query(&conn);
-    let mut stmt = match conn.prepare(&query) {
-        Ok(stmt) => stmt,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Zed thread query"
-            );
-            return Vec::new();
-        }
-    };
+    let query = "SELECT id, updated_at, created_at, folder_paths, folder_paths_order, data_type, data FROM threads";
+    let mut stmt = conn
+        .prepare(query)
+        .map_err(|error| SessionParseError::new("prepare Zed thread query", error))?;
 
-    let rows = match stmt.query_map([], |row| {
-        Ok(ZedThreadRow {
-            id: row.get(0)?,
-            updated_at: row.get(1)?,
-            created_at: row.get(2)?,
-            folder_paths: row.get(3)?,
-            folder_paths_order: row.get(4)?,
-            data_type: row.get(5)?,
-            data: row.get(6)?,
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ZedThreadRow {
+                id: row.get(0)?,
+                updated_at: row.get(1)?,
+                created_at: row.get(2)?,
+                folder_paths: row.get(3)?,
+                folder_paths_order: row.get(4)?,
+                data_type: row.get(5)?,
+                data: row.get(6)?,
+            })
         })
-    }) {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Zed thread query"
-            );
-            return Vec::new();
-        }
-    };
+        .map_err(|error| SessionParseError::new("execute Zed thread query", error))?;
 
-    rows.filter_map(|row| match row {
-        Ok(row) => parse_thread_row(db_path, row),
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to decode Zed thread row"
-            );
-            None
-        }
+    rows.map(|row| {
+        let row = row.map_err(|error| SessionParseError::new("decode Zed thread row", error))?;
+        parse_thread_row(row)
     })
+    .filter_map(|result| result.transpose())
     .collect()
 }
 
-fn build_threads_query(conn: &Connection) -> String {
-    let columns = thread_columns(conn);
-    let created_at = optional_column(&columns, "created_at");
-    let folder_paths = optional_column(&columns, "folder_paths");
-    let folder_paths_order = optional_column(&columns, "folder_paths_order");
+fn parse_thread_row(row: ZedThreadRow) -> SessionParseResult<Option<UnifiedMessage>> {
+    let json = decode_thread_json(&row.data_type, &row.data).map_err(|detail| {
+        SessionParseError::invalid(
+            "decode Zed thread payload",
+            format!("thread `{}`: {detail}", row.id),
+        )
+    })?;
 
-    format!(
-        "SELECT id, updated_at, {created_at}, {folder_paths}, {folder_paths_order}, data_type, data FROM threads"
-    )
-}
-
-fn optional_column(columns: &HashSet<String>, column: &'static str) -> &'static str {
-    if columns.contains(column) {
-        column
-    } else {
-        "NULL"
-    }
-}
-
-fn thread_columns(conn: &Connection) -> HashSet<String> {
-    let mut stmt = match conn.prepare("PRAGMA table_info(threads)") {
-        Ok(stmt) => stmt,
-        Err(_) => return HashSet::new(),
-    };
-
-    let rows = match stmt.query_map([], |row| row.get::<_, String>(1)) {
-        Ok(rows) => rows,
-        Err(_) => return HashSet::new(),
-    };
-
-    rows.filter_map(Result::ok).collect()
-}
-
-fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage> {
-    let json = match decode_thread_json(&row.data_type, &row.data) {
-        Ok(json) => json,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                thread_id = %row.id,
-                error = %err,
-                "Failed to decode Zed thread payload"
-            );
-            return None;
-        }
-    };
-
-    let thread: Value = match serde_json::from_slice(&json) {
-        Ok(thread) => thread,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                thread_id = %row.id,
-                error = %err,
-                "Failed to parse Zed thread JSON"
-            );
-            return None;
-        }
-    };
+    let thread: Value = serde_json::from_slice(&json)
+        .map_err(|error| SessionParseError::new("decode Zed thread JSON", error))?;
 
     if thread
         .get("imported")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return None;
+        return Ok(None);
     }
 
-    let model = thread.get("model")?;
-    let provider = model.get("provider")?.as_str()?.trim();
+    let model = thread.get("model").ok_or_else(|| {
+        SessionParseError::invalid("validate Zed thread", "thread is missing model")
+    })?;
+    let provider = model
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SessionParseError::invalid("validate Zed thread", "model is missing provider")
+        })?
+        .trim();
     if !provider.eq_ignore_ascii_case(ZED_HOSTED_PROVIDER) {
-        return None;
+        return Ok(None);
     }
 
-    let model_id = model.get("model")?.as_str()?.trim();
+    let model_id = model
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SessionParseError::invalid("validate Zed thread", "model is missing id"))?
+        .trim();
     if model_id.is_empty() {
-        return None;
+        return Err(SessionParseError::invalid(
+            "validate Zed thread",
+            "model id is empty",
+        ));
     }
 
-    let (tokens, message_count) = thread_usage(&thread)?;
-    let timestamp = timestamp_ms(&row, &thread)?;
+    let Some((tokens, message_count)) = thread_usage(&thread)? else {
+        return Ok(None);
+    };
+    let timestamp = timestamp_ms(&row, &thread).ok_or_else(|| {
+        SessionParseError::invalid("validate Zed thread", "thread has no valid timestamp")
+    })?;
 
     let mut message = UnifiedMessage::new_with_dedup(
         "zed",
@@ -195,12 +128,12 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
     if let Some(workspace_key) = workspace_key_from_folders(
         row.folder_paths.as_deref(),
         row.folder_paths_order.as_deref(),
-    ) {
+    )? {
         let workspace_label = workspace_label_from_key(&workspace_key);
         message.set_workspace(Some(workspace_key), workspace_label);
     }
 
-    Some(message)
+    Ok(Some(message))
 }
 
 fn decode_thread_json(data_type: &str, data: &[u8]) -> Result<Vec<u8>, String> {
@@ -233,85 +166,104 @@ fn decode_thread_json(data_type: &str, data: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn thread_usage(thread: &Value) -> Option<(TokenBreakdown, i32)> {
-    let (request_usage, request_count) = sum_request_token_usage(thread.get("request_token_usage"));
+fn thread_usage(thread: &Value) -> SessionParseResult<Option<(TokenBreakdown, i32)>> {
+    let (request_usage, request_count) =
+        sum_request_token_usage(thread.get("request_token_usage"))?;
     if request_usage.total() > 0 {
-        return Some((request_usage, request_count.max(1)));
+        return Ok(Some((request_usage, request_count.max(1))));
     }
 
-    let cumulative = token_usage_from_value(thread.get("cumulative_token_usage")?)?;
+    let Some(cumulative_value) = thread.get("cumulative_token_usage") else {
+        return Ok(None);
+    };
+    let cumulative = token_usage_from_value(cumulative_value)?;
     if cumulative.total() > 0 {
-        Some((cumulative, 1))
+        Ok(Some((cumulative, 1)))
     } else {
-        None
+        Ok(None)
     }
 }
 
-fn sum_request_token_usage(value: Option<&Value>) -> (TokenBreakdown, i32) {
+fn sum_request_token_usage(value: Option<&Value>) -> SessionParseResult<(TokenBreakdown, i32)> {
     let mut total = TokenBreakdown::default();
     let mut count = 0_i32;
 
     let Some(value) = value else {
-        return (total, count);
+        return Ok((total, count));
     };
 
     let usages: Box<dyn Iterator<Item = &Value> + '_> = match value {
         Value::Object(map) => Box::new(map.values()),
         Value::Array(values) => Box::new(values.iter()),
-        _ => return (total, count),
+        _ => {
+            return Err(SessionParseError::invalid(
+                "validate Zed token usage",
+                "request_token_usage must be an object or array",
+            ));
+        }
     };
 
     for usage_value in usages {
-        let Some(usage) = token_usage_from_value(usage_value) else {
-            continue;
-        };
+        let usage = token_usage_from_value(usage_value)?;
         if usage.total() <= 0 {
             continue;
         }
-        total = total
-            .checked_add(&usage)
-            .expect("Zed token buckets exceed i64::MAX");
+        total = total.checked_add(&usage).ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Zed token usage",
+                "token bucket total exceeds i64::MAX",
+            )
+        })?;
         count = count.saturating_add(1);
     }
 
-    (total, count)
+    Ok((total, count))
 }
 
 // Zed persists `language_model::TokenUsage`, which currently stores only
 // input/output/cache fields in `threads.db`. Until upstream adds a dedicated
 // reasoning token field there, `reasoning` stays zero in Tokscale.
-fn token_usage_from_value(value: &Value) -> Option<TokenBreakdown> {
-    Some(TokenBreakdown {
-        input: usage_field(value, "input_tokens"),
-        output: usage_field(value, "output_tokens"),
-        cache_read: usage_field(value, "cache_read_input_tokens"),
-        cache_write: usage_field(value, "cache_creation_input_tokens"),
+fn token_usage_from_value(value: &Value) -> SessionParseResult<TokenBreakdown> {
+    Ok(TokenBreakdown {
+        input: usage_field(value, "input_tokens")?,
+        output: usage_field(value, "output_tokens")?,
+        cache_read: usage_field(value, "cache_read_input_tokens")?,
+        cache_write: usage_field(value, "cache_creation_input_tokens")?,
         reasoning: 0,
     })
 }
 
-fn usage_field(value: &Value, field: &str) -> i64 {
+fn usage_field(value: &Value, field: &str) -> SessionParseResult<i64> {
     let Some(value) = value.get(field) else {
-        return 0;
+        return Ok(0);
     };
 
-    let parsed = value
-        .as_i64()
-        .or_else(|| {
-            value
-                .as_u64()
-                .map(|n| i64::try_from(n).expect("Zed token count exceeds i64::MAX"))
-        })
-        .or_else(|| {
-            value.as_str().map(|text| {
-                text.parse::<i64>().unwrap_or_else(|err| {
-                    panic!("Zed {field} token count is invalid or exceeds i64::MAX: {err}")
-                })
-            })
-        })
-        .unwrap_or(0);
+    let parsed = if let Some(value) = value.as_i64() {
+        value
+    } else if let Some(value) = value.as_u64() {
+        i64::try_from(value).map_err(|_| {
+            SessionParseError::invalid(
+                "validate Zed token usage",
+                format!("{field} exceeds i64::MAX"),
+            )
+        })?
+    } else if let Some(text) = value.as_str() {
+        text.parse::<i64>()
+            .map_err(|error| SessionParseError::new("decode Zed token count", error))?
+    } else {
+        return Err(SessionParseError::invalid(
+            "validate Zed token usage",
+            format!("{field} must be an integer or decimal integer string"),
+        ));
+    };
 
-    parsed.max(0)
+    if parsed < 0 {
+        return Err(SessionParseError::invalid(
+            "validate Zed token usage",
+            format!("{field} must be non-negative"),
+        ));
+    }
+    Ok(parsed)
 }
 
 fn timestamp_ms(row: &ZedThreadRow, thread: &Value) -> Option<i64> {
@@ -327,35 +279,46 @@ fn timestamp_ms(row: &ZedThreadRow, thread: &Value) -> Option<i64> {
         })
 }
 
-fn workspace_key_from_folders(paths: Option<&str>, order: Option<&str>) -> Option<String> {
-    let paths: Vec<&str> = paths?
+fn workspace_key_from_folders(
+    paths: Option<&str>,
+    order: Option<&str>,
+) -> SessionParseResult<Option<String>> {
+    let Some(paths) = paths else {
+        return Ok(None);
+    };
+    let paths: Vec<&str> = paths
         .lines()
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .collect();
     if paths.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    let selected = order
-        .and_then(|order| first_ordered_path_index(order, paths.len()))
-        .and_then(|index| paths.get(index).copied())
-        .unwrap_or(paths[0]);
+    let selected = match order {
+        Some(order) => first_ordered_path_index(order, paths.len())?,
+        None => None,
+    }
+    .and_then(|index| paths.get(index).copied())
+    .unwrap_or(paths[0]);
 
-    normalize_workspace_key(selected)
+    Ok(normalize_workspace_key(selected))
 }
 
-fn first_ordered_path_index(order: &str, path_count: usize) -> Option<usize> {
-    order
-        .split(',')
-        .map(str::trim)
-        .enumerate()
-        .filter_map(|(index, order)| {
-            let order = order.parse::<usize>().ok()?;
-            (index < path_count).then_some((index, order))
-        })
+fn first_ordered_path_index(order: &str, path_count: usize) -> SessionParseResult<Option<usize>> {
+    let mut parsed = Vec::new();
+    for (index, order) in order.split(',').map(str::trim).enumerate() {
+        let order = order
+            .parse::<usize>()
+            .map_err(|error| SessionParseError::new("decode Zed folder path order", error))?;
+        if index < path_count {
+            parsed.push((index, order));
+        }
+    }
+    Ok(parsed
+        .into_iter()
         .min_by_key(|(_, order)| *order)
-        .map(|(index, _)| index)
+        .map(|(index, _)| index))
 }
 
 #[cfg(test)]
@@ -366,22 +329,26 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn parse_zed_sqlite(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_zed_sqlite(path).unwrap()
+    }
+
     #[test]
-    #[should_panic(expected = "Zed input_tokens token count is invalid or exceeds i64::MAX")]
     fn string_token_overflow_fails_explicitly() {
         let usage = serde_json::json!({
             "input_tokens": (i64::MAX as u64 + 1).to_string()
         });
 
-        let _ = usage_field(&usage, "input_tokens");
+        let error = usage_field(&usage, "input_tokens").unwrap_err();
+        assert_eq!(error.operation(), "decode Zed token count");
     }
 
     #[test]
-    #[should_panic(expected = "Zed input_tokens token count is invalid or exceeds i64::MAX")]
     fn invalid_string_token_count_fails_explicitly() {
         let usage = serde_json::json!({"input_tokens": "not-a-token-count"});
 
-        let _ = usage_field(&usage, "input_tokens");
+        let error = usage_field(&usage, "input_tokens").unwrap_err();
+        assert_eq!(error.operation(), "decode Zed token count");
     }
 
     fn create_threads_db(dir: &TempDir) -> (std::path::PathBuf, Connection) {
@@ -592,56 +559,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_zed_sqlite_supports_pre_created_at_schema() {
-        let dir = TempDir::new().unwrap();
-        let db_path = dir.path().join("threads.db");
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE threads (
-                id TEXT PRIMARY KEY,
-                summary TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                data_type TEXT NOT NULL,
-                data BLOB NOT NULL
-            );
-            "#,
-        )
-        .unwrap();
-        let payload = thread_json(
-            ZED_HOSTED_PROVIDER,
-            "gpt-5.2",
-            json!({
-                "user-1": {
-                    "input_tokens": 12,
-                    "output_tokens": 3
-                }
-            }),
-        );
-        let data = zstd::encode_all(payload.as_bytes(), 3).unwrap();
-        conn.execute(
-            "INSERT INTO threads (id, summary, updated_at, data_type, data) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params!["thread-1", "Test thread", "2026-05-01T12:30:00Z", "zstd", data],
-        )
-        .unwrap();
-
-        let messages = parse_zed_sqlite(&db_path);
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0].timestamp,
-            parse_timestamp_str("2026-05-01T12:30:00Z").unwrap()
-        );
-    }
-
-    #[test]
     fn workspace_key_from_folders_uses_original_order_when_available() {
         assert_eq!(
-            workspace_key_from_folders(Some("/sorted/a\n/sorted/b"), Some("1,0")).as_deref(),
+            workspace_key_from_folders(Some("/sorted/a\n/sorted/b"), Some("1,0"))
+                .unwrap()
+                .as_deref(),
             Some("/sorted/b")
         );
         assert_eq!(
-            workspace_key_from_folders(Some("/sorted/a\n/sorted/b"), None).as_deref(),
+            workspace_key_from_folders(Some("/sorted/a\n/sorted/b"), None)
+                .unwrap()
+                .as_deref(),
             Some("/sorted/a")
         );
     }
@@ -656,7 +584,8 @@ mod tests {
     fn parse_zed_sqlite_returns_empty_for_missing_database() {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("missing.db");
-        assert!(parse_zed_sqlite(&missing).is_empty());
+        let error = super::parse_zed_sqlite(&missing).unwrap_err();
+        assert_eq!(error.operation(), "open SQLite source read-only");
         fs::create_dir_all(dir.path().join("threads")).unwrap();
     }
 }

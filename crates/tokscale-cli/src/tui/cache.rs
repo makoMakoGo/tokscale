@@ -6,12 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
-use tokscale_core::{sessions, GroupBy, ModelPerformance};
+use anyhow::Context;
+use serde::{Deserialize, Serialize, Serializer};
+use tokscale_core::{sessions, GroupBy, ModelPerformance, SourceInventorySignature};
 
 use tokscale_core::ClientId;
 
@@ -22,7 +23,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 24;
+const CACHE_SCHEMA_VERSION: u32 = 27;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,13 +59,13 @@ pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
-fn cache_dir() -> Option<PathBuf> {
-    Some(crate::paths::get_cache_dir())
+fn cache_dir() -> Result<PathBuf, tokscale_core::paths::ConfigDirUnavailable> {
+    crate::paths::try_get_cache_dir()
 }
 
 /// Get the cache file path
-fn cache_file() -> Option<PathBuf> {
-    cache_dir().map(|d| d.join("tui-data-cache.json"))
+fn cache_file() -> Result<PathBuf, tokscale_core::paths::ConfigDirUnavailable> {
+    cache_dir().map(|directory| directory.join("tui-data-cache.json"))
 }
 
 /// Cached TUI data structure (serializable)
@@ -76,6 +77,7 @@ struct CachedTUIData {
     enabled_clients: Vec<String>,
     group_by: String,
     report_scope: CacheReportScope,
+    source_inventory_signature: SourceInventorySignature,
     data: CachedUsageData,
 }
 
@@ -202,19 +204,422 @@ struct CachedGraphData {
     weeks: Vec<Vec<Option<CachedContributionDay>>>,
 }
 
-// Conversion implementations
+// Borrowed serialization views avoid allocating an owned copy of the aggregate.
 
-impl From<&TokenBreakdown> for CachedTokenBreakdown {
-    fn from(t: &TokenBreakdown) -> Self {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedTUIDataRef<'a> {
+    schema_version: u32,
+    timestamp: u64,
+    enabled_clients: &'a [&'a str],
+    group_by: CachedGroupByRef<'a>,
+    report_scope: &'a CacheReportScope,
+    source_inventory_signature: &'a SourceInventorySignature,
+    data: CachedUsageDataRef<'a>,
+}
+
+struct CachedGroupByRef<'a>(&'a GroupBy);
+
+impl Serialize for CachedGroupByRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self.0)
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedUsageDataRef<'a> {
+    models: CachedModelsRef<'a>,
+    agents: CachedAgentsRef<'a>,
+    daily: CachedDailyEntriesRef<'a>,
+    hourly: CachedHourlyEntriesRef<'a>,
+    graph: Option<CachedGraphDataRef<'a>>,
+    total_tokens: u64,
+    total_cost: f64,
+    current_streak: u32,
+    longest_streak: u32,
+}
+
+impl<'a> From<&'a UsageData> for CachedUsageDataRef<'a> {
+    fn from(data: &'a UsageData) -> Self {
         Self {
-            input: t.input,
-            output: t.output,
-            cache_read: t.cache_read,
-            cache_write: t.cache_write,
-            reasoning: t.reasoning,
+            models: CachedModelsRef(&data.models),
+            agents: CachedAgentsRef(&data.agents),
+            daily: CachedDailyEntriesRef(&data.daily),
+            hourly: CachedHourlyEntriesRef(&data.hourly),
+            graph: data.graph.as_ref().map(CachedGraphDataRef::from),
+            total_tokens: data.total_tokens,
+            total_cost: data.total_cost,
+            current_streak: data.current_streak,
+            longest_streak: data.longest_streak,
         }
     }
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedTokenBreakdownRef {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    reasoning: u64,
+}
+
+impl From<&TokenBreakdown> for CachedTokenBreakdownRef {
+    fn from(tokens: &TokenBreakdown) -> Self {
+        Self {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_write,
+            reasoning: tokens.reasoning,
+        }
+    }
+}
+
+struct CachedModelsRef<'a>(&'a [ModelUsage]);
+
+impl Serialize for CachedModelsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.0.iter().map(CachedModelUsageRef::from))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedModelUsageRef<'a> {
+    model: &'a str,
+    provider: &'a str,
+    client: &'a str,
+    workspace_key: Option<&'a str>,
+    workspace_label: Option<&'a str>,
+    tokens: CachedTokenBreakdownRef,
+    cost: f64,
+    performance: &'a ModelPerformance,
+    session_count: u32,
+}
+
+impl<'a> From<&'a ModelUsage> for CachedModelUsageRef<'a> {
+    fn from(model: &'a ModelUsage) -> Self {
+        Self {
+            model: &model.model,
+            provider: &model.provider,
+            client: &model.client,
+            workspace_key: model.workspace_key.as_deref(),
+            workspace_label: model.workspace_label.as_deref(),
+            tokens: (&model.tokens).into(),
+            cost: model.cost,
+            performance: &model.performance,
+            session_count: model.session_count,
+        }
+    }
+}
+
+struct CachedAgentsRef<'a>(&'a [AgentUsage]);
+
+impl Serialize for CachedAgentsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.0.iter().map(CachedAgentUsageRef::from))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedAgentUsageRef<'a> {
+    agent: &'a str,
+    clients: &'a str,
+    tokens: CachedTokenBreakdownRef,
+    cost: f64,
+    message_count: u32,
+    instance_count: u32,
+}
+
+impl<'a> From<&'a AgentUsage> for CachedAgentUsageRef<'a> {
+    fn from(agent: &'a AgentUsage) -> Self {
+        Self {
+            agent: &agent.agent,
+            clients: &agent.clients,
+            tokens: (&agent.tokens).into(),
+            cost: agent.cost,
+            message_count: agent.message_count,
+            instance_count: agent.instance_count,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedDailyModelInfoRef<'a> {
+    provider: &'a str,
+    display_name: &'a str,
+    color_key: &'a str,
+    tokens: CachedTokenBreakdownRef,
+    cost: f64,
+    messages: u64,
+}
+
+impl<'a> From<&'a DailyModelInfo> for CachedDailyModelInfoRef<'a> {
+    fn from(model: &'a DailyModelInfo) -> Self {
+        Self {
+            provider: &model.provider,
+            display_name: &model.display_name,
+            color_key: &model.color_key,
+            tokens: (&model.tokens).into(),
+            cost: model.cost,
+            messages: model.messages,
+        }
+    }
+}
+
+struct CachedDailyModelsRef<'a>(&'a BTreeMap<String, DailyModelInfo>);
+
+impl Serialize for CachedDailyModelsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .map(|(key, value)| (key, CachedDailyModelInfoRef::from(value))),
+        )
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedDailySourceInfoRef<'a> {
+    tokens: CachedTokenBreakdownRef,
+    cost: f64,
+    models: CachedDailyModelsRef<'a>,
+}
+
+impl<'a> From<&'a DailySourceInfo> for CachedDailySourceInfoRef<'a> {
+    fn from(source: &'a DailySourceInfo) -> Self {
+        Self {
+            tokens: (&source.tokens).into(),
+            cost: source.cost,
+            models: CachedDailyModelsRef(&source.models),
+        }
+    }
+}
+
+struct CachedDailySourceBreakdownRef<'a>(&'a BTreeMap<String, DailySourceInfo>);
+
+impl Serialize for CachedDailySourceBreakdownRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .map(|(key, value)| (key, CachedDailySourceInfoRef::from(value))),
+        )
+    }
+}
+
+struct CachedDateRef<'a>(&'a chrono::NaiveDate);
+
+impl Serialize for CachedDateRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self.0)
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedDailyUsageRef<'a> {
+    date: CachedDateRef<'a>,
+    tokens: CachedTokenBreakdownRef,
+    cost: f64,
+    source_breakdown: CachedDailySourceBreakdownRef<'a>,
+    message_count: u32,
+    turn_count: u32,
+}
+
+impl<'a> From<&'a DailyUsage> for CachedDailyUsageRef<'a> {
+    fn from(daily: &'a DailyUsage) -> Self {
+        Self {
+            date: CachedDateRef(&daily.date),
+            tokens: (&daily.tokens).into(),
+            cost: daily.cost,
+            source_breakdown: CachedDailySourceBreakdownRef(&daily.source_breakdown),
+            message_count: daily.message_count,
+            turn_count: daily.turn_count,
+        }
+    }
+}
+
+struct CachedDailyEntriesRef<'a>(&'a [DailyUsage]);
+
+impl Serialize for CachedDailyEntriesRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.0.iter().map(CachedDailyUsageRef::from))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedHourlyModelInfoRef<'a> {
+    provider: &'a str,
+    display_name: &'a str,
+    color_key: &'a str,
+    tokens: CachedTokenBreakdownRef,
+    cost: f64,
+}
+
+impl<'a> From<&'a HourlyModelInfo> for CachedHourlyModelInfoRef<'a> {
+    fn from(model: &'a HourlyModelInfo) -> Self {
+        Self {
+            provider: &model.provider,
+            display_name: &model.display_name,
+            color_key: &model.color_key,
+            tokens: (&model.tokens).into(),
+            cost: model.cost,
+        }
+    }
+}
+
+struct CachedHourlyModelsRef<'a>(&'a BTreeMap<String, HourlyModelInfo>);
+
+impl Serialize for CachedHourlyModelsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .map(|(key, value)| (key, CachedHourlyModelInfoRef::from(value))),
+        )
+    }
+}
+
+struct CachedDateTimeRef<'a>(&'a chrono::NaiveDateTime);
+
+impl Serialize for CachedDateTimeRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&self.0.format("%Y-%m-%d %H:%M:%S"))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedHourlyUsageRef<'a> {
+    datetime: CachedDateTimeRef<'a>,
+    tokens: CachedTokenBreakdownRef,
+    cost: f64,
+    clients: &'a BTreeSet<String>,
+    models: CachedHourlyModelsRef<'a>,
+    message_count: u32,
+    turn_count: u32,
+}
+
+impl<'a> From<&'a HourlyUsage> for CachedHourlyUsageRef<'a> {
+    fn from(hourly: &'a HourlyUsage) -> Self {
+        Self {
+            datetime: CachedDateTimeRef(&hourly.datetime),
+            tokens: (&hourly.tokens).into(),
+            cost: hourly.cost,
+            clients: &hourly.clients,
+            models: CachedHourlyModelsRef(&hourly.models),
+            message_count: hourly.message_count,
+            turn_count: hourly.turn_count,
+        }
+    }
+}
+
+struct CachedHourlyEntriesRef<'a>(&'a [HourlyUsage]);
+
+impl Serialize for CachedHourlyEntriesRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.0.iter().map(CachedHourlyUsageRef::from))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedContributionDayRef<'a> {
+    date: CachedDateRef<'a>,
+    tokens: u64,
+    cost: f64,
+    intensity: f64,
+}
+
+impl<'a> From<&'a ContributionDay> for CachedContributionDayRef<'a> {
+    fn from(day: &'a ContributionDay) -> Self {
+        Self {
+            date: CachedDateRef(&day.date),
+            tokens: day.tokens,
+            cost: day.cost,
+            intensity: day.intensity,
+        }
+    }
+}
+
+struct CachedContributionWeekRef<'a>(&'a [Option<ContributionDay>]);
+
+impl Serialize for CachedContributionWeekRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .map(|day| day.as_ref().map(CachedContributionDayRef::from)),
+        )
+    }
+}
+
+struct CachedContributionWeeksRef<'a>(&'a [Vec<Option<ContributionDay>>]);
+
+impl Serialize for CachedContributionWeeksRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.0.iter().map(|week| CachedContributionWeekRef(week)))
+    }
+}
+
+#[derive(Serialize)]
+struct CachedGraphDataRef<'a> {
+    weeks: CachedContributionWeeksRef<'a>,
+}
+
+impl<'a> From<&'a GraphData> for CachedGraphDataRef<'a> {
+    fn from(graph: &'a GraphData) -> Self {
+        Self {
+            weeks: CachedContributionWeeksRef(&graph.weeks),
+        }
+    }
+}
+
+// Owned conversion implementations used by the cache read path.
 
 impl From<CachedTokenBreakdown> for TokenBreakdown {
     fn from(t: CachedTokenBreakdown) -> Self {
@@ -224,22 +629,6 @@ impl From<CachedTokenBreakdown> for TokenBreakdown {
             cache_read: t.cache_read,
             cache_write: t.cache_write,
             reasoning: t.reasoning,
-        }
-    }
-}
-
-impl From<&ModelUsage> for CachedModelUsage {
-    fn from(m: &ModelUsage) -> Self {
-        Self {
-            model: m.model.clone(),
-            provider: m.provider.clone(),
-            client: m.client.clone(),
-            workspace_key: m.workspace_key.clone(),
-            workspace_label: m.workspace_label.clone(),
-            tokens: (&m.tokens).into(),
-            cost: m.cost,
-            performance: m.performance.clone(),
-            session_count: m.session_count,
         }
     }
 }
@@ -260,19 +649,6 @@ impl From<CachedModelUsage> for ModelUsage {
     }
 }
 
-impl From<&AgentUsage> for CachedAgentUsage {
-    fn from(a: &AgentUsage) -> Self {
-        Self {
-            agent: a.agent.clone(),
-            clients: a.clients.clone(),
-            tokens: (&a.tokens).into(),
-            cost: a.cost,
-            message_count: a.message_count,
-            instance_count: a.instance_count,
-        }
-    }
-}
-
 impl From<CachedAgentUsage> for AgentUsage {
     fn from(a: CachedAgentUsage) -> Self {
         Self {
@@ -286,19 +662,6 @@ impl From<CachedAgentUsage> for AgentUsage {
     }
 }
 
-impl From<&DailyModelInfo> for CachedDailyModelInfo {
-    fn from(d: &DailyModelInfo) -> Self {
-        Self {
-            provider: d.provider.clone(),
-            display_name: d.display_name.clone(),
-            color_key: d.color_key.clone(),
-            tokens: (&d.tokens).into(),
-            cost: d.cost,
-            messages: d.messages,
-        }
-    }
-}
-
 fn daily_model_info_from_cached(value: CachedDailyModelInfo) -> DailyModelInfo {
     DailyModelInfo {
         provider: value.provider,
@@ -307,20 +670,6 @@ fn daily_model_info_from_cached(value: CachedDailyModelInfo) -> DailyModelInfo {
         tokens: value.tokens.into(),
         cost: value.cost,
         messages: value.messages,
-    }
-}
-
-impl From<&DailySourceInfo> for CachedDailySourceInfo {
-    fn from(source: &DailySourceInfo) -> Self {
-        Self {
-            tokens: (&source.tokens).into(),
-            cost: source.cost,
-            models: source
-                .models
-                .iter()
-                .map(|(key, value)| (key.clone(), value.into()))
-                .collect(),
-        }
     }
 }
 
@@ -341,18 +690,6 @@ impl From<CachedDailySourceInfo> for DailySourceInfo {
     }
 }
 
-impl From<&HourlyModelInfo> for CachedHourlyModelInfo {
-    fn from(h: &HourlyModelInfo) -> Self {
-        Self {
-            provider: h.provider.clone(),
-            display_name: h.display_name.clone(),
-            color_key: h.color_key.clone(),
-            tokens: (&h.tokens).into(),
-            cost: h.cost,
-        }
-    }
-}
-
 fn hourly_model_info_from_cached(value: CachedHourlyModelInfo) -> HourlyModelInfo {
     HourlyModelInfo {
         provider: value.provider,
@@ -360,24 +697,6 @@ fn hourly_model_info_from_cached(value: CachedHourlyModelInfo) -> HourlyModelInf
         color_key: value.color_key,
         tokens: value.tokens.into(),
         cost: value.cost,
-    }
-}
-
-impl From<&HourlyUsage> for CachedHourlyUsage {
-    fn from(h: &HourlyUsage) -> Self {
-        Self {
-            datetime: h.datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
-            tokens: (&h.tokens).into(),
-            cost: h.cost,
-            clients: h.clients.iter().cloned().collect(),
-            models: h
-                .models
-                .iter()
-                .map(|(k, v)| (k.clone(), v.into()))
-                .collect(),
-            message_count: h.message_count,
-            turn_count: h.turn_count,
-        }
     }
 }
 
@@ -405,23 +724,6 @@ impl TryFrom<CachedHourlyUsage> for HourlyUsage {
     }
 }
 
-impl From<&DailyUsage> for CachedDailyUsage {
-    fn from(d: &DailyUsage) -> Self {
-        Self {
-            date: d.date.to_string(),
-            tokens: (&d.tokens).into(),
-            cost: d.cost,
-            source_breakdown: d
-                .source_breakdown
-                .iter()
-                .map(|(key, value)| (key.clone(), value.into()))
-                .collect(),
-            message_count: d.message_count,
-            turn_count: d.turn_count,
-        }
-    }
-}
-
 impl TryFrom<CachedDailyUsage> for DailyUsage {
     type Error = chrono::ParseError;
 
@@ -443,17 +745,6 @@ impl TryFrom<CachedDailyUsage> for DailyUsage {
     }
 }
 
-impl From<&ContributionDay> for CachedContributionDay {
-    fn from(c: &ContributionDay) -> Self {
-        Self {
-            date: c.date.to_string(),
-            tokens: c.tokens,
-            cost: c.cost,
-            intensity: c.intensity,
-        }
-    }
-}
-
 impl TryFrom<CachedContributionDay> for ContributionDay {
     type Error = chrono::ParseError;
 
@@ -465,22 +756,6 @@ impl TryFrom<CachedContributionDay> for ContributionDay {
             cost: c.cost,
             intensity: c.intensity,
         })
-    }
-}
-
-impl From<&GraphData> for CachedGraphData {
-    fn from(g: &GraphData) -> Self {
-        Self {
-            weeks: g
-                .weeks
-                .iter()
-                .map(|week| {
-                    week.iter()
-                        .map(|day| day.as_ref().map(|d| d.into()))
-                        .collect()
-                })
-                .collect(),
-        }
     }
 }
 
@@ -498,22 +773,6 @@ impl TryFrom<CachedGraphData> for GraphData {
             })
             .collect();
         Ok(Self { weeks: weeks? })
-    }
-}
-
-impl From<&UsageData> for CachedUsageData {
-    fn from(u: &UsageData) -> Self {
-        Self {
-            models: u.models.iter().map(|m| m.into()).collect(),
-            agents: u.agents.iter().map(|a| a.into()).collect(),
-            daily: u.daily.iter().map(|d| d.into()).collect(),
-            hourly: u.hourly.iter().map(|h| h.into()).collect(),
-            graph: u.graph.as_ref().map(|g| g.into()),
-            total_tokens: u.total_tokens,
-            total_cost: u.total_cost,
-            current_streak: u.current_streak,
-            longest_streak: u.longest_streak,
-        }
     }
 }
 
@@ -629,7 +888,7 @@ fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
 /// to avoid double file I/O (previously is_cache_stale + load_cached_data both parsed the file).
 pub enum CacheResult {
     /// Cache exists, is fresh (within TTL), and clients match exactly
-    Fresh(UsageData),
+    Fresh(UsageData, SourceInventorySignature),
     /// Cache exists and clients match exactly, but needs background refresh
     Stale(UsageData),
     /// Cache missing, unreadable, unparseable, or clients don't match
@@ -648,8 +907,12 @@ pub fn load_cache(
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
 ) -> CacheResult {
-    let Some(cache_path) = cache_file() else {
-        return CacheResult::Miss;
+    let cache_path = match cache_file() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("tokscale: TUI cache path unavailable; cache miss: {error}");
+            return CacheResult::Miss;
+        }
     };
     let cached: CachedTUIData = match File::open(&cache_path) {
         Ok(file) => match serde_json::from_reader(BufReader::new(file)) {
@@ -721,7 +984,7 @@ pub fn load_cache(
     if cache_age > CACHE_STALE_THRESHOLD_MS {
         CacheResult::Stale(data)
     } else {
-        CacheResult::Fresh(data)
+        CacheResult::Fresh(data, cached.source_inventory_signature)
     }
 }
 
@@ -747,26 +1010,28 @@ pub fn save_cached_data(
     enabled_clients: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
+    source_inventory_signature: SourceInventorySignature,
 ) -> anyhow::Result<()> {
-    let cache_path = cache_file().ok_or_else(|| anyhow::anyhow!("TUI cache path unavailable"))?;
+    let cache_path = cache_file()?;
 
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
-    let mut clients_vec: Vec<String> = enabled_clients
+    let mut clients_vec: Vec<&str> = enabled_clients
         .iter()
-        .map(|client| client.as_str().to_string())
+        .map(|client| client.as_str())
         .collect();
     // Sort so the cache key is deterministic across runs / HashSet
     // iteration order — otherwise unrelated runs would invalidate each
     // other's caches just because the JSON ordering shuffled.
     clients_vec.sort();
 
-    let cached = CachedTUIData {
+    let cached = CachedTUIDataRef {
         schema_version: CACHE_SCHEMA_VERSION,
         timestamp,
-        enabled_clients: clients_vec,
-        group_by: group_by.to_string(),
-        report_scope: report_scope.clone(),
+        enabled_clients: &clients_vec,
+        group_by: CachedGroupByRef(group_by),
+        report_scope,
+        source_inventory_signature: &source_inventory_signature,
         data: data.into(),
     };
 
@@ -774,18 +1039,171 @@ pub fn save_cached_data(
     // the canonical cache file before writing — a partial save or process
     // crash between delete and rename would lose the cache. The temp-file
     // pattern makes corruption-on-crash impossible.
-    let content = serde_json::to_vec(&cached)?;
-    tokscale_core::fs_atomic::write_atomic(&cache_path, &content)?;
+    tokscale_core::fs_atomic::write_atomic_with(&cache_path, |file| {
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &cached).map_err(std::io::Error::other)?;
+        writer.flush()
+    })
+    .with_context(|| format!("failed to persist TUI cache `{}`", cache_path.display()))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::de::{MapAccess, SeqAccess, Visitor};
     use serial_test::serial;
+    use std::ffi::{OsStr, OsString};
+    use std::fmt;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
     use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &OsStr) -> Self {
+            let previous = env::var_os(key);
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => env::set_var(self.key, value),
+                    None => env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    enum OrderedJson {
+        Object(Vec<(String, OrderedJson)>),
+        Array(Vec<OrderedJson>),
+        Scalar,
+    }
+
+    impl OrderedJson {
+        fn keys(&self) -> Vec<&str> {
+            match self {
+                Self::Object(fields) => fields.iter().map(|(key, _)| key.as_str()).collect(),
+                other => panic!("expected JSON object, got {other:?}"),
+            }
+        }
+
+        fn field(&self, expected_key: &str) -> &Self {
+            match self {
+                Self::Object(fields) => fields
+                    .iter()
+                    .find_map(|(key, value)| (key == expected_key).then_some(value))
+                    .unwrap_or_else(|| panic!("missing JSON field {expected_key}")),
+                other => panic!("expected JSON object, got {other:?}"),
+            }
+        }
+
+        fn element(&self, index: usize) -> &Self {
+            match self {
+                Self::Array(values) => &values[index],
+                other => panic!("expected JSON array, got {other:?}"),
+            }
+        }
+    }
+
+    impl<'de> Deserialize<'de> for OrderedJson {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(OrderedJsonVisitor)
+        }
+    }
+
+    struct OrderedJsonVisitor;
+
+    impl<'de> Visitor<'de> for OrderedJsonVisitor {
+        type Value = OrderedJson;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("any JSON value")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut fields = Vec::new();
+            while let Some(entry) = map.next_entry()? {
+                fields.push(entry);
+            }
+            Ok(OrderedJson::Object(fields))
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut values = Vec::new();
+            while let Some(value) = sequence.next_element()? {
+                values.push(value);
+            }
+            Ok(OrderedJson::Array(values))
+        }
+
+        fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+            Ok(OrderedJson::Scalar)
+        }
+
+        fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+            Ok(OrderedJson::Scalar)
+        }
+
+        fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+            Ok(OrderedJson::Scalar)
+        }
+
+        fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+            Ok(OrderedJson::Scalar)
+        }
+
+        fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(OrderedJson::Scalar)
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(OrderedJson::Scalar)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(OrderedJson::Scalar)
+        }
+    }
+
+    fn tuple_array_keys(value: &serde_json::Value) -> Vec<&str> {
+        value
+            .as_array()
+            .expect("expected tuple array")
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_array()
+                    .and_then(|tuple| tuple.first())
+                    .and_then(serde_json::Value::as_str)
+                    .expect("expected [string, value] tuple")
+            })
+            .collect()
+    }
 
     fn make_filters(filters: &[ClientId]) -> HashSet<ClientId> {
         filters.iter().copied().collect()
@@ -813,6 +1231,435 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
+    }
+
+    fn test_signature() -> SourceInventorySignature {
+        SourceInventorySignature::from_bytes([0x5a; 32])
+    }
+
+    fn token_breakdown(seed: u64) -> TokenBreakdown {
+        TokenBreakdown {
+            input: seed,
+            output: seed + 1,
+            cache_read: seed + 2,
+            cache_write: seed + 3,
+            reasoning: seed + 4,
+        }
+    }
+
+    fn complete_usage_data() -> UsageData {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 11).unwrap();
+
+        let mut daily_models = BTreeMap::new();
+        daily_models.insert(
+            "zeta-model".to_string(),
+            DailyModelInfo {
+                provider: "anthropic".to_string(),
+                display_name: "Zeta Model".to_string(),
+                color_key: "zeta-model".to_string(),
+                tokens: token_breakdown(31),
+                cost: 3.1,
+                messages: 7,
+            },
+        );
+        daily_models.insert(
+            "alpha-model".to_string(),
+            DailyModelInfo {
+                provider: "openai".to_string(),
+                display_name: "Alpha Model".to_string(),
+                color_key: "alpha-model".to_string(),
+                tokens: token_breakdown(32),
+                cost: 3.2,
+                messages: 8,
+            },
+        );
+
+        let mut cursor_daily_models = BTreeMap::new();
+        cursor_daily_models.insert(
+            "cursor-model".to_string(),
+            DailyModelInfo {
+                provider: "cursor".to_string(),
+                display_name: "Cursor Model".to_string(),
+                color_key: "cursor-model".to_string(),
+                tokens: token_breakdown(33),
+                cost: 3.3,
+                messages: 9,
+            },
+        );
+        let mut source_breakdown = BTreeMap::new();
+        source_breakdown.insert(
+            "cursor".to_string(),
+            DailySourceInfo {
+                tokens: token_breakdown(22),
+                cost: 2.2,
+                models: cursor_daily_models,
+            },
+        );
+        source_breakdown.insert(
+            "claude".to_string(),
+            DailySourceInfo {
+                tokens: token_breakdown(21),
+                cost: 2.1,
+                models: daily_models,
+            },
+        );
+
+        let mut hourly_models = BTreeMap::new();
+        hourly_models.insert(
+            "zeta-model".to_string(),
+            HourlyModelInfo {
+                provider: "anthropic".to_string(),
+                display_name: "Zeta Model".to_string(),
+                color_key: "zeta-model".to_string(),
+                tokens: token_breakdown(51),
+                cost: 5.1,
+            },
+        );
+        hourly_models.insert(
+            "alpha-model".to_string(),
+            HourlyModelInfo {
+                provider: "openai".to_string(),
+                display_name: "Alpha Model".to_string(),
+                color_key: "alpha-model".to_string(),
+                tokens: token_breakdown(52),
+                cost: 5.2,
+            },
+        );
+        let hourly_clients = ["claude".to_string(), "cursor".to_string()]
+            .into_iter()
+            .collect();
+
+        UsageData {
+            models: vec![ModelUsage {
+                model: "claude-sonnet-4".to_string(),
+                provider: "anthropic".to_string(),
+                client: "claude".to_string(),
+                workspace_key: Some("workspace-key".to_string()),
+                workspace_label: Some("Workspace Label".to_string()),
+                tokens: token_breakdown(1),
+                cost: 1.25,
+                performance: ModelPerformance {
+                    ms_per_1k_tokens: Some(12.5),
+                    total_duration_ms: 250,
+                    timed_tokens: 20_000,
+                    sample_count: 3,
+                    token_coverage: 0.75,
+                },
+                session_count: 2,
+            }],
+            agents: vec![AgentUsage {
+                agent: "Researcher".to_string(),
+                clients: "claude".to_string(),
+                tokens: token_breakdown(11),
+                cost: 1.1,
+                message_count: 4,
+                instance_count: 2,
+            }],
+            daily: vec![DailyUsage {
+                date,
+                tokens: token_breakdown(41),
+                cost: 4.1,
+                source_breakdown,
+                message_count: 8,
+                turn_count: 6,
+            }],
+            hourly: vec![HourlyUsage {
+                datetime: date.and_hms_opt(14, 5, 6).unwrap(),
+                tokens: token_breakdown(61),
+                cost: 6.1,
+                clients: hourly_clients,
+                models: hourly_models,
+                message_count: 5,
+                turn_count: 4,
+            }],
+            graph: Some(GraphData {
+                weeks: vec![vec![
+                    None,
+                    Some(ContributionDay {
+                        date,
+                        tokens: 71,
+                        cost: 7.1,
+                        intensity: 0.8,
+                    }),
+                ]],
+            }),
+            total_tokens: 1_234,
+            total_cost: 12.34,
+            loading: true,
+            error: Some("not persisted".to_string()),
+            current_streak: 3,
+            longest_streak: 9,
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn streamed_cache_matches_owned_schema_and_round_trips_complete_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+            env::remove_var("TOKSCALE_CONFIG_DIR");
+        }
+
+        let clients = make_filters(&[ClientId::Cursor, ClientId::Claude]);
+        let scope = CacheReportScope::new(
+            Some("2026-07-01".to_string()),
+            Some("2026-07-11".to_string()),
+            Some("2026".to_string()),
+        );
+        let data = complete_usage_data();
+        save_cached_data(
+            &data,
+            &clients,
+            &GroupBy::WorkspaceModel,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+
+        let serialized = fs::read(cache_file().unwrap()).unwrap();
+        let owned: CachedTUIData = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::to_vec(&owned).unwrap(),
+            "borrowed writer must preserve the owned schema's compact bytes and field order"
+        );
+
+        let value: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(value["schemaVersion"], CACHE_SCHEMA_VERSION);
+        assert_eq!(
+            value["enabledClients"],
+            serde_json::json!(["claude", "cursor"])
+        );
+        assert_eq!(value["data"]["daily"][0]["date"], "2026-07-11");
+        assert_eq!(
+            value["data"]["hourly"][0]["datetime"],
+            "2026-07-11 14:05:06"
+        );
+        assert!(value["data"]["daily"][0]["sourceBreakdown"][0].is_array());
+        assert!(value["data"]["daily"][0]["sourceBreakdown"][0][1]["models"][0].is_array());
+        assert!(value["data"]["hourly"][0]["models"][0].is_array());
+        assert_eq!(
+            value["data"]["graph"]["weeks"][0][0],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            tuple_array_keys(&value["data"]["daily"][0]["sourceBreakdown"]),
+            vec!["claude", "cursor"]
+        );
+        assert_eq!(
+            tuple_array_keys(&value["data"]["daily"][0]["sourceBreakdown"][0][1]["models"]),
+            vec!["alpha-model", "zeta-model"]
+        );
+        assert_eq!(
+            tuple_array_keys(&value["data"]["hourly"][0]["models"]),
+            vec!["alpha-model", "zeta-model"]
+        );
+
+        let ordered: OrderedJson = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(
+            ordered.keys(),
+            vec![
+                "schemaVersion",
+                "timestamp",
+                "enabledClients",
+                "groupBy",
+                "reportScope",
+                "sourceInventorySignature",
+                "data",
+            ]
+        );
+        assert_eq!(
+            ordered.field("reportScope").keys(),
+            vec!["since", "until", "year"]
+        );
+
+        let ordered_data = ordered.field("data");
+        assert_eq!(
+            ordered_data.keys(),
+            vec![
+                "models",
+                "agents",
+                "daily",
+                "hourly",
+                "graph",
+                "totalTokens",
+                "totalCost",
+                "currentStreak",
+                "longestStreak",
+            ]
+        );
+        let ordered_model = ordered_data.field("models").element(0);
+        assert_eq!(
+            ordered_model.keys(),
+            vec![
+                "model",
+                "provider",
+                "client",
+                "workspaceKey",
+                "workspaceLabel",
+                "tokens",
+                "cost",
+                "performance",
+                "sessionCount",
+            ]
+        );
+        assert_eq!(
+            ordered_model.field("tokens").keys(),
+            vec!["input", "output", "cacheRead", "cacheWrite", "reasoning"]
+        );
+        assert_eq!(
+            ordered_model.field("performance").keys(),
+            vec![
+                "msPer1KTokens",
+                "totalDurationMs",
+                "timedTokens",
+                "sampleCount",
+                "tokenCoverage",
+            ]
+        );
+        assert_eq!(
+            ordered_data.field("agents").element(0).keys(),
+            vec![
+                "agent",
+                "clients",
+                "tokens",
+                "cost",
+                "messageCount",
+                "instanceCount",
+            ]
+        );
+
+        let ordered_daily = ordered_data.field("daily").element(0);
+        assert_eq!(
+            ordered_daily.keys(),
+            vec![
+                "date",
+                "tokens",
+                "cost",
+                "sourceBreakdown",
+                "messageCount",
+                "turnCount",
+            ]
+        );
+        let ordered_daily_source = ordered_daily.field("sourceBreakdown").element(0).element(1);
+        assert_eq!(
+            ordered_daily_source.keys(),
+            vec!["tokens", "cost", "models"]
+        );
+        assert_eq!(
+            ordered_daily_source
+                .field("models")
+                .element(0)
+                .element(1)
+                .keys(),
+            vec![
+                "provider",
+                "displayName",
+                "colorKey",
+                "tokens",
+                "cost",
+                "messages",
+            ]
+        );
+
+        let ordered_hourly = ordered_data.field("hourly").element(0);
+        assert_eq!(
+            ordered_hourly.keys(),
+            vec![
+                "datetime",
+                "tokens",
+                "cost",
+                "clients",
+                "models",
+                "messageCount",
+                "turnCount",
+            ]
+        );
+        assert_eq!(
+            ordered_hourly.field("models").element(0).element(1).keys(),
+            vec!["provider", "displayName", "colorKey", "tokens", "cost"]
+        );
+
+        let ordered_graph = ordered_data.field("graph");
+        assert_eq!(ordered_graph.keys(), vec!["weeks"]);
+        assert_eq!(
+            ordered_graph.field("weeks").element(0).element(1).keys(),
+            vec!["date", "tokens", "cost", "intensity"]
+        );
+
+        let loaded = match load_cache(&clients, &GroupBy::WorkspaceModel, &scope) {
+            CacheResult::Fresh(data, signature) => {
+                assert_eq!(signature, test_signature());
+                data
+            }
+            result => panic!("expected fresh cache, got {}", other_variant_name(&result)),
+        };
+        assert_eq!(
+            value["data"],
+            serde_json::to_value(CachedUsageDataRef::from(&loaded)).unwrap(),
+            "all persisted aggregate fields must survive the owned read DTO round trip"
+        );
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+        match previous_override {
+            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn structured_model_map_keys_round_trip_without_coalescing() {
+        let temp_dir = TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
+
+        let mut data = complete_usage_data();
+        let daily_models = &mut data.daily[0]
+            .source_breakdown
+            .get_mut("claude")
+            .unwrap()
+            .models;
+        let daily_value = daily_models.values().next().unwrap().clone();
+        daily_models.clear();
+        daily_models.insert("v1|cpm|1:a3:b:c1:d".to_string(), daily_value.clone());
+        daily_models.insert("v1|cpm|1:a1:b3:c:d".to_string(), daily_value);
+
+        let hourly_models = &mut data.hourly[0].models;
+        let hourly_value = hourly_models.values().next().unwrap().clone();
+        hourly_models.clear();
+        hourly_models.insert("v1|pm|3:b:c1:d".to_string(), hourly_value.clone());
+        hourly_models.insert("v1|pm|1:b3:c:d".to_string(), hourly_value);
+
+        let clients = make_filters(&[ClientId::Claude]);
+        let scope = CacheReportScope::default();
+        save_cached_data(
+            &data,
+            &clients,
+            &GroupBy::ClientProviderModel,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+
+        let CacheResult::Fresh(loaded, _) =
+            load_cache(&clients, &GroupBy::ClientProviderModel, &scope)
+        else {
+            panic!("current-schema cache should load as fresh");
+        };
+        let loaded_daily = &loaded.daily[0].source_breakdown["claude"].models;
+        assert_eq!(loaded_daily.len(), 2);
+        assert!(loaded_daily.contains_key("v1|cpm|1:a3:b:c1:d"));
+        assert!(loaded_daily.contains_key("v1|cpm|1:a1:b3:c:d"));
+        let loaded_hourly = &loaded.hourly[0].models;
+        assert_eq!(loaded_hourly.len(), 2);
+        assert!(loaded_hourly.contains_key("v1|pm|3:b:c1:d"));
+        assert!(loaded_hourly.contains_key("v1|pm|1:b3:c:d"));
     }
 
     #[test]
@@ -880,6 +1727,7 @@ mod tests {
             enabled_clients: vec!["opencode".to_string()],
             group_by: GroupBy::Model.to_string(),
             report_scope: CacheReportScope::default(),
+            source_inventory_signature: test_signature(),
             data: CachedUsageData {
                 models: Vec::new(),
                 agents: vec![
@@ -1009,7 +1857,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 24,
+  "schemaVersion": 27,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
@@ -1018,6 +1866,7 @@ mod tests {
     "until": null,
     "year": null
   },
+	"sourceInventorySignature": [90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90],
 	  "data": {
 	    "models": [],
 	    "agents": [],
@@ -1069,6 +1918,7 @@ mod tests {
             &clients,
             &GroupBy::Model,
             &filtered_scope,
+            test_signature(),
         )
         .unwrap();
 
@@ -1079,7 +1929,7 @@ mod tests {
 
         assert!(matches!(
             load_cache(&clients, &GroupBy::Model, &filtered_scope),
-            CacheResult::Fresh(_)
+            CacheResult::Fresh(_, _)
         ));
 
         match previous_home {
@@ -1099,7 +1949,14 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         let scope = CacheReportScope::default();
-        save_cached_data(&UsageData::default(), &clients, &GroupBy::Model, &scope).unwrap();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
 
         let cache_path = cache_file().unwrap();
         let mut cached: CachedTUIData = serde_json::from_slice(&fs::read(&cache_path).unwrap())
@@ -1113,6 +1970,109 @@ mod tests {
             "expected Stale for future cache timestamp, got {}",
             other_variant_name(&result)
         );
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn source_inventory_signature_round_trips_in_schema_27() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+        let clients = make_filters(&[ClientId::Claude]);
+        let scope = CacheReportScope::default();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+
+        match load_cache(&clients, &GroupBy::Model, &scope) {
+            CacheResult::Fresh(_, signature) => assert_eq!(signature, test_signature()),
+            result => panic!("expected fresh cache, got {}", other_variant_name(&result)),
+        }
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn schema_26_cache_is_an_explicit_miss() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+        let clients = make_filters(&[ClientId::Claude]);
+        let scope = CacheReportScope::default();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["schemaVersion"] = serde_json::json!(26);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn schema_27_without_source_inventory_signature_is_a_miss() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+        let clients = make_filters(&[ClientId::Claude]);
+        let scope = CacheReportScope::default();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("sourceInventorySignature");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
 
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
@@ -1354,11 +2314,14 @@ mod tests {
         )
         .unwrap();
         cached["timestamp"] = serde_json::Value::from(fresh_timestamp_ms());
+        cached["schemaVersion"] = serde_json::Value::from(CACHE_SCHEMA_VERSION);
+        cached["sourceInventorySignature"] = serde_json::json!(vec![0x5a_u8; 32]);
         fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
         let clients = make_filters(&[ClientId::Claude, ClientId::Cursor]);
         match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
-            CacheResult::Fresh(data) => {
+            CacheResult::Fresh(data, signature) => {
+                assert_eq!(signature, test_signature());
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
                 let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
                 let model = cursor.models.get("claude-sonnet-4").unwrap();
@@ -1673,6 +2636,7 @@ mod tests {
             &clients,
             &GroupBy::Model,
             &CacheReportScope::default(),
+            test_signature(),
         )
         .unwrap();
 
@@ -1693,7 +2657,7 @@ mod tests {
 
     fn other_variant_name(result: &CacheResult) -> &'static str {
         match result {
-            CacheResult::Fresh(_) => "Fresh",
+            CacheResult::Fresh(_, _) => "Fresh",
             CacheResult::Stale(_) => "Stale",
             CacheResult::Miss => "Miss",
         }
@@ -1739,6 +2703,7 @@ mod tests {
             &enabled,
             &TUI_DEFAULT_GROUP_BY,
             &scope,
+            test_signature(),
         )
         .unwrap();
 
@@ -1748,7 +2713,7 @@ mod tests {
         // while the reader used `GroupBy::Model`.
         let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope);
         assert!(
-            matches!(result, CacheResult::Fresh(_)),
+            matches!(result, CacheResult::Fresh(_, _)),
             "expected Fresh after writing with TUI_DEFAULT_GROUP_BY, got {}",
             other_variant_name(&result)
         );
@@ -1783,7 +2748,14 @@ mod tests {
         let scope = CacheReportScope::default();
 
         // Pre-fix: writer used `GroupBy::default()`.
-        save_cached_data(&UsageData::default(), &enabled, &GroupBy::default(), &scope).unwrap();
+        save_cached_data(
+            &UsageData::default(),
+            &enabled,
+            &GroupBy::default(),
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
 
         // Reader uses the canonical key. If `GroupBy::default()` and
         // `TUI_DEFAULT_GROUP_BY` ever coincide (e.g. someone changes

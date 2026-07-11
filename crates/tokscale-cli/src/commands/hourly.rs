@@ -29,6 +29,10 @@ pub(crate) fn run_hourly_report(
     use tokio::runtime::Runtime;
     use tokscale_core::{get_hourly_report, GroupBy, ReportOptions};
 
+    if !json {
+        tui::config::TokscaleConfig::initialize()?;
+    }
+
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
     let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
@@ -41,6 +45,7 @@ pub(crate) fn run_hourly_report(
     let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
+    let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
     let rt = Runtime::new()?;
     let report = rt
@@ -53,7 +58,7 @@ pub(crate) fn run_hourly_report(
                 until,
                 year,
                 group_by: GroupBy::default(),
-                scanner_settings: tui::settings::load_scanner_settings_for_home(&home_dir),
+                scanner_settings,
             })
             .await
         })

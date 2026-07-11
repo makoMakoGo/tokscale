@@ -6,6 +6,7 @@
 //! The API returns token counts and vendor spend. Tokscale ignores vendor spend
 //! and derives report cost from token usage through its own pricing table.
 
+use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 
@@ -47,45 +48,70 @@ fn provider_for_model(name: &str) -> &'static str {
 }
 
 /// Parse a single session JSON object into a `UnifiedMessage`.
-fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMessage> {
-    let model_raw = session["model_name"].as_str().unwrap_or("");
-    let mode = session["mode"].as_str().unwrap_or("");
-    // Auto-mode sessions come back with `model_name: ""` because the
-    // system picks a model per turn. Bucket them under `trae-<mode>` (e.g.
-    // `trae-auto`) so token usage is still attributed instead of disappearing
-    // into an empty Model cell.
-    let model_id = if !model_raw.is_empty() {
-        normalize_trae_model(model_raw)
-    } else if !mode.is_empty() {
-        format!("trae-{}", mode.to_ascii_lowercase())
-    } else {
-        "trae-unknown".to_string()
-    };
+fn parse_session(
+    client: &str,
+    session: &serde_json::Value,
+) -> SessionParseResult<Option<UnifiedMessage>> {
+    let model_raw = session["model_name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Trae session",
+                "session is missing a non-empty model_name",
+            )
+        })?;
+    let model_id = normalize_trae_model(model_raw);
     let provider = provider_for_model(&model_id);
     // Records without a real `session_id` cannot be deduplicated correctly
     // (every "missing-id" record would collide on the same key); records
-    // without a positive `usage_time` would land at epoch 0. Drop them
+    // without a positive `usage_time` would land at epoch 0. Reject them
     // rather than fabricating placeholders.
-    let session_id = session["session_id"].as_str()?;
-    let usage_time = session["usage_time"].as_i64()?;
-    if session_id.is_empty() || usage_time <= 0 {
-        return None;
+    let session_id = session["session_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Trae session",
+                "session is missing a non-empty session_id",
+            )
+        })?;
+    let usage_time = session["usage_time"].as_i64().ok_or_else(|| {
+        SessionParseError::invalid("validate Trae session", "session is missing usage_time")
+    })?;
+    if usage_time <= 0 {
+        return Err(SessionParseError::invalid(
+            "validate Trae session",
+            "session usage_time must be positive",
+        ));
     }
     // API returns epoch seconds; UnifiedMessage expects milliseconds. Use
     // `checked_mul` because the JSON cache is untrusted input — a crafted
     // `usage_time` near `i64::MAX` would panic in debug builds and silently
     // wrap to a negative timestamp in release builds.
-    let timestamp_ms = usage_time.checked_mul(1000)?;
+    let timestamp_ms = usage_time.checked_mul(1000).ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate Trae session",
+            "session usage_time overflows millis",
+        )
+    })?;
     let extra = &session["extra_info"];
+    if !extra.is_object() {
+        return Err(SessionParseError::invalid(
+            "validate Trae session",
+            "session is missing extra_info object",
+        ));
+    }
     let tokens = TokenBreakdown {
-        input: extra["input_token"].as_i64().unwrap_or(0).max(0),
-        output: extra["output_token"].as_i64().unwrap_or(0).max(0),
-        cache_read: extra["cache_read_token"].as_i64().unwrap_or(0).max(0),
-        cache_write: extra["cache_write_token"].as_i64().unwrap_or(0).max(0),
+        input: nonnegative_token(extra, "input_token")?,
+        output: nonnegative_token(extra, "output_token")?,
+        cache_read: nonnegative_token(extra, "cache_read_token")?,
+        cache_write: nonnegative_token(extra, "cache_write_token")?,
         reasoning: 0,
     };
     if crate::positive_token_total(&tokens) == 0 {
-        return None;
+        return Ok(None);
     }
 
     let dedup_key = Some(crate::sessions::dedup_hash_str(&format!(
@@ -93,7 +119,7 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
         session_id, usage_time
     )));
 
-    Some(UnifiedMessage::new_with_dedup(
+    Ok(Some(UnifiedMessage::new_with_dedup(
         client,
         model_id,
         provider,
@@ -102,26 +128,47 @@ fn parse_session(client: &str, session: &serde_json::Value) -> Option<UnifiedMes
         tokens,
         0.0,
         dedup_key,
-    ))
+    )))
+}
+
+fn nonnegative_token(extra: &serde_json::Value, field: &str) -> SessionParseResult<i64> {
+    let Some(value) = extra.get(field) else {
+        return Ok(0);
+    };
+    let value = value.as_i64().ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate Trae session",
+            format!("extra_info.{field} must be an integer"),
+        )
+    })?;
+    if value < 0 {
+        return Err(SessionParseError::invalid(
+            "validate Trae session",
+            format!("extra_info.{field} must be non-negative"),
+        ));
+    }
+    Ok(value)
 }
 
 /// Parse a cache file containing an array of sessions as returned by the API.
-pub fn parse_trae_file(client: &str, path: &std::path::Path) -> Vec<UnifiedMessage> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let sessions = match value.as_array() {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
+pub fn parse_trae_file(
+    client: &str,
+    path: &std::path::Path,
+) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| SessionParseError::new("read Trae cache file", error))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|error| SessionParseError::new("decode Trae cache file", error))?;
+    let sessions = value.as_array().ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate Trae cache file",
+            "top-level value must be an array",
+        )
+    })?;
     sessions
         .iter()
-        .filter_map(|s| parse_session(client, s))
+        .map(|session| parse_session(client, session))
+        .filter_map(|result| result.transpose())
         .collect()
 }
 
@@ -129,6 +176,10 @@ pub fn parse_trae_file(client: &str, path: &std::path::Path) -> Vec<UnifiedMessa
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn parse_trae_file(client: &str, path: &std::path::Path) -> Vec<UnifiedMessage> {
+        super::parse_trae_file(client, path).unwrap()
+    }
 
     fn write_fixture(data: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -213,10 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_mode_fallback_uses_mode_as_model() {
-        // Trae's "Auto" mode returns `model_name: ""` because no single
-        // model is bound to the session. The parser must still keep the
-        // token usage and bucket it under `trae-auto`.
+    fn test_auto_mode_without_concrete_model_is_rejected() {
         let json = serde_json::json!([{
             "model_name": "",
             "mode": "Auto",
@@ -231,18 +279,14 @@ mod tests {
             }
         }]);
         let f = write_fixture(&json.to_string());
-        let msgs = parse_trae_file("trae", f.path());
-        assert_eq!(msgs.len(), 1);
-        let m = &msgs[0];
-        assert_eq!(m.model_id.as_ref(), "trae-auto");
-        assert_eq!(m.provider_id.as_ref(), "trae");
-        assert_eq!(m.cost, 0.0);
+        let error = super::parse_trae_file("trae", f.path()).unwrap_err();
+        assert_eq!(error.operation(), "validate Trae session");
     }
 
     #[test]
-    fn test_skip_session_without_session_id() {
+    fn test_reject_session_without_session_id() {
         // A record without `session_id` would otherwise dedup to the same
-        // key as every other malformed record. Drop it instead.
+        // key as every other malformed record. Reject it instead.
         let json = serde_json::json!([{
             "model_name": "GPT-5.4",
             "usage_time": 1776000000,
@@ -250,13 +294,13 @@ mod tests {
             "extra_info": { "input_token": 100, "output_token": 1, "cache_read_token": 0, "cache_write_token": 0 }
         }]);
         let f = write_fixture(&json.to_string());
-        let msgs = parse_trae_file("trae", f.path());
-        assert!(msgs.is_empty());
+        let error = super::parse_trae_file("trae", f.path()).unwrap_err();
+        assert_eq!(error.operation(), "validate Trae session");
     }
 
     #[test]
-    fn test_skip_session_without_usage_time() {
-        // No `usage_time` → would land at epoch 0. Drop it.
+    fn test_reject_session_without_usage_time() {
+        // No `usage_time` → would land at epoch 0. Reject it.
         let json = serde_json::json!([{
             "model_name": "GPT-5.4",
             "session_id": "abc",
@@ -264,12 +308,12 @@ mod tests {
             "extra_info": { "input_token": 100, "output_token": 1, "cache_read_token": 0, "cache_write_token": 0 }
         }]);
         let f = write_fixture(&json.to_string());
-        let msgs = parse_trae_file("trae", f.path());
-        assert!(msgs.is_empty());
+        let error = super::parse_trae_file("trae", f.path()).unwrap_err();
+        assert_eq!(error.operation(), "validate Trae session");
     }
 
     #[test]
-    fn test_skip_session_with_non_positive_usage_time() {
+    fn test_reject_session_with_non_positive_usage_time() {
         let json = serde_json::json!([{
             "model_name": "GPT-5.4",
             "session_id": "abc",
@@ -278,12 +322,12 @@ mod tests {
             "extra_info": { "input_token": 100, "output_token": 1, "cache_read_token": 0, "cache_write_token": 0 }
         }]);
         let f = write_fixture(&json.to_string());
-        let msgs = parse_trae_file("trae", f.path());
-        assert!(msgs.is_empty());
+        let error = super::parse_trae_file("trae", f.path()).unwrap_err();
+        assert_eq!(error.operation(), "validate Trae session");
     }
 
     #[test]
-    fn test_skip_session_with_overflowing_usage_time() {
+    fn test_reject_session_with_overflowing_usage_time() {
         // A maliciously crafted cache could contain a near-MAX `usage_time`.
         // Multiplying by 1000 would overflow `i64` — debug-panic or wrap to
         // a negative timestamp. Reject the record instead.
@@ -295,12 +339,12 @@ mod tests {
             "extra_info": { "input_token": 100, "output_token": 1, "cache_read_token": 0, "cache_write_token": 0 }
         }]);
         let f = write_fixture(&json.to_string());
-        let msgs = parse_trae_file("trae", f.path());
-        assert!(msgs.is_empty());
+        let error = super::parse_trae_file("trae", f.path()).unwrap_err();
+        assert_eq!(error.operation(), "validate Trae session");
     }
 
     #[test]
-    fn test_missing_model_and_mode_falls_back_to_unknown() {
+    fn test_missing_model_and_mode_is_rejected() {
         let json = serde_json::json!([{
             "session_id": "no-meta",
             "usage_time": 1776000000,
@@ -308,8 +352,7 @@ mod tests {
             "extra_info": { "input_token": 100, "output_token": 1, "cache_read_token": 0, "cache_write_token": 0 }
         }]);
         let f = write_fixture(&json.to_string());
-        let msgs = parse_trae_file("trae", f.path());
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].model_id.as_ref(), "trae-unknown");
+        let error = super::parse_trae_file("trae", f.path()).unwrap_err();
+        assert_eq!(error.operation(), "validate Trae session");
     }
 }

@@ -120,14 +120,12 @@ The canonical client identity list lives in
 Current catalog entries include:
 
 OpenCode, Claude Code, Codex CLI, Cursor, Gemini CLI, Amp, Droid, OpenClaw,
-Pi, OMP, Kimi, Qwen CLI, Roo Code, KiloCode, Mux, Kilo CLI, Crush,
+Pi, OMP, Kimi, Qwen CLI, Roo Code, KiloCode, Mux, Kilo CLI,
 Hermes Agent, Copilot, Goose, Codebuff, CodeBuddy, Antigravity, Zed Agent,
 ZCode, Kiro, Junie, Trae, Warp, Cline, Command Code, and Grok Build.
 
 Some catalog entries have explicit boundaries:
 
-- `crush` does not contribute normal local token-report rows because it does
-  not expose a token-level source accepted by this fork.
 - `grok` and local `warp.sqlite` expose token totals without bucket splits, so
   Tokscale applies the fixed total-only bucket allocation from ADR 0017.
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
@@ -168,6 +166,10 @@ a private guessed price. Details: [pricing semantics](docs/pricing.md).
 - [Development and testing](docs/development.md)
 - [Architecture decisions](docs/adr/)
 - [Upstream port logs](docs/upstream/)
+
+The scan performance helper in `scripts/measure-scan-performance.sh` requires
+`jq` and GNU time. It prefers `gtime`; otherwise, it uses `/usr/bin/time` only
+after verifying support for GNU `-f` and `-o` options.
 
 ## Upstream relationship
 

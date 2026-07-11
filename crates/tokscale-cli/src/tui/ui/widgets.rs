@@ -170,7 +170,7 @@ pub(crate) fn get_client_display_name(client: &str) -> String {
 }
 
 fn get_single_client_display_name(client: &str) -> String {
-    let config = TokscaleConfig::load();
+    let config = TokscaleConfig::initialized();
     if let Some(name) = config.get_client_display_name(client) {
         return name.to_string();
     }
@@ -186,7 +186,7 @@ pub(crate) fn get_provider_display_name(provider: &str) -> String {
 }
 
 fn get_single_provider_display_name(provider: &str) -> String {
-    let config = TokscaleConfig::load();
+    let config = TokscaleConfig::initialized();
     if let Some(name) = config.get_provider_display_name(provider) {
         return name.to_string();
     }
@@ -321,6 +321,7 @@ mod tests {
 
     #[test]
     fn provider_display_formats_each_segment_in_merged_list() {
+        TokscaleConfig::initialize_default_for_tests();
         assert_eq!(
             get_provider_display_name("openai, openai-codex, amazon-bedrock"),
             "OpenAI, AWS"
@@ -329,6 +330,7 @@ mod tests {
 
     #[test]
     fn provider_display_formats_coding_plan_aliases() {
+        TokscaleConfig::initialize_default_for_tests();
         let cases = [
             ("zai", "Z.AI"),
             ("zai-coding-plan", "Z.AI"),
@@ -410,6 +412,7 @@ mod tests {
 
     #[test]
     fn provider_display_dedups_after_formatting_merged_aliases() {
+        TokscaleConfig::initialize_default_for_tests();
         assert_eq!(
             get_provider_display_name("xiaomi, xiaomi-token-plan-cn, xiaomi-token-plan-sgp"),
             "XiaoMi"
@@ -446,6 +449,7 @@ mod tests {
 
     #[test]
     fn client_display_formats_each_segment_in_merged_list() {
+        TokscaleConfig::initialize_default_for_tests();
         assert_eq!(get_client_display_name("openclaw"), "OpenClaw");
         assert_eq!(
             get_client_display_name("opencode, codex, kiro, unknown-client"),

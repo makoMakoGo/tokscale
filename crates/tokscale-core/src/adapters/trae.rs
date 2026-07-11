@@ -3,7 +3,8 @@ use rayon::prelude::*;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
+    SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -15,7 +16,10 @@ impl LocalSourceAdapter for TraeAdapter {
         ClientId::Trae
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         adapter_discover::discover_default_scanned_units(
             ClientId::Trae,
             ctx,
@@ -23,18 +27,30 @@ impl LocalSourceAdapter for TraeAdapter {
         )
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages = sessions::trae::parse_trae_file("trae", &unit.path);
+                let mut messages =
+                    sessions::trae::parse_trae_file("trae", &unit.path).map_err(|source| {
+                        SourceParseError::from_session(
+                            unit.client,
+                            &unit.path,
+                            unit.parser_version.parser_id,
+                            source,
+                        )
+                    })?;
                 crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                ParsedUnit {
+                Ok(ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
                     cache_write: None,
                     invalidate_cache: false,
-                }
+                })
             })
             .collect()
     }
@@ -44,7 +60,7 @@ impl LocalSourceAdapter for TraeAdapter {
         parsed: Vec<ParsedUnit>,
         _ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut messages = Vec::new();
         for unit in parsed {
             if let UnitMessageSource::Fresh(unit_messages) = unit.messages {
@@ -52,6 +68,25 @@ impl LocalSourceAdapter for TraeAdapter {
             }
         }
         sink.extend_messages(crate::dedupe_latest_trae_messages(messages));
+        Ok(())
+    }
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
+        let mut accumulator = crate::TraeMessageAccumulator::default();
+        while let Some(parsed) = batches.next(ctx)? {
+            for unit in parsed {
+                if let UnitMessageSource::Fresh(messages) = unit.messages {
+                    accumulator.push_messages(messages);
+                }
+            }
+        }
+        sink.extend_messages(accumulator.finish());
+        Ok(())
     }
 }
 
@@ -60,7 +95,7 @@ pub(crate) static TRAE_ADAPTER: TraeAdapter = TraeAdapter;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::{FoldContext, ParseContext};
+    use crate::adapters::FoldContext;
     use crate::message_cache;
     use crate::pricing::{ModelPricing, PricingService};
 
@@ -98,25 +133,29 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
         let pricing = pricing_service();
 
-        let parsed = TRAE_ADAPTER.parse(
-            vec![
-                SourceUnit::no_message_cache(ClientId::Trae, older),
-                SourceUnit::no_message_cache(ClientId::Trae, newer),
-            ],
-            &ParseContext {
-                source_cache: &cache,
-                pricing: Some(&pricing),
-            },
-        );
-        let mut sink = Vec::new();
-        TRAE_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: Some(&pricing),
-            },
-            &mut sink,
-        );
+        let units = vec![
+            SourceUnit::no_message_cache(ClientId::Trae, older),
+            SourceUnit::no_message_cache(ClientId::Trae, newer),
+        ];
+        let sink = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut sink = Vec::new();
+                let mut batches = crate::adapters::ParsedBatchSource::new(&TRAE_ADAPTER, units);
+                TRAE_ADAPTER
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: Some(&pricing),
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
+                sink
+            });
 
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].timestamp, 1_776_000_001_000);

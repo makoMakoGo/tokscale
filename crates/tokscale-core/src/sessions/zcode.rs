@@ -4,7 +4,8 @@
 //! Token usage is taken from embedded API usage blocks when present and
 //! estimated from transcript content otherwise.
 
-use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::parse_timestamp_str;
 use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
@@ -13,7 +14,6 @@ use std::path::Path;
 
 const CLIENT_ID: &str = "zcode";
 const PROVIDER_ID: &str = "zai";
-const UNKNOWN_MODEL: &str = "unknown";
 
 #[derive(Debug, Deserialize)]
 struct ZcodeEntry {
@@ -154,14 +154,10 @@ fn normalize_input_and_output(
     }
 }
 
-pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
+pub fn parse_zcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-    let session_id_from_path = session_id_from_path(path);
     let workspace_key = workspace_key_from_path(path);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
@@ -173,18 +169,15 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut assistant_index = 0usize;
 
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
+        let line =
+            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let entry = match serde_json::from_str::<ZcodeEntry>(trimmed) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
+        let entry = serde_json::from_str::<ZcodeEntry>(trimmed)
+            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
 
         if session_id.is_none() {
             if let Some(id) = entry.session_id.as_deref().filter(|id| !id.is_empty()) {
@@ -201,7 +194,6 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
             model_id = Some(model.to_string());
         }
 
-        let resolved_model = model_id.as_deref().unwrap_or(UNKNOWN_MODEL).to_string();
         let chars = entry.content.as_ref().map(content_chars).unwrap_or(0);
         let breakdown_from_usage = entry
             .usage
@@ -233,16 +225,36 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                         reasoning: 0,
                     }
                 };
+                let resolved_model = model_id.clone().ok_or_else(|| {
+                    SessionParseError::invalid(
+                        "validate assistant model",
+                        "ZCode assistant turn is missing a non-empty model",
+                    )
+                })?;
 
                 context_chars += chars;
-                let resolved_session = session_id
-                    .clone()
-                    .unwrap_or_else(|| session_id_from_path.clone());
-                let timestamp = entry
-                    .timestamp
-                    .as_deref()
-                    .and_then(parse_timestamp_str)
-                    .unwrap_or(fallback_timestamp);
+                let resolved_session = session_id.clone().ok_or_else(|| {
+                    SessionParseError::invalid(
+                        "validate assistant session",
+                        "ZCode assistant turn is missing a non-empty sessionId",
+                    )
+                })?;
+                let timestamp = match entry.timestamp.as_deref() {
+                    Some(timestamp) => parse_timestamp_str(timestamp)
+                        .filter(|timestamp| *timestamp > 0)
+                        .ok_or_else(|| {
+                            SessionParseError::invalid(
+                                "validate assistant timestamp",
+                                format!("invalid ZCode timestamp `{timestamp}`"),
+                            )
+                        })?,
+                    None => {
+                        return Err(SessionParseError::invalid(
+                            "validate assistant timestamp",
+                            "ZCode assistant turn is missing a timestamp",
+                        ))
+                    }
+                };
                 let dedup_key =
                     dedup_hash_str(&format!("zcode:{resolved_session}:{assistant_index}"));
 
@@ -274,7 +286,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     }
 
-    messages
+    Ok(messages)
 }
 
 fn content_chars(content: &serde_json::Value) -> usize {
@@ -303,13 +315,6 @@ fn estimate_tokens(chars: usize) -> i64 {
     chars.div_ceil(4) as i64
 }
 
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
 fn workspace_key_from_path(path: &Path) -> Option<String> {
     path.parent()
         .and_then(|dir| dir.file_name())
@@ -320,6 +325,10 @@ fn workspace_key_from_path(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_zcode_file(path).unwrap()
+    }
     use serde_json::json;
     use std::io::Write;
     use tempfile::TempDir;
@@ -380,14 +389,14 @@ mod tests {
         let jsonl = format!(
             "{}\n{}",
             json!({"role": "user", "sessionId": "s2", "content": user_content}),
-            json!({"role": "assistant", "sessionId": "s2", "content": asst_content}),
+            json!({"role": "assistant", "sessionId": "s2", "timestamp": "2026-06-20T10:00:05Z", "model": "glm-5.2", "content": asst_content}),
         );
         let path = write_session(&dir, "repo", "s2", &jsonl);
         let messages = parse_zcode_file(&path);
 
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
-        assert_eq!(msg.model_id.as_ref(), "unknown");
+        assert_eq!(msg.model_id.as_ref(), "glm-5.2");
         assert_eq!(msg.tokens.input, 2);
         assert_eq!(msg.tokens.output, 1);
         assert_eq!(msg.tokens.cache_read, 0);
@@ -418,7 +427,7 @@ mod tests {
         let jsonl = format!(
             "{}\n{}",
             json!({"role": "user", "sessionId": "s", "content": true}),
-            json!({"role": "assistant", "sessionId": "s", "content": 123}),
+            json!({"role": "assistant", "sessionId": "s", "timestamp": "2026-06-20T10:00:05Z", "model": "glm-5.2", "content": 123}),
         );
         let path = write_session(&dir, "proj", "s", &jsonl);
         let messages = parse_zcode_file(&path);
@@ -434,7 +443,7 @@ mod tests {
         let jsonl = format!(
             "{}\n{}",
             json!({"role": "user", "sessionId": "s", "content": ""}),
-            json!({"role": "assistant", "sessionId": "s", "content": ""}),
+            json!({"role": "assistant", "sessionId": "s", "timestamp": "2026-06-20T10:00:05Z", "content": ""}),
         );
         let path = write_session(&dir, "proj", "s", &jsonl);
         let messages = parse_zcode_file(&path);
@@ -451,6 +460,8 @@ mod tests {
             json!({
                 "role": "assistant",
                 "sessionId": "s3",
+                "timestamp": "2026-06-20T10:00:05Z",
+                "model": "glm-5.2",
                 "content": "bye",
                 "token_usage": {
                     "prompt_tokens": 200,
@@ -475,6 +486,8 @@ mod tests {
             json!({
                 "role": "assistant",
                 "sessionId": "s",
+                "timestamp": "2026-06-20T10:00:05Z",
+                "model": "glm-5.2",
                 "content": "bye",
                 "usage": {
                     "prompt_tokens": 200,
@@ -503,6 +516,8 @@ mod tests {
             json!({
                 "role": "assistant",
                 "sessionId": "s",
+                "timestamp": "2026-06-20T10:00:05Z",
+                "model": "glm-5.2",
                 "content": "bye",
                 "usage": {
                     "prompt_tokens": 200,
@@ -529,6 +544,8 @@ mod tests {
             json!({
                 "role": "assistant",
                 "sessionId": "s",
+                "timestamp": "2026-06-20T10:00:05Z",
+                "model": "glm-5.2",
                 "content": "bye",
                 "usage": {
                     "prompt_tokens": 50,
@@ -555,6 +572,8 @@ mod tests {
             json!({
                 "role": "assistant",
                 "sessionId": "s",
+                "timestamp": "2026-06-20T10:00:05Z",
+                "model": "glm-5.2",
                 "content": "bye",
                 "usage": {
                     "inputTokens": 100,
@@ -625,13 +644,13 @@ mod tests {
     fn cumulative_context_estimation() {
         let dir = TempDir::new().unwrap();
         let jsonl = concat!(
-            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"aaaa"}]}"#,
+            r#"{"role":"user","sessionId":"s","model":"glm-5.2","content":[{"type":"text","text":"aaaa"}]}"#,
             "\n",
-            r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"bbbb"}]}"#,
+            r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-20T10:00:05Z","content":[{"type":"text","text":"bbbb"}]}"#,
             "\n",
             r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"cccc"}]}"#,
             "\n",
-            r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"dddd"}]}"#,
+            r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-20T10:00:15Z","content":[{"type":"text","text":"dddd"}]}"#,
         );
         let path = write_session(&dir, "proj", "s", jsonl);
         let messages = parse_zcode_file(&path);
@@ -650,6 +669,7 @@ mod tests {
                 "role": "assistant",
                 "sessionId": "s",
                 "model": "GLM-5.2",
+                "timestamp": "2026-06-20T10:00:05Z",
                 "content": "first",
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             }),
@@ -658,6 +678,7 @@ mod tests {
                 "role": "assistant",
                 "sessionId": "s",
                 "model": "glm-5-turbo",
+                "timestamp": "2026-06-20T10:00:15Z",
                 "content": "second",
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             }),
@@ -665,6 +686,7 @@ mod tests {
             json!({
                 "role": "assistant",
                 "sessionId": "s",
+                "timestamp": "2026-06-20T10:00:25Z",
                 "content": "third",
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             }),
@@ -693,6 +715,7 @@ mod tests {
             json!({
                 "role": "assistant",
                 "sessionId": "s",
+                "timestamp": "2026-06-20T10:00:05Z",
                 "content": "first response",
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             }),
@@ -706,6 +729,7 @@ mod tests {
                 "role": "assistant",
                 "sessionId": "s",
                 "model": "glm-5-turbo",
+                "timestamp": "2026-06-20T10:00:15Z",
                 "content": "second response",
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             }),
@@ -727,6 +751,8 @@ mod tests {
             json!({
                 "role": "assistant",
                 "sessionId": "s",
+                "timestamp": "2026-06-20T10:00:05Z",
+                "model": "glm-5.2",
                 "content": "bye",
                 "usage": {},
                 "token_usage": {
@@ -743,5 +769,48 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 321);
         assert_eq!(messages[0].tokens.output, 123);
         assert_eq!(messages[0].tokens.cache_read, 7);
+    }
+
+    #[test]
+    fn rejects_positive_assistant_turns_without_required_identity_or_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let missing_model = write_session(
+            &dir,
+            "p",
+            "missing-model",
+            r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-20T10:00:05Z","content":"response"}"#,
+        );
+        assert_eq!(
+            super::parse_zcode_file(&missing_model)
+                .unwrap_err()
+                .operation(),
+            "validate assistant model"
+        );
+
+        let missing_session = write_session(
+            &dir,
+            "p",
+            "missing-session",
+            r#"{"role":"assistant","model":"glm-5.2","timestamp":"2026-06-20T10:00:05Z","content":"response"}"#,
+        );
+        assert_eq!(
+            super::parse_zcode_file(&missing_session)
+                .unwrap_err()
+                .operation(),
+            "validate assistant session"
+        );
+
+        let missing_timestamp = write_session(
+            &dir,
+            "p",
+            "missing-timestamp",
+            r#"{"role":"assistant","sessionId":"s","model":"glm-5.2","content":"response"}"#,
+        );
+        assert_eq!(
+            super::parse_zcode_file(&missing_timestamp)
+                .unwrap_err()
+                .operation(),
+            "validate assistant timestamp"
+        );
     }
 }

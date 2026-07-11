@@ -380,6 +380,15 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn status_row_line(app: &App) -> Line<'static> {
+    if let Some(warning) = app.cache_persistence_warning() {
+        return Line::from(Span::styled(
+            warning.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     if app.current_tab == Tab::Usage {
         return usage_status_row_line(app);
     }
@@ -678,5 +687,18 @@ mod tests {
             text,
             "No remote subscription providers enabled; configure usageProviders"
         );
+    }
+
+    #[test]
+    fn cache_persistence_warning_stays_visible_over_transient_status() {
+        let mut app = make_app_on(Tab::Models);
+        app.set_status("Data loaded");
+        app.set_cache_persistence_warning(Some(
+            "Cache persistence warning: permission denied".to_string(),
+        ));
+
+        let text = line_text(status_row_line(&app));
+
+        assert_eq!(text, "Cache persistence warning: permission denied");
     }
 }

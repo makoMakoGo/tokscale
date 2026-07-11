@@ -34,7 +34,7 @@ pub(crate) fn build_client_filter(
     flags: ClientFlags,
     home_dir: &Option<String>,
 ) -> Result<Option<Vec<String>>> {
-    let defaults = tui::settings::load_default_clients_for_home(home_dir);
+    let defaults = tui::settings::load_default_clients_for_home(home_dir)?;
     build_client_filter_with_defaults(flags, &defaults)
 }
 
@@ -95,14 +95,12 @@ pub(crate) fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<Cl
 
 pub(crate) fn parse_persisted_default_client_id(raw: &str) -> Option<ClientId> {
     let normalized = raw.trim().to_ascii_lowercase();
+    // ADR 0021 retains this exact former ClientId only for persisted
+    // `defaultClients`. It is not a catalog, CLI, or scanner-key alias.
     if normalized == "antigravity-cli" {
         return Some(ClientId::Antigravity);
     }
     ClientId::from_str(&normalized)
-}
-
-pub(crate) fn client_id_set_all() -> std::collections::HashSet<ClientId> {
-    ClientId::iter().collect()
 }
 
 pub(crate) fn parse_client_id_set(clients: &[String]) -> std::collections::HashSet<ClientId> {

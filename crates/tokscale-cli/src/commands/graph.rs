@@ -220,6 +220,7 @@ pub(crate) fn run_graph_command(
         eprintln!("  Generating graph data...");
     }
     let use_env_roots = use_env_roots(&home_dir);
+    let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let rt = tokio::runtime::Runtime::new()?;
     let graph_result = rt
         .block_on(async {
@@ -231,7 +232,7 @@ pub(crate) fn run_graph_command(
                 until,
                 year,
                 group_by: GroupBy::default(),
-                scanner_settings: tui::settings::load_scanner_settings_for_home(&home_dir),
+                scanner_settings,
             })
             .await
         })

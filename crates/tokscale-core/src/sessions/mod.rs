@@ -14,6 +14,7 @@ pub mod commandcode;
 pub mod copilot;
 pub mod cursor;
 pub mod droid;
+pub mod error;
 pub mod gemini;
 pub mod goose;
 pub mod grok;

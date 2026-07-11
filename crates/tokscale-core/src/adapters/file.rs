@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rayon::prelude::*;
 
@@ -6,25 +6,22 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourcePipelineError,
+    SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
+use crate::sessions::error::SessionParseResult;
 use crate::{scanner, sessions, UnifiedMessage};
 
 const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const ZCODE_OVERLAP_NORMALIZATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 
-pub(crate) struct ParsedFileWithCachePolicy {
-    messages: Vec<UnifiedMessage>,
-    cacheable: bool,
-}
-
 pub(crate) struct CachedFileAdapter {
     client: ClientId,
     parser_version: ParserVersion,
-    parse: fn(&Path) -> Vec<UnifiedMessage>,
+    parse: fn(&Path) -> SessionParseResult<Vec<UnifiedMessage>>,
 }
 
 impl CachedFileAdapter {
@@ -32,7 +29,7 @@ impl CachedFileAdapter {
         client: ClientId,
         parser_id: ParserId,
         revision: u32,
-        parse: fn(&Path) -> Vec<UnifiedMessage>,
+        parse: fn(&Path) -> SessionParseResult<Vec<UnifiedMessage>>,
     ) -> Self {
         Self {
             client,
@@ -47,18 +44,25 @@ impl LocalSourceAdapter for CachedFileAdapter {
         self.client
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
-        adapter_discover::discover_default_scanned_units(
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+        Ok(adapter_discover::discover_default_scanned_units(
             self.client,
             ctx,
             FingerprintPolicy::PlainFile,
-        )
+        )?
         .into_iter()
         .map(|unit| unit.with_parser_version(self.parser_version))
-        .collect()
+        .collect())
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         let parse = self.parse;
         units
             .into_par_iter()
@@ -66,63 +70,21 @@ impl LocalSourceAdapter for CachedFileAdapter {
             .collect()
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
-    }
-}
-
-pub(crate) struct PolicyFileAdapter {
-    client: ClientId,
-    parser_version: ParserVersion,
-    parse: fn(&Path) -> ParsedFileWithCachePolicy,
-}
-
-impl PolicyFileAdapter {
-    pub(crate) const fn new(
-        client: ClientId,
-        parser_id: ParserId,
-        revision: u32,
-        parse: fn(&Path) -> ParsedFileWithCachePolicy,
-    ) -> Self {
-        Self {
-            client,
-            parser_version: ParserVersion::new(parser_id, revision),
-            parse,
-        }
-    }
-}
-
-impl LocalSourceAdapter for PolicyFileAdapter {
-    fn client(&self) -> ClientId {
-        self.client
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
-        adapter_discover::discover_default_scanned_units(
-            self.client,
-            ctx,
-            FingerprintPolicy::PlainFile,
-        )
-        .into_iter()
-        .map(|unit| unit.with_parser_version(self.parser_version))
-        .collect()
-    }
-
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
-        let parse = self.parse;
-        units
-            .into_par_iter()
-            .map(|unit| {
-                adapter_cache::load_or_parse_unit_with_policy(unit, ctx, |path| {
-                    let parsed = parse(path);
-                    (parsed.messages, parsed.cacheable)
-                })
-            })
-            .collect()
-    }
-
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), SourcePipelineError> {
+        adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 
@@ -133,30 +95,34 @@ impl LocalSourceAdapter for CopilotAdapter {
         ClientId::Copilot
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::Copilot
             .local_def()
             .expect("Copilot adapter must have local scan policy");
-        let default_root =
-            PathBuf::from(def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots));
+        let default_root = def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
 
-        let mut paths = adapter_discover::scan_roots([default_root], def.pattern);
+        let mut paths =
+            adapter_discover::scan_roots(ClientId::Copilot, [default_root], def.pattern)?;
         paths.extend(adapter_discover::scan_roots(
-            adapter_discover::extra_roots_for_client(ClientId::Copilot, ctx),
+            ClientId::Copilot,
+            adapter_discover::extra_roots_for_client(ClientId::Copilot, ctx)?,
             def.pattern,
-        ));
+        )?);
 
         if let Some(exporter_path) =
             scanner::copilot_exporter_path_with_env_strategy(ctx.use_env_roots)
         {
-            adapter_discover::push_existing_file(exporter_path, &mut paths);
+            adapter_discover::push_existing_file(ClientId::Copilot, exporter_path, &mut paths)?;
         }
 
-        adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::source_units_from_paths(
             ClientId::Copilot,
             paths,
             FingerprintPolicy::PlainFile,
-        )
+        )?
         .into_iter()
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
@@ -164,10 +130,14 @@ impl LocalSourceAdapter for CopilotAdapter {
                 MODEL_ID_CANONICALIZATION_REVISION,
             ))
         })
-        .collect()
+        .collect())
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -178,16 +148,21 @@ impl LocalSourceAdapter for CopilotAdapter {
             .collect()
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
     }
-}
 
-fn parse_gemini_file_with_policy(path: &Path) -> ParsedFileWithCachePolicy {
-    let parsed = sessions::gemini::parse_gemini_file_with_cache_status(path);
-    ParsedFileWithCachePolicy {
-        messages: parsed.messages,
-        cacheable: parsed.cacheable,
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), SourcePipelineError> {
+        adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 
@@ -198,11 +173,11 @@ pub(crate) static CURSOR_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     MODEL_ID_CANONICALIZATION_REVISION,
     sessions::cursor::parse_cursor_file,
 );
-pub(crate) static GEMINI_ADAPTER: PolicyFileAdapter = PolicyFileAdapter::new(
+pub(crate) static GEMINI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Gemini,
     ParserId::Gemini,
     MODEL_ID_CANONICALIZATION_REVISION,
-    parse_gemini_file_with_policy,
+    sessions::gemini::parse_gemini_file,
 );
 pub(crate) static GROK_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Grok,
@@ -258,12 +233,12 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::adapters::{FoldContext, ParseContext, UnitMessageSource};
+    use crate::adapters::{FoldContext, ParseContext};
     use crate::message_cache;
 
-    const AMP_CONTENT: &str = r#"{"version":1,"threadID":"T-test","requestID":"req-1","timestamp":"2026-01-01T00:00:00Z","model":"claude-sonnet-4-5","inputTokens":10,"outputTokens":5,"cacheReadTokens":2,"cacheWriteTokens":1,"credits":0.05}"#;
+    const AMP_CONTENT: &str = r#"{"id":"T-test","created":1767225600000,"usageLedger":{"events":[{"timestamp":"2026-01-01T00:00:00Z","model":"claude-sonnet-4-5","tokens":{"input":10,"output":5,"cacheReadInputTokens":2,"cacheCreationInputTokens":1}}]}}"#;
     const ZCODE_CONTENT: &str = r#"{"role":"user","sessionId":"s","content":"hello"}
-{"role":"assistant","sessionId":"s","model":"GLM-5.2","content":"hi","usage":{"input_tokens":10,"output_tokens":5}}"#;
+{"role":"assistant","sessionId":"s","model":"GLM-5.2","timestamp":"2026-06-20T10:00:05Z","content":"hi","usage":{"input_tokens":10,"output_tokens":5}}"#;
 
     fn scan_context<'a>(
         home_dir: &'a Path,
@@ -291,22 +266,20 @@ mod tests {
         units: Vec<SourceUnit>,
         cache: &mut message_cache::SourceMessageCache,
     ) -> Vec<UnifiedMessage> {
-        let parsed = adapter.parse(
-            units,
-            &ParseContext {
-                source_cache: cache,
-                pricing: None,
-            },
-        );
+        let parsed = adapter
+            .parse_checked(units, &ParseContext { pricing: None })
+            .unwrap();
         let mut sink = Vec::new();
-        adapter.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: cache,
-                pricing: None,
-            },
-            &mut sink,
-        );
+        adapter
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .unwrap();
         sink
     }
 
@@ -328,7 +301,7 @@ mod tests {
         };
         let ctx = scan_context(home.path(), &settings);
 
-        let units = AMP_ADAPTER.discover(&ctx);
+        let units = AMP_ADAPTER.discover_checked(&ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![default_path, extra_path];
         expected.sort_unstable();
@@ -348,7 +321,7 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
 
         let actual = fold_with_adapter(&AMP_ADAPTER, units, &mut cache);
-        let expected = finalized(sessions::amp::parse_amp_file(&path));
+        let expected = finalized(sessions::amp::parse_amp_file(&path).unwrap());
 
         assert_eq!(actual, expected);
     }
@@ -388,7 +361,7 @@ mod tests {
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
 
-        let units = ZCODE_ADAPTER.discover(&ctx);
+        let units = ZCODE_ADAPTER.discover_checked(&ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![default_path]);
@@ -406,7 +379,7 @@ mod tests {
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
 
-        let units = GROK_ADAPTER.discover(&ctx);
+        let units = GROK_ADAPTER.discover_checked(&ctx).unwrap();
 
         assert_eq!(units.len(), 1);
         assert_eq!(
@@ -432,13 +405,13 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
 
         let actual = fold_with_adapter(&ZCODE_ADAPTER, units, &mut cache);
-        let expected = finalized(sessions::zcode::parse_zcode_file(&path));
+        let expected = finalized(sessions::zcode::parse_zcode_file(&path).unwrap());
 
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn gemini_policy_adapter_invalidates_non_cacheable_parse() {
+    fn gemini_policy_adapter_propagates_malformed_jsonl() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join(".gemini/tmp/123/chats/corrupt.jsonl");
         write_file(
@@ -446,19 +419,12 @@ mod tests {
             "{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session-1\"}\nnot-json\n{\"type\":\"result\",\"stats\":{\"input_tokens\":10,\"output_tokens\":20}}\n",
         );
         let units = vec![SourceUnit::plain_file(ClientId::Gemini, path.clone())];
-        let cache = message_cache::SourceMessageCache::default();
+        let error = GEMINI_ADAPTER
+            .parse_checked(units, &ParseContext { pricing: None })
+            .unwrap_err();
 
-        let parsed = GEMINI_ADAPTER.parse(
-            units,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-        );
-
-        assert_eq!(parsed.len(), 1);
-        assert!(parsed[0].invalidate_cache);
-        assert!(parsed[0].cache_write.is_none());
-        assert!(matches!(parsed[0].messages, UnitMessageSource::Fresh(_)));
+        assert_eq!(error.client, ClientId::Gemini);
+        assert_eq!(error.path, path);
+        assert_eq!(error.operation, "decode JSONL line");
     }
 }

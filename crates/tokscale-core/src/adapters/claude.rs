@@ -7,7 +7,8 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
+    SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -22,33 +23,48 @@ impl LocalSourceAdapter for ClaudeAdapter {
         ClientId::Claude
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::Claude
             .local_def()
             .expect("Claude adapter must have local scan policy");
-        let mut roots = vec![PathBuf::from(
-            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
-        )];
+        let mut roots = vec![def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots)];
 
         roots.extend(adapter_discover::extra_roots_for_client(
             ClientId::Claude,
             ctx,
-        ));
+        )?);
         roots.push(PathBuf::from(format!(
             "{}/.claude/transcripts",
             ctx.home_dir
         )));
-        roots.extend(cc_mirror::discover_claude_project_roots(
-            std::path::Path::new(ctx.home_dir),
-        ));
+        roots.extend(
+            cc_mirror::discover_claude_project_roots(std::path::Path::new(ctx.home_dir)).map_err(
+                |source| {
+                    let path = source
+                        .path()
+                        .unwrap_or_else(|| std::path::Path::new(ctx.home_dir))
+                        .to_path_buf();
+                    SourceDiscoveryError::new(
+                        ClientId::Claude,
+                        path,
+                        "discover cc-mirror project roots",
+                        source,
+                    )
+                },
+            )?,
+        );
 
-        adapter_discover::source_units_from_paths(
+        let units = adapter_discover::source_units_from_paths(
             ClientId::Claude,
-            adapter_discover::scan_roots(roots, def.pattern),
+            adapter_discover::scan_roots(ClientId::Claude, roots, def.pattern)?,
             FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir: PathBuf::from(ctx.home_dir),
+                variant_path: None,
             },
-        )
+        )?
         .into_iter()
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
@@ -56,15 +72,20 @@ impl LocalSourceAdapter for ClaudeAdapter {
                 CLAUDE_WORKFLOW_REVISION,
             ))
         })
-        .collect()
+        .collect();
+        Ok(units)
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
                 let home_dir = match &unit.fingerprint_policy {
-                    FingerprintPolicy::ClaudeCodeWithHome { home_dir } => home_dir.clone(),
+                    FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => home_dir.clone(),
                     _ => unreachable!("unexpected Claude source fingerprint policy"),
                 };
                 adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
@@ -74,31 +95,69 @@ impl LocalSourceAdapter for ClaudeAdapter {
             .collect()
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        let mut seen_keys = HashSet::new();
-        for unit in parsed {
-            let ParsedUnit {
-                unit,
-                messages,
-                cache_write,
-                invalidate_cache,
-            } = unit;
-            let path = unit.path.clone();
-            let has_cache_write = cache_write.is_some();
-            let messages = adapter_cache::resolve_messages(messages, ctx);
-            adapter_cache::write_cache(cache_write, ctx, &messages);
-            sink.extend_messages(
-                messages
-                    .into_iter()
-                    .filter(|msg| msg.dedup_key.is_none_or(|key| seen_keys.insert(key)))
-                    .collect(),
-            );
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
+    }
 
-            if !has_cache_write && invalidate_cache {
-                ctx.source_cache.remove(&path, unit.parser_version);
-            }
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
+        let mut seen_keys = HashSet::new();
+        fold_claude_units(parsed, ctx, sink, &mut seen_keys)
+    }
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
+        let mut seen_keys = HashSet::new();
+        while let Some(parsed) = batches.next(ctx)? {
+            fold_claude_units(parsed, ctx, sink, &mut seen_keys)?;
+        }
+        Ok(())
+    }
+}
+
+fn fold_claude_units(
+    parsed: Vec<ParsedUnit>,
+    ctx: &mut FoldContext<'_>,
+    sink: &mut dyn MessageSink,
+    seen_keys: &mut HashSet<u64>,
+) -> Result<(), crate::adapters::SourcePipelineError> {
+    for parsed_unit in parsed {
+        let adapter_cache::ResolvedUnit {
+            unit,
+            messages,
+            cache_write,
+            invalidate_cache,
+        } = adapter_cache::resolve_unit(parsed_unit, ctx)?;
+        let path = unit.path.clone();
+        let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
+        if cache_write_outcome.is_err() && invalidate_cache {
+            ctx.source_cache.remove(&path, unit.parser_version);
+        }
+        let cache_write_outcome = cache_write_outcome?;
+        sink.extend_messages(
+            messages
+                .into_iter()
+                .filter(|message| crate::should_keep_deduped_message(seen_keys, message))
+                .collect(),
+        );
+
+        if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
+            ctx.source_cache.remove(&path, unit.parser_version);
         }
     }
+    Ok(())
 }
 
 pub(crate) static CLAUDE_ADAPTER: ClaudeAdapter = ClaudeAdapter;
@@ -161,7 +220,9 @@ mod tests {
             ..Default::default()
         };
 
-        let units = CLAUDE_ADAPTER.discover(&scan_context(home.path(), &settings));
+        let units = CLAUDE_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![
             default_file,
@@ -191,7 +252,8 @@ mod tests {
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
-        );
+        )
+        .unwrap();
 
         let mut digest_paths = unit.digest_paths();
         digest_paths.sort_unstable();
@@ -220,27 +282,51 @@ mod tests {
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
-        );
-        let parsed = CLAUDE_ADAPTER.parse(
-            vec![unit],
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-        );
+        )
+        .unwrap();
+        let parsed = CLAUDE_ADAPTER
+            .parse_checked(vec![unit], &ParseContext { pricing: None })
+            .unwrap();
         let mut actual = Vec::new();
-        CLAUDE_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-            &mut actual,
-        );
+        CLAUDE_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut actual,
+            )
+            .unwrap();
 
         let expected =
-            sessions::claudecode::parse_claude_file_with_home(&session_path, Some(home.path()));
+            sessions::claudecode::parse_claude_file_with_home(&session_path, Some(home.path()))
+                .unwrap();
         assert_eq!(actual, expected);
         assert_eq!(actual.len(), 1);
+    }
+
+    #[test]
+    fn claude_adapter_retains_client_path_parser_and_session_operation() {
+        let home = tempfile::TempDir::new().unwrap();
+        let session_path = home.path().join(".claude/projects/project-a/broken.jsonl");
+        write_file(&session_path, "{not-json\n");
+        let unit = SourceUnit::claude_code(
+            ClientId::Claude,
+            session_path.clone(),
+            home.path().to_path_buf(),
+        )
+        .unwrap();
+
+        let error = CLAUDE_ADAPTER
+            .parse_checked(vec![unit], &ParseContext { pricing: None })
+            .unwrap_err();
+
+        assert_eq!(error.client, ClientId::Claude);
+        assert_eq!(error.path, session_path);
+        assert_eq!(error.parser, ParserId::Claude);
+        assert_eq!(error.operation, "decode Claude session line");
+        assert!(error.to_string().contains("line 1"));
+        assert!(std::error::Error::source(&error).is_some());
     }
 }

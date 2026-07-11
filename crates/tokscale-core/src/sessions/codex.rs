@@ -6,15 +6,17 @@
 //! from being counted twice.
 //! Note: This parser has stateful logic to track model and delta calculations.
 
-use super::utils::{
-    extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,
-};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::{extract_i64, extract_string, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
+use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// Codex entry structure (from JSONL files)
 #[derive(Debug, Deserialize)]
@@ -114,15 +116,6 @@ impl CodexTotals {
         })
     }
 
-    fn checked_add(self, other: Self) -> Self {
-        Self {
-            input: checked_token_add(self.input, other.input),
-            output: checked_token_add(self.output, other.output),
-            cached: checked_token_add(self.cached, other.cached),
-            reasoning: checked_token_add(self.reasoning, other.reasoning),
-        }
-    }
-
     fn total(self) -> i64 {
         checked_token_sum([self.input, self.output, self.cached, self.reasoning])
     }
@@ -194,19 +187,83 @@ pub(crate) struct CodexParseState {
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedCodexFile {
     pub messages: Vec<UnifiedMessage>,
-    pub fallback_timestamp_indices: Vec<usize>,
     pub consumed_offset: u64,
-    pub parse_succeeded: bool,
-    /// True when model-less token_count rows were emitted without a later model.
-    pub unresolved_model_events: bool,
     pub state: CodexParseState,
+    pub content_hash: Option<[u8; 32]>,
+    pub ends_with_newline: bool,
+    pub source_identity: Option<crate::message_cache::SourceFileIdentity>,
 }
 
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
+struct PendingCodexMessage {
+    provider: String,
+    session_id: String,
+    timestamp: i64,
+    tokens: TokenBreakdown,
+    duration_ms: Option<i64>,
+    agent: Option<String>,
+    agent_instance: Option<String>,
+    is_turn_start: bool,
+    dedup_scope_id: String,
+    total_usage: CodexTotals,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
+}
+
+impl PendingCodexMessage {
+    fn into_message(self, model: &str) -> UnifiedMessage {
+        let mut message = UnifiedMessage::new_with_agent(
+            "codex",
+            model,
+            self.provider,
+            self.session_id,
+            self.timestamp,
+            self.tokens,
+            0.0,
+            self.agent,
+        );
+        message.duration_ms = self.duration_ms;
+        message.set_agent_instance(self.agent_instance);
+        message.is_turn_start = self.is_turn_start;
+        set_codex_dedup_key(&mut message, model, &self.dedup_scope_id, self.total_usage);
+        message.set_workspace(self.workspace_key, self.workspace_label);
+        message
+    }
+}
+
+struct HashingReader<R> {
+    inner: R,
+    hasher: Sha256,
+    last_byte: Option<u8>,
+    #[cfg(test)]
+    path: PathBuf,
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if read > 0 {
+            self.hasher.update(&buffer[..read]);
+            self.last_byte = Some(buffer[read - 1]);
+            #[cfg(test)]
+            crate::message_cache::record_source_bytes(&self.path, read);
+        }
+        Ok(read)
+    }
+}
+
+fn session_id_from_path(path: &Path) -> SessionParseResult<String> {
+    let session_id = path
+        .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "derive Codex session id",
+                "source filename must have a non-blank UTF-8 stem",
+            )
+        })?;
+    Ok(session_id.to_string())
 }
 
 fn codex_workspace_from_cwd(cwd: &str) -> (Option<String>, Option<String>) {
@@ -242,32 +299,26 @@ fn looks_like_explicit_workspace_path(path: &str) -> bool {
     bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
-fn parse_codex_reader<R: BufRead>(
-    mut reader: R,
+fn parse_codex_reader<R: BufRead + ?Sized>(
+    reader: &mut R,
     session_id: &str,
-    fallback_timestamp: i64,
     start_offset: u64,
     mut state: CodexParseState,
-) -> ParsedCodexFile {
+) -> SessionParseResult<ParsedCodexFile> {
     let mut messages = Vec::with_capacity(64);
-    let mut fallback_timestamp_indices = Vec::new();
     let mut buffer = Vec::with_capacity(4096);
     let mut line = String::with_capacity(4096);
     let mut consumed_offset = start_offset;
-    let mut parse_succeeded = true;
     let mut pending_model_messages = Vec::new();
-    let mut unresolved_model_events = false;
 
     loop {
         line.clear();
-        let bytes_read = match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(bytes_read) => bytes_read,
-            Err(_) => {
-                parse_succeeded = false;
-                break;
-            }
-        };
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|source| SessionParseError::new("read Codex JSONL line", source))?;
+        if bytes_read == 0 {
+            break;
+        }
         consumed_offset += bytes_read as u64;
 
         let trimmed = line.trim();
@@ -278,7 +329,11 @@ fn parse_codex_reader<R: BufRead>(
         let mut handled = false;
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
-        if let Ok(entry) = simd_json::from_slice::<CodexEntry>(&mut buffer) {
+        let (entry, entry_decode_error) = match simd_json::from_slice::<CodexEntry>(&mut buffer) {
+            Ok(entry) => (Some(entry), None),
+            Err(error) => (None, Some(error)),
+        };
+        if let Some(entry) = entry {
             if let Some(payload) = entry.payload {
                 let payload_model = extract_model(&payload);
                 let is_token_count = entry.entry_type == "event_msg"
@@ -320,7 +375,7 @@ fn parse_codex_reader<R: BufRead>(
                         }
                         if is_token_count {
                             if let Some(info) = payload.info.as_ref() {
-                                remember_forked_child_inherited_baseline(&mut state, info);
+                                remember_forked_child_inherited_baseline(&mut state, info)?;
                             }
                         }
                         continue;
@@ -332,12 +387,10 @@ fn parse_codex_reader<R: BufRead>(
                     && !is_token_count
                     && entry.entry_type != "session_meta"
                 {
-                    flush_pending_model_messages_as_unknown(
-                        &mut pending_model_messages,
-                        &mut messages,
-                        &mut fallback_timestamp_indices,
-                        &mut unresolved_model_events,
-                    );
+                    return Err(SessionParseError::invalid(
+                        "resolve Codex token-count model",
+                        "token-count rows were not followed by a model-bearing event",
+                    ));
                 }
 
                 if entry.entry_type == "session_meta" {
@@ -388,12 +441,11 @@ fn parse_codex_reader<R: BufRead>(
                 if entry.entry_type == "turn_context" {
                     state.current_model = payload_model.clone();
                     state.current_turn_start_ms =
-                        parse_codex_entry_timestamp(entry.timestamp.as_deref());
+                        parse_codex_entry_timestamp(entry.timestamp.as_deref())?;
                     if let Some(model) = state.current_model.clone() {
                         flush_pending_model_messages(
                             &mut pending_model_messages,
                             &mut messages,
-                            &mut fallback_timestamp_indices,
                             &model,
                         );
                     }
@@ -435,7 +487,6 @@ fn parse_codex_reader<R: BufRead>(
                         flush_pending_model_messages(
                             &mut pending_model_messages,
                             &mut messages,
-                            &mut fallback_timestamp_indices,
                             model,
                         );
                     }
@@ -444,8 +495,10 @@ fn parse_codex_reader<R: BufRead>(
                     // Upstream totals are mutable snapshots (compaction, context-window
                     // capping can rewrite them), so we only use total_token_usage for
                     // dedup and monotonicity checks — never as a direct delta source.
-                    let total_usage = info.total_token_usage.as_ref().map(CodexTotals::from_usage);
-                    let last_usage = info.last_token_usage.as_ref().map(CodexTotals::from_usage);
+                    let (total_usage_record, last_usage_record) =
+                        required_codex_token_usage(&info)?;
+                    let total_usage = CodexTotals::from_usage(total_usage_record);
+                    let last_usage = CodexTotals::from_usage(last_usage_record);
 
                     // Forked child logs can replay more than one parent
                     // token_count row after the first child turn_context,
@@ -453,7 +506,7 @@ fn parse_codex_reader<R: BufRead>(
                     // baseline active until totals move beyond it.
                     if forked_child_should_skip_inherited_snapshot(
                         &state,
-                        info.total_token_usage.as_ref(),
+                        total_usage_record,
                         total_usage,
                     ) {
                         continue;
@@ -461,47 +514,17 @@ fn parse_codex_reader<R: BufRead>(
                     state.forked_child_inherited_baseline = None;
                     state.forked_child_inherited_reported_total = None;
 
-                    let (tokens, next_totals) =
-                        match (total_usage, last_usage, state.previous_totals) {
-                            // Both present with previous baseline (standard path)
-                            (Some(total), Some(last), Some(previous)) => {
-                                if total == previous {
-                                    continue;
-                                }
-                                if total.delta_from(previous).is_none()
-                                    && total.looks_like_stale_regression(previous, last)
-                                {
-                                    continue;
-                                }
-                                (last.into_tokens(), Some(total))
-                            }
-                            // Both present, first event — use last (NOT full total) to
-                            // avoid overcounting tokens carried from a resumed session.
-                            (Some(total), Some(last), None) => (last.into_tokens(), Some(total)),
-                            // Only total, have previous (defensive — upstream schema
-                            // requires both when info is present)
-                            (Some(total), None, Some(previous)) => {
-                                if total == previous {
-                                    continue;
-                                }
-                                if let Some(delta) = total.delta_from(previous) {
-                                    (delta.into_tokens(), Some(total))
-                                } else {
-                                    state.previous_totals = Some(total);
-                                    continue;
-                                }
-                            }
-                            // Only total, first event, no last — legacy/degraded path
-                            (Some(total), None, None) => (total.into_tokens(), Some(total)),
-                            // Only last, have previous
-                            (None, Some(last), Some(previous)) => {
-                                (last.into_tokens(), Some(previous.checked_add(last)))
-                            }
-                            // Only last, no previous
-                            (None, Some(last), None) => (last.into_tokens(), None),
-                            // Neither
-                            (None, None, _) => continue,
-                        };
+                    if let Some(previous) = state.previous_totals {
+                        if total_usage == previous {
+                            continue;
+                        }
+                        if total_usage.delta_from(previous).is_none()
+                            && total_usage.looks_like_stale_regression(previous, last_usage)
+                        {
+                            continue;
+                        }
+                    }
+                    let tokens = last_usage.into_tokens();
 
                     // Skip zero-token snapshots without advancing the baseline so
                     // that post-compaction zero totals don't inflate later deltas.
@@ -513,71 +536,56 @@ fn parse_codex_reader<R: BufRead>(
                         continue;
                     }
 
-                    state.previous_totals = next_totals;
+                    state.previous_totals = Some(total_usage);
 
-                    let parsed_timestamp = parse_codex_entry_timestamp(entry.timestamp.as_deref());
-                    let timestamp = parsed_timestamp.unwrap_or(fallback_timestamp);
+                    let parsed_timestamp = parse_codex_entry_timestamp(entry.timestamp.as_deref())?;
+                    let timestamp = parsed_timestamp.ok_or_else(|| {
+                        SessionParseError::invalid(
+                            "validate Codex token-count event",
+                            "timestamp is missing",
+                        )
+                    })?;
                     let duration_ms =
-                        duration_between_ms(state.current_turn_start_ms, parsed_timestamp);
+                        duration_between_ms(state.current_turn_start_ms, Some(timestamp));
 
                     let provider = state.session_provider.as_deref().unwrap_or("openai");
 
-                    let mut message = UnifiedMessage::new_with_agent(
-                        "codex",
-                        model.clone().unwrap_or_else(|| "unknown".to_string()),
-                        provider,
-                        session_id,
+                    // Fork/subagent children replay the same upstream
+                    // token_count history into many sibling files. Those
+                    // replays carry identical cumulative totals but a
+                    // distinct per-file session id, so a session-scoped key
+                    // never collapses them and the totals get counted once
+                    // per sibling. Scope the key to the fork parent instead
+                    // so sibling replays share one key. Unrelated sessions
+                    // keep their own id and never merge.
+                    let dedup_scope_id = state
+                        .session_forked_from_id
+                        .as_deref()
+                        .or(state.session_id_from_meta.as_deref())
+                        .unwrap_or(session_id)
+                        .to_string();
+                    let is_turn_start = std::mem::take(&mut state.pending_turn_start);
+                    let pending = PendingCodexMessage {
+                        provider: provider.to_string(),
+                        session_id: session_id.to_string(),
                         timestamp,
                         tokens,
-                        0.0,
-                        state.session_agent.clone(),
-                    );
-                    message.duration_ms = duration_ms;
-                    message.set_agent_instance(
-                        state
+                        duration_ms,
+                        agent: state.session_agent.clone(),
+                        agent_instance: state
                             .session_agent_instance
                             .clone()
                             .or_else(|| state.session_id_from_meta.clone()),
-                    );
-                    // Apply a deferred human-turn marker from a preceding
-                    // user_message to this assistant reply — the first
-                    // token-bearing message after the human input.
-                    if state.pending_turn_start {
-                        message.is_turn_start = true;
-                        state.pending_turn_start = false;
-                    }
-                    if parsed_timestamp.is_some() || total_usage.is_some() {
-                        // Fork/subagent children replay the same upstream
-                        // token_count history into many sibling files. Those
-                        // replays carry identical cumulative totals but a
-                        // distinct per-file session id, so a session-scoped key
-                        // never collapses them and the totals get counted once
-                        // per sibling. Scope the key to the fork parent instead
-                        // so sibling replays share one key. Unrelated sessions
-                        // keep their own id and never merge.
-                        let dedup_scope_id = state
-                            .session_forked_from_id
-                            .as_deref()
-                            .or(state.session_id_from_meta.as_deref())
-                            .unwrap_or(session_id);
-                        set_codex_dedup_key(
-                            &mut message,
-                            model.as_deref().unwrap_or("unknown"),
-                            dedup_scope_id,
-                            total_usage,
-                        );
-                    }
-                    message.set_workspace(
-                        state.session_workspace_key.clone(),
-                        state.session_workspace_label.clone(),
-                    );
-                    if model.is_some() {
-                        messages.push(message);
-                        if parsed_timestamp.is_none() {
-                            fallback_timestamp_indices.push(messages.len() - 1);
-                        }
+                        is_turn_start,
+                        dedup_scope_id,
+                        total_usage,
+                        workspace_key: state.session_workspace_key.clone(),
+                        workspace_label: state.session_workspace_label.clone(),
+                    };
+                    if let Some(model) = model.as_deref() {
+                        messages.push(pending.into_message(model));
                     } else {
-                        pending_model_messages.push((message, parsed_timestamp.is_none()));
+                        pending_model_messages.push(pending);
                     }
                     handled = true;
                 }
@@ -604,66 +612,57 @@ fn parse_codex_reader<R: BufRead>(
             trimmed,
             CodexHeadlessContext {
                 session_id,
-                fallback_timestamp,
                 session_provider: state.session_provider.as_deref(),
                 session_agent: &state.session_agent,
                 session_agent_instance: &state.session_agent_instance,
                 session_is_headless: state.session_is_headless,
             },
             &mut state.current_model,
-        );
+        )?;
         if !pending_model_messages.is_empty() {
             if let Some(model) = state.current_model.clone() {
-                flush_pending_model_messages(
-                    &mut pending_model_messages,
-                    &mut messages,
-                    &mut fallback_timestamp_indices,
-                    &model,
-                );
+                flush_pending_model_messages(&mut pending_model_messages, &mut messages, &model);
             } else {
-                flush_pending_model_messages_as_unknown(
-                    &mut pending_model_messages,
-                    &mut messages,
-                    &mut fallback_timestamp_indices,
-                    &mut unresolved_model_events,
-                );
+                return Err(SessionParseError::invalid(
+                    "resolve Codex token-count model",
+                    "headless usage followed token-count rows without a model",
+                ));
             }
         }
 
-        if let Some((mut msg, used_fallback_timestamp)) = headless_message {
+        if let Some(mut msg) = headless_message {
             msg.set_workspace(
                 state.session_workspace_key.clone(),
                 state.session_workspace_label.clone(),
             );
             messages.push(msg);
-            if used_fallback_timestamp {
-                fallback_timestamp_indices.push(messages.len() - 1);
-            }
             continue;
+        }
+
+        if let Some(source) = entry_decode_error {
+            return Err(SessionParseError::new("decode Codex JSONL entry", source));
         }
 
         let mut json_probe = trimmed.as_bytes().to_vec();
-        if simd_json::from_slice::<Value>(&mut json_probe).is_err() {
-            parse_succeeded = false;
-            continue;
-        }
+        simd_json::from_slice::<Value>(&mut json_probe)
+            .map_err(|source| SessionParseError::new("decode Codex JSONL line", source))?;
     }
 
-    flush_pending_model_messages_as_unknown(
-        &mut pending_model_messages,
-        &mut messages,
-        &mut fallback_timestamp_indices,
-        &mut unresolved_model_events,
-    );
+    if !pending_model_messages.is_empty() {
+        return Err(SessionParseError::invalid(
+            "resolve Codex token-count model",
+            "source ended with token-count rows whose model was never identified",
+        ));
+    }
 
-    ParsedCodexFile {
+    Ok(ParsedCodexFile {
         messages,
-        fallback_timestamp_indices,
         consumed_offset,
-        parse_succeeded,
-        unresolved_model_events,
         state,
-    }
+        content_hash: None,
+        ends_with_newline: false,
+        source_identity: None,
+    })
 }
 
 fn codex_source_is_exec(source: Option<&Value>) -> bool {
@@ -770,10 +769,14 @@ fn codex_uuid_v7_order_key(id: &str) -> Option<String> {
     Some(key)
 }
 
-fn parse_codex_entry_timestamp(timestamp: Option<&str>) -> Option<i64> {
+fn parse_codex_entry_timestamp(timestamp: Option<&str>) -> SessionParseResult<Option<i64>> {
     timestamp
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.timestamp_millis())
+        .map(|timestamp| {
+            chrono::DateTime::parse_from_rfc3339(timestamp)
+                .map(|date_time| date_time.timestamp_millis())
+                .map_err(|source| SessionParseError::new("parse Codex event timestamp", source))
+        })
+        .transpose()
 }
 
 fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
@@ -785,35 +788,20 @@ fn codex_token_count_dedup_key(
     message: &UnifiedMessage,
     model: &str,
     upstream_session_id: &str,
-    total_usage: Option<CodexTotals>,
+    total_usage: CodexTotals,
 ) -> u64 {
-    if let Some(total) = total_usage {
-        // Codex fork/subagent logs can replay the same upstream token_count
-        // history into many child files with child-local timestamps. The
-        // cumulative total is the stable upstream identity; timestamp is only
-        // a fallback when older rows do not carry totals.
-        return crate::sessions::dedup_hash_str(&format!(
-            "codex:token_count-total:{}:{}:{}:{}:{}:{}:{}",
-            upstream_session_id,
-            message.provider_id,
-            model,
-            total.input,
-            total.output,
-            total.cached,
-            total.reasoning
-        ));
-    }
-
+    // Codex fork/subagent logs can replay the same upstream token_count
+    // history into many child files with child-local timestamps. Current-format
+    // cumulative totals provide the stable upstream identity.
     crate::sessions::dedup_hash_str(&format!(
-        "codex:token_count:{}:{}:{}:{}:{}:{}:{}:{}",
-        message.timestamp,
+        "codex:token_count-total:{}:{}:{}:{}:{}:{}:{}",
+        upstream_session_id,
         message.provider_id,
         model,
-        message.tokens.input,
-        message.tokens.output,
-        message.tokens.cache_read,
-        message.tokens.cache_write,
-        message.tokens.reasoning
+        total_usage.input,
+        total_usage.output,
+        total_usage.cached,
+        total_usage.reasoning
     ))
 }
 
@@ -821,7 +809,7 @@ fn set_codex_dedup_key(
     message: &mut UnifiedMessage,
     model: &str,
     upstream_session_id: &str,
-    total_usage: Option<CodexTotals>,
+    total_usage: CodexTotals,
 ) {
     if message.dedup_key.is_none() {
         message.dedup_key = Some(codex_token_count_dedup_key(
@@ -834,92 +822,72 @@ fn set_codex_dedup_key(
 }
 
 fn flush_pending_model_messages(
-    pending_model_messages: &mut Vec<(UnifiedMessage, bool)>,
+    pending_model_messages: &mut Vec<PendingCodexMessage>,
     messages: &mut Vec<UnifiedMessage>,
-    fallback_timestamp_indices: &mut Vec<usize>,
     model: &str,
 ) {
-    for (mut message, used_fallback_timestamp) in pending_model_messages.drain(..) {
-        if !used_fallback_timestamp {
-            let upstream_session_id = message.session_id.clone();
-            set_codex_dedup_key(&mut message, model, &upstream_session_id, None);
-        }
-        message.model_id = crate::sessions::intern::intern(model);
-        messages.push(message);
-        if used_fallback_timestamp {
-            fallback_timestamp_indices.push(messages.len() - 1);
-        }
+    for pending in pending_model_messages.drain(..) {
+        messages.push(pending.into_message(model));
     }
-}
-
-fn flush_pending_model_messages_as_unknown(
-    pending_model_messages: &mut Vec<(UnifiedMessage, bool)>,
-    messages: &mut Vec<UnifiedMessage>,
-    fallback_timestamp_indices: &mut Vec<usize>,
-    unresolved_model_events: &mut bool,
-) {
-    if pending_model_messages.is_empty() {
-        return;
-    }
-
-    *unresolved_model_events = true;
-    flush_pending_model_messages(
-        pending_model_messages,
-        messages,
-        fallback_timestamp_indices,
-        "unknown",
-    );
 }
 
 /// Parse a Codex JSONL file with stateful tracking
-pub fn parse_codex_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
+pub fn parse_codex_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let file = std::fs::File::open(path)
+        .map_err(|source| SessionParseError::new("open Codex JSONL source", source))?;
 
-    let session_id = session_id_from_path(path);
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-    let reader = BufReader::new(file);
-    let parsed = parse_codex_reader(
-        reader,
-        &session_id,
-        fallback_timestamp,
-        0,
-        CodexParseState::default(),
-    );
-    parsed.messages
+    let session_id = session_id_from_path(path)?;
+    let mut reader = BufReader::new(file);
+    let parsed = parse_codex_reader(&mut reader, &session_id, 0, CodexParseState::default())?;
+    Ok(parsed.messages)
 }
 
 fn reported_total_tokens(usage: &CodexTokenUsage) -> Option<i64> {
     usage.total_tokens.filter(|total| *total >= 0)
 }
 
-fn remember_forked_child_inherited_baseline(state: &mut CodexParseState, info: &CodexInfo) {
-    let Some(total_usage) = info.total_token_usage.as_ref() else {
-        return;
-    };
+fn required_codex_token_usage(
+    info: &CodexInfo,
+) -> SessionParseResult<(&CodexTokenUsage, &CodexTokenUsage)> {
+    let total = info.total_token_usage.as_ref().ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate Codex token-count event",
+            "total_token_usage is missing",
+        )
+    })?;
+    let last = info.last_token_usage.as_ref().ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate Codex token-count event",
+            "last_token_usage is missing",
+        )
+    })?;
+    Ok((total, last))
+}
 
+fn remember_forked_child_inherited_baseline(
+    state: &mut CodexParseState,
+    info: &CodexInfo,
+) -> SessionParseResult<()> {
+    let (total_usage, _) = required_codex_token_usage(info)?;
     let totals = CodexTotals::from_usage(total_usage);
     state.previous_totals = Some(totals);
     state.forked_child_inherited_baseline = Some(totals);
     state.forked_child_inherited_reported_total = reported_total_tokens(total_usage);
+    Ok(())
 }
 
 fn forked_child_should_skip_inherited_snapshot(
     state: &CodexParseState,
-    total_usage: Option<&CodexTokenUsage>,
-    totals: Option<CodexTotals>,
+    total_usage: &CodexTokenUsage,
+    totals: CodexTotals,
 ) -> bool {
-    if let (Some(usage), Some(baseline)) =
-        (total_usage, state.forked_child_inherited_reported_total)
-    {
-        if reported_total_tokens(usage).is_some_and(|total| total <= baseline) {
+    if let Some(baseline) = state.forked_child_inherited_reported_total {
+        if reported_total_tokens(total_usage).is_some_and(|total| total <= baseline) {
             return true;
         }
     }
 
-    if let (Some(totals), Some(baseline)) = (totals, state.forked_child_inherited_baseline) {
+    if let Some(baseline) = state.forked_child_inherited_baseline {
         return totals.is_within(baseline);
     }
 
@@ -930,36 +898,84 @@ pub(crate) fn parse_codex_file_incremental(
     path: &Path,
     start_offset: u64,
     state: CodexParseState,
-) -> ParsedCodexFile {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => {
-            return ParsedCodexFile {
-                messages: Vec::new(),
-                fallback_timestamp_indices: Vec::new(),
-                consumed_offset: start_offset,
-                parse_succeeded: false,
-                unresolved_model_events: false,
-                state,
+) -> SessionParseResult<ParsedCodexFile> {
+    parse_codex_file_incremental_hashed(path, start_offset, state, None)?.ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate Codex incremental prefix",
+            "source ended before the requested start offset",
+        )
+    })
+}
+
+pub(crate) fn parse_codex_file_incremental_verified(
+    path: &Path,
+    start_offset: u64,
+    state: CodexParseState,
+    expected_prefix_hash: [u8; 32],
+) -> SessionParseResult<Option<ParsedCodexFile>> {
+    parse_codex_file_incremental_hashed(path, start_offset, state, Some(expected_prefix_hash))
+}
+
+fn parse_codex_file_incremental_hashed(
+    path: &Path,
+    start_offset: u64,
+    state: CodexParseState,
+    expected_prefix_hash: Option<[u8; 32]>,
+) -> SessionParseResult<Option<ParsedCodexFile>> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|source| SessionParseError::new("open Codex JSONL source", source))?;
+    let source_identity = crate::message_cache::source_file_identity_from_open_file(&file)
+        .map_err(|source| SessionParseError::new("read Codex source file identity", source))?;
+
+    #[cfg(test)]
+    crate::message_cache::record_source_hash_start(path);
+    let mut hasher = Sha256::new();
+    let mut last_byte = None;
+    let mut remaining = start_offset;
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let bytes_to_read = remaining.min(buffer.len() as u64) as usize;
+        let read = file
+            .read(&mut buffer[..bytes_to_read])
+            .map_err(|source| SessionParseError::new("read Codex incremental prefix", source))?;
+        if read == 0 {
+            return if expected_prefix_hash.is_some() {
+                Ok(None)
+            } else {
+                Err(SessionParseError::invalid(
+                    "validate Codex incremental prefix",
+                    "source ended before the requested start offset",
+                ))
             };
         }
-    };
-
-    if file.seek(SeekFrom::Start(start_offset)).is_err() {
-        return ParsedCodexFile {
-            messages: Vec::new(),
-            fallback_timestamp_indices: Vec::new(),
-            consumed_offset: start_offset,
-            parse_succeeded: false,
-            unresolved_model_events: false,
-            state,
-        };
+        #[cfg(test)]
+        crate::message_cache::record_source_bytes(path, read);
+        hasher.update(&buffer[..read]);
+        last_byte = Some(buffer[read - 1]);
+        remaining -= read as u64;
+    }
+    if expected_prefix_hash
+        .is_some_and(|expected| <[u8; 32]>::from(hasher.clone().finalize()) != expected)
+    {
+        return Ok(None);
     }
 
-    let session_id = session_id_from_path(path);
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-    let reader = BufReader::new(file);
-    parse_codex_reader(reader, &session_id, fallback_timestamp, start_offset, state)
+    let session_id = session_id_from_path(path)?;
+    let hashing_reader = HashingReader {
+        inner: file,
+        hasher,
+        last_byte,
+        #[cfg(test)]
+        path: path.to_path_buf(),
+    };
+    let mut reader = BufReader::new(hashing_reader);
+    let mut parsed = parse_codex_reader(&mut reader, &session_id, start_offset, state)?;
+    let hashing_reader = reader.into_inner();
+    parsed.content_hash = Some(hashing_reader.hasher.finalize().into());
+    parsed.ends_with_newline =
+        parsed.consumed_offset == 0 || hashing_reader.last_byte == Some(b'\n');
+    parsed.source_identity = Some(source_identity);
+    Ok(Some(parsed))
 }
 
 fn extract_model(payload: &CodexPayload) -> Option<String> {
@@ -990,7 +1006,6 @@ struct CodexHeadlessUsage {
 
 struct CodexHeadlessContext<'a> {
     session_id: &'a str,
-    fallback_timestamp: i64,
     session_provider: Option<&'a str>,
     session_agent: &'a Option<String>,
     session_agent_instance: &'a Option<String>,
@@ -1001,23 +1016,30 @@ fn parse_codex_headless_line(
     line: &str,
     context: CodexHeadlessContext<'_>,
     current_model: &mut Option<String>,
-) -> Option<(UnifiedMessage, bool)> {
+) -> SessionParseResult<Option<UnifiedMessage>> {
     let mut bytes = line.as_bytes().to_vec();
-    let value: Value = simd_json::from_slice(&mut bytes).ok()?;
+    let value: Value = simd_json::from_slice(&mut bytes)
+        .map_err(|source| SessionParseError::new("decode Codex headless line", source))?;
 
     if let Some(model) = extract_model_from_value(&value) {
         *current_model = Some(model);
     }
 
-    let usage = extract_headless_usage(&value)?;
+    let Some(usage) = extract_headless_usage(&value) else {
+        return Ok(None);
+    };
     let model = usage
         .model
         .or_else(|| current_model.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let timestamp = usage.timestamp_ms.unwrap_or(context.fallback_timestamp);
+        .ok_or_else(|| {
+            SessionParseError::invalid("validate Codex headless usage", "model is missing")
+        })?;
+    let timestamp = usage.timestamp_ms.ok_or_else(|| {
+        SessionParseError::invalid("validate Codex headless usage", "timestamp is missing")
+    })?;
 
     if usage.input == 0 && usage.output == 0 && usage.cached == 0 {
-        return None;
+        return Ok(None);
     }
 
     let provider = context.session_provider.unwrap_or("openai");
@@ -1043,7 +1065,7 @@ fn parse_codex_headless_line(
     );
     message.set_agent_instance(context.session_agent_instance.clone());
 
-    Some((message, usage.timestamp_ms.is_none()))
+    Ok(Some(message))
 }
 
 fn extract_headless_usage(value: &Value) -> Option<CodexHeadlessUsage> {
@@ -1172,6 +1194,19 @@ mod tests {
         file
     }
 
+    fn parse_codex_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_codex_file(path).expect("test fixture must be valid Codex JSONL")
+    }
+
+    fn parse_codex_file_incremental(
+        path: &Path,
+        start_offset: u64,
+        state: CodexParseState,
+    ) -> ParsedCodexFile {
+        super::parse_codex_file_incremental(path, start_offset, state)
+            .expect("test fixture must be valid incremental Codex JSONL")
+    }
+
     struct FailAfterFirstLine {
         inner: Cursor<Vec<u8>>,
         fail_next_read: bool,
@@ -1217,8 +1252,48 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_source_returns_open_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("missing.jsonl");
+
+        let error = super::parse_codex_file(&path).expect_err("missing source must fail");
+
+        assert!(error.to_string().contains("open Codex JSONL source"));
+    }
+
+    #[test]
+    fn test_structurally_malformed_entry_returns_decode_error() {
+        let file = create_test_file(r#"{"type":7,"payload":{}}"#);
+
+        let error = super::parse_codex_file(file.path())
+            .expect_err("a non-string entry type must fail schema decoding");
+
+        assert!(error.to_string().contains("decode Codex JSONL entry"));
+    }
+
+    #[test]
+    fn test_verified_incremental_prefix_mismatch_is_a_cache_miss() {
+        let file = create_test_file(FIRST_CODEX_ENTRY_FOR_PREFIX_TEST);
+
+        let parsed = parse_codex_file_incremental_verified(
+            file.path(),
+            1,
+            CodexParseState::default(),
+            [0xff; 32],
+        )
+        .expect("prefix verification I/O must succeed");
+
+        assert!(parsed.is_none());
+    }
+
+    const FIRST_CODEX_ENTRY_FOR_PREFIX_TEST: &str = concat!(
+        r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+        "\n",
+    );
+
+    #[test]
     fn test_headless_usage_line() {
-        let content = r#"{"type":"turn.completed","model":"gpt-4o-mini","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}"#;
+        let content = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn.completed","model":"gpt-4o-mini","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}"#;
         let file = create_test_file(content);
 
         let messages = parse_codex_file(file.path());
@@ -1232,7 +1307,7 @@ mod tests {
 
     #[test]
     fn test_headless_usage_nested_data() {
-        let content = r#"{"type":"result","data":{"model_name":"gpt-4o","usage":{"input_tokens":50,"cached_input_tokens":5,"output_tokens":12}}}"#;
+        let content = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"result","data":{"model_name":"gpt-4o","usage":{"input_tokens":50,"cached_input_tokens":5,"output_tokens":12}}}"#;
         let file = create_test_file(content);
 
         let messages = parse_codex_file(file.path());
@@ -1354,11 +1429,11 @@ mod tests {
         assert_eq!(messages[2].tokens.reasoning, 1);
 
         let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
-        assert!(!parsed.unresolved_model_events);
+        assert_eq!(parsed.messages.len(), messages.len());
     }
 
     #[test]
-    fn test_token_count_without_model_stays_unknown_but_is_not_cacheable() {
+    fn test_token_count_without_model_is_an_error() {
         let file = create_test_file(concat!(
             r#"{"type":"session_meta","payload":{"source":"interactive","model_provider":"openai"}}"#,
             "\n",
@@ -1366,12 +1441,10 @@ mod tests {
             "\n"
         ));
 
-        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        let error = super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+            .expect_err("a token-count row without any model must fail");
 
-        assert!(parsed.parse_succeeded);
-        assert!(parsed.unresolved_model_events);
-        assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].model_id.as_ref(), "unknown");
+        assert!(error.to_string().contains("model was never identified"));
     }
 
     #[test]
@@ -1387,29 +1460,27 @@ mod tests {
 
         let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
 
-        assert!(parsed.parse_succeeded);
-        assert!(!parsed.unresolved_model_events);
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.5");
     }
 
     #[test]
-    fn test_parse_reader_marks_failure_on_line_read_error() {
-        let reader = FailAfterFirstLine::new(concat!(
+    fn test_parse_reader_returns_line_read_error() {
+        let mut reader = FailAfterFirstLine::new(concat!(
             r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
             "\n",
             r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
             "\n"
         ));
 
-        let parsed = parse_codex_reader(reader, "session", 0, 0, CodexParseState::default());
+        let error = parse_codex_reader(&mut reader, "session", 0, CodexParseState::default())
+            .expect_err("line read failure must propagate");
 
-        assert!(!parsed.parse_succeeded);
-        assert!(parsed.messages.is_empty());
+        assert!(error.to_string().contains("read Codex JSONL line"));
     }
 
     #[test]
-    fn test_parse_file_returns_empty_on_invalid_utf8_line_error() {
+    fn test_parse_file_returns_error_on_invalid_utf8_line() {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(
             concat!(
@@ -1422,15 +1493,20 @@ mod tests {
         file.write_all(&[0xff, b'\n']).unwrap();
         file.flush().unwrap();
 
-        let messages = parse_codex_file(file.path());
-        assert!(messages.is_empty());
+        let full_error = super::parse_codex_file(file.path())
+            .expect_err("invalid UTF-8 must fail the full parser");
+        assert!(full_error.to_string().contains("read Codex JSONL line"));
 
-        let incremental = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
-        assert!(!incremental.parse_succeeded);
+        let incremental_error =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .expect_err("invalid UTF-8 must fail the incremental parser");
+        assert!(incremental_error
+            .to_string()
+            .contains("read Codex JSONL line"));
     }
 
     #[test]
-    fn test_parse_file_preserves_valid_messages_after_late_invalid_utf8_line_error() {
+    fn test_parse_file_rejects_late_invalid_utf8_line() {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(
             concat!(
@@ -1445,22 +1521,17 @@ mod tests {
         file.write_all(&[0xff, b'\n']).unwrap();
         file.flush().unwrap();
 
-        let messages = parse_codex_file(file.path());
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
-        assert_eq!(messages[0].tokens.input, 8);
-        assert_eq!(messages[0].tokens.output, 3);
-        assert_eq!(messages[0].tokens.cache_read, 2);
-
-        let incremental = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
-        assert!(!incremental.parse_succeeded);
-        assert_eq!(incremental.messages.len(), 1);
+        assert!(super::parse_codex_file(file.path()).is_err());
+        assert!(
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default(),)
+                .is_err()
+        );
     }
 
     #[test]
     fn test_session_meta_exec_marks_headless() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"originator":"codex_exec","source":"exec"}}"#;
-        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"gpt-5.4","total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
         let content = format!("{}\n{}", line1, line2);
         let file = create_test_file(&content);
 
@@ -1488,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn test_token_count_falls_back_to_last_usage_when_totals_reset() {
+    fn test_token_count_uses_last_usage_when_totals_reset() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
         let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}}}"#;
         let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
@@ -1509,55 +1580,30 @@ mod tests {
     }
 
     #[test]
-    fn test_token_count_advances_baseline_after_missing_total_fallback() {
+    fn test_token_count_rejects_missing_total_usage() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
         let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}}}"#;
         let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
-        let line4 = r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33,"reasoning_output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
-        let content = format!("{}\n{}\n{}\n{}", line1, line2, line3, line4);
+        let content = format!("{}\n{}\n{}", line1, line2, line3);
         let file = create_test_file(&content);
 
-        let messages = parse_codex_file(file.path());
+        let error = super::parse_codex_file(file.path())
+            .expect_err("current Codex token-count rows require total_token_usage");
 
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
-        assert_eq!(messages[0].tokens.cache_read, 20);
-        assert_eq!(messages[0].tokens.reasoning, 5);
-        assert_eq!(messages[1].tokens.input, 8);
-        assert_eq!(messages[1].tokens.output, 3);
-        assert_eq!(messages[1].tokens.cache_read, 2);
-        assert_eq!(messages[1].tokens.reasoning, 1);
+        assert!(error.to_string().contains("total_token_usage is missing"));
     }
 
     #[test]
-    fn test_token_count_skips_regressed_totals_without_last_usage() {
-        // When totals regress and last_usage is absent, the row should be
-        // skipped entirely to avoid double-counting the full cumulative total.
+    fn test_token_count_rejects_missing_last_usage() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
         let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}}}"#;
-        // Totals regress (lower values) and no last_token_usage — should skip
-        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"reasoning_output_tokens":2}}}}"#;
-        // Normal continuation after reset
-        let line4 = r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":80,"cached_input_tokens":15,"output_tokens":25,"reasoning_output_tokens":4}}}}"#;
-        let content = format!("{}\n{}\n{}\n{}", line1, line2, line3, line4);
+        let content = format!("{}\n{}", line1, line2);
         let file = create_test_file(&content);
 
-        let messages = parse_codex_file(file.path());
+        let error = super::parse_codex_file(file.path())
+            .expect_err("current Codex token-count rows require last_token_usage");
 
-        // Should produce 2 messages: first from line2 (full total),
-        // then delta from line4 relative to line3 (baseline reset).
-        assert_eq!(messages.len(), 2);
-        // First message: full total
-        assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
-        assert_eq!(messages[0].tokens.cache_read, 20);
-        assert_eq!(messages[0].tokens.reasoning, 5);
-        // Second message: delta from 50→80
-        assert_eq!(messages[1].tokens.input, 25);
-        assert_eq!(messages[1].tokens.output, 10);
-        assert_eq!(messages[1].tokens.cache_read, 5);
-        assert_eq!(messages[1].tokens.reasoning, 2);
+        assert!(error.to_string().contains("last_token_usage is missing"));
     }
 
     #[test]
@@ -1578,10 +1624,10 @@ mod tests {
     }
 
     #[test]
-    fn test_token_count_ignores_negative_fallback_usage_in_baseline() {
+    fn test_token_count_ignores_negative_last_usage_in_baseline() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
         let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}}}"#;
-        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":-10,"cached_input_tokens":-2,"output_tokens":-3,"reasoning_output_tokens":-1}}}}"#;
+        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":90,"cached_input_tokens":18,"output_tokens":27,"reasoning_output_tokens":4},"last_token_usage":{"input_tokens":-10,"cached_input_tokens":-2,"output_tokens":-3,"reasoning_output_tokens":-1}}}}"#;
         let line4 = r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33,"reasoning_output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
         let content = format!("{}\n{}\n{}\n{}", line1, line2, line3, line4);
         let file = create_test_file(&content);
@@ -1964,8 +2010,6 @@ mod tests {
         let prefix_size = file.as_file().metadata().unwrap().len();
         let prefix = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
 
-        assert!(prefix.parse_succeeded);
-        assert!(!prefix.unresolved_model_events);
         assert!(prefix.messages.is_empty());
 
         let appended = concat!(
@@ -2115,11 +2159,11 @@ mod tests {
     }
 
     #[test]
-    fn test_headless_fallback_uses_session_provider_and_agent() {
+    fn test_headless_line_uses_session_provider_and_agent() {
         // session_meta sets provider to "azure" and agent to "my-bot",
         // then a line falls through to headless parsing (no structured entry_type)
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"model_provider":"azure","agent_nickname":"my-bot"}}"#;
-        let line2 = r#"{"type":"turn.completed","model":"gpt-4o","usage":{"input_tokens":100,"output_tokens":50}}"#;
+        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn.completed","model":"gpt-4o","usage":{"input_tokens":100,"output_tokens":50}}"#;
         let content = format!("{}\n{}", line1, line2);
         let file = create_test_file(&content);
 
@@ -2131,9 +2175,9 @@ mod tests {
     }
 
     #[test]
-    fn test_headless_fallback_defaults_to_openai_without_session_meta() {
-        // No session_meta — headless fallback should default to "openai"
-        let content = r#"{"type":"turn.completed","model":"gpt-4o-mini","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}"#;
+    fn test_headless_line_uses_codex_default_provider_without_session_meta() {
+        // The Codex headless protocol uses OpenAI as its default provider.
+        let content = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn.completed","model":"gpt-4o-mini","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}"#;
         let file = create_test_file(content);
 
         let messages = parse_codex_file(file.path());
@@ -2148,7 +2192,7 @@ mod tests {
         // model_info.slug is empty string, but payload.model has a valid value.
         // extract_model should skip the empty slug and return payload.model.
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model_info":{"slug":""},"model":"gpt-4o"}}"#;
-        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":5}}}}"#;
+        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":5},"last_token_usage":{"input_tokens":10,"output_tokens":5}}}}"#;
         let content = format!("{}\n{}", line1, line2);
         let file = create_test_file(&content);
 
@@ -2173,13 +2217,12 @@ mod tests {
             "\n"
         ));
 
-        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        let error = super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+            .expect_err("an unrelated event must not resolve an earlier model-less row");
 
-        assert!(parsed.parse_succeeded);
-        assert!(parsed.unresolved_model_events);
-        assert_eq!(parsed.messages.len(), 2);
-        assert_eq!(parsed.messages[0].model_id.as_ref(), "unknown");
-        assert_eq!(parsed.messages[1].model_id.as_ref(), "gpt-5.5");
+        assert!(error
+            .to_string()
+            .contains("resolve Codex token-count model"));
     }
 
     #[test]
@@ -2195,8 +2238,6 @@ mod tests {
 
         let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
 
-        assert!(parsed.parse_succeeded);
-        assert!(!parsed.unresolved_model_events);
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.5");
     }
@@ -2230,7 +2271,7 @@ mod tests {
         let content = [
             r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
             r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"\n<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
         ]
         .join("\n");
         let file = create_test_file(&content);
@@ -2256,7 +2297,7 @@ mod tests {
             // A real `codex exec` interleaves an agent_message between the user
             // prompt and the token_count; the deferred turn flag must survive it.
             r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"hi"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
         ]
         .join("\n");
         let file = create_test_file(&content);
@@ -2294,7 +2335,7 @@ mod tests {
 
         let appended = format!(
             "{}\n",
-            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#
         );
         let mut reopened = file.reopen().unwrap();
         reopened.seek(SeekFrom::End(0)).unwrap();

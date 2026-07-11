@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
     use tokscale_core::scanner::{
         built_in_extra_scan_paths_for, copilot_exporter_path_with_env_strategy,
-        extra_scan_paths_for, parse_extra_dirs,
+        discover_opencode_dbs, extra_scan_paths_for, opencode_data_dir_with_env_strategy,
+        parse_extra_dirs,
     };
     use tokscale_core::{
         count_local_client_messages, warp_sqlite_roots_with_env_strategy, ClientId,
@@ -17,7 +18,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
 
     let explicit_home_dir = home_dir;
     let use_env_roots = use_env_roots(&explicit_home_dir);
-    let scanner_settings = tui::settings::load_scanner_settings_for_home(&explicit_home_dir);
+    let scanner_settings = tui::settings::load_scanner_settings_for_home(&explicit_home_dir)?;
     let home_dir = explicit_home_dir
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
@@ -99,23 +100,24 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
 
     let all_clients: std::collections::HashSet<ClientId> = ClientId::iter().collect();
     let extra_dirs_val = if use_env_roots {
-        std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default()
+        match std::env::var("TOKSCALE_EXTRA_DIRS") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => String::new(),
+            Err(source) => return Err(source.into()),
+        }
     } else {
         String::new()
     };
     let extra_dirs: Vec<(ClientId, String)> = if use_env_roots {
-        parse_extra_dirs(&extra_dirs_val, &all_clients)
+        parse_extra_dirs(&extra_dirs_val, &all_clients)?
     } else {
         Vec::new()
     };
-    let legacy_antigravity_cli_extra_dirs = if use_env_roots {
-        parse_legacy_antigravity_cli_extra_dirs(&extra_dirs_val)
-    } else {
-        Vec::new()
-    };
-    let built_in_extra_paths = built_in_extra_scan_paths_for(&home_dir, &all_clients);
-    let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients);
+    let built_in_extra_paths = built_in_extra_scan_paths_for(&home_dir, &all_clients)?;
+    let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients)?;
     let copilot_exporter_path = copilot_exporter_path_with_env_strategy(use_env_roots);
+    let opencode_data_root = opencode_data_dir_with_env_strategy(&home_dir_str, use_env_roots);
+    let opencode_auto_dbs = discover_opencode_dbs(&opencode_data_root)?;
 
     let clients: Vec<ClientRow> =
         ClientId::iter()
@@ -125,13 +127,17 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                 } else {
                     Vec::new()
                 };
-                let sessions_path = if let Some(path) = warp_default_roots.first() {
+                let sessions_path = if client == ClientId::OpenCode {
+                    opencode_data_root.to_string_lossy().into_owned()
+                } else if let Some(path) = warp_default_roots.first() {
                     path.to_string_lossy().to_string()
                 } else {
                     client
                         .local_def()
                         .expect("client diagnostics require local scan policy")
                         .resolve_path_with_env_strategy(&home_dir_str, use_env_roots)
+                        .to_string_lossy()
+                        .into_owned()
                 };
                 let sessions_path_exists = Path::new(&sessions_path).exists();
                 let mut additional_paths: Vec<AdditionalPath> = built_in_extra_paths
@@ -148,6 +154,12 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                             path: path.to_string_lossy().to_string(),
                             exists: path.exists(),
                         }
+                    }));
+                }
+                if client == ClientId::OpenCode {
+                    additional_paths.extend(opencode_auto_dbs.iter().map(|path| AdditionalPath {
+                        path: path.to_string_lossy().to_string(),
+                        exists: true,
                     }));
                 }
                 if client == ClientId::Antigravity {
@@ -222,28 +234,15 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                         source: "env".to_string(),
                     },
                 ));
-                if client == ClientId::Antigravity {
-                    if let Some(paths) = scanner_settings.extra_scan_paths.get("antigravity-cli") {
-                        extra_paths.extend(
-                            paths
-                                .iter()
-                                .filter(|path| !path.as_os_str().is_empty())
-                                .map(|path| ExtraPath {
-                                    path: path.to_string_lossy().to_string(),
-                                    exists: path.exists(),
-                                    source: "settings".to_string(),
-                                }),
-                        );
-                    }
-                    extra_paths.extend(legacy_antigravity_cli_extra_dirs.iter().map(|path| {
+                if client == ClientId::OpenCode {
+                    extra_paths.extend(scanner_settings.opencode_db_paths.iter().map(|path| {
                         ExtraPath {
-                            path: path.clone(),
-                            exists: Path::new(path).exists(),
-                            source: "env".to_string(),
+                            path: path.to_string_lossy().to_string(),
+                            exists: path.is_file(),
+                            source: "scanner.opencodeDbPaths".to_string(),
                         }
                     }));
                 }
-
                 let diagnostics = if client == ClientId::Claude {
                     claude_diagnostics::diagnostics_for_clients_row(&home_dir)
                 } else {
@@ -349,29 +348,24 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
             }
 
             if !row.extra_paths.is_empty() {
-                let settings_desc: Vec<String> = row
-                    .extra_paths
-                    .iter()
-                    .filter(|ep| ep.source == "settings")
-                    .map(|ep| describe_path_for_home(&ep.path, ep.exists, &home_dir))
-                    .collect();
-                if !settings_desc.is_empty() {
-                    println!(
-                        "  {}",
-                        format!("extra (settings): {}", settings_desc.join(", ")).bright_black()
-                    );
+                let mut paths_by_source: Vec<(&str, Vec<String>)> = Vec::new();
+                for extra_path in &row.extra_paths {
+                    let description =
+                        describe_path_for_home(&extra_path.path, extra_path.exists, &home_dir);
+                    if let Some((_, paths)) = paths_by_source
+                        .iter_mut()
+                        .find(|(source, _)| *source == extra_path.source)
+                    {
+                        paths.push(description);
+                    } else {
+                        paths_by_source.push((&extra_path.source, vec![description]));
+                    }
                 }
 
-                let env_desc: Vec<String> = row
-                    .extra_paths
-                    .iter()
-                    .filter(|ep| ep.source == "env")
-                    .map(|ep| describe_path_for_home(&ep.path, ep.exists, &home_dir))
-                    .collect();
-                if !env_desc.is_empty() {
+                for (source, paths) in paths_by_source {
                     println!(
                         "  {}",
-                        format!("extra (env): {}", env_desc.join(", ")).bright_black()
+                        format!("extra ({source}): {}", paths.join(", ")).bright_black()
                     );
                 }
             }
@@ -436,25 +430,7 @@ pub(crate) fn antigravity_cli_conversations_path(home_dir: &str, use_env_roots: 
         fallback_relative: ".gemini",
     }
     .resolve_with_env_strategy(home_dir, use_env_roots);
-    PathBuf::from(root).join("antigravity-cli/conversations")
-}
-
-pub(crate) fn parse_legacy_antigravity_cli_extra_dirs(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .filter_map(|entry| {
-            let entry = entry.trim();
-            let (client, path) = entry.split_once(':')?;
-            if client.trim() != "antigravity-cli" {
-                return None;
-            }
-            let path = path.trim();
-            if path.is_empty() {
-                return None;
-            }
-            Some(path.to_string())
-        })
-        .collect()
+    root.join("antigravity-cli/conversations")
 }
 
 pub(crate) fn describe_path_for_home(path: &str, exists: bool, home: &Path) -> String {

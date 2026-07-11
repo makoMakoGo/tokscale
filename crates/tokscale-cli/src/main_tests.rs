@@ -113,10 +113,20 @@ fn test_resolve_default_tui_filter_set_uses_configured_defaults() {
 }
 
 #[test]
-fn test_resolve_default_tui_filter_set_falls_back_when_empty() {
-    // No defaultClients configured → use the canonical default set.
+fn test_resolve_default_tui_filter_set_uses_catalog_when_empty() {
+    // No defaultClients configured → use the complete accepted catalog.
     let set = resolve_default_tui_filter_set_with(&[]).unwrap();
-    assert_eq!(set, ClientId::iter().collect());
+    let expected = ClientId::iter().collect();
+    assert_eq!(set, expected);
+    assert!(set.contains(&ClientId::Cursor));
+}
+
+#[test]
+fn test_light_cache_no_filter_uses_catalog() {
+    let set = resolve_light_cache_filter_set(&None);
+    let expected = ClientId::iter().collect();
+    assert_eq!(set, expected);
+    assert!(set.contains(&ClientId::Cursor));
 }
 
 #[test]
@@ -161,7 +171,7 @@ fn test_build_client_filter_with_defaults_when_no_flags() {
 }
 
 #[test]
-fn test_build_client_filter_maps_legacy_antigravity_cli_default() {
+fn test_build_client_filter_canonicalizes_persisted_antigravity_cli_default() {
     let flags = ClientFlags::default();
     let defaults = vec![
         "antigravity-cli".to_string(),
@@ -305,6 +315,13 @@ fn test_client_flag_accepts_uppercase() {
 fn test_client_flag_rejects_unknown_and_empty_values() {
     assert!(Cli::try_parse_from(["tokscale", "--client", "unknown"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "--client", ""]).is_err());
+
+    let error = Cli::try_parse_from(["tokscale", "--client", "crush"])
+        .err()
+        .expect("excluded clients must not remain valid CLI values")
+        .to_string();
+    assert!(error.contains("invalid client id `crush`"), "{error}");
+    assert!(!error.contains("does not support local parsing"), "{error}");
 }
 
 #[test]
@@ -694,6 +711,17 @@ fn clap_accepts_models_light_write_cache_after_subcommand() {
 }
 
 #[test]
+fn clap_accepts_source_cache_prune_command() {
+    let cli = Cli::try_parse_from(["tokscale", "cache", "prune"]).expect("cache prune parses");
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Cache {
+            subcommand: CacheSubcommand::Prune
+        })
+    ));
+}
+
+#[test]
 fn clap_accepts_cursor_sync_command() {
     assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_ok());
     assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());
@@ -831,16 +859,6 @@ fn headless_roots_trim_env_override() {
         Some(value) => unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", value) },
         None => unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") },
     }
-}
-
-#[test]
-fn parse_legacy_antigravity_cli_extra_dirs_accepts_only_legacy_key() {
-    assert_eq!(
-        parse_legacy_antigravity_cli_extra_dirs(
-            "antigravity-cli:/tmp/agy-cli,antigravity:/tmp/agy,broken"
-        ),
-        vec!["/tmp/agy-cli".to_string()]
-    );
 }
 
 #[test]

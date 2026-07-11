@@ -3395,11 +3395,13 @@ dependencies = [
  "imageproc",
  "indicatif",
  "libc",
+ "once_cell",
  "predicates",
  "ratatui",
  "rayon",
  "reqwest",
  "rpassword",
+ "rusqlite",
  "serde",
  "serde_json",
  "serial_test",
@@ -3440,6 +3442,7 @@ dependencies = [
  "toml",
  "tracing",
  "walkdir",
+ "winapi-util",
  "zstd",
 ]
 

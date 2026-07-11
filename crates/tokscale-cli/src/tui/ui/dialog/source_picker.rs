@@ -23,8 +23,7 @@ use super::{DialogContent, DialogResult};
 /// toggles propagate without a separate sync step.
 pub struct ClientPickerDialog {
     /// Every selectable filter in the same order they appear on screen.
-    /// Mirrors `ClientId::ALL` so the listing order is
-    /// the canonical chronological order across the whole CLI/TUI.
+    /// Retains the accepted catalog's canonical order.
     sources: Vec<ClientId>,
     enabled: Rc<RefCell<HashSet<ClientId>>>,
     needs_reload: Rc<RefCell<bool>>,
@@ -46,7 +45,7 @@ struct SourcePickerAreas {
 
 impl ClientPickerDialog {
     pub fn new(enabled: Rc<RefCell<HashSet<ClientId>>>, needs_reload: Rc<RefCell<bool>>) -> Self {
-        let sources: Vec<ClientId> = ClientId::ALL.to_vec();
+        let sources: Vec<ClientId> = ClientId::iter().collect();
         let filtered_indices: Vec<usize> = (0..sources.len()).collect();
         Self {
             sources,
@@ -376,6 +375,15 @@ mod tests {
             .find(|client| client.hotkey().is_some())
             .expect("catalog should expose at least one picker hotkey");
         (client, hotkey(client))
+    }
+
+    #[test]
+    fn source_picker_lists_the_complete_catalog() {
+        let dialog = make_dialog();
+        let expected = ClientId::iter().collect::<Vec<_>>();
+
+        assert_eq!(dialog.sources, expected);
+        assert!(dialog.sources.contains(&ClientId::Cursor));
     }
 
     #[test]

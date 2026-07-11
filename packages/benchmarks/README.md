@@ -1,172 +1,71 @@
-# Benchmark Infrastructure
+# Benchmark fixtures and measurements
 
-This directory contains tools for measuring and comparing the performance of the Tokscale CLI.
+This package generates synthetic local-client data in the storage formats that
+the current Rust scanner accepts. Performance measurements themselves use the
+workspace's Rust benchmark and scan-measurement scripts.
 
-## Overview
-
-The benchmark infrastructure measures:
-- **Wall-clock time** (primary metric): Total execution time
-- **Peak memory usage** (secondary metric): Maximum RSS during execution
-
-## Quick Start
+## Generate synthetic data
 
 ```bash
-# Generate synthetic benchmark data
-bun run generate
+# Default-sized fixture
+bun run --cwd packages/benchmarks generate
 
-# Run benchmark with synthetic data (recommended for CI)
-bun run run:synthetic
-
-# Run benchmark with your real session data
-bun run run
-
-# (Future) Run Rust implementation benchmark
-bun run run:rust:synthetic
+# Smaller smoke-test fixture outside the repository
+bun packages/benchmarks/generate.ts --output /tmp/tokscale-bench --scale 0.02
 ```
 
-## Benchmark Tools
+The generator recreates its output directory and writes:
 
-### `generate.ts` - Synthetic Data Generator
+| Client | Files/DBs | Default messages |
+| --- | ---: | ---: |
+| OpenCode | 1 current-schema SQLite DB | 500 |
+| Claude | 50 JSONL files | 2,500 |
+| Codex | 30 JSONL files | 2,400 |
+| Gemini | 20 JSON files | 500 |
+| Total | 101 files/DBs | about 5,900 |
 
-Generates reproducible test data that mimics real session files.
+The scale is repeatable, but the generated values are not deterministic:
+timestamps, token counts, identifiers, and model choices use unseeded random
+inputs. Use generated data for smoke tests and rough stress probes, not for
+byte-for-byte or long-term performance baselines. Commit an immutable fixture
+when a comparison requires identical inputs.
+
+## Measure local scanning
+
+Build the release binary, then use the repository measurement script:
 
 ```bash
-# Generate default dataset (~6,000 messages)
-bun run generate
+cargo build -p tokscale-cli --release
 
-# Generate larger dataset (2x scale)
-bunx benchmarks/generate.ts --scale 2
-
-# Generate to custom directory
-bunx benchmarks/generate.ts --output /tmp/bench-data
+HOME=/tmp/tokscale-bench \
+  XDG_DATA_HOME=/tmp/tokscale-bench/.local/share \
+  TOKSCALE_CONFIG_DIR=/tmp/tokscale-bench-config \
+  scripts/measure-scan-performance.sh \
+  "$PWD/target/release/tokscale" synthetic opencode,claude,codex,gemini 3
 ```
 
-**Default data volume:**
-| Client   | Files | Messages |
-|----------|-------|----------|
-| OpenCode | 500   | 500      |
-| Claude   | 50    | 2,500    |
-| Codex    | 30    | 2,400    |
-| Gemini   | 20    | 500      |
-| **Total**| 600   | ~5,900   |
+For generated data, set `HOME` to the output root or pass the equivalent
+client-specific environment roots. The script performs one unmeasured warm-up,
+then records CLI processing time, wall/user/system time, and GNU `time` maximum
+RSS for each fresh process. Keep the source and cache snapshots fixed when
+comparing binaries.
 
-### `runner.ts` - Benchmark Runner
+## Measure aggregation
 
-Measures performance of the `graph` command.
+The Rust aggregation benchmark constructs a deterministic 100,000-message
+corpus in process:
 
 ```bash
-# Run with defaults (3 iterations, 1 warmup)
-bunx benchmarks/runner.ts
-
-# Use synthetic data
-bunx benchmarks/runner.ts --synthetic
-
-# More iterations for accuracy
-bunx benchmarks/runner.ts --iterations 10 --warmup 2
-
-# Test Rust implementation (when available)
-bunx benchmarks/runner.ts --implementation rust
+cargo bench -p tokscale-core --bench aggregation -- tui_client_model --quick
 ```
 
-**Options:**
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--synthetic` | Use synthetic data | false |
-| `--iterations <n>` | Number of benchmark runs | 3 |
-| `--warmup <n>` | Warmup iterations (not counted) | 1 |
-| `--implementation <ts\|rust>` | Which implementation to test | typescript |
-| `--output <dir>` | Directory for results | ./benchmarks/results |
+Use its executable under `target/release/deps/` with `/usr/bin/time` when a
+comparison needs process-level maximum RSS. Criterion timing and external
+process metrics answer different questions, so record both explicitly rather
+than combining them into one number.
 
-## Baseline Results
+## CI use
 
-Initial TypeScript implementation baseline (as of 2025-12-02):
-
-### Synthetic Data (5,900 messages)
-
-| Metric | Value |
-|--------|-------|
-| Wall-clock (median) | ~79ms |
-| Wall-clock (stddev) | ~7ms |
-| Peak memory | ~371MB |
-| Throughput | ~74,000 msg/sec |
-
-### Real Data (18,671 messages)
-
-| Metric | Value |
-|--------|-------|
-| Wall-clock (median) | ~1,806ms |
-| Wall-clock (stddev) | ~76ms |
-| Peak memory | ~575MB |
-| Throughput | ~10,340 msg/sec |
-
-### Target (Rust Implementation)
-
-| Metric | TypeScript | Target (Rust) | Expected Speedup |
-|--------|------------|---------------|------------------|
-| Real data (18k msgs) | 1,806ms | ~200ms | ~9x |
-| Synthetic (6k msgs) | 79ms | ~10ms | ~8x |
-| Peak memory | 575MB | ~50MB | ~11x |
-
-## Result Files
-
-Benchmark results are saved to `benchmarks/results/` as JSON:
-
-```
-benchmark-{implementation}-{dataSource}-{timestamp}.json
-```
-
-Example:
-```json
-{
-  "implementation": "typescript",
-  "command": "graph",
-  "dataSource": "real",
-  "timestamp": "2025-12-02T17:27:52.334Z",
-  "summary": {
-    "wallClockMs": {
-      "min": 1711.54,
-      "max": 1896.98,
-      "median": 1805.63,
-      "mean": 1804.72,
-      "stdDev": 75.71
-    },
-    "peakMemoryMb": {
-      "median": 575.0
-    }
-  },
-  "data": {
-    "totalMessages": 18671,
-    "totalDays": 19,
-    "clients": ["claude", "gemini", "opencode"]
-  }
-}
-```
-
-## CI Integration
-
-For CI pipelines, use synthetic data for reproducible benchmarks:
-
-```yaml
-# .github/workflows/benchmark.yml
-jobs:
-  benchmark:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-      - run: bun install
-      - run: cd packages/benchmarks && bun run generate
-      - run: cd packages/benchmarks && bun run run:synthetic
-      - uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-results
-          path: benchmarks/results/
-```
-
-## Adding New Benchmarks
-
-To add a new benchmark scenario:
-
-1. Modify `generate.ts` to include new data patterns
-2. Update `runner.ts` to measure new metrics if needed
-3. Run benchmarks and update baseline in this README
+CI may run the generator followed by a source-built CLI scan to verify that
+all generated formats remain readable. It must not treat two independently
+generated random corpora as a performance regression comparison.

@@ -25,6 +25,9 @@ usage cache today.
   "usageTabEnabled": true,
   "usageProviders": ["codex", "zai", "minimax-token-plan-cn"],
   "scanner": {
+    "opencodeDbPaths": [
+      "/Users/me/Library/Application Support/opencode/opencode-stable.db"
+    ],
     "extraScanPaths": {
       "codex": [
         "/Users/me/workspace/project-a/.codex/sessions"
@@ -56,9 +59,16 @@ usage cache today.
 | `light.writeCache` | boolean | Allow `tokscale --light` to refresh the TUI startup cache after rendering. |
 | `usageTabEnabled` | boolean | Show the subscription quota Usage tab in the TUI. |
 | `usageProviders` | string[] | Explicit allowlist of subscription providers the TUI may fetch. Empty means cache-display mode. |
+| `scanner.opencodeDbPaths` | string[] | Authoritative additional current-format OpenCode SQLite database files. Missing, unreadable, or obsolete entries fail explicitly. This is the only custom OpenCode scan setting. |
 | `scanner.extraScanPaths` | object | Persistent extra scan roots by client id. |
 
 CLI flags override matching config values for a single invocation.
+
+OpenCode is intentionally not an `extraScanPaths` client. Put each additional
+current-format database file in `scanner.opencodeDbPaths`; OpenCode entries in
+`scanner.extraScanPaths` or `TOKSCALE_EXTRA_DIRS` are ignored. Automatic
+discovery treats only `NotFound` as absent; other discovery I/O failures are
+reported explicitly.
 
 ## Environment variables
 
@@ -97,14 +107,19 @@ default config root. The files listed in this section can be deleted when you
 want a fresh local rebuild:
 
 - `tui-data-cache.json`
-- `source-message-cache.bin`
-- `source-message-cache.lock`
+- `shards/` (source-message cache)
 - `pricing-litellm.json`
 - `pricing-openrouter.json`
 - `pricing-models-dev.json`
-- `opencode-migration.json`
 - `fonts/`
 - `images/`
+
+Source-message cache writes use the v3 shard envelope and stable explicit
+parser keys. Ordinary reports write current v3 shards without traversing,
+migrating, or deleting older v2 shards. Run `tokscale cache prune` when you
+explicitly want a full traversal that removes classified v2 shards; there is no
+automatic v2 migration. Retired `source-message-cache.bin` and
+`source-message-cache.lock` files are not current cache inputs.
 
 Integration roots are mixed state, not all disposable caches:
 

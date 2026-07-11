@@ -4,7 +4,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -18,7 +18,10 @@ impl LocalSourceAdapter for PiAdapter {
         ClientId::Pi
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         adapter_discover::discover_default_scanned_units(
             ClientId::Pi,
             ctx,
@@ -26,7 +29,11 @@ impl LocalSourceAdapter for PiAdapter {
         )
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -37,8 +44,21 @@ impl LocalSourceAdapter for PiAdapter {
             .collect()
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
+    }
+
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
+        adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 
@@ -49,7 +69,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::adapters::{FoldContext, ParseContext, UnitMessageSource};
+    use crate::adapters::{CacheHitPlan, FoldContext, ParseContext, UnitMessageSource};
     use crate::message_cache;
 
     const PI_CONTENT: &str = r#"{"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
@@ -91,22 +111,20 @@ mod tests {
         units: Vec<SourceUnit>,
         cache: &mut message_cache::SourceMessageCache,
     ) -> Vec<crate::UnifiedMessage> {
-        let parsed = adapter.parse(
-            units,
-            &ParseContext {
-                source_cache: cache,
-                pricing: None,
-            },
-        );
+        let parsed = adapter
+            .parse_checked(units, &ParseContext { pricing: None })
+            .unwrap();
         let mut sink = Vec::new();
-        adapter.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: cache,
-                pricing: None,
-            },
-            &mut sink,
-        );
+        adapter
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .unwrap();
         sink
     }
 
@@ -128,7 +146,7 @@ mod tests {
         };
         let ctx = scan_context(home.path(), &settings);
 
-        let units = PI_ADAPTER.discover(&ctx);
+        let units = PI_ADAPTER.discover_checked(&ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![default_path, extra_path];
         expected.sort_unstable();
@@ -148,10 +166,64 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
 
         let actual = fold_with_adapter(&PI_ADAPTER, units, &mut cache);
-        let mut expected = sessions::pi::parse_pi_file(&path);
+        let mut expected = sessions::pi::parse_pi_file(&path).unwrap();
         refresh(&mut expected);
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn pi_adapter_reports_missing_source_with_typed_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("missing.jsonl");
+
+        let error = PI_ADAPTER
+            .parse_checked(
+                vec![SourceUnit::plain_file(ClientId::Pi, path.clone())],
+                &ParseContext { pricing: None },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.client, ClientId::Pi);
+        assert_eq!(error.path, path);
+        assert_eq!(error.operation, "snapshot source metadata and content");
+        let snapshot_error = std::error::Error::source(&error).unwrap();
+        assert!(snapshot_error.to_string().contains(path.to_str().unwrap()));
+        assert_eq!(
+            snapshot_error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn pi_adapter_reports_malformed_json_with_typed_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("malformed.jsonl");
+        write_file(
+            &path,
+            concat!(
+                "{\"type\":\"session\",\"id\":\"pi-session\"}\n",
+                "not valid json\n"
+            ),
+        );
+
+        let error = PI_ADAPTER
+            .parse_checked(
+                vec![SourceUnit::plain_file(ClientId::Pi, path.clone())],
+                &ParseContext { pricing: None },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.client, ClientId::Pi);
+        assert_eq!(error.path, path);
+        assert_eq!(error.operation, "decode Pi JSONL message");
+        assert!(std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("decode Pi JSONL message"));
     }
 
     #[test]
@@ -165,30 +237,32 @@ mod tests {
         let path = dir.path().join("pi.jsonl");
         write_file(&path, PI_CONTENT);
         let units = vec![SourceUnit::plain_file(ClientId::Pi, path.clone())];
-        let mut cache = message_cache::SourceMessageCache::load();
+        let mut cache = message_cache::SourceMessageCache::load().unwrap();
 
         let first = fold_with_adapter(&PI_ADAPTER, units.clone(), &mut cache);
-        let parsed = PI_ADAPTER.parse(
-            units,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-        );
+        let planned = PI_ADAPTER
+            .plan_cache_hit(units.into_iter().next().unwrap(), &cache)
+            .unwrap();
+        let parsed = match planned {
+            CacheHitPlan::Hit(parsed) => vec![parsed],
+            CacheHitPlan::Miss(_) => panic!("warm Pi shard must plan an exact cache hit"),
+        };
         assert!(matches!(
             parsed[0].messages,
             UnitMessageSource::CacheHit(ref plan) if plan.path() == path
         ));
 
         let mut second = Vec::new();
-        PI_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-            &mut second,
-        );
+        PI_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut second,
+            )
+            .unwrap();
 
         assert_eq!(second, first);
         restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);

@@ -30,6 +30,7 @@ pub use clients::{
     warp_sqlite_roots_with_env_strategy, ClientCounts, ClientId, ClientIdentity, LocalClientDef,
     PathRoot,
 };
+pub use message_cache::{prune_source_message_cache, SourceCachePruneError, SourceCachePruneStats};
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
 pub use sessionize::{
     compute_daily_active_time, compute_time_metrics, sessionize, sessionize_time_intervals,
@@ -38,9 +39,11 @@ pub use sessionize::{
 pub use sessions::UnifiedMessage;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::Instant;
+
+use sha2::{Digest, Sha256};
 
 /// Canonicalize a raw model string for callers that do not already hold a
 /// finalized `UnifiedMessage`.
@@ -275,6 +278,76 @@ pub struct LocalParseOptions {
     pub scanner_settings: scanner::ScannerSettings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SourceInventorySignature([u8; 32]);
+
+impl SourceInventorySignature {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Compact comparison key for the lifetime of one process. The persisted
+    /// SHA-256 signature remains the cross-process source of truth.
+    pub fn process_digest(self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(&self.0);
+        hasher.finish()
+    }
+}
+
+/// A one-shot inventory of discovered local sources and their pre-parse
+/// metadata snapshots. It is intentionally non-`Clone`: execution consumes
+/// the exact units whose signature was compared by the caller.
+pub struct PreparedLocalSources {
+    options: LocalParseOptions,
+    clients: Vec<String>,
+    groups: Vec<adapters::PreparedAdapterSources>,
+    signature: SourceInventorySignature,
+}
+
+impl PreparedLocalSources {
+    pub fn source_inventory_signature(&self) -> SourceInventorySignature {
+        self.signature
+    }
+
+    pub fn source_digest(&self) -> u64 {
+        self.signature.process_digest()
+    }
+
+    /// Refresh metadata and stable identity without rediscovering sources or
+    /// reading their bodies. This is the narrow probe used by TUI auto-refresh
+    /// before it decides that a prepared inventory is unchanged.
+    pub fn refresh_source_inventory_signature(
+        &mut self,
+    ) -> Result<SourceInventorySignature, String> {
+        for group in &mut self.groups {
+            for unit in &mut group.units {
+                let client = unit.client;
+                let path = unit.path.clone();
+                let parser = unit.parser_version.parser_id;
+                unit.refresh_prepared_snapshot_for_inventory_probe()
+                    .map_err(|source| {
+                        adapters::SourceParseError::new(
+                            client,
+                            path,
+                            parser,
+                            "refresh source inventory metadata and identity",
+                            source,
+                        )
+                        .to_string()
+                    })?;
+            }
+        }
+        self.signature = source_inventory_signature(&self.clients, &self.groups);
+        Ok(self.signature)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DailyTotals {
     pub tokens: i64,
@@ -450,13 +523,15 @@ pub struct HourlyReport {
 }
 
 pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, String> {
-    home_dir_option
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .or_else(|| dirs::home_dir().map(|p| p.to_string_lossy().into_owned()))
-        .ok_or_else(|| {
-            "HOME directory not specified and could not determine home directory".to_string()
-        })
+    if let Some(home_dir) = home_dir_option {
+        return Ok(home_dir.clone());
+    }
+    let home_dir = dirs::home_dir().ok_or_else(|| {
+        "HOME directory not specified and could not determine home directory".to_string()
+    })?;
+    home_dir.into_os_string().into_string().map_err(|_| {
+        "HOME directory contains non-UTF-8 data unsupported by the local parser API".to_string()
+    })
 }
 
 #[cfg(test)]
@@ -474,6 +549,7 @@ fn parse_all_messages_with_pricing(
     )
 }
 
+#[cfg(test)]
 fn parse_all_messages_with_pricing_with_env_strategy(
     home_dir: &str,
     clients: &[String],
@@ -481,61 +557,58 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let mut all_messages: Vec<UnifiedMessage> = Vec::new();
-    fold_local_sources_with_pricing(
-        home_dir,
-        clients,
-        pricing,
+    let prepared = prepare_local_sources(LocalParseOptions {
+        home_dir: Some(home_dir.to_string()),
         use_env_roots,
-        scanner_settings,
-        &mut all_messages,
-    )?;
+        clients: Some(clients.to_vec()),
+        scanner_settings: scanner_settings.clone(),
+        ..LocalParseOptions::default()
+    })?;
+    let mut all_messages: Vec<UnifiedMessage> = Vec::new();
+    fold_prepared_local_sources_with_pricing(prepared, pricing, &mut all_messages)?;
     Ok(all_messages)
 }
 
-fn fold_local_sources_with_pricing(
-    home_dir: &str,
-    clients: &[String],
+fn fold_prepared_local_sources_with_pricing(
+    prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
-    use_env_roots: bool,
-    scanner_settings: &scanner::ScannerSettings,
     sink: &mut dyn adapters::MessageSink,
-) -> Result<(), String> {
-    let selected_adapters = adapters::selected_adapters(clients);
-    let mut source_cache = message_cache::SourceMessageCache::load();
-    source_cache.prune_missing_files();
+) -> Result<SourceInventorySignature, String> {
+    let PreparedLocalSources {
+        clients, groups, ..
+    } = prepared;
+    let mut source_cache = message_cache::SourceMessageCache::load()
+        .map_err(adapters::SourcePipelineError::from)
+        .map_err(|error| error.to_string())?;
 
-    let scan_ctx = adapters::AdapterScanContext {
-        home_dir,
-        use_env_roots,
-        scanner_settings,
-    };
-    if clients.is_empty() {
-        adapters::run_local_source_adapters(
-            &selected_adapters,
-            &scan_ctx,
-            &mut source_cache,
-            pricing,
-            sink,
-        );
+    let parse_result = if clients.is_empty() {
+        adapters::run_prepared_local_source_adapters(groups, &mut source_cache, pricing, sink)
     } else {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
         let mut filtered_sink = RequestedClientFilterSink {
             requested: &requested,
             inner: sink,
         };
-        adapters::run_local_source_adapters(
-            &selected_adapters,
-            &scan_ctx,
+        adapters::run_prepared_local_source_adapters(
+            groups,
             &mut source_cache,
             pricing,
             &mut filtered_sink,
-        );
-    }
+        )
+    };
 
-    source_cache.save_if_dirty();
-
-    Ok(())
+    let cache_result = source_cache.save_if_dirty();
+    let result = match (parse_result, cache_result) {
+        (Ok(confirmed), Ok(())) => Ok(confirmed),
+        (Err(parse_error), Ok(())) => Err(parse_error),
+        (Ok(_), Err(cache_error)) => Err(cache_error.into()),
+        (Err(parse_error), Err(cache_error)) => Err(
+            adapters::SourcePipelineError::with_finalization(parse_error, cache_error),
+        ),
+    };
+    result
+        .map(|confirmed| confirmed_source_inventory_signature(&clients, &confirmed))
+        .map_err(|error| error.to_string())
 }
 
 struct RequestedClientFilterSink<'a> {
@@ -598,121 +671,173 @@ impl adapters::MessageSink for ClientCountSink {
 }
 
 fn stream_local_sources_into_engine(
-    home_dir: &str,
-    clients: &[String],
+    prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
-    use_env_roots: bool,
-    scanner_settings: &scanner::ScannerSettings,
     engine: &mut crate::aggregate::AggregationEngine,
-) -> Result<(), String> {
+) -> Result<SourceInventorySignature, String> {
     let mut sink = AggregationSink(engine);
-    fold_local_sources_with_pricing(
-        home_dir,
-        clients,
-        pricing,
-        use_env_roots,
-        scanner_settings,
-        &mut sink,
-    )
+    fold_prepared_local_sources_with_pricing(prepared, pricing, &mut sink)
 }
 
-/// Digest over every scannable source's (path, size, mtime) plus the
-/// requested client set. Two equal digests mean a fresh parse would see
-/// byte-identical inputs, so refresh work can be skipped entirely (ADR 0008).
-/// The value is only comparable within one process (`DefaultHasher`) and is
-/// never persisted.
-pub fn compute_source_digest(
-    home_dir: &str,
-    clients: &[String],
-    use_env_roots: bool,
-    scanner_settings: &scanner::ScannerSettings,
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-
-    let selected_adapters = adapters::selected_adapters(clients);
-    let mut paths: Vec<PathBuf> = Vec::new();
+pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocalSources, String> {
+    let (home_dir, clients) = resolve_local_parse_request(&options)?;
+    options
+        .scanner_settings
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let selected_adapters = adapters::selected_adapters(&clients)?;
     let scan_ctx = adapters::AdapterScanContext {
-        home_dir,
-        use_env_roots,
-        scanner_settings,
+        home_dir: &home_dir,
+        use_env_roots: options.use_env_roots,
+        scanner_settings: &options.scanner_settings,
     };
-    for adapter in selected_adapters {
-        for unit in adapter.discover(&scan_ctx) {
-            paths.extend(unit.digest_paths());
-        }
-    }
-
-    // SQLite writes may only touch the WAL sidecar between checkpoints.
-    let wal_paths: Vec<PathBuf> = paths
-        .iter()
-        .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
-        .map(|path| {
-            let mut name = path.as_os_str().to_owned();
-            name.push("-wal");
-            PathBuf::from(name)
+    let groups: Vec<_> = selected_adapters
+        .into_iter()
+        .map(|adapter| {
+            #[cfg(test)]
+            PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
+            let units = adapter
+                .discover_checked(&scan_ctx)?
+                .into_iter()
+                .map(|unit| {
+                    let client = unit.client;
+                    let path = unit.path.clone();
+                    unit.prepare_snapshot().map_err(|source| {
+                        adapters::SourceDiscoveryError::new(
+                            client,
+                            path,
+                            "snapshot source metadata and identity",
+                            source,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, adapters::SourceDiscoveryError>>()?;
+            Ok(adapters::PreparedAdapterSources { adapter, units })
         })
-        .collect();
-    paths.extend(wal_paths);
-    paths.sort_unstable();
-    paths.dedup();
+        .collect::<Result<_, adapters::SourceDiscoveryError>>()
+        .map_err(|error| error.to_string())?;
+    let signature = source_inventory_signature(&clients, &groups);
+    Ok(PreparedLocalSources {
+        options,
+        clients,
+        groups,
+        signature,
+    })
+}
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+#[cfg(test)]
+thread_local! {
+    static PREPARE_DISCOVERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_prepare_discovery_count() {
+    PREPARE_DISCOVERY_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn prepare_discovery_count() -> usize {
+    PREPARE_DISCOVERY_COUNT.with(std::cell::Cell::get)
+}
+
+fn source_inventory_signature(
+    clients: &[String],
+    groups: &[adapters::PreparedAdapterSources],
+) -> SourceInventorySignature {
+    let mut hasher = Sha256::new();
+    message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-source-inventory");
+    hasher.update(2_u32.to_le_bytes());
     let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
     sorted_clients.sort_unstable();
-    sorted_clients.hash(&mut hasher);
-    for path in &paths {
-        path.hash(&mut hasher);
-        match std::fs::metadata(path) {
-            Ok(metadata) => {
-                metadata.len().hash(&mut hasher);
-                let mtime = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_nanos())
-                    .unwrap_or(0);
-                mtime.hash(&mut hasher);
-            }
-            Err(_) => {
-                0u64.hash(&mut hasher);
-            }
+    sorted_clients.dedup();
+    message_cache::hash_inventory_len(&mut hasher, sorted_clients.len());
+    for client in sorted_clients {
+        message_cache::hash_inventory_bytes(&mut hasher, client.as_bytes());
+    }
+    message_cache::hash_inventory_len(&mut hasher, groups.len());
+    for group in groups {
+        message_cache::hash_inventory_bytes(
+            &mut hasher,
+            group.adapter.client().as_str().as_bytes(),
+        );
+        message_cache::hash_inventory_len(&mut hasher, group.units.len());
+        for unit in &group.units {
+            hasher.update(unit.inventory_signature_digest());
         }
     }
-    hasher.finish()
+    SourceInventorySignature(hasher.finalize().into())
 }
 
-fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
-    let mut latest_by_session: HashMap<std::sync::Arc<str>, UnifiedMessage> = HashMap::new();
+fn confirmed_source_inventory_signature(
+    clients: &[String],
+    groups: &[adapters::ConfirmedAdapterSources],
+) -> SourceInventorySignature {
+    let mut hasher = Sha256::new();
+    message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-source-inventory");
+    hasher.update(2_u32.to_le_bytes());
+    let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
+    sorted_clients.sort_unstable();
+    sorted_clients.dedup();
+    message_cache::hash_inventory_len(&mut hasher, sorted_clients.len());
+    for client in sorted_clients {
+        message_cache::hash_inventory_bytes(&mut hasher, client.as_bytes());
+    }
+    message_cache::hash_inventory_len(&mut hasher, groups.len());
+    for group in groups {
+        message_cache::hash_inventory_bytes(&mut hasher, group.client.as_str().as_bytes());
+        message_cache::hash_inventory_len(&mut hasher, group.unit_digests.len());
+        for digest in &group.unit_digests {
+            hasher.update(digest);
+        }
+    }
+    SourceInventorySignature(hasher.finalize().into())
+}
 
-    for message in messages.drain(..) {
-        let session_id = std::sync::Arc::clone(&message.session_id);
-        match latest_by_session.get_mut(&session_id) {
-            Some(existing) => {
-                let should_replace = message.timestamp > existing.timestamp
-                    || (message.timestamp == existing.timestamp
-                        && message.dedup_key.as_ref().is_some_and(|key| {
-                            existing
-                                .dedup_key
-                                .as_ref()
-                                .is_none_or(|existing_key| key > existing_key)
-                        }));
-                if should_replace {
-                    *existing = message;
+#[derive(Default)]
+struct TraeMessageAccumulator {
+    latest_by_session: HashMap<std::sync::Arc<str>, UnifiedMessage>,
+}
+
+impl TraeMessageAccumulator {
+    fn push_messages(&mut self, messages: Vec<UnifiedMessage>) {
+        for message in messages {
+            let session_id = std::sync::Arc::clone(&message.session_id);
+            match self.latest_by_session.get_mut(&session_id) {
+                Some(existing) => {
+                    let should_replace = message.timestamp > existing.timestamp
+                        || (message.timestamp == existing.timestamp
+                            && message.dedup_key.as_ref().is_some_and(|key| {
+                                existing
+                                    .dedup_key
+                                    .as_ref()
+                                    .is_none_or(|existing_key| key > existing_key)
+                            }));
+                    if should_replace {
+                        *existing = message;
+                    }
                 }
-            }
-            None => {
-                let _ = latest_by_session.insert(session_id, message);
+                None => {
+                    let _ = self.latest_by_session.insert(session_id, message);
+                }
             }
         }
     }
 
-    let mut deduped: Vec<UnifiedMessage> = latest_by_session.into_values().collect();
-    deduped.sort_unstable_by(|a, b| {
-        a.session_id
-            .cmp(&b.session_id)
-            .then_with(|| a.timestamp.cmp(&b.timestamp))
-    });
-    deduped
+    fn finish(self) -> Vec<UnifiedMessage> {
+        let mut deduped: Vec<UnifiedMessage> = self.latest_by_session.into_values().collect();
+        deduped.sort_unstable_by(|a, b| {
+            a.session_id
+                .cmp(&b.session_id)
+                .then_with(|| a.timestamp.cmp(&b.timestamp))
+        });
+        deduped
+    }
+}
+
+fn dedupe_latest_trae_messages(messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+    let mut accumulator = TraeMessageAccumulator::default();
+    accumulator.push_messages(messages);
+    accumulator.finish()
 }
 
 /// Date-range retain shared by the report and local-parse filters. One
@@ -809,8 +934,8 @@ fn normalize_token_breakdown(tokens: &mut TokenBreakdown) {
 fn resolve_report_request(options: &ReportOptions) -> Result<(String, Vec<String>), String> {
     let home_dir = get_home_dir_string(&options.home_dir)?;
     let clients = options.clients.clone().unwrap_or_else(|| {
-        ClientId::ALL
-            .iter()
+        ClientId::iter()
+            .filter(|client| client.parse_local())
             .map(|c| c.as_str().to_string())
             .collect()
     });
@@ -831,20 +956,53 @@ struct ResolvedAggregationRequest<'a> {
 fn load_aggregated_views_resolved(
     request: ResolvedAggregationRequest<'_>,
 ) -> Result<AggregatedViews, String> {
-    let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
-        group_by: request.group_by,
-        date_range: request.date_range,
-        views: request.views,
-    });
-    stream_local_sources_into_engine(
-        request.home_dir,
-        request.clients,
+    let prepared = prepare_local_sources(LocalParseOptions {
+        home_dir: Some(request.home_dir.to_string()),
+        use_env_roots: request.use_env_roots,
+        clients: Some(request.clients.to_vec()),
+        since: request.date_range.since.clone(),
+        until: request.date_range.until.clone(),
+        year: request.date_range.year.clone(),
+        scanner_settings: request.scanner_settings.clone(),
+    })?;
+    load_prepared_aggregated_views(
+        prepared,
+        request.group_by,
+        request.date_range,
+        request.views,
         request.pricing,
-        request.use_env_roots,
-        request.scanner_settings,
-        &mut engine,
-    )?;
-    Ok(engine.finish())
+    )
+    .map(|(views, _)| views)
+}
+
+fn load_prepared_aggregated_views(
+    prepared: PreparedLocalSources,
+    group_by: GroupBy,
+    date_range: DateRange,
+    views: ViewSet,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<(AggregatedViews, SourceInventorySignature), String> {
+    let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
+        group_by,
+        date_range,
+        views,
+    });
+    let source_inventory_signature =
+        match stream_local_sources_into_engine(prepared, pricing, &mut engine) {
+            Ok(signature) => signature,
+            Err(error) => {
+                drop(engine);
+                sessions::intern::prune_dead();
+                return Err(error);
+            }
+        };
+    let views = engine.finish();
+    // The streaming sink has dropped every source message and `finish` has
+    // consumed all Arc-backed accumulators. Public views own Strings, so this
+    // is the narrow lifecycle seam where dead weak identity indices can be
+    // reclaimed without sweeping caller-owned generic message slices.
+    sessions::intern::prune_dead();
+    Ok((views, source_inventory_signature))
 }
 
 fn load_aggregated_views_for_resolved_report(
@@ -1197,43 +1355,33 @@ fn resolve_local_parse_request(
             .map(|c| c.as_str().to_string())
             .collect()
     });
+    for client in &clients {
+        ClientId::from_str(client).ok_or_else(|| format!("unknown local client `{client}`"))?;
+    }
     Ok((home_dir, clients))
 }
 
-fn parse_local_unified_messages_resolved(
-    options: LocalParseOptions,
-    home_dir: &str,
-    clients: &[String],
+fn parse_prepared_local_unified_messages(
+    prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let messages = parse_all_messages_with_pricing_with_env_strategy(
-        home_dir,
-        clients,
-        pricing,
-        options.use_env_roots,
-        &options.scanner_settings,
-    )?;
-    Ok(filter_unified_messages(messages, &options))
+    let filters = prepared.options.clone();
+    let mut messages = Vec::new();
+    fold_prepared_local_sources_with_pricing(prepared, pricing, &mut messages)?;
+    Ok(filter_unified_messages(messages, &filters))
 }
 #[doc(hidden)]
 pub fn count_local_client_messages(
     options: LocalParseOptions,
 ) -> Result<LocalClientMessageCounts, String> {
     let start = Instant::now();
-    let (home_dir, clients) = resolve_local_parse_request(&options)?;
+    let prepared = prepare_local_sources(options)?;
     let mut sink = ClientCountSink::new(DateRange {
-        since: options.since.clone(),
-        until: options.until.clone(),
-        year: options.year.clone(),
+        since: prepared.options.since.clone(),
+        until: prepared.options.until.clone(),
+        year: prepared.options.year.clone(),
     });
-    fold_local_sources_with_pricing(
-        &home_dir,
-        &clients,
-        None,
-        options.use_env_roots,
-        &options.scanner_settings,
-        &mut sink,
-    )?;
+    fold_prepared_local_sources_with_pricing(prepared, None, &mut sink)?;
     Ok(LocalClientMessageCounts {
         counts: sink.counts,
         headless_codex_count: sink.headless_codex_count,
@@ -1246,16 +1394,16 @@ pub async fn parse_local_unified_messages_with_pricing(
     options: LocalParseOptions,
     pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing)
+    let prepared = prepare_local_sources(options)?;
+    parse_prepared_local_unified_messages(prepared, pricing)
 }
 
 pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let (home_dir, clients) = resolve_local_parse_request(&options)?;
+    let prepared = prepare_local_sources(options)?;
     let pricing = load_pricing_for_local_parse().await;
-    parse_local_unified_messages_resolved(options, &home_dir, &clients, pricing.as_deref())
+    parse_prepared_local_unified_messages(prepared, pricing.as_deref())
 }
 
 #[doc(hidden)]
@@ -1264,21 +1412,23 @@ pub fn load_usage_data_with_pricing(
     group_by: GroupBy,
     pricing: Option<&pricing::PricingService>,
 ) -> Result<usage_views::UsageData, String> {
-    let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    let views = load_aggregated_views_resolved(ResolvedAggregationRequest {
-        home_dir: &home_dir,
-        clients: &clients,
-        group_by,
-        date_range: DateRange {
-            since: options.since.clone(),
-            until: options.until.clone(),
-            year: options.year.clone(),
-        },
-        use_env_roots: options.use_env_roots,
-        scanner_settings: &options.scanner_settings,
-        views: ViewSet::TUI,
-        pricing,
-    })?;
+    let prepared = prepare_local_sources(options)?;
+    load_prepared_usage_data_with_pricing(prepared, group_by, pricing)
+}
+
+#[doc(hidden)]
+pub fn load_prepared_usage_data_with_pricing(
+    prepared: PreparedLocalSources,
+    group_by: GroupBy,
+    pricing: Option<&pricing::PricingService>,
+) -> Result<usage_views::UsageData, String> {
+    let date_range = DateRange {
+        since: prepared.options.since.clone(),
+        until: prepared.options.until.clone(),
+        year: prepared.options.year.clone(),
+    };
+    let (views, _) =
+        load_prepared_aggregated_views(prepared, group_by, date_range, ViewSet::TUI, pricing)?;
     Ok(views.tui_usage.expect("tui view requested"))
 }
 
@@ -1286,18 +1436,40 @@ pub fn load_usage_data_with_pricing(
 pub struct UsageDataWithDiagnostics {
     pub data: usage_views::UsageData,
     pub pricing_diagnostics: pricing::PricingDiagnostics,
+    pub source_inventory_signature: SourceInventorySignature,
 }
 
 pub async fn load_usage_data_with_diagnostics(
     options: LocalParseOptions,
     group_by: GroupBy,
 ) -> Result<UsageDataWithDiagnostics, String> {
+    let prepared = prepare_local_sources(options)?;
+    load_prepared_usage_data_with_diagnostics(prepared, group_by).await
+}
+
+pub async fn load_prepared_usage_data_with_diagnostics(
+    prepared: PreparedLocalSources,
+    group_by: GroupBy,
+) -> Result<UsageDataWithDiagnostics, String> {
     let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
     let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
-    let data = load_usage_data_with_pricing(options, group_by, pricing.as_deref())?;
+    let date_range = DateRange {
+        since: prepared.options.since.clone(),
+        until: prepared.options.until.clone(),
+        year: prepared.options.year.clone(),
+    };
+    let (views, source_inventory_signature) = load_prepared_aggregated_views(
+        prepared,
+        group_by,
+        date_range,
+        ViewSet::TUI,
+        pricing.as_deref(),
+    )?;
+    let data = views.tui_usage.expect("tui view requested");
     Ok(UsageDataWithDiagnostics {
         data,
         pricing_diagnostics,
+        source_inventory_signature,
     })
 }
 
@@ -1305,8 +1477,9 @@ pub async fn load_usage_data(
     options: LocalParseOptions,
     group_by: GroupBy,
 ) -> Result<usage_views::UsageData, String> {
+    let prepared = prepare_local_sources(options)?;
     let pricing = load_pricing_for_local_parse().await;
-    load_usage_data_with_pricing(options, group_by, pricing.as_deref())
+    load_prepared_usage_data_with_pricing(prepared, group_by, pricing.as_deref())
 }
 
 fn should_keep_deduped_message(seen_keys: &mut HashSet<u64>, message: &UnifiedMessage) -> bool {

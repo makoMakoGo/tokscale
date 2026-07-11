@@ -270,7 +270,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
             until: Some(until),
             year: Some(year.clone()),
             group_by: GroupBy::default(),
-            scanner_settings: crate::tui::settings::load_scanner_settings(),
+            scanner_settings: crate::tui::settings::load_scanner_settings()?,
         },
         views,
         Some(pricing.as_ref()),
@@ -2241,7 +2241,6 @@ mod tests {
         assert!(clients.iter().any(|client| client == "kiro"));
         assert!(clients.iter().any(|client| client == "trae"));
         assert!(clients.iter().any(|client| client == "warp"));
-        assert!(!clients.iter().any(|client| client == "crush"));
     }
 
     #[test]

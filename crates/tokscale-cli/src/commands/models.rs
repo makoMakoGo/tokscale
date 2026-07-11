@@ -1,5 +1,7 @@
 use crate::claude_diagnostics;
-use crate::commands::cache::{resolve_should_write_cache, write_light_cache};
+use crate::commands::cache::{
+    resolve_should_write_cache, validate_light_cache_write, write_light_cache,
+};
 use crate::commands::render::{
     aggregate_model_report_performance, dim_borders, format_currency, format_model_name,
     format_ms_per_1k, format_tokens_with_commas, LightSpinner, TABLE_PRESET,
@@ -49,6 +51,21 @@ pub(crate) fn run_models_report(
     use tokio::runtime::Runtime;
     use tokscale_core::{get_model_report, GroupBy, ReportOptions};
 
+    if !json {
+        tui::config::TokscaleConfig::initialize()?;
+    }
+    let should_write_cache = if json {
+        false
+    } else {
+        let settings = tui::settings::Settings::load()?;
+        let should_write =
+            resolve_should_write_cache(cli_write_cache, cli_no_write_cache, &settings);
+        if should_write {
+            validate_light_cache_write(&home_dir)?;
+        }
+        should_write
+    };
+
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
     let effective_home_dir = resolve_effective_home_dir(&home_dir);
 
@@ -62,6 +79,7 @@ pub(crate) fn run_models_report(
     let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
+    let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
     let rt = Runtime::new()?;
     let report = rt
@@ -74,7 +92,7 @@ pub(crate) fn run_models_report(
                 until: until.clone(),
                 year: year.clone(),
                 group_by: group_by.clone(),
-                scanner_settings: tui::settings::load_scanner_settings_for_home(&home_dir),
+                scanner_settings,
             })
             .await
         })
@@ -762,9 +780,8 @@ pub(crate) fn run_models_report(
 
         io::stdout().flush()?;
 
-        let settings = tui::settings::Settings::load();
-        if resolve_should_write_cache(cli_write_cache, cli_no_write_cache, &settings) {
-            write_light_cache(&home_dir, &clients, &since, &until, &year, &group_by);
+        if should_write_cache {
+            write_light_cache(&clients, &since, &until, &year, &group_by)?;
         }
     }
 

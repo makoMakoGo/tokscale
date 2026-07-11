@@ -9,6 +9,7 @@
 //! - v2 (new): Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 //! - v3 (latest): Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 
+use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use std::path::Path;
@@ -57,11 +58,9 @@ fn infer_provider(model: &str) -> &'static str {
 /// Handles both formats:
 /// - New: Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 /// - Old: Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you
-pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
+pub fn parse_cursor_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| SessionParseError::new("read CSV file", error))?;
 
     let mut messages = Vec::with_capacity(128);
     let mut lines = content.lines();
@@ -69,12 +68,15 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
     // Parse header line to determine column indices
     let header = match lines.next() {
         Some(h) => h,
-        None => return vec![],
+        None => return Ok(vec![]),
     };
 
     // Verify this is a valid Cursor CSV
     if !header.contains("Date") || !header.contains("Model") {
-        return vec![];
+        return Err(SessionParseError::invalid(
+            "validate CSV header",
+            "missing required Date or Model column",
+        ));
     }
 
     // Detect format by checking for "Kind" column and column count
@@ -108,31 +110,28 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         // Need at least enough columns for the format
         let min_fields = output_idx + 1;
         if fields.len() < min_fields {
-            continue;
+            return Err(SessionParseError::invalid(
+                "validate CSV row",
+                format!(
+                    "expected at least {min_fields} columns, found {}",
+                    fields.len()
+                ),
+            ));
         }
 
         let date_str = fields[0].trim().trim_matches('"');
         let model = fields[model_idx].trim().trim_matches('"');
-        let input_with_cache_write: i64 = fields[input_cache_write_idx]
-            .trim()
-            .trim_matches('"')
-            .parse()
-            .unwrap_or(0);
-        let input_without_cache_write: i64 = fields[input_no_cache_idx]
-            .trim()
-            .trim_matches('"')
-            .parse()
-            .unwrap_or(0);
-        let cache_read: i64 = fields[cache_read_idx]
-            .trim()
-            .trim_matches('"')
-            .parse()
-            .unwrap_or(0);
-        let output_tokens: i64 = fields[output_idx]
-            .trim()
-            .trim_matches('"')
-            .parse()
-            .unwrap_or(0);
+        let parse_count = |value: &str| {
+            value
+                .trim()
+                .trim_matches('"')
+                .parse::<i64>()
+                .map_err(|error| SessionParseError::new("decode CSV token count", error))
+        };
+        let input_with_cache_write = parse_count(fields[input_cache_write_idx])?;
+        let input_without_cache_write = parse_count(fields[input_no_cache_idx])?;
+        let cache_read = parse_count(fields[cache_read_idx])?;
+        let output_tokens = parse_count(fields[output_idx])?;
 
         // Skip empty or errored entries
         if model.is_empty() {
@@ -142,7 +141,10 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         // Parse timestamp from date string
         let timestamp = parse_date_to_timestamp(date_str);
         if timestamp == 0 {
-            continue;
+            return Err(SessionParseError::invalid(
+                "validate CSV date",
+                format!("invalid Cursor usage date `{date_str}`"),
+            ));
         }
 
         // Cache write = input_with_cache_write - input_without_cache_write
@@ -171,7 +173,7 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         ));
     }
 
-    messages
+    Ok(messages)
 }
 
 /// Simple CSV line parser that handles quoted fields
@@ -238,6 +240,29 @@ fn parse_date_to_timestamp(date_str: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_cursor_file(path).unwrap()
+    }
+
+    #[test]
+    fn rejects_csv_without_required_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.csv");
+        std::fs::write(&path, "Kind,Input,Output\nchat,1,2\n").unwrap();
+
+        let error = super::parse_cursor_file(&path).unwrap_err();
+        assert_eq!(error.operation(), "validate CSV header");
+    }
+
+    #[test]
+    fn missing_csv_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.csv");
+
+        let error = super::parse_cursor_file(&path).unwrap_err();
+        assert_eq!(error.operation(), "read CSV file");
+    }
 
     #[test]
     fn test_infer_provider() {

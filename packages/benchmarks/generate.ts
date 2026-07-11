@@ -3,7 +3,7 @@
  * Synthetic Data Generator for Benchmarks
  * 
  * Generates realistic test data for all 4 session clients:
- * - OpenCode: Individual JSON files
+ * - OpenCode: Current-format SQLite database
  * - Claude Code: JSONL files
  * - Codex CLI: JSONL files with token_count events
  * - Gemini CLI: JSON session files
@@ -14,6 +14,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { Database } from "bun:sqlite";
 
 // =============================================================================
 // Configuration
@@ -49,7 +51,10 @@ interface GeneratorConfig {
 }
 
 const DEFAULT_CONFIG: GeneratorConfig = {
-  outputDir: "./benchmarks/synthetic-data",
+  outputDir: path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "synthetic-data",
+  ),
   scale: 1,
   
   opencode: {
@@ -122,7 +127,9 @@ function randomChoice<T>(arr: T[]): T {
 }
 
 function randomTimestamp(start: Date, end: Date): number {
-  return start.getTime() + Math.random() * (end.getTime() - start.getTime());
+  return Math.floor(
+    start.getTime() + Math.random() * (end.getTime() - start.getTime()),
+  );
 }
 
 function generateSessionId(): string {
@@ -149,7 +156,6 @@ function ensureDir(dir: string): void {
 
 interface OpenCodeMessage {
   id: string;
-  sessionID: string;
   role: "assistant";
   modelID: string;
   providerID: string;
@@ -170,18 +176,36 @@ interface OpenCodeMessage {
 }
 
 function generateOpenCodeData(config: GeneratorConfig): void {
-  const baseDir = path.join(config.outputDir, ".local/share/opencode/storage/message");
+  const baseDir = path.join(config.outputDir, ".local/share/opencode");
   ensureDir(baseDir);
+  const database = new Database(path.join(baseDir, "opencode.db"), { create: true });
+  database.exec(`
+    CREATE TABLE session (
+      id TEXT PRIMARY KEY,
+      directory TEXT NOT NULL
+    );
+    CREATE TABLE message (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      data TEXT NOT NULL
+    );
+  `);
+  const insertSession = database.prepare(
+    "INSERT INTO session (id, directory) VALUES (?, ?)",
+  );
+  const insertMessage = database.prepare(
+    "INSERT INTO message (id, session_id, data) VALUES (?, ?, ?)",
+  );
   
   const sessions = Math.ceil(config.opencode.sessions * config.scale);
   const messagesPerSession = config.opencode.messagesPerSession;
   
   let totalMessages = 0;
   
+  database.exec("BEGIN IMMEDIATE");
   for (let s = 0; s < sessions; s++) {
     const sessionId = generateSessionId();
-    const sessionDir = path.join(baseDir, sessionId);
-    ensureDir(sessionDir);
+    insertSession.run(sessionId, `/synthetic/opencode/${sessionId}`);
     
     const sessionStart = randomTimestamp(config.startDate, config.endDate);
     
@@ -200,7 +224,6 @@ function generateOpenCodeData(config: GeneratorConfig): void {
       
       const message: OpenCodeMessage = {
         id: messageId,
-        sessionID: sessionId,
         role: "assistant",
         modelID: model.modelID,
         providerID: model.providerID,
@@ -220,11 +243,12 @@ function generateOpenCodeData(config: GeneratorConfig): void {
         },
       };
       
-      const filePath = path.join(sessionDir, `${messageId}.json`);
-      fs.writeFileSync(filePath, JSON.stringify(message, null, 2));
+      insertMessage.run(messageId, sessionId, JSON.stringify(message));
       totalMessages++;
     }
   }
+  database.exec("COMMIT");
+  database.close();
   
   console.log(`  OpenCode: ${totalMessages} messages in ${sessions} sessions`);
 }
@@ -527,7 +551,7 @@ Synthetic Data Generator for Benchmarks
 Usage: bunx benchmarks/generate.ts [options]
 
 Options:
-  --output <dir>   Output directory (default: ./benchmarks/synthetic-data)
+  --output <dir>   Output directory (default: packages/benchmarks/synthetic-data)
   --scale <n>      Scale multiplier for data volume (default: 1)
   --help           Show this help message
 

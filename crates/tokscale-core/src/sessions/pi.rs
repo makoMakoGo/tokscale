@@ -2,7 +2,7 @@
 //!
 //! Parses JSONL files from ~/.pi/agent/sessions/<encoded-cwd>/*.jsonl
 
-use super::utils::file_modified_timestamp_ms;
+use super::error::{SessionParseError, SessionParseResult};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -76,19 +76,19 @@ pub struct PiUsage {
 }
 
 /// Parse a Pi JSONL session file
-pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
+pub fn parse_pi_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
     parse_pi_format_file(path, "pi", None)
 }
 
 /// Parse an OMP JSONL session file.
-pub fn parse_omp_file(path: &Path) -> Vec<UnifiedMessage> {
+pub fn parse_omp_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
     parse_pi_format_file(path, "omp", None)
 }
 
 pub fn parse_omp_file_with_parent_task_agent_index(
     path: &Path,
     parent_task_agent_index: &OmpParentTaskAgentIndex,
-) -> Vec<UnifiedMessage> {
+) -> SessionParseResult<Vec<UnifiedMessage>> {
     parse_pi_format_file(path, "omp", Some(parent_task_agent_index))
 }
 
@@ -120,30 +120,41 @@ fn normalize_omp_advisor_label(child_stem: &str) -> Option<String> {
     None
 }
 
-fn omp_parent_session_path(path: &Path) -> Option<PathBuf> {
-    let parent = path.parent()?;
+fn omp_parent_session_path(path: &Path) -> SessionParseResult<Option<PathBuf>> {
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
     let root = parent.with_extension("jsonl");
-    root.exists().then_some(root)
+    root.try_exists()
+        .map(|exists| exists.then_some(root))
+        .map_err(|source| SessionParseError::at_path(path, "check OMP parent session", source))
 }
 
-pub fn build_omp_parent_task_agent_index(paths: &[PathBuf]) -> OmpParentTaskAgentIndex {
-    let mut parent_paths: Vec<PathBuf> = paths
-        .iter()
-        .filter_map(|path| omp_parent_session_path(path))
-        .collect();
+pub fn build_omp_parent_task_agent_index(
+    paths: &[PathBuf],
+) -> SessionParseResult<OmpParentTaskAgentIndex> {
+    let mut parent_paths = Vec::new();
+    for path in paths {
+        if let Some(parent_path) = omp_parent_session_path(path)? {
+            parent_paths.push(parent_path);
+        }
+    }
     parent_paths.sort_unstable();
     parent_paths.dedup();
 
-    parent_paths
-        .into_iter()
-        .filter_map(|parent_path| {
-            let task_agents = omp_task_agent_map_from_parent(&parent_path);
-            (!task_agents.is_empty()).then_some((parent_path, task_agents))
-        })
-        .collect()
+    let mut index = OmpParentTaskAgentIndex::new();
+    for parent_path in parent_paths {
+        let task_agents = omp_task_agent_map_from_parent(&parent_path)?;
+        if !task_agents.is_empty() {
+            index.insert(parent_path, task_agents);
+        }
+    }
+    Ok(index)
 }
 
-fn omp_task_agent_map_from_parent(parent_path: &Path) -> HashMap<String, String> {
+fn omp_task_agent_map_from_parent(
+    parent_path: &Path,
+) -> SessionParseResult<HashMap<String, String>> {
     #[derive(Deserialize)]
     struct OmpParentLine {
         message: Option<OmpParentMessage>,
@@ -173,27 +184,24 @@ fn omp_task_agent_map_from_parent(parent_path: &Path) -> HashMap<String, String>
         id: Option<String>,
     }
 
-    let file = match std::fs::File::open(parent_path) {
-        Ok(file) => file,
-        Err(_) => return HashMap::new(),
-    };
+    let file = std::fs::File::open(parent_path).map_err(|source| {
+        SessionParseError::at_path(parent_path, "open OMP parent session", source)
+    })?;
     let reader = BufReader::new(file);
     let mut task_agents: HashMap<String, String> = HashMap::new();
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
+        let line = line.map_err(|source| {
+            SessionParseError::at_path(parent_path, "read OMP parent JSONL line", source)
+        })?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let entry: OmpParentLine = match serde_json::from_str(trimmed) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
+        let entry: OmpParentLine = serde_json::from_str(trimmed).map_err(|source| {
+            SessionParseError::at_path(parent_path, "decode OMP parent JSONL line", source)
+        })?;
 
         let Some(content) = entry.message.and_then(|message| message.content) else {
             continue;
@@ -231,12 +239,15 @@ fn omp_task_agent_map_from_parent(parent_path: &Path) -> HashMap<String, String>
         }
     }
 
-    task_agents
+    Ok(task_agents)
 }
 
-fn omp_subagent_label_from_parent(parent_path: &Path, child_stem: &str) -> Option<String> {
-    let task_agents = omp_task_agent_map_from_parent(parent_path);
-    omp_subagent_label_from_map(&task_agents, child_stem)
+fn omp_subagent_label_from_parent(
+    parent_path: &Path,
+    child_stem: &str,
+) -> SessionParseResult<Option<String>> {
+    let task_agents = omp_task_agent_map_from_parent(parent_path)?;
+    Ok(omp_subagent_label_from_map(&task_agents, child_stem))
 }
 
 fn omp_subagent_label_from_map(
@@ -257,7 +268,6 @@ fn omp_subagent_label_from_map(
 enum PiHeaderParse {
     Session(PiSessionHeader),
     TitleSlot,
-    Invalid,
 }
 
 fn refill_json_buffer(trimmed: &str, buffer: &mut Vec<u8>) {
@@ -265,62 +275,71 @@ fn refill_json_buffer(trimmed: &str, buffer: &mut Vec<u8>) {
     buffer.extend_from_slice(trimmed.as_bytes());
 }
 
-fn parse_pi_line_kind(trimmed: &str, buffer: &mut Vec<u8>) -> Option<PiEntryKind> {
+fn parse_pi_line_kind(trimmed: &str, buffer: &mut Vec<u8>) -> SessionParseResult<PiEntryKind> {
     refill_json_buffer(trimmed, buffer);
-    simd_json::from_slice::<PiEntryKind>(buffer).ok()
+    simd_json::from_slice::<PiEntryKind>(buffer)
+        .map_err(|source| SessionParseError::new("decode Pi header kind", source))
 }
 
-fn parse_pi_session_header_line(trimmed: &str, buffer: &mut Vec<u8>) -> Option<PiSessionHeader> {
+fn parse_pi_session_header_line(
+    trimmed: &str,
+    buffer: &mut Vec<u8>,
+) -> SessionParseResult<PiSessionHeader> {
     refill_json_buffer(trimmed, buffer);
-    simd_json::from_slice::<PiSessionHeader>(buffer).ok()
+    let header = simd_json::from_slice::<PiSessionHeader>(buffer)
+        .map_err(|source| SessionParseError::new("decode Pi session header", source))?;
+    if header.id.trim().is_empty() {
+        return Err(SessionParseError::invalid(
+            "validate Pi session header",
+            "session id must not be blank",
+        ));
+    }
+    Ok(header)
 }
 
-fn parse_omp_title_slot_line(trimmed: &str, buffer: &mut Vec<u8>) -> bool {
+fn parse_omp_title_slot_line(trimmed: &str, buffer: &mut Vec<u8>) -> SessionParseResult<()> {
     refill_json_buffer(trimmed, buffer);
-    let Ok(slot) = simd_json::from_slice::<OmpTitleSlot>(buffer) else {
-        return false;
-    };
+    let slot = simd_json::from_slice::<OmpTitleSlot>(buffer)
+        .map_err(|source| SessionParseError::new("decode OMP title slot", source))?;
 
-    slot.v == 1 && !slot.updated_at.trim().is_empty()
+    if slot.v != 1 || slot.updated_at.trim().is_empty() {
+        return Err(SessionParseError::invalid(
+            "validate OMP title slot",
+            "expected version 1 and a non-blank updatedAt",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_pi_header_line(
     trimmed: &str,
     buffer: &mut Vec<u8>,
     allow_omp_title_slot: bool,
-) -> PiHeaderParse {
-    let Some(kind) = parse_pi_line_kind(trimmed, buffer) else {
-        return PiHeaderParse::Invalid;
-    };
+) -> SessionParseResult<PiHeaderParse> {
+    let kind = parse_pi_line_kind(trimmed, buffer)?;
 
     if allow_omp_title_slot && kind.entry_type == "title" {
-        return if parse_omp_title_slot_line(trimmed, buffer) {
-            PiHeaderParse::TitleSlot
-        } else {
-            PiHeaderParse::Invalid
-        };
+        parse_omp_title_slot_line(trimmed, buffer)?;
+        return Ok(PiHeaderParse::TitleSlot);
     }
 
     if kind.entry_type != "session" {
-        return PiHeaderParse::Invalid;
+        return Err(SessionParseError::invalid(
+            "validate Pi session header",
+            format!("expected `session` entry, found `{}`", kind.entry_type),
+        ));
     }
 
-    parse_pi_session_header_line(trimmed, buffer)
-        .map(PiHeaderParse::Session)
-        .unwrap_or(PiHeaderParse::Invalid)
+    parse_pi_session_header_line(trimmed, buffer).map(PiHeaderParse::Session)
 }
 
 fn parse_pi_format_file(
     path: &Path,
     client: &'static str,
     omp_parent_task_agent_index: Option<&OmpParentTaskAgentIndex>,
-) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
-    let fallback_timestamp = file_modified_timestamp_ms(path);
+) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let file = std::fs::File::open(path)
+        .map_err(|source| SessionParseError::new("open Pi JSONL source", source))?;
 
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
@@ -330,19 +349,23 @@ fn parse_pi_format_file(
         .and_then(|stem| stem.to_str())
         .map(str::to_string);
     let omp_subagent_label = if client == "omp" {
-        child_stem.as_deref().and_then(|stem| {
-            if let Some(label) = normalize_omp_advisor_label(stem) {
-                return Some(label);
+        match child_stem.as_deref() {
+            Some(stem) => {
+                if let Some(label) = normalize_omp_advisor_label(stem) {
+                    Some(label)
+                } else if let Some(parent) = omp_parent_session_path(path)? {
+                    match omp_parent_task_agent_index {
+                        Some(index) => index
+                            .get(&parent)
+                            .and_then(|task_agents| omp_subagent_label_from_map(task_agents, stem)),
+                        None => omp_subagent_label_from_parent(&parent, stem)?,
+                    }
+                } else {
+                    None
+                }
             }
-
-            let parent = omp_parent_session_path(path)?;
-            match omp_parent_task_agent_index {
-                Some(index) => index
-                    .get(&parent)
-                    .and_then(|task_agents| omp_subagent_label_from_map(task_agents, stem)),
-                None => omp_subagent_label_from_parent(&parent, stem),
-            }
-        })
+            None => None,
+        }
     } else {
         None
     };
@@ -352,10 +375,7 @@ fn parse_pi_format_file(
     let mut workspace_label: Option<String> = None;
     let mut saw_omp_title_slot = false;
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        let line = line.map_err(|source| SessionParseError::new("read Pi JSONL line", source))?;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -367,13 +387,12 @@ fn parse_pi_format_file(
                 trimmed,
                 &mut buffer,
                 client == "omp" && !saw_omp_title_slot,
-            ) {
+            )? {
                 PiHeaderParse::Session(header) => header,
                 PiHeaderParse::TitleSlot => {
                     saw_omp_title_slot = true;
                     continue;
                 }
-                PiHeaderParse::Invalid => return Vec::new(),
             };
 
             session_id = Some(header.id);
@@ -384,10 +403,8 @@ fn parse_pi_format_file(
 
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
-        let entry = match simd_json::from_slice::<PiSessionEntry>(&mut buffer) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let entry = simd_json::from_slice::<PiSessionEntry>(&mut buffer)
+            .map_err(|source| SessionParseError::new("decode Pi JSONL message", source))?;
 
         if entry.entry_type != "message" {
             continue;
@@ -407,37 +424,72 @@ fn parse_pi_format_file(
             None => continue,
         };
 
-        let model = match message.model {
-            Some(m) => model_aliases::canonicalize_source_model_id(&m)
-                .unwrap_or_else(|| m.trim().to_string()),
-            None => continue,
+        let usage_values = [
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+            usage.reasoning_tokens,
+        ];
+        if usage_values.into_iter().flatten().any(|value| value < 0) {
+            return Err(SessionParseError::invalid(
+                "validate Pi assistant message",
+                "token counts must not be negative",
+            ));
+        }
+        let tokens = TokenBreakdown {
+            input: usage.input.unwrap_or(0),
+            output: usage.output.unwrap_or(0),
+            cache_read: usage.cache_read.unwrap_or(0),
+            cache_write: usage.cache_write.unwrap_or(0),
+            reasoning: usage.reasoning_tokens.unwrap_or(0),
         };
+        if crate::positive_token_total(&tokens) == 0 {
+            continue;
+        }
 
-        let provider = message.provider.unwrap_or_else(|| {
-            provider_identity::inferred_provider_from_model(&model)
-                .unwrap_or("unknown")
-                .to_string()
-        });
+        let raw_model = message
+            .model
+            .filter(|model| !model.trim().is_empty())
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Pi assistant message",
+                    "positive-token usage is missing a non-empty model",
+                )
+            })?;
+        let model = model_aliases::canonicalize_source_model_id(&raw_model)
+            .unwrap_or_else(|| raw_model.trim().to_string());
 
-        let timestamp = entry
-            .timestamp
-            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or(fallback_timestamp);
+        let provider = message
+            .provider
+            .filter(|provider| !provider.trim().is_empty())
+            .or_else(|| provider_identity::inferred_provider_from_model(&model).map(str::to_string))
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Pi assistant message",
+                    format!("provider is missing and cannot be inferred for model `{model}`"),
+                )
+            })?;
+
+        let timestamp_text = entry.timestamp.ok_or_else(|| {
+            SessionParseError::invalid("validate Pi assistant message", "timestamp is missing")
+        })?;
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_text)
+            .map_err(|source| SessionParseError::new("parse Pi message timestamp", source))?
+            .timestamp_millis();
 
         let mut unified = UnifiedMessage::new(
             client,
             model,
             provider,
-            session_id.clone().unwrap_or_else(|| "unknown".to_string()),
+            session_id.clone().ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Pi assistant message",
+                    "session header was not established",
+                )
+            })?,
             timestamp,
-            TokenBreakdown {
-                input: usage.input.unwrap_or(0).max(0),
-                output: usage.output.unwrap_or(0).max(0),
-                cache_read: usage.cache_read.unwrap_or(0).max(0),
-                cache_write: usage.cache_write.unwrap_or(0).max(0),
-                reasoning: usage.reasoning_tokens.unwrap_or(0).max(0),
-            },
+            tokens,
             0.0,
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
@@ -448,7 +500,13 @@ fn parse_pi_format_file(
         messages.push(unified);
     }
 
-    messages
+    if session_id.is_none() {
+        return Err(SessionParseError::invalid(
+            "validate Pi JSONL source",
+            "session header is missing",
+        ));
+    }
+    Ok(messages)
 }
 
 #[cfg(test)]
@@ -496,7 +554,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path());
+        let messages = parse_pi_file(file.path()).unwrap();
 
         // then
         assert_eq!(messages.len(), 1);
@@ -518,10 +576,41 @@ mod tests {
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","usage":{"input":10,"output":5}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_pi_file(file.path());
+        let messages = parse_pi_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "openai");
+    }
+
+    #[test]
+    fn test_parse_pi_rejects_positive_usage_without_model() {
+        let content = r#"{"type":"session","id":"pi_ses_missing_model","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","provider":"openai","usage":{"input":10,"output":5}}}"#;
+        let file = create_test_file(content);
+
+        let error = parse_pi_file(file.path()).unwrap_err();
+
+        assert!(error.to_string().contains("non-empty model"));
+    }
+
+    #[test]
+    fn test_parse_pi_filters_zero_usage_before_requiring_usage_identity() {
+        let content = r#"{"type":"session","id":"pi_ses_zero","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","message":{"role":"assistant","usage":{"input":0,"output":0}}}"#;
+        let file = create_test_file(content);
+
+        assert!(parse_pi_file(file.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_pi_rejects_negative_token_counts() {
+        let content = r#"{"type":"session","id":"pi_ses_negative","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":-1,"output":5}}}"#;
+        let file = create_test_file(content);
+
+        let error = parse_pi_file(file.path()).unwrap_err();
+
+        assert!(error.to_string().contains("must not be negative"));
     }
 
     #[test]
@@ -532,7 +621,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_omp_file(file.path());
+        let messages = parse_omp_file(file.path()).unwrap();
 
         // then
         assert_eq!(messages.len(), 1);
@@ -550,7 +639,7 @@ mod tests {
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":5,"cacheWrite":0,"reasoningTokens":2,"totalTokens":37}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_omp_file(file.path());
+        let messages = parse_omp_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "omp");
@@ -565,9 +654,9 @@ mod tests {
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"totalTokens":30}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_omp_file(file.path());
+        let error = parse_omp_file(file.path()).unwrap_err();
 
-        assert!(messages.is_empty());
+        assert!(error.to_string().contains("decode OMP title slot"));
     }
 
     #[test]
@@ -578,9 +667,9 @@ mod tests {
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"totalTokens":30}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_omp_file(file.path());
+        let error = parse_omp_file(file.path()).unwrap_err();
 
-        assert!(messages.is_empty());
+        assert!(error.to_string().contains("validate Pi session header"));
     }
 
     #[test]
@@ -595,7 +684,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_omp_file(&path);
+        let messages = parse_omp_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent.as_deref(), Some("OMP Advisor"));
@@ -609,7 +698,7 @@ mod tests {
 {"type":"message","id":"msg_002","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.3-codex-xhigh","provider":"openai","usage":{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_omp_file(file.path());
+        let messages = parse_omp_file(file.path()).unwrap();
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
@@ -625,7 +714,7 @@ mod tests {
         let (_dir, child_path) =
             create_omp_task_files(session_content, "0-ReviewFindings", child_content);
 
-        let messages = parse_omp_file(&child_path);
+        let messages = parse_omp_file(&child_path).unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent.as_deref(), Some("OMP Reviewer"));
@@ -664,11 +753,13 @@ mod tests {
         std::fs::write(&second_child, child_content).unwrap();
 
         let paths = vec![first_child.clone(), second_child.clone()];
-        let index = build_omp_parent_task_agent_index(&paths);
+        let index = build_omp_parent_task_agent_index(&paths).unwrap();
 
         assert_eq!(index.len(), 1);
-        let first_messages = parse_omp_file_with_parent_task_agent_index(&first_child, &index);
-        let second_messages = parse_omp_file_with_parent_task_agent_index(&second_child, &index);
+        let first_messages =
+            parse_omp_file_with_parent_task_agent_index(&first_child, &index).unwrap();
+        let second_messages =
+            parse_omp_file_with_parent_task_agent_index(&second_child, &index).unwrap();
         assert_eq!(first_messages[0].agent.as_deref(), Some("OMP Reviewer"));
         assert_eq!(second_messages[0].agent.as_deref(), Some("OMP Reviewer"));
     }
@@ -681,7 +772,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path());
+        let messages = parse_pi_file(file.path()).unwrap();
 
         // then
         assert_eq!(messages.len(), 1);
@@ -701,7 +792,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path());
+        let messages = parse_pi_file(file.path()).unwrap();
 
         // then
         assert!(messages.is_empty());
@@ -715,14 +806,14 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path());
+        let messages = parse_pi_file(file.path()).unwrap();
 
         // then
         assert!(messages.is_empty());
     }
 
     #[test]
-    fn test_parse_pi_skips_malformed_json_lines() {
+    fn test_parse_pi_rejects_malformed_json_lines() {
         // given
         let content = r#"{"type":"session","id":"pi_ses_004","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 not valid json
@@ -730,11 +821,19 @@ not valid json
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path());
+        let error = parse_pi_file(file.path()).unwrap_err();
 
         // then
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
-        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert!(error.to_string().contains("decode Pi JSONL message"));
+    }
+
+    #[test]
+    fn test_parse_pi_reports_missing_source() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("missing.jsonl");
+
+        let error = parse_pi_file(&path).unwrap_err();
+
+        assert!(error.to_string().contains("open Pi JSONL source"));
     }
 }

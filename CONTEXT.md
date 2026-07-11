@@ -24,6 +24,9 @@ file take precedence when upstream semantics conflict with local needs.
 - Do not add silent fallback, fake success, mock execution, or defensive
   degradation to make an unclear state look successful. Failures should surface
   as explicit errors, logs, or failing tests.
+- Read local client storage in its accepted current format only, as established
+  by ADR 0019. OpenCode reads current SQLite databases, not legacy message JSON;
+  obsolete schemas and database I/O/query failures are explicit errors.
 - Keep Claude Code handling for `model = "<synthetic>"` placeholder records.
   That placeholder is malformed input cleanup, not a real source or client.
 - Remove upstream `synthetic.new` as a source/client concept. It does not belong

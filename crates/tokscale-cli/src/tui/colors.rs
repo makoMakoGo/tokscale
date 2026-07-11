@@ -30,7 +30,7 @@ pub fn get_model_color(_model: &str) -> Color {
 /// a 7-step lighten-to-white palette from the override base color.
 pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
     let provider_key = provider.to_lowercase();
-    if let Some(base) = TokscaleConfig::load()
+    if let Some(base) = TokscaleConfig::initialized()
         .get_provider_color_hex(&provider_key)
         .and_then(parse_hex_color)
     {
@@ -163,7 +163,7 @@ pub fn provider_color_key(provider: &str) -> &str {
 
 pub fn get_client_color(client: &str) -> Color {
     let client_key = client.trim().to_lowercase();
-    if let Some(color) = TokscaleConfig::load()
+    if let Some(color) = TokscaleConfig::initialized()
         .get_client_color_hex(&client_key)
         .and_then(parse_hex_color)
     {
@@ -234,6 +234,7 @@ mod tests {
 
     #[test]
     fn empty_provider_uses_unknown_shade_key() {
+        TokscaleConfig::initialize_default_for_tests();
         let map = build_model_shade_map(&[model_usage("", "u2")]);
 
         assert!(map.contains_key(&model_shade_key("unknown", "u2")));
@@ -242,6 +243,7 @@ mod tests {
 
     #[test]
     fn merged_provider_uses_first_provider_shade_key() {
+        TokscaleConfig::initialize_default_for_tests();
         let map = build_model_shade_map(&[model_usage("openai, anthropic", "shared-model")]);
 
         assert!(map.contains_key(&model_shade_key("openai", "shared-model")));
@@ -285,6 +287,7 @@ mod tests {
 
     #[test]
     fn unknown_provider_returns_gray_ramp_not_pure_white() {
+        TokscaleConfig::initialize_default_for_tests();
         let rank_0 = get_provider_shade("some-new-provider", 0);
         let rank_3 = get_provider_shade("some-new-provider", 3);
         assert_ne!(rank_0, rank_3);
@@ -293,6 +296,7 @@ mod tests {
 
     #[test]
     fn client_color_uses_catalog_for_known_clients() {
+        TokscaleConfig::initialize_default_for_tests();
         assert_eq!(get_client_color("opencode"), Color::Rgb(0, 168, 232));
         assert_eq!(get_client_color("droid"), Color::Rgb(31, 29, 28));
         assert_eq!(get_client_color("openclaw"), Color::Rgb(239, 68, 68));
@@ -309,6 +313,7 @@ mod tests {
 
     #[test]
     fn cursor_provider_has_distinct_shades_per_rank() {
+        TokscaleConfig::initialize_default_for_tests();
         let rank_0 = get_provider_shade("cursor", 0);
         let rank_6 = get_provider_shade("cursor", 6);
         assert_ne!(rank_0, rank_6);
@@ -316,6 +321,7 @@ mod tests {
 
     #[test]
     fn get_provider_shade_saturates_at_palette_end() {
+        TokscaleConfig::initialize_default_for_tests();
         let last = get_provider_shade("anthropic", 6);
         let past_end = get_provider_shade("anthropic", 99);
         assert_eq!(last, past_end);
@@ -323,6 +329,7 @@ mod tests {
 
     #[test]
     fn get_provider_shade_fuzzy_matching() {
+        TokscaleConfig::initialize_default_for_tests();
         assert_eq!(
             get_provider_shade("test-anthropic", 0),
             get_provider_shade("anthropic", 0)

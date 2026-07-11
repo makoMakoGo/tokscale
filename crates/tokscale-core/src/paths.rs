@@ -14,15 +14,54 @@
 
 use std::path::PathBuf;
 
+#[derive(Debug, thiserror::Error)]
+#[error("could not determine the tokscale configuration directory")]
+pub struct ConfigDirUnavailable;
+
+pub(crate) fn configured_path_env(variable: &'static str) -> Option<PathBuf> {
+    let value = std::env::var_os(variable)?;
+    if value.is_empty() {
+        return None;
+    }
+    match value.to_str() {
+        Some(value) => {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+        }
+        None => Some(PathBuf::from(value)),
+    }
+}
+
+/// Resolve the configuration directory without inventing a process-relative
+/// storage location when the platform has no user configuration directory.
+pub fn try_get_config_dir() -> Result<PathBuf, ConfigDirUnavailable> {
+    if let Some(custom) = configured_path_env("TOKSCALE_CONFIG_DIR") {
+        return Ok(custom);
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(home) = dirs::home_dir() {
+        return Ok(home.join(".config").join("tokscale"));
+    }
+
+    dirs::config_dir()
+        .map(|directory| directory.join("tokscale"))
+        .ok_or(ConfigDirUnavailable)
+}
+
+pub fn try_get_cache_dir() -> Result<PathBuf, ConfigDirUnavailable> {
+    try_get_config_dir().map(|directory| directory.join("cache"))
+}
+
 /// Resolve the tokscale config dir, honoring `TOKSCALE_CONFIG_DIR` first.
 ///
 /// Resolution order:
-/// 1. `TOKSCALE_CONFIG_DIR` taken verbatim when set to a non-empty value.
+/// 1. `TOKSCALE_CONFIG_DIR` trimmed and used when set to a non-blank value.
 ///    Absolute paths are recommended; relative paths are accepted and
-///    resolved against the process CWD. Empty strings are treated as
+///    resolved against the process CWD. Empty and whitespace-only strings are treated as
 ///    unset so the user gets the platform default instead of a surprise
 ///    `./` write — keeps the resolver consistent with
-///    [`is_config_dir_overridden`], which also rejects empty strings.
+///    [`is_config_dir_overridden`], which also rejects blank strings.
 /// 2. macOS: `$HOME/.config/tokscale` (overrides `dirs::config_dir()`,
 ///    which would return `~/Library/Application Support/` and split state
 ///    across two roots — see module docs).
@@ -32,28 +71,13 @@ use std::path::PathBuf;
 /// 4. Windows (and any other platform): `dirs::config_dir().join("tokscale")`.
 /// 5. Last-ditch fallback: `./.tokscale` so a missing HOME never panics.
 pub fn get_config_dir() -> PathBuf {
-    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
-        if !custom.is_empty() {
-            return PathBuf::from(custom);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(".config").join("tokscale");
-        }
-    }
-
-    dirs::config_dir()
-        .map(|d| d.join("tokscale"))
-        .unwrap_or_else(|| PathBuf::from(".tokscale"))
+    try_get_config_dir().unwrap_or_else(|_| PathBuf::from(".tokscale"))
 }
 
 /// Resolve the tokscale cache dir as `<config_dir>/cache`.
 ///
-/// Caches (TUI display data, source-message bincode, pricing JSON, the
-/// OpenCode migration record, Wrapped fonts/images) all live under this
+/// Caches (TUI display data, source-message bincode, pricing JSON, and
+/// Wrapped fonts/images) all live under this
 /// single subdirectory so an isolated profile (`TOKSCALE_CONFIG_DIR=...`)
 /// covers everything in one shot, and so `rm -rf <cache_dir>` is always
 /// safe — no durable state mixed in.
@@ -70,14 +94,14 @@ pub fn get_cache_dir() -> PathBuf {
 /// the historic `~/.cache/tokscale/` or `~/Library/Caches/tokscale/`
 /// locations defeats that contract.
 pub fn is_config_dir_overridden() -> bool {
-    std::env::var_os("TOKSCALE_CONFIG_DIR").is_some_and(|v| !v.is_empty())
+    configured_path_env("TOKSCALE_CONFIG_DIR").is_some()
 }
 
 /// Pre-#470 cache directory at `dirs::cache_dir()/tokscale`.
 ///
 /// On macOS this resolves to `~/Library/Caches/tokscale/` (where the
-/// source-message-cache, pricing caches, and opencode-migration.json
-/// historically lived). On Linux this resolves to `$XDG_CACHE_HOME/tokscale`
+/// source-message-cache and pricing caches historically lived). On Linux this
+/// resolves to `$XDG_CACHE_HOME/tokscale`
 /// or `~/.cache/tokscale/`.
 ///
 /// Returns `None` when `TOKSCALE_CONFIG_DIR` is set so the override stays
@@ -154,6 +178,17 @@ mod tests {
         let prev = save_env();
         unsafe {
             env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/tokscale-custom");
+        }
+        assert_eq!(get_config_dir(), PathBuf::from("/tmp/tokscale-custom"));
+        restore_env(prev);
+    }
+
+    #[test]
+    #[serial]
+    fn env_override_trims_surrounding_whitespace() {
+        let prev = save_env();
+        unsafe {
+            env::set_var("TOKSCALE_CONFIG_DIR", "  /tmp/tokscale-custom  ");
         }
         assert_eq!(get_config_dir(), PathBuf::from("/tmp/tokscale-custom"));
         restore_env(prev);
@@ -267,6 +302,18 @@ mod tests {
         unsafe {
             env::set_var("TOKSCALE_CONFIG_DIR", "");
         }
+        assert!(!is_config_dir_overridden());
+        restore_env(prev);
+    }
+
+    #[test]
+    #[serial]
+    fn config_dir_treats_whitespace_override_as_unset() {
+        let prev = save_env();
+        unsafe {
+            env::set_var("TOKSCALE_CONFIG_DIR", "   ");
+        }
+        assert_ne!(get_config_dir(), PathBuf::from("   "));
         assert!(!is_config_dir_overridden());
         restore_env(prev);
     }

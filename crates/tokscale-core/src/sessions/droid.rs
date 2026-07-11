@@ -2,11 +2,10 @@
 //!
 //! Parses JSON files from ~/.factory/sessions/
 
-use super::utils::{file_modified_timestamp_ms, read_file_or_none};
+use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// Droid settings.json structure
@@ -96,150 +95,135 @@ fn normalize_model_name(model: &str) -> String {
     model_aliases::canonicalize_source_model_id(&claude_prefixed).unwrap_or(claude_prefixed)
 }
 
-fn get_provider_from_model_and_lock(model: &str, provider_lock: Option<&str>) -> String {
+fn get_provider_from_model_and_lock(model: &str, provider_lock: Option<&str>) -> Option<String> {
     let inferred = provider_identity::inferred_provider_from_model(model);
     let provider_lock = provider_lock
         .map(str::trim)
         .filter(|provider| !provider.is_empty());
 
     match provider_lock {
-        Some(provider) => {
+        Some(provider) => Some(
             provider_identity::provider_override_from_model_and_provider(model, provider)
                 .unwrap_or(provider)
-                .to_string()
-        }
-        None => inferred.unwrap_or("unknown").to_string(),
+                .to_string(),
+        ),
+        None => inferred.map(str::to_string),
     }
 }
 
-/// Get default model name based on provider when model field is missing
-fn get_default_model_from_provider(provider: &str) -> String {
-    match provider_identity::canonical_provider(provider)
-        .as_deref()
-        .unwrap_or(provider)
-    {
-        "anthropic" => "claude-unknown".to_string(),
-        "openai" => "gpt-unknown".to_string(),
-        "google" => "gemini-unknown".to_string(),
-        "xai" => "grok-unknown".to_string(),
-        _ => format!("{}-unknown", provider),
-    }
-}
-
-/// Try to extract model name from JSONL file's system-reminder
-/// Looks for pattern: "Model: Claude Opus 4.5 Thinking [Anthropic]"
-fn extract_model_from_jsonl(jsonl_path: &Path) -> Option<String> {
-    let file = std::fs::File::open(jsonl_path).ok()?;
-    let reader = BufReader::new(file);
-
-    // Scan more lines for parity with TypeScript which reads entire file
-    // Cap at 500 lines to avoid performance issues with very large files
-    for line in reader.lines().take(500) {
-        let line = line.ok()?;
-        // Look for Model: pattern in system-reminder
-        if let Some(pos) = line.find("Model:") {
-            let after_model = &line[pos + 6..];
-            // Extract until [ or end of string/newline
-            let model_part: String = after_model
-                .chars()
-                .take_while(|&c| c != '[' && c != '\\' && c != '"')
-                .collect();
-            let model_name = model_part.trim();
-            if !model_name.is_empty() {
-                return Some(normalize_model_name(model_name));
-            }
-        }
-    }
-
-    None
+fn invalid_at_path(
+    path: &Path,
+    operation: &'static str,
+    detail: impl Into<String>,
+) -> SessionParseError {
+    SessionParseError::at_path(
+        path,
+        operation,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, detail.into()),
+    )
 }
 
 /// Parse a Droid settings.json file
-pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
-    let Some(data) = read_file_or_none(path) else {
-        return Vec::new();
-    };
+pub fn parse_droid_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let data = std::fs::read(path)
+        .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
 
     let mut bytes = data;
-    let settings: DroidSettingsJson = match simd_json::from_slice(&mut bytes) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+    let settings: DroidSettingsJson = simd_json::from_slice(&mut bytes)
+        .map_err(|error| SessionParseError::at_path(path, "decode JSON", error))?;
 
     // Skip if no token usage data
     let usage = match settings.token_usage {
         Some(u) => u,
-        None => return Vec::new(),
+        None => return Ok(Vec::new()),
     };
 
-    // Calculate total tokens to check if any were used
-    let total_tokens = usage.input_tokens.unwrap_or(0)
-        + usage.output_tokens.unwrap_or(0)
-        + usage.cache_creation_tokens.unwrap_or(0)
-        + usage.cache_read_tokens.unwrap_or(0)
-        + usage.thinking_tokens.unwrap_or(0);
-
-    if total_tokens == 0 {
-        return Vec::new();
+    let tokens = TokenBreakdown {
+        input: usage.input_tokens.unwrap_or(0).max(0),
+        output: usage.output_tokens.unwrap_or(0).max(0),
+        cache_read: usage.cache_read_tokens.unwrap_or(0).max(0),
+        cache_write: usage.cache_creation_tokens.unwrap_or(0).max(0),
+        reasoning: usage.thinking_tokens.unwrap_or(0).max(0),
+    };
+    if tokens.total() == 0 {
+        return Ok(Vec::new());
     }
 
-    // Extract session ID from filename (e.g., "uuid.settings.json" -> "uuid")
+    // The settings filename is Factory's authoritative session identifier.
     let session_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-        .replace(".settings", "");
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".settings.json"))
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "extract session identifier",
+                "settings path must end in a non-empty `<session>.settings.json` filename",
+            )
+        })?
+        .to_string();
 
-    // Get model and provider
     let provider_lock = settings.provider_lock.as_deref();
-    let missing_model_provider = provider_lock.unwrap_or("unknown");
-    let model = if let Some(m) = settings.model.as_deref() {
-        normalize_model_name(m)
-    } else {
-        // Try to extract from JSONL file
-        let jsonl_path = path
-            .to_str()
-            .map(|s| s.replace(".settings.json", ".jsonl"))
-            .map(std::path::PathBuf::from);
+    let raw_model = settings
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate model",
+                "token-bearing settings are missing a non-empty model",
+            )
+        })?;
+    let model = normalize_model_name(raw_model);
+    if model.is_empty() {
+        return Err(invalid_at_path(
+            path,
+            "validate model",
+            format!("model `{raw_model}` normalizes to an empty identifier"),
+        ));
+    }
+    let provider = get_provider_from_model_and_lock(&model, provider_lock).ok_or_else(|| {
+        invalid_at_path(
+            path,
+            "validate provider",
+            format!("cannot determine provider for model `{model}` without providerLock"),
+        )
+    })?;
 
-        if let Some(ref jsonl) = jsonl_path {
-            extract_model_from_jsonl(jsonl)
-                .unwrap_or_else(|| get_default_model_from_provider(missing_model_provider))
-        } else {
-            get_default_model_from_provider(missing_model_provider)
-        }
-    };
-    let provider = get_provider_from_model_and_lock(&model, provider_lock);
+    let raw_timestamp = settings.provider_lock_timestamp.as_deref().ok_or_else(|| {
+        invalid_at_path(
+            path,
+            "validate provider lock timestamp",
+            "token-bearing settings are missing providerLockTimestamp",
+        )
+    })?;
+    let timestamp = chrono::DateTime::parse_from_rfc3339(raw_timestamp)
+        .map_err(|error| SessionParseError::at_path(path, "decode provider lock timestamp", error))?
+        .timestamp_millis();
+    if timestamp <= 0 {
+        return Err(invalid_at_path(
+            path,
+            "validate provider lock timestamp",
+            "provider lock timestamp must resolve after the Unix epoch",
+        ));
+    }
 
-    // Get timestamp from providerLockTimestamp or file mtime.
-    let timestamp = settings
-        .provider_lock_timestamp
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-        .map(|dt| dt.timestamp_millis())
-        .filter(|timestamp| *timestamp != 0)
-        .unwrap_or_else(|| file_modified_timestamp_ms(path));
-
-    vec![UnifiedMessage::new(
-        "droid",
-        model,
-        provider,
-        session_id,
-        timestamp,
-        TokenBreakdown {
-            input: usage.input_tokens.unwrap_or(0).max(0),
-            output: usage.output_tokens.unwrap_or(0).max(0),
-            cache_read: usage.cache_read_tokens.unwrap_or(0).max(0),
-            cache_write: usage.cache_creation_tokens.unwrap_or(0).max(0),
-            reasoning: usage.thinking_tokens.unwrap_or(0).max(0),
-        },
-        0.0,
-    )]
+    Ok(vec![UnifiedMessage::new(
+        "droid", model, provider, session_id, timestamp, tokens, 0.0,
+    )])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_droid_file(path).unwrap()
+    }
 
     #[test]
     fn test_normalize_model_name_custom_prefix() {
@@ -293,49 +277,37 @@ mod tests {
         let provider =
             |model: &str| get_provider_from_model_and_lock(&normalize_model_name(model), None);
 
-        assert_eq!(provider("claude-3-sonnet"), "anthropic");
-        assert_eq!(provider("opus-4"), "anthropic");
-        assert_eq!(provider("custom:opus-4.5"), "anthropic");
-        assert_eq!(provider("sonnet-4"), "anthropic");
-        assert_eq!(provider("haiku-3"), "anthropic");
-        assert_eq!(provider("gpt-4o"), "openai");
-        assert_eq!(provider("o1-preview"), "openai");
-        assert_eq!(provider("o3-mini"), "openai");
-        assert_eq!(provider("gemini-pro"), "google");
-        assert_eq!(provider("grok-2"), "xai");
-        assert_eq!(provider("unknown-model"), "unknown");
+        assert_eq!(provider("claude-3-sonnet").as_deref(), Some("anthropic"));
+        assert_eq!(provider("opus-4").as_deref(), Some("anthropic"));
+        assert_eq!(provider("custom:opus-4.5").as_deref(), Some("anthropic"));
+        assert_eq!(provider("sonnet-4").as_deref(), Some("anthropic"));
+        assert_eq!(provider("haiku-3").as_deref(), Some("anthropic"));
+        assert_eq!(provider("gpt-4o").as_deref(), Some("openai"));
+        assert_eq!(provider("o1-preview").as_deref(), Some("openai"));
+        assert_eq!(provider("o3-mini").as_deref(), Some("openai"));
+        assert_eq!(provider("gemini-pro").as_deref(), Some("google"));
+        assert_eq!(provider("grok-2").as_deref(), Some("xai"));
+        assert_eq!(provider("unknown-model"), None);
     }
 
     #[test]
     fn test_get_provider_from_model_and_lock_rejects_anthropic_for_non_claude_model() {
         assert_eq!(
-            get_provider_from_model_and_lock("glm-5.1", Some("anthropic")),
-            "zai"
+            get_provider_from_model_and_lock("glm-5.1", Some("anthropic")).as_deref(),
+            Some("zai")
         );
         assert_eq!(
-            get_provider_from_model_and_lock("mimo-v2.5-pro", Some("anthropic")),
-            "xiaomi"
+            get_provider_from_model_and_lock("mimo-v2.5-pro", Some("anthropic")).as_deref(),
+            Some("xiaomi")
         );
         assert_eq!(
-            get_provider_from_model_and_lock("claude-opus-4.5", Some("anthropic")),
-            "anthropic"
+            get_provider_from_model_and_lock("claude-opus-4.5", Some("anthropic")).as_deref(),
+            Some("anthropic")
         );
         assert_eq!(
-            get_provider_from_model_and_lock("model1", Some("some-reseller")),
-            "deepseek"
+            get_provider_from_model_and_lock("model1", Some("some-reseller")).as_deref(),
+            Some("deepseek")
         );
-    }
-
-    #[test]
-    fn test_get_default_model_from_provider() {
-        assert_eq!(
-            get_default_model_from_provider("anthropic"),
-            "claude-unknown"
-        );
-        assert_eq!(get_default_model_from_provider("openai"), "gpt-unknown");
-        assert_eq!(get_default_model_from_provider("google"), "gemini-unknown");
-        assert_eq!(get_default_model_from_provider("xai"), "grok-unknown");
-        assert_eq!(get_default_model_from_provider("custom"), "custom-unknown");
     }
 
     #[test]
@@ -471,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_droid_file_keeps_usage_when_timestamp_missing() {
+    fn test_parse_droid_file_rejects_usage_when_timestamp_missing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("session.settings.json");
         std::fs::write(
@@ -486,9 +458,49 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_droid_file(&path);
+        let error = super::parse_droid_file(&path).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].timestamp > 0);
+        assert_eq!(error.operation(), "validate provider lock timestamp");
+        assert_eq!(error.path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn test_parse_droid_file_rejects_usage_when_model_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "providerLock": "openai",
+                "providerLockTimestamp": "2024-12-26T12:00:00Z",
+                "tokenUsage": {"inputTokens": 10}
+            }"#,
+        )
+        .unwrap();
+
+        let error = super::parse_droid_file(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate model");
+        assert_eq!(error.path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn test_parse_droid_file_rejects_unknown_provider() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "custom-model",
+                "providerLockTimestamp": "2024-12-26T12:00:00Z",
+                "tokenUsage": {"inputTokens": 10}
+            }"#,
+        )
+        .unwrap();
+
+        let error = super::parse_droid_file(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate provider");
+        assert_eq!(error.path(), Some(path.as_path()));
     }
 }

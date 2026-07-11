@@ -9,20 +9,19 @@
 //! estimated from context_usage_percentage * context_window (input) and
 //! response_size / 4 (output).
 
-use super::utils::{file_modified_timestamp_ms, parse_epoch_f64_millis};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::{open_readonly_sqlite, parse_epoch_f64_millis, read_file};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
-use rusqlite::Connection;
-use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use tracing::warn;
 
 const CLIENT_ID: &str = "kiro";
 const PROVIDER_ID: &str = "amazon-bedrock";
-const UNKNOWN_MODEL: &str = "unknown";
 
 #[derive(Debug, Deserialize)]
 struct KiroSessionHeader {
@@ -65,6 +64,7 @@ struct KiroTurnMetadata {
 
 #[derive(Debug, Deserialize)]
 struct KiroJsonlEntry {
+    version: String,
     kind: String,
     data: Option<KiroJsonlData>,
 }
@@ -79,7 +79,79 @@ struct KiroJsonlData {
 #[derive(Debug, Deserialize)]
 struct KiroContentPart {
     kind: Option<String>,
-    data: Option<String>,
+    data: Option<KiroContentData>,
+}
+
+// Keep report text, but consume structured tool payloads without materializing them.
+#[derive(Debug)]
+enum KiroContentData {
+    String(String),
+    NonString,
+}
+
+impl<'de> Deserialize<'de> for KiroContentData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct KiroContentDataVisitor;
+
+        impl<'de> Visitor<'de> for KiroContentDataVisitor {
+            type Value = KiroContentData;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a Kiro content value")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(KiroContentData::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(KiroContentData::String(value))
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(KiroContentData::NonString)
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(KiroContentData::NonString)
+            }
+        }
+
+        deserializer.deserialize_any(KiroContentDataVisitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +166,7 @@ struct KiroMessageContent {
     prompt_timestamp_ms: Option<i64>,
 }
 
-pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
+pub fn parse_kiro_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
     if is_kiro_global_storage_path(path)
         || path
             .extension()
@@ -104,30 +176,25 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         return parse_kiro_global_storage_file(path);
     }
 
-    let fallback_timestamp = file_modified_timestamp_ms(path);
+    let mut json_bytes = read_file(path)
+        .map_err(|source| SessionParseError::at_path(path, "read Kiro session header", source))?;
 
-    let mut json_bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(_) => return Vec::new(),
-    };
-
-    let header = match simd_json::from_slice::<KiroSessionHeader>(&mut json_bytes) {
-        Ok(header) => header,
-        Err(_) => return Vec::new(),
-    };
+    let header = simd_json::from_slice::<KiroSessionHeader>(&mut json_bytes)
+        .map_err(|error| SessionParseError::at_path(path, "decode Kiro session header", error))?;
 
     let session_id = header
         .session_id
-        .unwrap_or_else(|| session_id_from_path(path));
+        .map(|session_id| session_id.trim().to_string())
+        .filter(|session_id| !session_id.is_empty());
     let model_id = header
         .session_state
         .as_ref()
         .and_then(|state| state.rts_model_state.as_ref())
         .and_then(|state| state.model_info.as_ref())
         .and_then(|info| info.model_id.as_deref())
-        .filter(|model| !model.trim().is_empty())
-        .unwrap_or(UNKNOWN_MODEL)
-        .to_string();
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && *model != "auto")
+        .map(str::to_string);
     let workspace_key = header.cwd.as_deref().and_then(normalize_workspace_key);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
     let context_window = header
@@ -137,6 +204,13 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         .and_then(|state| state.model_info.as_ref())
         .and_then(|info| info.context_window_tokens)
         .unwrap_or(0);
+    if context_window < 0 {
+        return Err(invalid_at_path(
+            path,
+            "validate Kiro session header",
+            "context_window_tokens must not be negative",
+        ));
+    }
     let turns = header
         .session_state
         .and_then(|state| state.conversation_metadata)
@@ -146,145 +220,245 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
     let jsonl_path = path.with_extension("jsonl");
     let mut content_by_message_id: HashMap<String, KiroMessageContent> = HashMap::new();
 
-    if let Ok(jsonl_file) = std::fs::File::open(&jsonl_path) {
-        let reader = BufReader::new(jsonl_file);
-        let mut pending_prompt: Option<(usize, Option<i64>)> = None;
+    match std::fs::File::open(&jsonl_path) {
+        Ok(jsonl_file) => {
+            let reader = BufReader::new(jsonl_file);
+            let mut pending_prompt: Option<(usize, Option<i64>)> = None;
 
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let mut bytes = trimmed.as_bytes().to_vec();
-            let entry = match simd_json::from_slice::<KiroJsonlEntry>(&mut bytes) {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-
-            let Some(data) = entry.data else {
-                continue;
-            };
-            let Some(message_id) = data.message_id else {
-                continue;
-            };
-
-            let text_chars = text_char_count(data.content.as_deref());
-
-            match entry.kind.as_str() {
-                "Prompt" => {
-                    let timestamp_ms = data
-                        .meta
-                        .and_then(|meta| meta.timestamp)
-                        .and_then(parse_epoch_f64_millis);
-                    pending_prompt = Some((text_chars, timestamp_ms));
+            for line in reader.lines() {
+                let line = line.map_err(|error| {
+                    SessionParseError::at_path(&jsonl_path, "read Kiro JSONL sidecar line", error)
+                })?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                "AssistantMessage" => {
-                    let message = content_by_message_id.entry(message_id).or_default();
-                    if let Some((prompt_chars, prompt_ts)) = pending_prompt.take() {
-                        message.prompt_chars += prompt_chars;
-                        if message.prompt_timestamp_ms.is_none() {
-                            message.prompt_timestamp_ms = prompt_ts;
-                        }
+
+                let mut bytes = trimmed.as_bytes().to_vec();
+                let entry =
+                    simd_json::from_slice::<KiroJsonlEntry>(&mut bytes).map_err(|error| {
+                        SessionParseError::at_path(
+                            &jsonl_path,
+                            "decode Kiro JSONL sidecar line",
+                            error,
+                        )
+                    })?;
+
+                if entry.version != "v1" {
+                    return Err(invalid_at_path(
+                        &jsonl_path,
+                        "validate Kiro JSONL schema version",
+                        format!("expected version `v1`, found `{}`", entry.version),
+                    ));
+                }
+
+                if entry.kind != "Prompt" && entry.kind != "AssistantMessage" {
+                    continue;
+                }
+
+                let data = entry.data.ok_or_else(|| {
+                    invalid_at_path(
+                        &jsonl_path,
+                        "validate Kiro JSONL entry",
+                        format!("{} entry is missing data", entry.kind),
+                    )
+                })?;
+                let message_id = data
+                    .message_id
+                    .map(|message_id| message_id.trim().to_string())
+                    .filter(|message_id| !message_id.is_empty())
+                    .ok_or_else(|| {
+                        invalid_at_path(
+                            &jsonl_path,
+                            "validate Kiro JSONL entry",
+                            format!("{} entry is missing message_id", entry.kind),
+                        )
+                    })?;
+
+                let text_chars = text_char_count(data.content.as_deref(), &jsonl_path)?;
+
+                match entry.kind.as_str() {
+                    "Prompt" => {
+                        let timestamp_ms = match data.meta.and_then(|meta| meta.timestamp) {
+                            Some(timestamp) => {
+                                Some(parse_epoch_f64_millis(timestamp).ok_or_else(|| {
+                                    invalid_at_path(
+                                        &jsonl_path,
+                                        "validate Kiro prompt timestamp",
+                                        format!("invalid prompt timestamp `{timestamp}`"),
+                                    )
+                                })?)
+                            }
+                            None => None,
+                        };
+                        pending_prompt = Some((text_chars, timestamp_ms));
                     }
-                    message.assistant_chars += text_chars;
+                    "AssistantMessage" => {
+                        let message = content_by_message_id.entry(message_id).or_default();
+                        if let Some((prompt_chars, prompt_ts)) = pending_prompt.take() {
+                            message.prompt_chars += prompt_chars;
+                            if message.prompt_timestamp_ms.is_none() {
+                                message.prompt_timestamp_ms = prompt_ts;
+                            }
+                        }
+                        message.assistant_chars += text_chars;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(SessionParseError::at_path(
+                &jsonl_path,
+                "open Kiro JSONL sidecar",
+                error,
+            ));
         }
     }
 
     turns
         .into_iter()
         .enumerate()
-        .filter_map(|(index, turn)| {
-            let message_ids = turn.message_ids.unwrap_or_default();
-            let mut prompt_chars = 0;
-            let mut assistant_chars = 0;
-            let mut prompt_timestamp_ms = None;
+        .map(
+            |(index, turn)| -> SessionParseResult<Option<UnifiedMessage>> {
+                let message_ids = turn.message_ids.unwrap_or_default();
+                let mut prompt_chars = 0;
+                let mut assistant_chars = 0;
+                let mut prompt_timestamp_ms = None;
 
-            for message_id in message_ids.iter().flatten() {
-                let Some(content) = content_by_message_id.get(message_id) else {
-                    continue;
-                };
-                prompt_chars += content.prompt_chars;
-                assistant_chars += content.assistant_chars;
-                if prompt_timestamp_ms.is_none() {
-                    prompt_timestamp_ms = content.prompt_timestamp_ms;
+                for message_id in message_ids.iter().flatten() {
+                    let Some(content) = content_by_message_id.get(message_id) else {
+                        continue;
+                    };
+                    prompt_chars += content.prompt_chars;
+                    assistant_chars += content.assistant_chars;
+                    if prompt_timestamp_ms.is_none() {
+                        prompt_timestamp_ms = content.prompt_timestamp_ms;
+                    }
                 }
-            }
 
-            let explicit_input = turn.input_token_count.unwrap_or(0).max(0);
-            let explicit_output = turn.output_token_count.unwrap_or(0).max(0);
-            let input = if explicit_input > 0 {
-                explicit_input
-            } else if context_window > 0 {
-                let ctx_pct = turn.context_usage_percentage.unwrap_or(0.0);
-                if ctx_pct > 0.0 {
-                    ((context_window as f64) * ctx_pct / 100.0) as i64
+                if turn.input_token_count.is_some_and(|tokens| tokens < 0)
+                    || turn.output_token_count.is_some_and(|tokens| tokens < 0)
+                {
+                    return Err(invalid_at_path(
+                        path,
+                        "validate Kiro turn",
+                        format!("turn {index} has a negative token count"),
+                    ));
+                }
+                let explicit_input = turn.input_token_count.unwrap_or(0);
+                let explicit_output = turn.output_token_count.unwrap_or(0);
+                let input = if explicit_input > 0 {
+                    explicit_input
+                } else if context_window > 0 {
+                    let ctx_pct = turn.context_usage_percentage.unwrap_or(0.0);
+                    if !ctx_pct.is_finite() || ctx_pct < 0.0 {
+                        return Err(invalid_at_path(
+                            path,
+                            "validate Kiro turn",
+                            format!("turn {index} has an invalid context_usage_percentage"),
+                        ));
+                    }
+                    if ctx_pct > 0.0 {
+                        ((context_window as f64) * ctx_pct / 100.0) as i64
+                    } else {
+                        estimate_tokens(prompt_chars)
+                    }
                 } else {
                     estimate_tokens(prompt_chars)
+                };
+                let output = if explicit_output > 0 {
+                    explicit_output
+                } else {
+                    estimate_tokens(assistant_chars)
+                };
+
+                if input == 0 && output == 0 {
+                    return Ok(None);
                 }
-            } else {
-                estimate_tokens(prompt_chars)
-            };
-            let output = if explicit_output > 0 {
-                explicit_output
-            } else {
-                estimate_tokens(assistant_chars)
-            };
 
-            if input == 0 && output == 0 {
-                return None;
-            }
+                let session_id = session_id.as_deref().ok_or_else(|| {
+                    invalid_at_path(
+                        path,
+                        "validate Kiro session header",
+                        "token-bearing session is missing a non-empty session_id",
+                    )
+                })?;
+                let model_id = model_id.as_deref().ok_or_else(|| {
+                    invalid_at_path(
+                        path,
+                        "validate Kiro session header",
+                        "token-bearing session is missing a concrete model_id",
+                    )
+                })?;
 
-            let end_timestamp_ms = parse_timestamp_value(turn.end_timestamp.as_ref());
-            let duration_ms = duration_between_ms(prompt_timestamp_ms, end_timestamp_ms);
-            let timestamp = prompt_timestamp_ms
-                .or(end_timestamp_ms)
-                .unwrap_or(fallback_timestamp);
+                let end_timestamp_ms = match turn.end_timestamp.as_ref() {
+                    Some(value) => Some(parse_timestamp_value(Some(value)).ok_or_else(|| {
+                        invalid_at_path(
+                            path,
+                            "validate Kiro turn timestamp",
+                            format!("turn {index} has an invalid end_timestamp"),
+                        )
+                    })?),
+                    None => None,
+                };
+                let duration_ms = duration_between_ms(prompt_timestamp_ms, end_timestamp_ms);
+                let timestamp = prompt_timestamp_ms.or(end_timestamp_ms).ok_or_else(|| {
+                    invalid_at_path(
+                        path,
+                        "validate Kiro turn",
+                        format!("turn {index} has no valid timestamp"),
+                    )
+                })?;
 
-            let mut message = UnifiedMessage::new_with_dedup(
-                CLIENT_ID,
-                model_id.clone(),
-                PROVIDER_ID,
-                session_id.clone(),
-                timestamp,
-                TokenBreakdown {
-                    input,
-                    output,
-                    cache_read: 0,
-                    cache_write: 0,
-                    reasoning: 0,
-                },
-                0.0,
-                Some(crate::sessions::dedup_hash_str(&format!(
-                    "{}:{}",
-                    session_id, index
-                ))),
-            );
-            message.message_count = turn.total_request_count.unwrap_or(1).max(1);
-            message.duration_ms = duration_ms;
-            message.is_turn_start = true;
-            message.set_workspace(workspace_key.clone(), workspace_label.clone());
-            Some(message)
-        })
+                let mut message = UnifiedMessage::new_with_dedup(
+                    CLIENT_ID,
+                    model_id,
+                    PROVIDER_ID,
+                    session_id,
+                    timestamp,
+                    TokenBreakdown {
+                        input,
+                        output,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    0.0,
+                    Some(crate::sessions::dedup_hash_str(&format!(
+                        "{}:{}",
+                        session_id, index
+                    ))),
+                );
+                message.message_count = turn.total_request_count.unwrap_or(1).max(1);
+                message.duration_ms = duration_ms;
+                message.is_turn_start = true;
+                message.set_workspace(workspace_key.clone(), workspace_label.clone());
+                Ok(Some(message))
+            },
+        )
+        .filter_map(|result| result.transpose())
         .collect()
 }
 
-fn text_char_count(content: Option<&[KiroContentPart]>) -> usize {
-    content
-        .unwrap_or_default()
-        .iter()
-        .filter(|part| part.kind.as_deref().is_none_or(|kind| kind == "text"))
-        .filter_map(|part| part.data.as_deref())
-        .map(str::chars)
-        .map(Iterator::count)
-        .sum()
+fn text_char_count(content: Option<&[KiroContentPart]>, path: &Path) -> SessionParseResult<usize> {
+    let mut chars = 0;
+    for part in content.unwrap_or_default() {
+        if part.kind.as_deref() != Some("text") {
+            continue;
+        }
+
+        let Some(KiroContentData::String(text)) = part.data.as_ref() else {
+            return Err(invalid_at_path(
+                path,
+                "validate Kiro text content",
+                "text content data must be a string",
+            ));
+        };
+        chars += text.chars().count();
+    }
+    Ok(chars)
 }
 
 fn estimate_tokens(chars: usize) -> i64 {
@@ -312,11 +486,16 @@ fn parse_timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
     }
 }
 
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string()
+fn invalid_at_path(
+    path: &Path,
+    operation: &'static str,
+    detail: impl Into<String>,
+) -> SessionParseError {
+    SessionParseError::at_path(
+        path,
+        operation,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, detail.into()),
+    )
 }
 
 fn is_kiro_global_storage_path(path: &Path) -> bool {
@@ -336,145 +515,93 @@ fn kiro_global_storage_workspace(path: &Path) -> Option<String> {
     None
 }
 
-#[derive(Debug, Default)]
-struct KiroSnapshotTextCounts {
-    prompt_chars: usize,
-    assistant_chars: usize,
+#[derive(Debug, Deserialize)]
+struct KiroGlobalStorageSnapshot {
+    session_id: Option<String>,
+    model: Option<String>,
+    timestamp: Option<Value>,
+    messages: Option<Vec<KiroGlobalStorageMessage>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KiroSnapshotRole {
-    Prompt,
-    Assistant,
+#[derive(Debug, Deserialize)]
+struct KiroGlobalStorageMessage {
+    role: Option<String>,
+    content: Option<String>,
 }
 
-const KIRO_SNAPSHOT_ALIAS_KEY_GROUPS: &[&[&str]] = &[
-    &["prompt", "response", "content", "text", "message"],
-    &[
-        "messages",
-        "conversation",
-        "chat",
-        "transcript",
-        "entries",
-        "events",
-        "history",
-    ],
-    &["parts", "items", "nodes"],
-];
-
-fn kiro_snapshot_alias_values(map: &Map<String, Value>) -> Vec<&Value> {
-    let mut values = Vec::new();
-    for group in KIRO_SNAPSHOT_ALIAS_KEY_GROUPS {
-        for key in *group {
-            if let Some(item) = map.get(*key) {
-                if values.contains(&item) {
-                    continue;
-                }
-                values.push(item);
-            }
+fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let json = std::fs::read_to_string(path).map_err(|error| {
+        SessionParseError::at_path(path, "read Kiro global storage file", error)
+    })?;
+    let snapshot: KiroGlobalStorageSnapshot = serde_json::from_str(&json).map_err(|error| {
+        SessionParseError::at_path(path, "decode Kiro global storage file", error)
+    })?;
+    let mut prompt_chars = 0;
+    let mut assistant_chars = 0;
+    for message in snapshot.messages.as_deref().unwrap_or_default() {
+        let chars = message
+            .content
+            .as_deref()
+            .map(str::chars)
+            .map(Iterator::count)
+            .unwrap_or(0);
+        match message.role.as_deref() {
+            Some("user") => prompt_chars += chars,
+            Some("assistant") => assistant_chars += chars,
+            _ => {}
         }
     }
-    values
-}
-
-fn collect_kiro_snapshot_text(
-    value: &Value,
-    counts: &mut KiroSnapshotTextCounts,
-    mut role: Option<KiroSnapshotRole>,
-) {
-    match value {
-        Value::Object(map) => {
-            if let Some(kind) = map
-                .get("role")
-                .or_else(|| map.get("type"))
-                .and_then(|value| value.as_str())
-            {
-                role = match kind {
-                    "user" | "prompt" => Some(KiroSnapshotRole::Prompt),
-                    "assistant" | "response" => Some(KiroSnapshotRole::Assistant),
-                    _ => role,
-                };
-            }
-
-            for item in kiro_snapshot_alias_values(map) {
-                collect_kiro_snapshot_text(item, counts, role);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_kiro_snapshot_text(item, counts, role);
-            }
-        }
-        Value::String(text) => match role {
-            Some(KiroSnapshotRole::Prompt) => counts.prompt_chars += text.chars().count(),
-            Some(KiroSnapshotRole::Assistant) => counts.assistant_chars += text.chars().count(),
-            None => {}
-        },
-        _ => {}
+    let input = estimate_tokens(prompt_chars);
+    let output = estimate_tokens(assistant_chars);
+    if input == 0 && output == 0 {
+        return Ok(Vec::new());
     }
-}
-
-fn find_kiro_snapshot_model_id(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for key in ["model_id", "modelId", "model"] {
-                if let Some(model) = map.get(key).and_then(|value| value.as_str()) {
-                    let model = model.trim();
-                    if !model.is_empty() {
-                        return Some(model.to_string());
-                    }
-                }
-            }
-            for item in kiro_snapshot_alias_values(map) {
-                if let Some(model) = find_kiro_snapshot_model_id(item) {
-                    return Some(model);
-                }
-            }
-            None
-        }
-        Value::Array(items) => items.iter().find_map(find_kiro_snapshot_model_id),
-        _ => None,
-    }
-}
-
-fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-    let json = match std::fs::read_to_string(path) {
-        Ok(json) => json,
-        Err(_) => return Vec::new(),
-    };
-    let value: Value = match serde_json::from_str(&json) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
-    };
-
-    let file_stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("unknown");
+    let session_id = snapshot
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate Kiro global storage session",
+                "snapshot is missing a non-empty session_id",
+            )
+        })?
+        .to_string();
+    let model_id = snapshot
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && *model != "auto")
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate Kiro global storage model",
+                "snapshot is missing a concrete model",
+            )
+        })?
+        .to_string();
+    let timestamp = snapshot
+        .timestamp
+        .as_ref()
+        .and_then(|value| parse_timestamp_value(Some(value)))
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate Kiro global storage timestamp",
+                "snapshot is missing a valid positive timestamp",
+            )
+        })?;
     let workspace = kiro_global_storage_workspace(path);
     let workspace_key = workspace.as_deref().and_then(normalize_workspace_key);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
-    let session_id = match workspace.as_deref() {
-        Some(workspace) => format!("{workspace}/{file_stem}"),
-        None => file_stem.to_string(),
-    };
-    let model_id = find_kiro_snapshot_model_id(&value).unwrap_or_else(|| UNKNOWN_MODEL.to_string());
-
-    let mut counts = KiroSnapshotTextCounts::default();
-    collect_kiro_snapshot_text(&value, &mut counts, None);
-    let input = estimate_tokens(counts.prompt_chars);
-    let output = estimate_tokens(counts.assistant_chars);
-    if input == 0 && output == 0 {
-        return Vec::new();
-    }
-
     let mut message = UnifiedMessage::new_with_dedup(
         CLIENT_ID,
         model_id,
         PROVIDER_ID,
         session_id.clone(),
-        fallback_timestamp,
+        timestamp,
         TokenBreakdown {
             input,
             output,
@@ -484,82 +611,65 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
         },
         0.0,
         Some(crate::sessions::dedup_hash_str(&format!(
-            "kiro-globalstorage:{session_id}:{file_stem}"
+            "kiro-globalstorage:{session_id}"
         ))),
     );
     message.is_turn_start = true;
     message.set_workspace(workspace_key, workspace_label);
-    vec![message]
+    Ok(vec![message])
 }
 
-pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let conn = match Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to open Kiro CLI database"
-            );
-            return Vec::new();
-        }
-    };
+pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let conn = open_readonly_sqlite(db_path).map_err(|source| {
+        SessionParseError::at_path(db_path, "open Kiro database read-only", source)
+    })?;
 
     let query = "SELECT key, conversation_id, value FROM conversations_v2";
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Kiro conversations query"
-            );
-            return Vec::new();
-        }
-    };
+    let mut stmt = conn.prepare(query).map_err(|error| {
+        SessionParseError::at_path(db_path, "prepare Kiro conversations query", error)
+    })?;
 
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Kiro conversations query"
-            );
-            return Vec::new();
-        }
-    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| {
+            SessionParseError::at_path(db_path, "execute Kiro conversations query", error)
+        })?;
 
     let mut messages = Vec::new();
 
-    for row in rows.flatten() {
+    for row in rows {
+        let row = row.map_err(|error| {
+            SessionParseError::at_path(db_path, "decode Kiro conversation row", error)
+        })?;
         let (cwd, conversation_id, json_str) = row;
-        let parsed = match serde_json::from_str::<KiroDbConversation>(&json_str) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+        let parsed = serde_json::from_str::<KiroDbConversation>(&json_str).map_err(|error| {
+            SessionParseError::at_path(db_path, "decode Kiro conversation JSON", error)
+        })?;
 
         let context_window = parsed
             .model_info
             .as_ref()
             .and_then(|info| info.context_window_tokens)
             .unwrap_or(0);
+        if context_window < 0 {
+            return Err(invalid_at_path(
+                db_path,
+                "validate Kiro conversation row",
+                format!("conversation `{conversation_id}` has negative context_window_tokens"),
+            ));
+        }
         let model_id = parsed
             .model_info
             .as_ref()
             .and_then(|info| info.model_id.as_deref())
-            .filter(|m| !m.trim().is_empty() && *m != "auto")
-            .unwrap_or(UNKNOWN_MODEL)
-            .to_string();
+            .map(str::trim)
+            .filter(|model| !model.is_empty() && *model != "auto");
         let workspace_key = normalize_workspace_key(&cwd);
         let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
@@ -571,6 +681,15 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 
             let ctx_pct = meta.context_usage_percentage.unwrap_or(0.0);
             let response_size = meta.response_size.unwrap_or(0);
+            if !ctx_pct.is_finite() || ctx_pct < 0.0 {
+                return Err(invalid_at_path(
+                    db_path,
+                    "validate Kiro conversation row",
+                    format!(
+                        "conversation `{conversation_id}` turn {index} has invalid context usage"
+                    ),
+                ));
+            }
 
             let input = if context_window > 0 && ctx_pct > 0.0 {
                 ((context_window as f64) * ctx_pct / 100.0) as i64
@@ -583,6 +702,22 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
                 continue;
             }
 
+            let conversation_id = conversation_id.trim();
+            if conversation_id.is_empty() {
+                return Err(invalid_at_path(
+                    db_path,
+                    "validate Kiro conversation row",
+                    "token-bearing conversation has an empty conversation_id",
+                ));
+            }
+            let model_id = model_id.ok_or_else(|| {
+                invalid_at_path(
+                    db_path,
+                    "validate Kiro conversation row",
+                    format!("conversation `{conversation_id}` is missing a concrete model id"),
+                )
+            })?;
+
             let duration_ms = duration_between_ms(
                 meta.request_start_timestamp_ms,
                 meta.stream_end_timestamp_ms,
@@ -590,13 +725,22 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             let timestamp = meta
                 .request_start_timestamp_ms
                 .or(meta.stream_end_timestamp_ms)
-                .unwrap_or(0);
+                .filter(|timestamp| *timestamp > 0)
+                .ok_or_else(|| {
+                    invalid_at_path(
+                        db_path,
+                        "validate Kiro conversation row",
+                        format!(
+                            "conversation `{conversation_id}` turn {index} has no positive timestamp"
+                        ),
+                    )
+                })?;
 
             let mut message = UnifiedMessage::new_with_dedup(
                 CLIENT_ID,
-                model_id.clone(),
+                model_id,
                 PROVIDER_ID,
-                conversation_id.clone(),
+                conversation_id,
                 timestamp,
                 TokenBreakdown {
                     input,
@@ -619,7 +763,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         }
     }
 
-    messages
+    Ok(messages)
 }
 
 #[derive(Debug, Deserialize)]
@@ -644,8 +788,17 @@ struct KiroDbRequestMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use std::io::Write;
     use tempfile::TempDir;
+
+    fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_kiro_file(path).unwrap()
+    }
+
+    fn parse_kiro_sqlite(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_kiro_sqlite(path).unwrap()
+    }
 
     fn create_session_files(
         dir: &TempDir,
@@ -688,6 +841,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_kiro_accepts_structured_non_text_content() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-tools","cwd":"/tmp/project","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"end_timestamp":1770983427,"message_ids":["prompt-tools","assistant-tools"]}]}}}"#;
+        let jsonl = r#"{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-tools","content":[{"kind":"text","data":"hello world"}],"meta":{"timestamp":1770983426.0}}}
+{"version":"v1","kind":"AssistantMessage","data":{"message_id":"assistant-tools","content":[{"kind":"toolUse","data":{"name":"read","input":{"path":"README.md"}}},{"kind":"text","data":"response"}]}}
+{"version":"v1","kind":"ToolResults","data":{"message_id":"tool-result","content":[{"kind":"toolResult","data":{"status":"success"}}]}}"#;
+        let path = create_session_files(&dir, "session-tools", json, jsonl);
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 3);
+        assert_eq!(messages[0].tokens.output, 2);
+    }
+
+    #[test]
+    fn test_parse_kiro_rejects_structured_text_content() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-bad-text","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[]}}}"#;
+        let jsonl = r#"{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-bad-text","content":[{"kind":"text","data":{"unexpected":true}}]}}"#;
+        let path = create_session_files(&dir, "session-bad-text", json, jsonl);
+
+        let error = super::parse_kiro_file(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Kiro text content");
+        assert_eq!(error.path(), Some(path.with_extension("jsonl").as_path()));
+    }
+
+    #[test]
     fn test_parse_kiro_skips_zero_content_turns() {
         let dir = TempDir::new().unwrap();
         let json = r#"{"session_id":"session-2","cwd":"/tmp","session_state":{"rts_model_state":{"model_info":{"model_id":"model"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"message_ids":["missing"]}]}}}"#;
@@ -700,7 +882,30 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_kiro_skips_malformed_jsonl_lines() {
+    fn zero_content_turn_does_not_require_identity_fields() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_state":{"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":null,"output_token_count":null,"message_ids":[]}]}}}"#;
+        let path = create_session_files(&dir, "zero", json, "");
+
+        let messages = parse_kiro_file(&path);
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn token_bearing_turn_without_model_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-missing-model","session_state":{"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":1,"output_token_count":0,"end_timestamp":1770983427}]}}}"#;
+        let path = create_session_files(&dir, "missing-model", json, "");
+
+        let error = super::parse_kiro_file(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Kiro session header");
+        assert_eq!(error.path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn test_parse_kiro_reports_malformed_jsonl_lines() {
         let dir = TempDir::new().unwrap();
         let json = r#"{"session_id":"session-3","cwd":"/tmp/project","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"turn_duration":100,"end_timestamp":1770983427,"total_request_count":2,"message_ids":["prompt-3","assistant-3"]}]}}}"#;
         let jsonl = r#"{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-3","content":[{"kind":"text","data":"hello world"}],"meta":{"timestamp":1770983426.420942}}}
@@ -708,10 +913,8 @@ not valid json at all
 {"version":"v1","kind":"AssistantMessage","data":{"message_id":"assistant-3","content":[{"kind":"text","data":"response text"}]}}"#;
         let path = create_session_files(&dir, "session-3", json, jsonl);
 
-        let messages = parse_kiro_file(&path);
-
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].tokens.input > 0 || messages[0].tokens.output > 0);
+        let error = super::parse_kiro_file(&path).unwrap_err();
+        assert_eq!(error.operation(), "decode Kiro JSONL sidecar line");
     }
 
     #[test]
@@ -764,7 +967,9 @@ not valid json at all
         std::fs::write(
             &path,
             r#"{
-                "model": "auto",
+                "session_id": "ide-session-1",
+                "model": "claude-sonnet-4-5",
+                "timestamp": 1770983426420,
                 "messages": [
                     {"role": "user", "content": "hello world"},
                     {"role": "assistant", "content": "response text"}
@@ -777,23 +982,27 @@ not valid json at all
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "kiro");
-        assert_eq!(messages[0].model_id.as_ref(), "auto");
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-5");
+        assert_eq!(messages[0].session_id.as_ref(), "ide-session-1");
+        assert_eq!(messages[0].timestamp, 1_770_983_426_420);
         assert!(messages[0].tokens.input > 0);
         assert!(messages[0].tokens.output > 0);
         assert_eq!(messages[0].workspace_key.as_deref(), Some("workspace-a"));
         assert_eq!(
             messages[0].dedup_key,
             Some(crate::sessions::dedup_hash_str(
-                "kiro-globalstorage:workspace-a/execution:execution"
+                "kiro-globalstorage:ide-session-1"
             ))
         );
     }
 
     #[test]
-    fn test_parse_kiro_global_storage_dedup_keys_differ_across_workspaces() {
+    fn test_parse_kiro_global_storage_dedup_uses_recorded_session_id() {
         let dir = TempDir::new().unwrap();
         let payload = r#"{
-            "model": "auto",
+            "session_id": "ide-session-shared",
+            "model": "claude-sonnet-4-5",
+            "timestamp": 1770983426420,
             "messages": [
                 {"role": "user", "content": "hello world"},
                 {"role": "assistant", "content": "response text"}
@@ -815,113 +1024,7 @@ not valid json at all
 
         assert_eq!(messages_a.len(), 1);
         assert_eq!(messages_b.len(), 1);
-        assert_ne!(messages_a[0].dedup_key, messages_b[0].dedup_key);
-    }
-
-    #[test]
-    fn collect_snapshot_text_does_not_double_count_equal_aliases() {
-        let value: Value = serde_json::from_str(
-            r#"{
-                "messages": [
-                    {"role": "assistant", "content": "abcd", "text": "abcd"}
-                ],
-                "entries": [
-                    {"role": "assistant", "content": "abcd", "text": "abcd"}
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        let mut counts = KiroSnapshotTextCounts::default();
-        collect_kiro_snapshot_text(&value, &mut counts, None);
-
-        assert_eq!(counts.assistant_chars, 4);
-        assert_eq!(counts.prompt_chars, 0);
-    }
-
-    #[test]
-    fn collect_snapshot_text_does_not_double_count_equal_aliases_across_groups() {
-        let value: Value = serde_json::from_str(
-            r#"{
-                "content": [
-                    {"role": "assistant", "text": "abcd"}
-                ],
-                "messages": [
-                    {"role": "assistant", "text": "abcd"}
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        let mut counts = KiroSnapshotTextCounts::default();
-        collect_kiro_snapshot_text(&value, &mut counts, None);
-
-        assert_eq!(counts.assistant_chars, 4);
-        assert_eq!(counts.prompt_chars, 0);
-    }
-
-    #[test]
-    fn collect_snapshot_text_counts_distinct_alias_subtrees() {
-        let value: Value = serde_json::from_str(
-            r#"{
-                "prompt": {"role": "user", "text": "hi there"},
-                "response": {"role": "assistant", "text": "hello back"},
-                "messages": [{"role": "user", "content": "alpha"}],
-                "history": [{"role": "user", "content": "bravo"}]
-            }"#,
-        )
-        .unwrap();
-
-        let mut counts = KiroSnapshotTextCounts::default();
-        collect_kiro_snapshot_text(&value, &mut counts, None);
-
-        assert_eq!(counts.prompt_chars, 18);
-        assert_eq!(counts.assistant_chars, 10);
-    }
-
-    #[test]
-    fn find_snapshot_model_id_descends_into_alias_subtrees() {
-        let value: Value = serde_json::from_str(
-            r#"{
-                "messages": [
-                    {"parts": [{"model_id": "claude-sonnet-4-5"}]}
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            find_kiro_snapshot_model_id(&value).as_deref(),
-            Some("claude-sonnet-4-5")
-        );
-    }
-
-    #[test]
-    fn find_snapshot_model_id_descends_into_every_alias_key() {
-        for key in [
-            "prompt",
-            "response",
-            "content",
-            "text",
-            "message",
-            "messages",
-            "conversation",
-            "chat",
-            "transcript",
-            "entries",
-            "events",
-            "history",
-            "parts",
-            "items",
-            "nodes",
-        ] {
-            let model = format!("model-for-{key}");
-            let value = serde_json::json!({
-                key: [{ "model_id": model }]
-            });
-
-            assert_eq!(find_kiro_snapshot_model_id(&value), Some(model));
-        }
+        assert_eq!(messages_a[0].dedup_key, messages_b[0].dedup_key);
     }
 
     #[test]
@@ -935,5 +1038,37 @@ not valid json at all
             Some(1_770_983_426_420)
         );
         assert_eq!(parse_timestamp_value(Some(&serde_json::json!(0))), None);
+    }
+
+    #[test]
+    fn global_storage_usage_without_recorded_timestamp_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("execution.chat");
+        std::fs::write(
+            &path,
+            r#"{"session_id":"ide-1","model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}]}"#,
+        )
+        .unwrap();
+
+        let error = super::parse_kiro_file(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Kiro global storage timestamp");
+        assert_eq!(error.path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn global_storage_usage_with_auto_model_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("execution.chat");
+        std::fs::write(
+            &path,
+            r#"{"session_id":"ide-1","model":"auto","timestamp":1770983426420,"messages":[{"role":"user","content":"hello"}]}"#,
+        )
+        .unwrap();
+
+        let error = super::parse_kiro_file(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Kiro global storage model");
+        assert_eq!(error.path(), Some(path.as_path()));
     }
 }

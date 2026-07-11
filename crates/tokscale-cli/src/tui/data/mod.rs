@@ -6,7 +6,10 @@ use tokio::runtime::{Handle, Runtime};
 #[cfg(test)]
 use chrono::NaiveDate;
 
-use tokscale_core::{load_usage_data_with_diagnostics, ClientId, GroupBy, LocalParseOptions};
+use tokscale_core::{
+    load_prepared_usage_data_with_diagnostics, prepare_local_sources, ClientId, GroupBy,
+    LocalParseOptions, PreparedLocalSources, SourceInventorySignature,
+};
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
 // aggregation engine can produce them directly (#37). Re-export them under the
@@ -31,19 +34,19 @@ pub use tokscale_core::{
 /// hermetic across developer machines; production builds still honor
 /// user-configured paths.
 #[cfg(not(test))]
-fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
+fn data_loader_scanner_settings() -> Result<tokscale_core::scanner::ScannerSettings> {
     crate::tui::settings::load_scanner_settings()
 }
 
 #[cfg(test)]
-fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
-    tokscale_core::scanner::ScannerSettings::default()
+fn data_loader_scanner_settings() -> Result<tokscale_core::scanner::ScannerSettings> {
+    Ok(tokscale_core::scanner::ScannerSettings::default())
 }
 
 /// Return freed allocator pages to the OS after the parse peak. glibc
 /// otherwise keeps the high-water mark resident in arena free lists, which
 /// is most of the TUI's idle RSS (ADR 0008).
-fn trim_allocator() {
+pub(super) fn trim_allocator() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {
         libc::malloc_trim(0);
@@ -60,6 +63,20 @@ pub struct DataLoader {
 pub struct DataLoadResult {
     pub data: UsageData,
     pub pricing_diagnostics: Vec<String>,
+    pub source_inventory_signature: SourceInventorySignature,
+    pub source_digest: u64,
+}
+
+pub struct PreparedDataLoad {
+    sources: PreparedLocalSources,
+}
+
+impl PreparedDataLoad {
+    pub fn refresh_source_inventory_signature(&mut self) -> Result<SourceInventorySignature> {
+        self.sources
+            .refresh_source_inventory_signature()
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 impl DataLoader {
@@ -77,6 +94,7 @@ impl DataLoader {
         }
     }
 
+    #[allow(dead_code)]
     pub fn load(&self, enabled_clients: &[ClientId], group_by: &GroupBy) -> Result<UsageData> {
         self.load_with_diagnostics(enabled_clients, group_by)
             .map(|result| result.data)
@@ -87,6 +105,11 @@ impl DataLoader {
         enabled_clients: &[ClientId],
         group_by: &GroupBy,
     ) -> Result<DataLoadResult> {
+        let prepared = self.prepare(enabled_clients)?;
+        self.execute_with_diagnostics(prepared, group_by)
+    }
+
+    pub fn prepare(&self, enabled_clients: &[ClientId]) -> Result<PreparedDataLoad> {
         let home = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
             .to_string_lossy()
@@ -104,20 +127,38 @@ impl DataLoader {
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
-            scanner_settings: data_loader_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings()?,
         };
+
+        prepare_local_sources(opts)
+            .map(|sources| PreparedDataLoad { sources })
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub fn execute_with_diagnostics(
+        &self,
+        prepared: PreparedDataLoad,
+        group_by: &GroupBy,
+    ) -> Result<DataLoadResult> {
+        let group_by = group_by.clone();
 
         let usage_data = if Handle::try_current().is_ok() {
             std::thread::scope(|s| {
-                s.spawn(|| {
+                s.spawn(move || {
                     let rt = Runtime::new().map_err(|e| e.to_string())?;
-                    rt.block_on(load_usage_data_with_diagnostics(opts, group_by.clone()))
+                    rt.block_on(load_prepared_usage_data_with_diagnostics(
+                        prepared.sources,
+                        group_by,
+                    ))
                 })
                 .join()
                 .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
             })
         } else {
-            Runtime::new()?.block_on(load_usage_data_with_diagnostics(opts, group_by.clone()))
+            Runtime::new()?.block_on(load_prepared_usage_data_with_diagnostics(
+                prepared.sources,
+                group_by,
+            ))
         };
 
         trim_allocator();
@@ -125,25 +166,10 @@ impl DataLoader {
             .map(|result| DataLoadResult {
                 data: result.data,
                 pricing_diagnostics: result.pricing_diagnostics,
+                source_inventory_signature: result.source_inventory_signature,
+                source_digest: result.source_inventory_signature.process_digest(),
             })
             .map_err(anyhow::Error::msg)
-    }
-
-    /// Digest of the sources `load` would scan, used by the auto-refresh
-    /// probe to skip unchanged reloads (ADR 0008). Mirrors `load`'s home and
-    /// scanner-settings resolution.
-    pub fn source_digest(&self, enabled_clients: &[ClientId]) -> Option<u64> {
-        let home = dirs::home_dir()?.to_string_lossy().to_string();
-        let sources: Vec<String> = enabled_clients
-            .iter()
-            .map(|client| client.as_str().to_string())
-            .collect();
-        Some(tokscale_core::compute_source_digest(
-            &home,
-            &sources,
-            true,
-            &data_loader_scanner_settings(),
-        ))
     }
 
     #[cfg(test)]
@@ -171,7 +197,7 @@ impl DataLoader {
             until: self.until.clone(),
             year: self.year.clone(),
             use_env_roots: false,
-            scanner_settings: data_loader_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings()?,
         };
 
         let usage_data =
@@ -247,7 +273,7 @@ mod tests {
             since: loader.since.clone(),
             until: loader.until.clone(),
             year: loader.year.clone(),
-            scanner_settings: data_loader_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings()?,
         };
 
         tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), pricing)
@@ -316,7 +342,6 @@ mod tests {
         assert_eq!(ClientId::short_name(ClientId::KiloCode), "KiloCode");
         assert_eq!(ClientId::short_name(ClientId::Mux), "Mux");
         assert_eq!(ClientId::short_name(ClientId::Kilo), "Kilo CLI");
-        assert_eq!(ClientId::short_name(ClientId::Crush), "Crush");
         assert_eq!(ClientId::short_name(ClientId::Hermes), "Hermes Agent");
         assert_eq!(ClientId::short_name(ClientId::Codebuff), "Codebuff");
         assert_eq!(ClientId::short_name(ClientId::CodeBuddy), "CodeBuddy");
@@ -347,7 +372,6 @@ mod tests {
         assert_eq!(ClientId::hotkey(ClientId::KiloCode), Some('k'));
         assert_eq!(ClientId::hotkey(ClientId::Mux), Some('x'));
         assert_eq!(ClientId::hotkey(ClientId::Kilo), Some('l'));
-        assert_eq!(ClientId::hotkey(ClientId::Crush), Some('h'));
         assert_eq!(ClientId::hotkey(ClientId::Hermes), Some('e'));
         assert_eq!(ClientId::hotkey(ClientId::Codebuff), Some('b'));
         assert_eq!(ClientId::hotkey(ClientId::CodeBuddy), Some('f'));
@@ -378,7 +402,6 @@ mod tests {
         assert_eq!(ClientId::from_hotkey('k'), Some(ClientId::KiloCode));
         assert_eq!(ClientId::from_hotkey('l'), Some(ClientId::Kilo));
         assert_eq!(ClientId::from_hotkey('x'), Some(ClientId::Mux));
-        assert_eq!(ClientId::from_hotkey('h'), Some(ClientId::Crush));
         assert_eq!(ClientId::from_hotkey('e'), Some(ClientId::Hermes));
         assert_eq!(ClientId::from_hotkey('b'), Some(ClientId::Codebuff));
         assert_eq!(ClientId::from_hotkey('f'), Some(ClientId::CodeBuddy));
@@ -447,7 +470,7 @@ mod tests {
         // instead it asserts the cfg(test) helper returns a default
         // ScannerSettings regardless of what the real settings file
         // contains on the developer's machine.
-        let settings = super::data_loader_scanner_settings();
+        let settings = super::data_loader_scanner_settings().unwrap();
         assert!(
             settings.opencode_db_paths.is_empty(),
             "under #[cfg(test)] data_loader_scanner_settings must return \
@@ -653,15 +676,28 @@ after"#,
     fn test_data_loader_keeps_gateway_model_path_under_original_client() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
-        let message_dir = temp_dir
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        fs::create_dir_all(&message_dir).unwrap();
-        fs::write(
-            message_dir.join("msg_001.json"),
-            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0.25,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        let data_dir = temp_dir.path().join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        let conn = rusqlite::Connection::open(data_dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );",
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "msg-1",
+                "session-1",
+                r#"{"id":"msg-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0.25,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
 
         unsafe {
             env::set_var("HOME", temp_dir.path());

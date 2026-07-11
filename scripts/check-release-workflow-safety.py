@@ -2,6 +2,7 @@
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 
@@ -39,6 +40,37 @@ def read_lines(path: pathlib.Path) -> list[str]:
     if not path.exists():
         fail(f"Missing workflow: {path}")
     return path.read_text(encoding="utf-8").splitlines()
+
+
+def git_index_mode(path: pathlib.Path) -> str:
+    relative_path = path.relative_to(ROOT).as_posix()
+    result = subprocess.run(
+        ["git", "ls-files", "--stage", "--", relative_path],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(
+            f"Failed to inspect Git index mode for {path}: "
+            f"{result.stderr.strip()}"
+        )
+
+    entries = [line for line in result.stdout.splitlines() if line]
+    if len(entries) != 1:
+        fail(f"Release tooling entrypoint is not tracked exactly once: {path}")
+
+    metadata, separator, tracked_path = entries[0].partition("\t")
+    fields = metadata.split()
+    if not separator or len(fields) != 3 or tracked_path != relative_path:
+        fail(f"Unexpected Git index metadata for release tooling entrypoint: {entries[0]}")
+
+    mode, _object_id, stage = fields
+    if stage != "0":
+        fail(f"Release tooling entrypoint has an unresolved Git index stage: {path}")
+    return mode
 
 
 def strip_yaml_scalar(value: str) -> str:
@@ -210,7 +242,7 @@ def main() -> None:
 
     if not RELEASE_TOOLING_SCRIPT.is_file():
         errors.append(f"missing release tooling entrypoint: {RELEASE_TOOLING_SCRIPT}")
-    elif RELEASE_TOOLING_SCRIPT.stat().st_mode & 0o111 == 0:
+    elif git_index_mode(RELEASE_TOOLING_SCRIPT) != "100755":
         errors.append(f"release tooling entrypoint is not executable: {RELEASE_TOOLING_SCRIPT}")
 
     for label, workflow_lines in (

@@ -1,10 +1,12 @@
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::path::PathBuf;
 
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
+    EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -19,48 +21,55 @@ impl LocalSourceAdapter for ZedAdapter {
         ClientId::Zed
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::Zed
             .local_def()
             .expect("Zed adapter must have local scan policy");
         let mut paths = Vec::new();
 
         adapter_discover::push_existing_file(
-            PathBuf::from(def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots)),
+            ClientId::Zed,
+            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
             &mut paths,
-        );
+        )?;
 
         #[cfg(target_os = "macos")]
         if paths.is_empty() {
             adapter_discover::push_existing_file(
+                ClientId::Zed,
                 PathBuf::from(format!(
                     "{}/Library/Application Support/Zed/threads/threads.db",
                     ctx.home_dir
                 )),
                 &mut paths,
-            );
+            )?;
         }
 
         #[cfg(target_os = "windows")]
         if paths.is_empty() {
             if let Some(local_app_data) = dirs::data_local_dir() {
                 adapter_discover::push_existing_file(
+                    ClientId::Zed,
                     local_app_data.join("Zed/threads/threads.db"),
                     &mut paths,
-                );
+                )?;
             }
         }
 
         paths.extend(adapter_discover::scan_roots(
-            adapter_discover::extra_roots_for_client(ClientId::Zed, ctx),
+            ClientId::Zed,
+            adapter_discover::extra_roots_for_client(ClientId::Zed, ctx)?,
             def.pattern,
-        ));
+        )?);
 
-        adapter_discover::source_units_from_paths(
+        let units = adapter_discover::source_units_from_paths(
             ClientId::Zed,
             paths,
             FingerprintPolicy::SqliteWithWal,
-        )
+        )?
         .into_iter()
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
@@ -68,10 +77,15 @@ impl LocalSourceAdapter for ZedAdapter {
                 EXPLICIT_TOKEN_OVERFLOW_REVISION,
             ))
         })
-        .collect()
+        .collect();
+        Ok(units)
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         use rayon::prelude::*;
 
         units
@@ -84,8 +98,21 @@ impl LocalSourceAdapter for ZedAdapter {
             .collect()
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
+    }
+
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
+        adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 
@@ -121,6 +148,9 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 summary TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                created_at TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
                 data_type TEXT NOT NULL,
                 data BLOB NOT NULL
             );
@@ -184,7 +214,7 @@ mod tests {
         };
         let ctx = scan_context(home.path(), &settings);
 
-        let units = ZED_ADAPTER.discover(&ctx);
+        let units = ZED_ADAPTER.discover_checked(&ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![default_db, extra_db];
         expected.sort_unstable();
@@ -205,24 +235,22 @@ mod tests {
 
         let units = vec![SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())];
         let mut cache = message_cache::SourceMessageCache::default();
-        let parsed = ZED_ADAPTER.parse(
-            units,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-        );
+        let parsed = ZED_ADAPTER
+            .parse_checked(units, &ParseContext { pricing: None })
+            .unwrap();
         let mut actual = Vec::new();
-        ZED_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-            &mut actual,
-        );
+        ZED_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut actual,
+            )
+            .unwrap();
 
-        let expected = finalized(sessions::zed::parse_zed_sqlite(&db_path));
+        let expected = finalized(sessions::zed::parse_zed_sqlite(&db_path).unwrap());
         assert_eq!(actual, expected);
     }
 }

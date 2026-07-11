@@ -30,6 +30,7 @@ pub(crate) fn run_time_metrics_report(
     let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
+    let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let rt = Runtime::new()?;
     let report = rt
         .block_on(async {
@@ -41,7 +42,7 @@ pub(crate) fn run_time_metrics_report(
                 until,
                 year,
                 group_by: GroupBy::default(),
-                scanner_settings: tui::settings::load_scanner_settings_for_home(&home_dir),
+                scanner_settings,
             })
             .await
         })

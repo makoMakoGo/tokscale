@@ -6,8 +6,10 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, SourceUnitMeta, UnitMessageSource,
+    AdapterScanContext, CacheHitPlan, FingerprintPolicy, FoldContext, LocalSourceAdapter,
+    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError,
+    SourceParseError, SourcePipelineError, SourcePlanningError, SourceUnit, SourceUnitMeta,
+    UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::{message_cache, pricing, scanner, sessions, UnifiedMessage};
@@ -20,9 +22,7 @@ pub(crate) struct CodexAppendSource {
     read_plan: message_cache::CacheReadPlan,
     parser_version: message_cache::ParserVersion,
     is_headless: bool,
-    fallback_timestamp: i64,
     tail_messages: Vec<UnifiedMessage>,
-    tail_fallback_indices: Vec<usize>,
     fingerprint: message_cache::SourceFingerprint,
     codex_incremental: message_cache::CodexIncrementalCache,
 }
@@ -32,37 +32,45 @@ impl LocalSourceAdapter for CodexAdapter {
         ClientId::Codex
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::Codex
             .local_def()
             .expect("Codex adapter must have local scan policy");
-        let codex_home = codex_home(ctx.home_dir, ctx.use_env_roots);
+        let codex_home = codex_home(ctx.home_dir, ctx.use_env_roots)?;
         let headless_roots =
             scanner::headless_roots_with_env_strategy(Path::new(ctx.home_dir), ctx.use_env_roots);
         let mut roots = vec![
-            PathBuf::from(def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots)),
+            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
             codex_home.join("archived_sessions"),
         ];
         roots.extend(headless_roots.iter().map(|root| root.join("codex")));
         roots.extend(adapter_discover::extra_roots_for_client(
             ClientId::Codex,
             ctx,
-        ));
+        )?);
 
-        adapter_discover::source_units_from_paths_preserving_order(
+        let units = adapter_discover::source_units_from_paths_preserving_order(
             ClientId::Codex,
-            adapter_discover::scan_roots(roots, def.pattern),
+            adapter_discover::scan_roots(ClientId::Codex, roots, def.pattern)?,
             FingerprintPolicy::PlainFile,
-        )
+        )?
         .into_iter()
         .map(|unit| {
             let is_headless = is_headless_path(&unit.path, &headless_roots);
             unit.with_meta(SourceUnitMeta::Codex { is_headless })
         })
-        .collect()
+        .collect();
+        Ok(units)
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        _ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -70,39 +78,169 @@ impl LocalSourceAdapter for CodexAdapter {
                     SourceUnitMeta::Codex { is_headless } => is_headless,
                     _ => unreachable!("unexpected Codex source unit meta"),
                 };
-                load_or_parse_codex_unit(unit, ctx.source_cache, ctx.pricing, is_headless)
+                let client = unit.client;
+                let path = unit.path.clone();
+                let parser = unit.parser_version.parser_id;
+                load_or_parse_codex_unit(unit, is_headless)
+                    .map_err(|source| SourceParseError::from_session(client, &path, parser, source))
             })
             .collect()
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &message_cache::SourceMessageCache,
+    ) -> Result<CacheHitPlan, SourcePlanningError> {
+        plan_exact_codex_cache_hit(unit, source_cache)
+    }
+
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), SourcePipelineError> {
         let mut seen = HashSet::new();
-        for parsed in parsed {
-            let path = parsed.unit.path.clone();
-            let (messages, extra_write) = resolve_codex_messages(parsed.messages, ctx);
-            let cache_write = parsed.cache_write.or(extra_write);
-            let has_cache_write = cache_write.is_some();
-            adapter_cache::write_cache(cache_write, ctx, &messages);
-            sink.extend_messages(
-                messages
-                    .into_iter()
-                    .filter(|message| crate::should_keep_deduped_message(&mut seen, message))
-                    .collect(),
-            );
-            if !has_cache_write && parsed.invalidate_cache {
-                ctx.source_cache.remove(&path, parsed.unit.parser_version);
-            }
+        fold_codex_units(parsed, ctx, sink, &mut seen)
+    }
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), SourcePipelineError> {
+        let mut seen = HashSet::new();
+        while let Some(parsed) = batches.next(ctx)? {
+            fold_codex_units(parsed, ctx, sink, &mut seen)?;
         }
+        Ok(())
     }
 }
 
-fn codex_home(home_dir: &str, use_env_roots: bool) -> PathBuf {
+fn plan_exact_codex_cache_hit(
+    mut unit: SourceUnit,
+    source_cache: &message_cache::SourceMessageCache,
+) -> Result<CacheHitPlan, SourcePlanningError> {
+    let is_headless = match unit.meta {
+        SourceUnitMeta::Codex { is_headless } => is_headless,
+        _ => unreachable!("unexpected Codex source unit meta"),
+    };
+    unit.revalidate_snapshot_for_cache_decision()?;
+    let Some(cached) = source_cache.get_meta(&unit.path, unit.parser_version)? else {
+        unit.mark_cache_lookup_completed_no_hit();
+        return Ok(CacheHitPlan::Miss(unit));
+    };
+    let snapshot = unit.prepared_source_input_snapshot().ok_or_else(|| {
+        message_cache::SourceSnapshotError::InvalidSnapshot {
+            path: unit.path.clone(),
+            detail: "Codex cache planner lost its freshly validated snapshot".to_string(),
+        }
+    })?;
+    let stamp =
+        message_cache::SourceInputPolicy::plain(&unit.path).stamp_from_snapshot(snapshot)?;
+    if cached.fingerprint.stamp != stamp || !message_cache::codex_cache_meta_is_consistent(&cached)
+    {
+        unit.set_planned_cache_meta(cached);
+        return Ok(CacheHitPlan::Miss(unit));
+    }
+
+    let read_plan =
+        message_cache::CacheReadPlan::new(&unit.path, unit.parser_version, cached.fingerprint);
+    unit.release_prepared_snapshot();
+    Ok(CacheHitPlan::Hit(ParsedUnit {
+        unit,
+        messages: UnitMessageSource::CodexCacheHit {
+            read_plan,
+            is_headless,
+        },
+        cache_write: None,
+        invalidate_cache: false,
+    }))
+}
+
+fn fold_codex_units(
+    parsed: Vec<ParsedUnit>,
+    ctx: &mut FoldContext<'_>,
+    sink: &mut dyn MessageSink,
+    seen: &mut HashSet<u64>,
+) -> Result<(), SourcePipelineError> {
+    for parsed in parsed {
+        let path = parsed.unit.path.clone();
+        let parser_version = parsed.unit.parser_version;
+        let CodexResolvedMessages {
+            mut messages,
+            cache_write: extra_write,
+            finalization,
+            recovery_requires_removal,
+        } = resolve_codex_messages(parsed.messages, ctx)?;
+        write_codex_cache_and_apply_recovery(
+            &path,
+            parser_version,
+            parsed.cache_write.or(extra_write),
+            &messages,
+            parsed.invalidate_cache,
+            recovery_requires_removal,
+            ctx,
+        )?;
+        if let Some(finalization) = finalization {
+            finalize_codex_messages(&mut messages, ctx.pricing, finalization.is_headless);
+        }
+        sink.extend_messages(
+            messages
+                .into_iter()
+                .filter(|message| crate::should_keep_deduped_message(seen, message))
+                .collect(),
+        );
+    }
+    Ok(())
+}
+
+fn write_codex_cache_and_apply_recovery(
+    path: &Path,
+    parser_version: message_cache::ParserVersion,
+    cache_write: Option<Box<message_cache::CacheWritePlan>>,
+    messages: &[UnifiedMessage],
+    invalidate_cache: bool,
+    recovery_requires_removal: bool,
+    ctx: &mut FoldContext<'_>,
+) -> Result<adapter_cache::CacheWriteOutcome, SourcePipelineError> {
+    let write_result = adapter_cache::write_cache(cache_write, ctx, messages);
+    let should_remove = invalidate_cache || recovery_requires_removal;
+    if should_remove && !matches!(&write_result, Ok(adapter_cache::CacheWriteOutcome::Written)) {
+        ctx.source_cache.remove(path, parser_version);
+    }
+    write_result.map_err(Into::into)
+}
+
+struct CodexFinalization {
+    is_headless: bool,
+}
+
+struct CodexResolvedMessages {
+    messages: Vec<UnifiedMessage>,
+    cache_write: Option<Box<message_cache::CacheWritePlan>>,
+    finalization: Option<CodexFinalization>,
+    recovery_requires_removal: bool,
+}
+
+fn codex_home(home_dir: &str, use_env_roots: bool) -> Result<PathBuf, SourceDiscoveryError> {
     if use_env_roots {
-        std::env::var("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(home_dir).join(".codex"))
+        match std::env::var("CODEX_HOME") {
+            Ok(path) if !path.trim().is_empty() => Ok(PathBuf::from(path)),
+            Ok(_) | Err(std::env::VarError::NotPresent) => {
+                Ok(PathBuf::from(home_dir).join(".codex"))
+            }
+            Err(source) => Err(SourceDiscoveryError::new(
+                ClientId::Codex,
+                "CODEX_HOME",
+                "read environment variable",
+                source,
+            )),
+        }
     } else {
-        PathBuf::from(home_dir).join(".codex")
+        Ok(PathBuf::from(home_dir).join(".codex"))
     }
 }
 
@@ -118,185 +256,255 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
 
 fn parse_full_log_source(
     unit: SourceUnit,
-    pricing: Option<&pricing::PricingService>,
     is_headless: bool,
-) -> ParsedUnit {
+    source_snapshot: message_cache::SourceInputSnapshot,
+) -> crate::sessions::error::SessionParseResult<ParsedUnit> {
     let path = unit.path.clone();
-    let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
-    let parsed = sessions::codex::parse_codex_file_incremental(
+    let sessions::codex::ParsedCodexFile {
+        messages,
+        consumed_offset,
+        state,
+        content_hash,
+        ends_with_newline,
+        source_identity,
+    } = sessions::codex::parse_codex_file_incremental(
         &path,
         0,
         sessions::codex::CodexParseState::default(),
-    );
-    let messages = finalize_codex_messages(
-        parsed.messages.clone(),
-        pricing,
-        is_headless,
-        &parsed.fallback_timestamp_indices,
-        fallback_timestamp,
-    );
-    if !parsed.parse_succeeded || parsed.unresolved_model_events {
-        return ParsedUnit {
-            unit,
-            messages: UnitMessageSource::Fresh(messages),
-            cache_write: None,
-            invalidate_cache: false,
-        };
-    }
-
-    let cache_write = build_codex_cache_write(
+    )?;
+    let content_hash = content_hash.ok_or_else(|| {
+        sessions::error::SessionParseError::invalid(
+            "validate Codex cache fingerprint",
+            "full incremental parse did not produce a content hash",
+        )
+    })?;
+    let source_identity = source_identity.ok_or_else(|| {
+        sessions::error::SessionParseError::invalid(
+            "validate Codex cache fingerprint",
+            "full incremental parse did not produce a file identity",
+        )
+    })?;
+    let cache_write = build_codex_cache_plan(
         &path,
         unit.parser_version,
-        parsed.messages,
-        parsed.consumed_offset,
-        parsed.state,
-        parsed.fallback_timestamp_indices,
-    );
+        CodexCacheMaterial {
+            consumed_offset,
+            state,
+            ends_with_newline,
+            content_hash,
+            source_snapshot,
+            source_identity,
+        },
+    )
+    .map_err(|source| {
+        sessions::error::SessionParseError::at_path(
+            &path,
+            "validate Codex cache fingerprint",
+            source,
+        )
+    })?
+    .map(Box::new);
 
-    ParsedUnit {
+    Ok(ParsedUnit {
         unit,
-        messages: UnitMessageSource::Fresh(messages),
+        messages: UnitMessageSource::CodexFresh {
+            messages,
+            is_headless,
+        },
         cache_write,
         invalidate_cache: false,
-    }
+    })
 }
 
 fn finalize_codex_messages(
-    mut messages: Vec<UnifiedMessage>,
+    messages: &mut Vec<UnifiedMessage>,
     pricing: Option<&pricing::PricingService>,
     is_headless: bool,
-    fallback_timestamp_indices: &[usize],
-    fallback_timestamp: i64,
-) -> Vec<UnifiedMessage> {
-    for index in fallback_timestamp_indices {
-        if let Some(message) = messages.get_mut(*index) {
-            message.set_timestamp(fallback_timestamp);
-        }
-    }
-    crate::finalize_token_priced_messages(&mut messages, pricing);
-    for message in &mut messages {
+) {
+    crate::finalize_token_priced_messages(messages, pricing);
+    for message in messages {
         apply_headless_agent(message, is_headless);
     }
-    messages
 }
 
-fn build_codex_cache_write(
-    path: &Path,
-    parser_version: message_cache::ParserVersion,
-    raw_messages: Vec<UnifiedMessage>,
+struct CodexCacheMaterial {
     consumed_offset: u64,
     state: sessions::codex::CodexParseState,
-    fallback_timestamp_indices: Vec<usize>,
-) -> Option<message_cache::CacheWrite> {
-    let fingerprint = message_cache::SourceFingerprint::from_path(path)?;
-    if fingerprint.size != consumed_offset {
-        return None;
+    ends_with_newline: bool,
+    content_hash: [u8; 32],
+    source_snapshot: message_cache::SourceInputSnapshot,
+    source_identity: message_cache::SourceFileIdentity,
+}
+
+fn build_codex_cache_plan(
+    path: &Path,
+    parser_version: message_cache::ParserVersion,
+    material: CodexCacheMaterial,
+) -> Result<Option<message_cache::CacheWritePlan>, message_cache::SourceSnapshotError> {
+    let Some((fingerprint, codex_incremental)) = build_codex_cache_metadata(path, material)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(message_cache::CacheWritePlan::new(
+        path,
+        parser_version,
+        fingerprint,
+        Some(codex_incremental),
+    )))
+}
+
+fn build_codex_cache_metadata(
+    path: &Path,
+    material: CodexCacheMaterial,
+) -> Result<
+    Option<(
+        message_cache::SourceFingerprint,
+        message_cache::CodexIncrementalCache,
+    )>,
+    message_cache::SourceSnapshotError,
+> {
+    let input_policy = message_cache::SourceInputPolicy::plain(path);
+    if material.source_snapshot.primary_identity() != Some(material.source_identity)
+        || input_policy.snapshot()? != material.source_snapshot
+    {
+        return Ok(None);
     }
-
-    let codex_incremental =
-        message_cache::build_codex_incremental_cache(path, consumed_offset, state)?;
-
-    Some(message_cache::CacheWrite::Owned(
-        message_cache::CachedSourceEntry::new_with_version(
-            path,
-            parser_version,
-            fingerprint,
-            raw_messages,
-            fallback_timestamp_indices,
-            Some(codex_incremental),
-        ),
-    ))
+    let stamp = input_policy.stamp_from_snapshot(&material.source_snapshot)?;
+    let fingerprint =
+        message_cache::SourceFingerprint::from_main_digest(stamp, material.content_hash)?;
+    if fingerprint.size != material.consumed_offset {
+        return Ok(None);
+    }
+    let Some(incremental) = message_cache::build_codex_incremental_cache(
+        material.consumed_offset,
+        material.state,
+        material.ends_with_newline,
+        material.content_hash,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some((fingerprint, incremental)))
 }
 
 fn load_or_parse_codex_unit(
-    unit: SourceUnit,
-    source_cache: &message_cache::SourceMessageCache,
-    pricing: Option<&pricing::PricingService>,
+    mut unit: SourceUnit,
     is_headless: bool,
-) -> ParsedUnit {
+) -> crate::sessions::error::SessionParseResult<ParsedUnit> {
     let path = unit.path.clone();
-    let Some(fingerprint) = message_cache::SourceFingerprint::from_path(&path) else {
-        return parse_full_log_source(unit, pricing, is_headless);
-    };
-    let fallback_timestamp = sessions::utils::file_modified_timestamp_ms(&path);
+    let cache_lookup_completed_no_hit = unit.take_cache_lookup_completed_no_hit();
+    if !cache_lookup_completed_no_hit {
+        unit.revalidate_snapshot_for_cache_decision()
+            .map_err(|source| {
+                sessions::error::SessionParseError::at_path(
+                    &path,
+                    "refresh Codex source snapshot",
+                    source,
+                )
+            })?;
+    }
+    let cached = unit.take_planned_cache_meta();
+    let source_snapshot = unit.take_source_input_snapshot().map_err(|source| {
+        sessions::error::SessionParseError::at_path(&path, "read Codex source snapshot", source)
+    })?;
 
-    if let Some(cached) = source_cache.get_meta(&path, unit.parser_version) {
+    if let Some(cached) = cached {
+        let reparse_snapshot = source_snapshot.clone();
         let reparse_from_start = |invalidate_cache: bool| {
-            let mut parsed = parse_full_log_source(unit.clone(), pricing, is_headless);
-            parsed.invalidate_cache = invalidate_cache && parsed.cache_write.is_none();
-            parsed
+            let mut parsed =
+                parse_full_log_source(unit.clone(), is_headless, reparse_snapshot.clone())?;
+            parsed.invalidate_cache = invalidate_cache;
+            Ok(parsed)
         };
+        let snapshot = source_snapshot;
+        let stamp = message_cache::SourceInputPolicy::plain(&path)
+            .stamp_from_snapshot(&snapshot)
+            .map_err(|source| {
+                sessions::error::SessionParseError::at_path(
+                    &path,
+                    "validate Codex source snapshot",
+                    source,
+                )
+            })?;
 
-        if cached.fingerprint == fingerprint {
-            if message_cache::codex_cache_meta_matches_fingerprint(&cached, &fingerprint) {
+        if cached.fingerprint.stamp == stamp {
+            if message_cache::codex_cache_meta_is_consistent(&cached) {
                 let read_plan = message_cache::CacheReadPlan::new(
                     &path,
                     unit.parser_version,
                     cached.fingerprint,
                 );
-                return ParsedUnit {
+                return Ok(ParsedUnit {
                     unit,
                     messages: UnitMessageSource::CodexCacheHit {
                         read_plan,
                         is_headless,
-                        fallback_timestamp,
                     },
                     cache_write: None,
                     invalidate_cache: false,
-                };
+                });
             }
 
             return reparse_from_start(true);
         }
 
         if let Some(codex_incremental) = cached.codex_incremental.as_ref() {
-            if fingerprint.size > codex_incremental.consumed_offset
-                && message_cache::codex_prefix_matches(&path, codex_incremental)
-            {
-                let parsed = sessions::codex::parse_codex_file_incremental(
+            if snapshot.primary_size().is_some_and(|size| {
+                size > codex_incremental.consumed_offset && codex_incremental.ends_with_newline
+            }) {
+                let parsed = sessions::codex::parse_codex_file_incremental_verified(
                     &path,
                     codex_incremental.consumed_offset,
                     codex_incremental.state.clone(),
-                );
-                if parsed.parse_succeeded && !parsed.unresolved_model_events {
-                    let entry_fingerprint = message_cache::SourceFingerprint::from_path(&path);
-                    let codex_incremental_cache = entry_fingerprint
-                        .as_ref()
-                        .filter(|entry_fingerprint| {
-                            entry_fingerprint.size == parsed.consumed_offset
-                        })
-                        .and_then(|_| {
-                            message_cache::build_codex_incremental_cache(
+                    codex_incremental.prefix_hash,
+                )?;
+                if let Some(parsed) = parsed {
+                    let cache_metadata = match (parsed.content_hash, parsed.source_identity) {
+                        (Some(content_hash), Some(source_identity)) => build_codex_cache_metadata(
+                            &path,
+                            CodexCacheMaterial {
+                                consumed_offset: parsed.consumed_offset,
+                                state: parsed.state.clone(),
+                                ends_with_newline: parsed.ends_with_newline,
+                                content_hash,
+                                source_snapshot: snapshot.clone(),
+                                source_identity,
+                            },
+                        )
+                        .map_err(|source| {
+                            sessions::error::SessionParseError::at_path(
                                 &path,
-                                parsed.consumed_offset,
-                                parsed.state,
+                                "validate Codex append cache fingerprint",
+                                source,
                             )
-                        });
-                    if let (Some(entry_fingerprint), Some(codex_incremental_cache)) =
-                        (entry_fingerprint, codex_incremental_cache)
-                    {
+                        })?,
+                        _ => {
+                            return Err(sessions::error::SessionParseError::invalid(
+                                "validate Codex append cache fingerprint",
+                                "incremental parse did not produce a hash and file identity",
+                            ));
+                        }
+                    };
+                    if let Some((entry_fingerprint, codex_incremental_cache)) = cache_metadata {
                         let parser_version = unit.parser_version;
                         let read_plan = message_cache::CacheReadPlan::new(
                             &path,
                             parser_version,
                             cached.fingerprint.clone(),
                         );
-                        return ParsedUnit {
+                        return Ok(ParsedUnit {
                             unit,
                             messages: UnitMessageSource::CodexAppend(Box::new(CodexAppendSource {
                                 path,
                                 read_plan,
                                 parser_version,
                                 is_headless,
-                                fallback_timestamp,
                                 tail_messages: parsed.messages,
-                                tail_fallback_indices: parsed.fallback_timestamp_indices,
                                 fingerprint: entry_fingerprint,
                                 codex_incremental: codex_incremental_cache,
                             })),
                             cache_write: None,
                             invalidate_cache: false,
-                        };
+                        });
                     }
                 }
             }
@@ -305,104 +513,98 @@ fn load_or_parse_codex_unit(
         return reparse_from_start(true);
     }
 
-    parse_full_log_source(unit, pricing, is_headless)
+    parse_full_log_source(unit, is_headless, source_snapshot)
 }
 
 fn resolve_codex_messages(
     source: UnitMessageSource,
     ctx: &mut FoldContext<'_>,
-) -> (Vec<UnifiedMessage>, Option<message_cache::CacheWrite>) {
+) -> Result<CodexResolvedMessages, SourcePipelineError> {
     match source {
-        UnitMessageSource::Fresh(messages) => (messages, None),
+        UnitMessageSource::Fresh(messages) => Ok(CodexResolvedMessages {
+            messages,
+            cache_write: None,
+            finalization: None,
+            recovery_requires_removal: false,
+        }),
+        UnitMessageSource::CodexFresh {
+            messages,
+            is_headless,
+        } => Ok(CodexResolvedMessages {
+            messages,
+            cache_write: None,
+            finalization: Some(CodexFinalization { is_headless }),
+            recovery_requires_removal: false,
+        }),
         UnitMessageSource::CodexCacheHit {
             read_plan,
             is_headless,
-            fallback_timestamp,
-        } => {
-            let Some((messages, indices)) =
-                ctx.source_cache.take_messages_with_fallback(&read_plan)
-            else {
-                return reparse_full_codex_messages(
+        } => match ctx.source_cache.take_messages(&read_plan) {
+            Ok(messages) => Ok(CodexResolvedMessages {
+                messages,
+                cache_write: None,
+                finalization: Some(CodexFinalization { is_headless }),
+                recovery_requires_removal: false,
+            }),
+            Err(failure) => {
+                adapter_cache::report_cache_read_failure(&failure);
+                let recovery_requires_removal = failure.requires_shard_removal();
+                if recovery_requires_removal {
+                    ctx.source_cache
+                        .remove(&read_plan.path(), read_plan.parser_version());
+                } else {
+                    ctx.source_cache
+                        .invalidate_read(&read_plan.path(), read_plan.parser_version());
+                }
+                reparse_full_codex_messages(
                     &read_plan.path(),
                     read_plan.parser_version(),
-                    ctx.pricing,
                     is_headless,
-                    fallback_timestamp,
-                );
-            };
-            let messages = finalize_codex_messages(
-                messages,
-                ctx.pricing,
-                is_headless,
-                &indices,
-                fallback_timestamp,
-            );
-            (messages, None)
-        }
+                    recovery_requires_removal,
+                )
+            }
+        },
         UnitMessageSource::CodexAppend(append) => {
             let CodexAppendSource {
                 path,
                 read_plan,
                 parser_version,
                 is_headless,
-                fallback_timestamp,
                 tail_messages,
-                tail_fallback_indices,
                 fingerprint,
                 codex_incremental,
             } = *append;
-            let Some((mut raw_messages, mut fallback_timestamp_indices)) =
-                ctx.source_cache.take_messages_with_fallback(&read_plan)
-            else {
-                let replacement_plan =
-                    message_cache::CacheReadPlan::new(&path, parser_version, fingerprint);
-                if let Some((messages, indices)) = ctx
-                    .source_cache
-                    .take_messages_with_fallback(&replacement_plan)
-                {
-                    let messages = finalize_codex_messages(
-                        messages,
-                        ctx.pricing,
+            let mut raw_messages = match ctx.source_cache.take_messages(&read_plan) {
+                Ok(cached) => cached,
+                Err(failure) => {
+                    adapter_cache::report_cache_read_failure(&failure);
+                    let recovery_requires_removal = failure.requires_shard_removal();
+                    if recovery_requires_removal {
+                        ctx.source_cache.remove(&path, parser_version);
+                    } else {
+                        ctx.source_cache.invalidate_read(&path, parser_version);
+                    }
+                    return reparse_full_codex_messages(
+                        &path,
+                        parser_version,
                         is_headless,
-                        &indices,
-                        fallback_timestamp,
+                        recovery_requires_removal,
                     );
-                    return (messages, None);
                 }
-
-                return reparse_full_codex_messages(
-                    &path,
-                    parser_version,
-                    ctx.pricing,
-                    is_headless,
-                    fallback_timestamp,
-                );
             };
-            let existing_len = raw_messages.len();
-            fallback_timestamp_indices.extend(
-                tail_fallback_indices
-                    .iter()
-                    .map(|index| existing_len + index),
-            );
             raw_messages.extend(tail_messages);
-            let cache_write = message_cache::CacheWrite::Owned(
-                message_cache::CachedSourceEntry::new_with_version(
-                    &path,
-                    parser_version,
-                    fingerprint,
-                    raw_messages.clone(),
-                    fallback_timestamp_indices.clone(),
-                    Some(codex_incremental),
-                ),
-            );
-            let messages = finalize_codex_messages(
-                raw_messages,
-                ctx.pricing,
-                is_headless,
-                &fallback_timestamp_indices,
-                fallback_timestamp,
-            );
-            (messages, Some(cache_write))
+            let cache_write = Box::new(message_cache::CacheWritePlan::new(
+                &path,
+                parser_version,
+                fingerprint,
+                Some(codex_incremental),
+            ));
+            Ok(CodexResolvedMessages {
+                messages: raw_messages,
+                cache_write: Some(cache_write),
+                finalization: Some(CodexFinalization { is_headless }),
+                recovery_requires_removal: false,
+            })
         }
         UnitMessageSource::CacheHit(_) => unreachable!("codex does not use generic cache hits"),
     }
@@ -411,36 +613,54 @@ fn resolve_codex_messages(
 fn reparse_full_codex_messages(
     path: &Path,
     parser_version: message_cache::ParserVersion,
-    pricing: Option<&pricing::PricingService>,
     is_headless: bool,
-    fallback_timestamp: i64,
-) -> (Vec<UnifiedMessage>, Option<message_cache::CacheWrite>) {
-    let parsed = sessions::codex::parse_codex_file_incremental(
+    recovery_requires_removal: bool,
+) -> Result<CodexResolvedMessages, SourcePipelineError> {
+    let source_snapshot = message_cache::SourceInputPolicy::plain(path)
+        .snapshot()
+        .map_err(SourcePlanningError::from)?;
+    let sessions::codex::ParsedCodexFile {
+        messages,
+        consumed_offset,
+        state,
+        content_hash,
+        ends_with_newline,
+        source_identity,
+    } = sessions::codex::parse_codex_file_incremental(
         path,
         0,
         sessions::codex::CodexParseState::default(),
-    );
-    let messages = finalize_codex_messages(
-        parsed.messages.clone(),
-        pricing,
-        is_headless,
-        &parsed.fallback_timestamp_indices,
-        fallback_timestamp,
-    );
-    let cache_write = if parsed.parse_succeeded && !parsed.unresolved_model_events {
-        build_codex_cache_write(
-            path,
-            parser_version,
-            parsed.messages,
-            parsed.consumed_offset,
-            parsed.state,
-            parsed.fallback_timestamp_indices,
-        )
-    } else {
-        None
-    };
+    )
+    .map_err(|source| {
+        SourceParseError::from_session(ClientId::Codex, path, parser_version.parser_id, source)
+    })?;
+    let content_hash = content_hash.ok_or_else(|| {
+        SourcePipelineError::contract("Codex full reparse did not produce a content hash")
+    })?;
+    let source_identity = source_identity.ok_or_else(|| {
+        SourcePipelineError::contract("Codex full reparse did not produce a file identity")
+    })?;
+    let cache_write = build_codex_cache_plan(
+        path,
+        parser_version,
+        CodexCacheMaterial {
+            consumed_offset,
+            state,
+            ends_with_newline,
+            content_hash,
+            source_snapshot,
+            source_identity,
+        },
+    )
+    .map_err(SourcePlanningError::from)?
+    .map(Box::new);
 
-    (messages, cache_write)
+    Ok(CodexResolvedMessages {
+        messages,
+        cache_write,
+        finalization: Some(CodexFinalization { is_headless }),
+        recovery_requires_removal,
+    })
 }
 
 pub(crate) static CODEX_ADAPTER: CodexAdapter = CodexAdapter;
@@ -454,6 +674,7 @@ mod tests {
 
     use super::*;
     use crate::message_cache;
+    use crate::pricing::{ModelPricing, PricingService};
 
     const FIRST_CODEX_ENTRY: &str = concat!(
         r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
@@ -462,7 +683,15 @@ mod tests {
         "\n",
     );
     const APPENDED_CODEX_ENTRY: &str = concat!(
-        r#"{"timestamp":"2026-04-27T10:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+        r#"{"timestamp":"2026-04-27T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+        "\n",
+    );
+    const MISSING_TIMESTAMP_CODEX_ENTRY: &str = concat!(
+        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+        "\n",
+    );
+    const EMPTY_CODEX_ENTRY: &str = concat!(
+        r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
         "\n",
     );
 
@@ -517,18 +746,117 @@ mod tests {
             .with_meta(SourceUnitMeta::Codex { is_headless })
     }
 
+    fn prepared_codex_unit(path: &Path, is_headless: bool) -> SourceUnit {
+        codex_unit(path, is_headless)
+            .prepare_snapshot()
+            .expect("Codex fixture snapshot must succeed")
+    }
+
+    fn expect_codex_hit(
+        result: Result<CacheHitPlan, SourcePlanningError>,
+        message: &str,
+    ) -> ParsedUnit {
+        match result.expect(message) {
+            CacheHitPlan::Hit(parsed) => parsed,
+            CacheHitPlan::Miss(_) => panic!("{message}"),
+        }
+    }
+
+    fn expect_codex_miss(
+        result: Result<CacheHitPlan, SourcePlanningError>,
+        message: &str,
+    ) -> SourceUnit {
+        match result.expect(message) {
+            CacheHitPlan::Miss(unit) => unit,
+            CacheHitPlan::Hit(_) => panic!("{message}"),
+        }
+    }
+
     fn parse_and_fold(
         units: Vec<SourceUnit>,
         cache: &mut message_cache::SourceMessageCache,
     ) -> Vec<UnifiedMessage> {
-        let parsed = CODEX_ADAPTER.parse(
-            units,
-            &ParseContext {
-                source_cache: cache,
-                pricing: None,
+        let parsed = plan_and_parse(units, cache, None);
+        fold_parsed(parsed, cache)
+    }
+
+    fn parse_and_fold_with_pricing(
+        units: Vec<SourceUnit>,
+        cache: &mut message_cache::SourceMessageCache,
+        pricing: &PricingService,
+    ) -> Vec<UnifiedMessage> {
+        let parsed = plan_and_parse(units, cache, Some(pricing));
+        let mut sink = Vec::new();
+        CODEX_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: cache,
+                    pricing: Some(pricing),
+                },
+                &mut sink,
+            )
+            .expect("valid Codex fixture must fold");
+        sink
+    }
+
+    fn plan_and_parse(
+        units: Vec<SourceUnit>,
+        cache: &message_cache::SourceMessageCache,
+        pricing: Option<&PricingService>,
+    ) -> Vec<ParsedUnit> {
+        let mut parsed = Vec::with_capacity(units.len());
+        for unit in units {
+            match CODEX_ADAPTER
+                .plan_cache_hit(
+                    unit.prepare_snapshot()
+                        .expect("Codex fixture snapshot must succeed"),
+                    cache,
+                )
+                .expect("Codex cache planning must succeed")
+            {
+                CacheHitPlan::Hit(hit) => parsed.push(hit),
+                CacheHitPlan::Miss(miss) => parsed.extend(
+                    CODEX_ADAPTER
+                        .parse_checked(vec![miss], &ParseContext { pricing })
+                        .expect("valid Codex fixture must parse"),
+                ),
+            }
+        }
+        parsed
+    }
+
+    fn pricing_service(rate: f64) -> PricingService {
+        let mut litellm = std::collections::HashMap::new();
+        litellm.insert(
+            "openai/gpt-5.4".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(rate),
+                output_cost_per_token: Some(rate),
+                cache_read_input_token_cost: Some(rate),
+                ..Default::default()
             },
         );
-        fold_parsed(parsed, cache)
+        PricingService::new(litellm, std::collections::HashMap::new())
+    }
+
+    fn parse_and_fold_batched(
+        units: Vec<SourceUnit>,
+        cache: &mut message_cache::SourceMessageCache,
+    ) -> Vec<UnifiedMessage> {
+        let mut sink = Vec::new();
+        let mut batches = crate::adapters::ParsedBatchSource::new(&CODEX_ADAPTER, units);
+        CODEX_ADAPTER
+            .fold_batches(
+                &mut batches,
+                &mut FoldContext {
+                    source_cache: cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .unwrap();
+        sink
     }
 
     fn fold_parsed(
@@ -536,23 +864,52 @@ mod tests {
         cache: &mut message_cache::SourceMessageCache,
     ) -> Vec<UnifiedMessage> {
         let mut sink = Vec::new();
-        CODEX_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: cache,
-                pricing: None,
-            },
-            &mut sink,
-        );
+        CODEX_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .expect("valid Codex fixture must fold");
         sink
     }
 
     fn parser_messages(path: &Path) -> Vec<UnifiedMessage> {
-        let mut messages = sessions::codex::parse_codex_file(path);
+        let mut messages = sessions::codex::parse_codex_file(path).unwrap();
         for message in &mut messages {
             message.refresh_derived_fields();
         }
         messages
+    }
+
+    fn assert_cached_raw_messages_match_parser(cache_home: &Path, path: &Path) {
+        let expected = sessions::codex::parse_codex_file_incremental(
+            path,
+            0,
+            sessions::codex::CodexParseState::default(),
+        )
+        .unwrap();
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home);
+        let meta = cache
+            .get_meta(path, parser_version)
+            .expect("Codex cache lookup must succeed")
+            .expect("Codex fold must persist the raw shard immediately");
+        let messages = cache
+            .take_messages(&message_cache::CacheReadPlan::new(
+                path,
+                parser_version,
+                meta.fingerprint,
+            ))
+            .unwrap();
+
+        assert_eq!(messages, expected.messages);
     }
 
     #[test]
@@ -579,7 +936,9 @@ mod tests {
             ..Default::default()
         };
 
-        let units = CODEX_ADAPTER.discover(&scan_context(home.path(), &settings));
+        let units = CODEX_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .expect("Codex fixture discovery must succeed");
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let expected = vec![
             default_path.clone(),
@@ -626,14 +985,22 @@ mod tests {
         write_file(&archived_path, duplicate_history);
 
         let settings = crate::scanner::ScannerSettings::default();
-        let units = CODEX_ADAPTER.discover(&scan_context(home.path(), &settings));
+        let units = CODEX_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .expect("Codex fixture discovery must succeed");
 
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].path, default_path);
         assert_eq!(units[1].path, archived_path);
 
-        let mut cache = message_cache::SourceMessageCache::default();
-        let messages = parse_and_fold(units, &mut cache);
+        let messages = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut cache = message_cache::SourceMessageCache::default();
+                parse_and_fold_batched(units, &mut cache)
+            });
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id.as_ref(), "zz-default");
@@ -641,12 +1008,22 @@ mod tests {
 
     #[test]
     fn codex_adapter_output_matches_parser_and_builds_incremental_cache() {
+        let cache_home = tempfile::TempDir::new().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_source_read_stats(&path);
         let actual = parse_and_fold(vec![codex_unit(&path, false)], &mut cache);
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats {
+                bytes: std::fs::metadata(&path).unwrap().len(),
+                hash_passes: 1,
+            },
+            "cold Codex parsing must hash the parser's single read stream"
+        );
         let expected = parser_messages(&path);
 
         assert_eq!(actual, expected);
@@ -658,27 +1035,46 @@ mod tests {
                     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
                 ),
             )
+            .unwrap()
             .and_then(|meta| meta.codex_incremental)
             .is_some());
     }
 
     #[test]
+    fn codex_adapter_reports_malformed_source_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("malformed.jsonl");
+        write_file(&path, r#"{"type":7,"payload":{}}"#);
+
+        let error = CODEX_ADAPTER
+            .parse_checked(
+                vec![codex_unit(&path, false)],
+                &ParseContext { pricing: None },
+            )
+            .expect_err("malformed Codex JSONL must fail the adapter seam");
+
+        assert_eq!(error.client, ClientId::Codex);
+        assert_eq!(error.path, path);
+        assert_eq!(error.parser, message_cache::ParserId::Codex);
+        assert_eq!(error.operation, "decode Codex JSONL entry");
+    }
+
+    #[test]
     fn codex_adapter_cache_hit_matches_fresh_parse() {
+        let cache_home = tempfile::TempDir::new().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut cache = message_cache::SourceMessageCache::default();
-        let fresh = parse_and_fold(vec![codex_unit(&path, false)], &mut cache);
-        let parsed = CODEX_ADAPTER.parse(
-            vec![codex_unit(&path, false)],
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-        );
-
-        assert_eq!(parsed.len(), 1);
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let fresh = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        assert_cached_raw_messages_match_parser(cache_home.path(), &path);
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_source_read_stats(&path);
+        let parsed = vec![expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &cache),
+            "exact Codex stamp should plan a cache hit",
+        )];
         assert!(matches!(
             parsed[0].messages,
             UnitMessageSource::CodexCacheHit { .. }
@@ -686,26 +1082,351 @@ mod tests {
 
         let cached = fold_parsed(parsed, &mut cache);
         assert_eq!(cached, fresh);
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats::default(),
+            "exact Codex cache hits must not read or hash source bytes"
+        );
     }
 
     #[test]
-    fn codex_adapter_append_cache_matches_full_parse() {
+    fn codex_truncated_body_is_repaired_and_second_read_is_a_true_warm_hit() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let expected = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        message_cache::truncate_shard_after_header_for_test(
+            cache_home.path(),
+            &path,
+            parser_version,
+        );
+
+        let mut repair_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let planned = expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &repair_cache),
+            "valid header must still plan a Codex hit",
+        );
+        let repaired = fold_parsed(vec![planned], &mut repair_cache);
+        assert_eq!(repaired, expected);
+
+        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_source_read_stats(&path);
+        let warm = expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &warm_cache),
+            "successful repair must produce a readable warm shard",
+        );
+        let warm_messages = fold_parsed(vec![warm], &mut warm_cache);
+        assert_eq!(warm_messages, expected);
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats::default(),
+            "the second read after repair must not reparse source bytes"
+        );
+    }
+
+    #[test]
+    fn codex_message_count_mismatch_is_reparsed_and_repaired() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let expected = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        message_cache::replace_shard_message_count_for_test(
+            cache_home.path(),
+            &path,
+            parser_version,
+            2,
+        );
+
+        let mut repair_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let planned = expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &repair_cache),
+            "message-count corruption retains a valid planning header",
+        );
+        assert_eq!(fold_parsed(vec![planned], &mut repair_cache), expected);
+        assert_cached_raw_messages_match_parser(cache_home.path(), &path);
+    }
+
+    #[test]
+    fn codex_corrupt_body_removal_is_saved_when_reparse_fails() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        let shard_path = message_cache::truncate_shard_after_header_for_test(
+            cache_home.path(),
+            &path,
+            parser_version,
+        );
+
+        let mut repair_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let planned = expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &repair_cache),
+            "valid header must still plan a Codex hit",
+        );
+        write_file(&path, MISSING_TIMESTAMP_CODEX_ENTRY);
+        let mut sink = Vec::new();
+        let error = CODEX_ADAPTER
+            .fold(
+                vec![planned],
+                &mut FoldContext {
+                    source_cache: &mut repair_cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .expect_err("strict Codex reparse must return the missing timestamp error");
+        assert!(error.to_string().contains("timestamp is missing"));
+        assert!(sink.is_empty());
+        repair_cache.save_if_dirty().unwrap();
+
+        assert!(
+            !shard_path.exists(),
+            "proven current-body corruption must be deleted even when strict reparse fails"
+        );
+    }
+
+    #[test]
+    fn codex_unknown_header_is_preserved_when_reparse_is_not_cacheable() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        let shard_path =
+            message_cache::shard_path_for_test(cache_home.path(), &path, parser_version);
+
+        let mut repair_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let planned = expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &repair_cache),
+            "the original v4 header must plan a Codex hit",
+        );
+        let unknown = b"unknown!";
+        std::fs::write(&shard_path, unknown).unwrap();
+        write_file(&path, MISSING_TIMESTAMP_CODEX_ENTRY);
+        let mut sink = Vec::new();
+        CODEX_ADAPTER
+            .fold(
+                vec![planned],
+                &mut FoldContext {
+                    source_cache: &mut repair_cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .expect_err("strict Codex reparse must return the missing timestamp error");
+        repair_cache.save_if_dirty().unwrap();
+
+        assert_eq!(
+            std::fs::read(shard_path).unwrap(),
+            unknown,
+            "unknown envelopes must remain protected when no atomic replacement succeeds"
+        );
+    }
+
+    #[test]
+    fn codex_corrupt_body_is_removed_when_repair_write_fails() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        let shard_path = message_cache::truncate_shard_after_header_for_test(
+            cache_home.path(),
+            &path,
+            parser_version,
+        );
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let planned = expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &cache),
+            "valid header must still plan a Codex hit",
+        );
+        let resolved = resolve_codex_messages(
+            planned.messages,
+            &mut FoldContext {
+                source_cache: &mut cache,
+                pricing: None,
+            },
+        )
+        .expect("valid source must repair the corrupt cache body");
+        assert!(resolved.recovery_requires_removal);
+        assert!(resolved.cache_write.is_some());
+
+        let cache_path = cache_home.path().to_path_buf();
+        let backup_path = cache_path.with_extension("write-failure-backup");
+        std::fs::rename(&cache_path, &backup_path).unwrap();
+        std::fs::write(&cache_path, b"block cache directory recreation").unwrap();
+        let write_result = write_codex_cache_and_apply_recovery(
+            &path,
+            parser_version,
+            resolved.cache_write,
+            &resolved.messages,
+            false,
+            resolved.recovery_requires_removal,
+            &mut FoldContext {
+                source_cache: &mut cache,
+                pricing: None,
+            },
+        );
+        std::fs::remove_file(&cache_path).unwrap();
+        std::fs::rename(&backup_path, &cache_path).unwrap();
+        assert!(write_result.is_err());
+        cache.save_if_dirty().unwrap();
+        assert!(
+            !shard_path.exists(),
+            "a queued removal must delete proven corruption after the cache directory recovers"
+        );
+    }
+
+    #[test]
+    fn codex_confirmed_no_hit_skips_shard_inserted_before_parse() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+
+        let miss = expect_codex_miss(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &cache),
+            "empty cache must plan a Codex miss",
+        );
+        assert!(miss.cache_lookup_completed_no_hit);
+        assert!(miss.prepared_source_input_snapshot().is_some());
+        assert_eq!(
+            parse_and_fold(vec![codex_unit(&path, false)], &mut cache).len(),
+            1
+        );
+        message_cache::reset_source_read_stats(&path);
+
+        let parsed = CODEX_ADAPTER
+            .parse_checked(vec![miss], &ParseContext { pricing: None })
+            .expect("valid Codex fixture must parse");
+
+        assert!(matches!(
+            parsed[0].messages,
+            UnitMessageSource::CodexFresh { .. }
+        ));
+        assert!(!parsed[0].unit.cache_lookup_completed_no_hit);
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats {
+                bytes: std::fs::metadata(&path).unwrap().len(),
+                hash_passes: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn codex_empty_log_persists_a_valid_warm_shard() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("empty-session.jsonl");
+        write_file(&path, EMPTY_CODEX_ENTRY);
+
+        let mut cold_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        assert!(parse_and_fold(vec![codex_unit(&path, false)], &mut cold_cache).is_empty());
+
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let meta = cold_cache
+            .get_meta(&path, parser_version)
+            .expect("Codex cache lookup must succeed")
+            .expect("an empty Codex parse is still a valid cache result");
+        assert!(!meta.has_messages);
+        assert!(meta.codex_incremental.is_some());
+
+        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_source_read_stats(&path);
+        let parsed = plan_and_parse(vec![codex_unit(&path, false)], &warm_cache, None);
+        assert!(matches!(
+            parsed[0].messages,
+            UnitMessageSource::CodexCacheHit { .. }
+        ));
+        assert!(fold_parsed(parsed, &mut warm_cache).is_empty());
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats::default(),
+            "a valid empty Codex shard must avoid reparsing source bytes"
+        );
+    }
+
+    #[test]
+    fn codex_raw_cache_does_not_persist_headless_or_pricing_derivations() {
+        let cache_home = tempfile::TempDir::new().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cold_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let cold = parse_and_fold_with_pricing(
+            vec![codex_unit(&path, true)],
+            &mut cold_cache,
+            &pricing_service(1.0),
+        );
+        assert_eq!(cold[0].agent.as_deref(), Some("headless"));
+        assert!(cold[0].cost > 0.0);
+        assert_cached_raw_messages_match_parser(cache_home.path(), &path);
+
+        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let warm = parse_and_fold_with_pricing(
+            vec![codex_unit(&path, false)],
+            &mut warm_cache,
+            &pricing_service(2.0),
+        );
+        assert_eq!(warm[0].agent, None);
+        assert!(warm[0].cost > cold[0].cost);
+    }
+
+    #[test]
+    fn codex_adapter_append_cache_matches_full_parse() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         let initial = parse_and_fold(vec![codex_unit(&path, false)], &mut cache);
         assert_eq!(initial.len(), 1);
 
         append_file(&path, APPENDED_CODEX_ENTRY);
-        let parsed = CODEX_ADAPTER.parse(
-            vec![codex_unit(&path, false)],
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
+        message_cache::reset_source_read_stats(&path);
+        let miss = expect_codex_miss(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &cache),
+            "an appended Codex source must remain a parse miss",
         );
+        assert!(miss.prepared_source_input_snapshot().is_some());
+        let parsed = CODEX_ADAPTER
+            .parse_checked(vec![miss], &ParseContext { pricing: None })
+            .expect("valid Codex append fixture must parse");
 
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
@@ -714,8 +1435,97 @@ mod tests {
         ));
 
         let actual = fold_parsed(parsed, &mut cache);
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats {
+                bytes: std::fs::metadata(&path).unwrap().len(),
+                hash_passes: 1,
+            },
+            "Codex append must verify the prefix and hash the tail in one pass"
+        );
         let expected = parser_messages(&path);
         assert_eq!(actual, expected);
+        assert_cached_raw_messages_match_parser(cache_home.path(), &path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_same_stamp_atomic_replacement_is_not_cached() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let input_policy = message_cache::SourceInputPolicy::plain(&path);
+        let before = input_policy.snapshot().unwrap();
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let parsed = sessions::codex::parse_codex_file_incremental(
+            &path,
+            0,
+            sessions::codex::CodexParseState::default(),
+        )
+        .expect("valid Codex fixture must parse");
+
+        let replacement = dir.path().join("replacement.jsonl");
+        let replacement_contents =
+            FIRST_CODEX_ENTRY.replace("input_tokens\":10", "input_tokens\":11");
+        assert_eq!(replacement_contents.len(), FIRST_CODEX_ENTRY.len());
+        write_file(&replacement, &replacement_contents);
+        std::fs::File::open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let after = input_policy.snapshot().unwrap();
+        assert_ne!(
+            input_policy.stamp_from_snapshot(&before).unwrap(),
+            input_policy.stamp_from_snapshot(&after).unwrap()
+        );
+        assert_ne!(before.primary_identity(), after.primary_identity());
+        assert!(build_codex_cache_metadata(
+            &path,
+            CodexCacheMaterial {
+                consumed_offset: parsed.consumed_offset,
+                state: parsed.state,
+                ends_with_newline: parsed.ends_with_newline,
+                content_hash: parsed.content_hash.unwrap(),
+                source_snapshot: before,
+                source_identity: parsed.source_identity.unwrap(),
+            },
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_warm_cache_rejects_same_size_same_mtime_atomic_replacement() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let initial = parse_and_fold(vec![codex_unit(&path, false)], &mut cache);
+        assert_eq!(initial[0].tokens.input, 8);
+        let prepared = prepared_codex_unit(&path, false);
+
+        let replacement = dir.path().join("replacement.jsonl");
+        let replacement_contents =
+            FIRST_CODEX_ENTRY.replace("input_tokens\":10", "input_tokens\":11");
+        assert_eq!(replacement_contents.len(), FIRST_CODEX_ENTRY.len());
+        write_file(&replacement, &replacement_contents);
+        std::fs::File::open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let miss = expect_codex_miss(
+            CODEX_ADAPTER.plan_cache_hit(prepared, &cache),
+            "persisted file identity must reject the replaced source",
+        );
+        let reparsed = parse_and_fold(vec![miss], &mut cache);
+        assert_eq!(reparsed[0].tokens.input, 9);
     }
 
     #[test]
@@ -728,35 +1538,23 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut seed_cache = message_cache::SourceMessageCache::load();
+        let mut seed_cache = message_cache::SourceMessageCache::load().unwrap();
         let initial = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
         assert_eq!(initial.len(), 1);
-        seed_cache.save_if_dirty();
+        seed_cache.save_if_dirty().unwrap();
 
         append_file(&path, APPENDED_CODEX_ENTRY);
         let expected = parser_messages(&path);
 
-        let mut cache_a = message_cache::SourceMessageCache::load();
-        let parsed_a = CODEX_ADAPTER.parse(
-            vec![codex_unit(&path, false)],
-            &ParseContext {
-                source_cache: &cache_a,
-                pricing: None,
-            },
-        );
+        let mut cache_a = message_cache::SourceMessageCache::load().unwrap();
+        let parsed_a = plan_and_parse(vec![codex_unit(&path, false)], &cache_a, None);
         assert!(matches!(
             parsed_a[0].messages,
             UnitMessageSource::CodexAppend(_)
         ));
 
-        let mut cache_b = message_cache::SourceMessageCache::load();
-        let parsed_b = CODEX_ADAPTER.parse(
-            vec![codex_unit(&path, false)],
-            &ParseContext {
-                source_cache: &cache_b,
-                pricing: None,
-            },
-        );
+        let mut cache_b = message_cache::SourceMessageCache::load().unwrap();
+        let parsed_b = plan_and_parse(vec![codex_unit(&path, false)], &cache_b, None);
         assert!(matches!(
             parsed_b[0].messages,
             UnitMessageSource::CodexAppend(_)
@@ -764,13 +1562,13 @@ mod tests {
 
         let messages_b = fold_parsed(parsed_b, &mut cache_b);
         assert_eq!(messages_b, expected);
-        cache_b.save_if_dirty();
+        cache_b.save_if_dirty().unwrap();
 
         let messages_a = fold_parsed(parsed_a, &mut cache_a);
         assert_eq!(messages_a, expected);
-        cache_a.save_if_dirty();
+        cache_a.save_if_dirty().unwrap();
 
-        let mut warm_cache = message_cache::SourceMessageCache::load();
+        let mut warm_cache = message_cache::SourceMessageCache::load().unwrap();
         let warm_messages = parse_and_fold(vec![codex_unit(&path, false)], &mut warm_cache);
         assert_eq!(warm_messages, expected);
     }
@@ -785,28 +1583,22 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut seed_cache = message_cache::SourceMessageCache::load();
+        let mut seed_cache = message_cache::SourceMessageCache::load().unwrap();
         let initial = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
         assert_eq!(initial.len(), 1);
-        seed_cache.save_if_dirty();
+        seed_cache.save_if_dirty().unwrap();
 
         append_file(&path, APPENDED_CODEX_ENTRY);
         let expected = parser_messages(&path);
 
-        let mut cache = message_cache::SourceMessageCache::load();
-        let parsed = CODEX_ADAPTER.parse(
-            vec![codex_unit(&path, false)],
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-        );
+        let mut cache = message_cache::SourceMessageCache::load().unwrap();
+        let parsed = plan_and_parse(vec![codex_unit(&path, false)], &cache, None);
         assert!(matches!(
             parsed[0].messages,
             UnitMessageSource::CodexAppend(_)
         ));
 
-        let mut remover = message_cache::SourceMessageCache::load();
+        let mut remover = message_cache::SourceMessageCache::load().unwrap();
         remover.remove(
             &path,
             message_cache::ParserVersion::new(
@@ -814,13 +1606,14 @@ mod tests {
                 crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
             ),
         );
-        remover.save_if_dirty();
+        remover.save_if_dirty().unwrap();
 
         let messages = fold_parsed(parsed, &mut cache);
         assert_eq!(messages, expected);
-        cache.save_if_dirty();
+        cache.save_if_dirty().unwrap();
+        assert_cached_raw_messages_match_parser(&cache_home.path().join("cache"), &path);
 
-        let mut warm_cache = message_cache::SourceMessageCache::load();
+        let mut warm_cache = message_cache::SourceMessageCache::load().unwrap();
         let warm_messages = parse_and_fold(vec![codex_unit(&path, false)], &mut warm_cache);
         assert_eq!(warm_messages, expected);
     }
@@ -833,7 +1626,9 @@ mod tests {
             .join(".config/tokscale/headless/codex/headless.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
         let settings = crate::scanner::ScannerSettings::default();
-        let units = CODEX_ADAPTER.discover(&scan_context(home.path(), &settings));
+        let units = CODEX_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .expect("Codex fixture discovery must succeed");
 
         assert_eq!(units.len(), 1);
         assert!(matches!(

@@ -1,4 +1,5 @@
 use crate::client_catalog::ClientId;
+use crate::paths::configured_path_env;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,60 +14,53 @@ pub enum PathRoot {
 }
 
 impl PathRoot {
-    pub fn resolve_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
+    pub fn resolve_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> PathBuf {
+        let home_dir = PathBuf::from(home_dir);
         match self {
-            PathRoot::Home => home_dir.to_string(),
+            PathRoot::Home => home_dir,
             PathRoot::XdgData => {
                 if use_env_roots {
-                    std::env::var("XDG_DATA_HOME")
-                        .unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+                    configured_path_env("XDG_DATA_HOME")
+                        .unwrap_or_else(|| home_dir.join(".local/share"))
                 } else {
-                    format!("{}/.local/share", home_dir)
+                    home_dir.join(".local/share")
                 }
             }
             PathRoot::Config => {
                 if use_env_roots {
-                    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
-                        if !custom.is_empty() {
-                            return custom.to_string_lossy().into_owned();
-                        }
+                    if let Some(custom) = configured_path_env("TOKSCALE_CONFIG_DIR") {
+                        return custom;
                     }
 
                     #[cfg(target_os = "linux")]
-                    if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
-                        return format!("{xdg_config_home}/tokscale");
+                    if let Some(xdg_config_home) = configured_path_env("XDG_CONFIG_HOME") {
+                        return xdg_config_home.join("tokscale");
                     }
                 }
 
                 #[cfg(target_os = "windows")]
                 {
                     if let Some(dir) = dirs::config_dir() {
-                        return dir.join("tokscale").to_string_lossy().into_owned();
+                        return dir.join("tokscale");
                     }
                 }
 
-                format!("{home_dir}/.config/tokscale")
+                home_dir.join(".config/tokscale")
             }
             PathRoot::EnvVar {
                 var,
                 fallback_relative,
             } => {
                 if use_env_roots {
-                    let val = std::env::var(var).unwrap_or_default();
-                    let trimmed = val.trim();
-                    if trimmed.is_empty() {
-                        format!("{}/{}", home_dir, fallback_relative)
-                    } else {
-                        trimmed.to_string()
-                    }
+                    configured_path_env(var).unwrap_or_else(|| home_dir.join(fallback_relative))
                 } else {
-                    format!("{}/{}", home_dir, fallback_relative)
+                    home_dir.join(fallback_relative)
                 }
             }
         }
     }
 
-    pub fn resolve(&self, home_dir: &str) -> String {
+    pub fn resolve(&self, home_dir: &str) -> PathBuf {
         self.resolve_with_env_strategy(home_dir, true)
     }
 }
@@ -81,15 +75,13 @@ pub struct LocalClientDef {
 }
 
 impl LocalClientDef {
-    pub fn resolve_path_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> String {
-        format!(
-            "{}/{}",
-            self.root.resolve_with_env_strategy(home_dir, use_env_roots),
-            self.relative_path
-        )
+    pub fn resolve_path_with_env_strategy(&self, home_dir: &str, use_env_roots: bool) -> PathBuf {
+        self.root
+            .resolve_with_env_strategy(home_dir, use_env_roots)
+            .join(self.relative_path)
     }
 
-    pub fn resolve_path(&self, home_dir: &str) -> String {
+    pub fn resolve_path(&self, home_dir: &str) -> PathBuf {
         self.resolve_path_with_env_strategy(home_dir, true)
     }
 }
@@ -105,8 +97,8 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         client: ClientId::OpenCode,
         def: LocalClientDef {
             root: PathRoot::XdgData,
-            relative_path: "opencode/storage/message",
-            pattern: "*.json",
+            relative_path: "opencode",
+            pattern: "*.db",
             headless: false,
             parse_local: true,
         },
@@ -268,16 +260,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             pattern: "kilo.db",
             headless: false,
             parse_local: true,
-        },
-    },
-    LocalClientEntry {
-        client: ClientId::Crush,
-        def: LocalClientDef {
-            root: PathRoot::XdgData,
-            relative_path: "crush/projects.json",
-            pattern: "projects.json",
-            headless: false,
-            parse_local: false,
         },
     },
     LocalClientEntry {
@@ -563,13 +545,7 @@ mod tests {
         assert_eq!(def.relative_path, ".config/tokscale/cursor-cache");
         assert_eq!(def.pattern, "usage*.csv");
         assert!(!ClientId::Cursor.parse_local());
-    }
-
-    #[test]
-    fn crush_is_registered_but_not_locally_parsed() {
-        let crush = ClientId::Crush.local_def().expect("crush has scan policy");
-        assert_eq!(crush.relative_path, "crush/projects.json");
-        assert!(!ClientId::Crush.parse_local());
+        assert!(crate::adapters::adapter_for(ClientId::Cursor).is_some());
     }
 
     #[test]
@@ -652,7 +628,7 @@ mod tests {
         unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-home") };
 
         let resolved = PathRoot::XdgData.resolve("/tmp/home");
-        assert_eq!(resolved, "/tmp/xdg-data-home");
+        assert_eq!(resolved, PathBuf::from("/tmp/xdg-data-home"));
 
         restore_env("XDG_DATA_HOME", previous);
     }
@@ -668,7 +644,7 @@ mod tests {
         }
 
         let resolved = PathRoot::Config.resolve("/tmp/home");
-        assert_eq!(resolved, "/tmp/custom-config-root");
+        assert_eq!(resolved, PathBuf::from("/tmp/custom-config-root"));
 
         restore_env("TOKSCALE_CONFIG_DIR", previous_override);
         restore_env("XDG_CONFIG_HOME", previous_xdg);
@@ -686,7 +662,7 @@ mod tests {
             fallback_relative: ".fallback",
         };
         let resolved = root.resolve_with_env_strategy("/tmp/home", false);
-        assert_eq!(resolved, "/tmp/home/.fallback");
+        assert_eq!(resolved, PathBuf::from("/tmp/home/.fallback"));
 
         restore_env(var, previous);
     }
@@ -705,7 +681,7 @@ mod tests {
 
         assert_eq!(
             root.resolve_with_env_strategy("/tmp/home", true),
-            "/tmp/custom-root"
+            PathBuf::from("/tmp/custom-root")
         );
 
         restore_env(var, previous);
@@ -725,7 +701,7 @@ mod tests {
 
         assert_eq!(
             root.resolve_with_env_strategy("/tmp/home", true),
-            "/tmp/home/.fallback"
+            PathBuf::from("/tmp/home/.fallback")
         );
 
         restore_env(var, previous);
@@ -741,6 +717,9 @@ mod tests {
             parse_local: true,
         };
 
-        assert_eq!(def.resolve_path("/tmp/home"), "/tmp/home/.test/sessions");
+        assert_eq!(
+            def.resolve_path("/tmp/home"),
+            PathBuf::from("/tmp/home/.test/sessions")
+        );
     }
 }

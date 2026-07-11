@@ -6,7 +6,8 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, SourceUnitMeta, UnitMessageSource,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit, SourceUnitMeta,
+    UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -18,17 +19,20 @@ impl LocalSourceAdapter for KiroAdapter {
         ClientId::Kiro
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let mut units = adapter_discover::discover_default_scanned_units(
             ClientId::Kiro,
             ctx,
             FingerprintPolicy::PlainFile,
-        )
+        )?
         .into_iter()
         .map(|unit| unit.with_meta(SourceUnitMeta::KiroFile))
         .collect::<Vec<_>>();
 
-        if let Some(db_path) = kiro_db_path(ctx.home_dir) {
+        if let Some(db_path) = kiro_db_path(ctx.home_dir)? {
             units.push(
                 SourceUnit::sqlite_with_wal(ClientId::Kiro, db_path)
                     .with_meta(SourceUnitMeta::KiroSqlite),
@@ -39,19 +43,24 @@ impl LocalSourceAdapter for KiroAdapter {
             adapter_discover::source_units_from_paths(
                 ClientId::Kiro,
                 adapter_discover::scan_roots(
+                    ClientId::Kiro,
                     kiro_global_storage_roots(ctx.home_dir, ctx.use_env_roots),
                     "kiro-globalstorage",
-                ),
+                )?,
                 FingerprintPolicy::PlainFile,
-            )
+            )?
             .into_iter()
             .map(|unit| unit.with_meta(SourceUnitMeta::KiroGlobalStorage)),
         );
 
-        units
+        Ok(units)
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
@@ -61,14 +70,22 @@ impl LocalSourceAdapter for KiroAdapter {
                     sessions::kiro::parse_kiro_file,
                 ),
                 SourceUnitMeta::KiroSqlite => {
-                    let mut messages = sessions::kiro::parse_kiro_sqlite(&unit.path);
+                    let mut messages =
+                        sessions::kiro::parse_kiro_sqlite(&unit.path).map_err(|source| {
+                            SourceParseError::from_session(
+                                unit.client,
+                                &unit.path,
+                                unit.parser_version.parser_id,
+                                source,
+                            )
+                        })?;
                     crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                    ParsedUnit {
+                    Ok(ParsedUnit {
                         unit,
                         messages: UnitMessageSource::Fresh(messages),
                         cache_write: None,
                         invalidate_cache: false,
-                    }
+                    })
                 }
                 SourceUnitMeta::KiroGlobalStorage => adapter_cache::load_or_parse_unit_with(
                     unit,
@@ -79,7 +96,6 @@ impl LocalSourceAdapter for KiroAdapter {
                 | SourceUnitMeta::AntigravityCacheJsonl
                 | SourceUnitMeta::AntigravityCliSqlite
                 | SourceUnitMeta::OpenCodeSqlite
-                | SourceUnitMeta::OpenCodeJson
                 | SourceUnitMeta::CodeBuddyJsonl
                 | SourceUnitMeta::CodeBuddyExtensionLog { .. }
                 | SourceUnitMeta::Codex { .. } => unreachable!("unexpected Kiro source unit meta"),
@@ -87,22 +103,44 @@ impl LocalSourceAdapter for KiroAdapter {
             .collect()
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
+        match unit.meta {
+            SourceUnitMeta::KiroFile | SourceUnitMeta::KiroGlobalStorage => {
+                adapter_cache::plan_cache_hit(unit, source_cache)
+            }
+            SourceUnitMeta::KiroSqlite => Ok(crate::adapters::CacheHitPlan::Miss(unit)),
+            _ => unreachable!("unexpected Kiro source unit meta"),
+        }
+    }
+
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
+        adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 
-fn kiro_db_path(home_dir: &str) -> Option<PathBuf> {
+fn kiro_db_path(home_dir: &str) -> Result<Option<PathBuf>, SourceDiscoveryError> {
     let xdg_path = PathBuf::from(format!("{}/.local/share/kiro-cli/data.sqlite3", home_dir));
-    if xdg_path.is_file() {
-        return Some(xdg_path);
+    let mut paths = Vec::new();
+    adapter_discover::push_existing_file(ClientId::Kiro, xdg_path, &mut paths)?;
+    if let Some(path) = paths.pop() {
+        return Ok(Some(path));
     }
 
     let macos_path = PathBuf::from(format!(
         "{}/Library/Application Support/kiro-cli/data.sqlite3",
         home_dir
     ));
-    macos_path.is_file().then_some(macos_path)
+    adapter_discover::push_existing_file(ClientId::Kiro, macos_path, &mut paths)?;
+    Ok(paths.pop())
 }
 
 fn kiro_global_storage_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
@@ -168,7 +206,7 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = KIRO_ADAPTER.discover(&ctx);
+        let units = KIRO_ADAPTER.discover_checked(&ctx).unwrap();
 
         assert_eq!(units.len(), 3);
         assert!(units

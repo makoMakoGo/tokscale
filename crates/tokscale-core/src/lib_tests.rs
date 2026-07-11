@@ -4,7 +4,7 @@ use super::{
     load_aggregated_views_with_pricing, load_cache_only_pricing_with_diagnostics,
     load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
     parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-    parse_local_unified_messages_resolved, positive_token_total, pricing,
+    parse_prepared_local_unified_messages, positive_token_total, pricing,
     retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
     AggregationConfig, ClientContribution, ClientCounts, ClientId, DailyTotals, DateRange,
     GraphResult, GroupBy, LocalParseOptions, ReportOptions, SessionContribution, TimeMetricsReport,
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[derive(Debug)]
 struct LocalMessagesForTest {
     messages: Vec<UnifiedMessage>,
     counts: ClientCounts,
@@ -26,8 +27,8 @@ fn load_local_messages_for_test(
     options: LocalParseOptions,
 ) -> Result<LocalMessagesForTest, String> {
     let counts = super::count_local_client_messages(options.clone())?.counts;
-    let (home_dir, clients) = super::resolve_local_parse_request(&options)?;
-    let messages = parse_local_unified_messages_resolved(options, &home_dir, &clients, None)?;
+    let prepared = super::prepare_local_sources(options)?;
+    let messages = parse_prepared_local_unified_messages(prepared, None)?;
     Ok(LocalMessagesForTest { messages, counts })
 }
 
@@ -38,6 +39,28 @@ impl HomeEnvGuard {
         let original_home = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
         Self(original_home)
+    }
+}
+
+struct TestEnvGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl TestEnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
+}
+
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        match self.original.take() {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
     }
 }
 
@@ -192,13 +215,15 @@ fn aggregate_finalized_model_usage_entries(
 }
 
 fn write_streaming_fold_fixture(home: &Path) {
-    let opencode_dir = home.join(".local/share/opencode/storage/message/project-streaming");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"opencode-session","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":1,"cache":{"read":2,"write":3}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    let db_path = home.join(".local/share/opencode/opencode.db");
+    let conn = create_opencode_sqlite_db(&db_path);
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "opencode-session",
+        "/repo",
+        r#"{"id":"msg-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":1,"cache":{"read":2,"write":3}},"time":{"created":1733011200000}}"#,
+    );
 
     let codex_dir = home.join(".codex/sessions");
     std::fs::create_dir_all(&codex_dir).unwrap();
@@ -271,18 +296,25 @@ fn normalized_time_metrics_value(mut report: TimeMetricsReport) -> serde_json::V
 }
 
 #[test]
-fn cache_only_pricing_diagnostics_reports_missing_cache() {
-    let mut diagnostics = pricing::PricingDiagnostics::new();
+fn cache_only_pricing_diagnostics_append_missing_cache_in_order() {
+    let mut diagnostics = vec![
+        "first diagnostic".to_string(),
+        "second diagnostic".to_string(),
+    ];
 
     let loaded = load_cache_only_pricing_with_diagnostics(&mut diagnostics, || None);
 
     assert!(loaded.is_none());
     assert_eq!(
         diagnostics,
-        vec![format!(
-            "{}: cache-only mode and no cached pricing",
-            pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
-        )]
+        vec![
+            "first diagnostic".to_string(),
+            "second diagnostic".to_string(),
+            format!(
+                "{}: cache-only mode and no cached pricing",
+                pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
+            ),
+        ]
     );
 }
 
@@ -607,9 +639,14 @@ fn build_opencode_sqlite_payload(
 }
 
 fn create_opencode_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
     let conn = rusqlite::Connection::open(db_path).unwrap();
     conn.execute_batch(
-        "CREATE TABLE message (
+        "CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            directory TEXT NOT NULL
+        );
+        CREATE TABLE message (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             data TEXT NOT NULL
@@ -617,6 +654,36 @@ fn create_opencode_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection 
     )
     .unwrap();
     conn
+}
+
+fn insert_opencode_sqlite_message(
+    conn: &rusqlite::Connection,
+    row_id: &str,
+    session_id: &str,
+    directory: &str,
+    data: &str,
+) {
+    conn.execute(
+        "INSERT OR IGNORE INTO session (id, directory) VALUES (?1, ?2)",
+        rusqlite::params![session_id, directory],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+        rusqlite::params![row_id, session_id, data],
+    )
+    .unwrap();
+}
+
+fn write_single_opencode_sqlite_fixture(home: &Path) {
+    let conn = create_opencode_sqlite_db(&home.join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
+        r#"{"id":"msg-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+    );
 }
 
 fn create_hermes_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
@@ -649,6 +716,9 @@ fn create_zed_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
             id TEXT PRIMARY KEY,
             summary TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            created_at TEXT,
+            folder_paths TEXT,
+            folder_paths_order TEXT,
             data_type TEXT NOT NULL,
             data BLOB NOT NULL
         );",
@@ -679,8 +749,19 @@ fn insert_zed_thread(conn: &rusqlite::Connection, id: &str, model: &str) {
         }}"#
     );
     conn.execute(
-        "INSERT INTO threads (id, summary, updated_at, data_type, data) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![id, "Test thread", "2026-05-01T12:30:00Z", "json", payload.as_bytes()],
+        "INSERT INTO threads (
+            id, summary, updated_at, created_at, folder_paths, folder_paths_order, data_type, data
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            id,
+            "Test thread",
+            "2026-05-01T12:30:00Z",
+            "2026-05-01T12:00:00Z",
+            Option::<&str>::None,
+            Option::<&str>::None,
+            "json",
+            payload.as_bytes()
+        ],
     )
     .unwrap();
 }
@@ -1787,6 +1868,7 @@ fn test_retain_for_requested_clients_preserves_kilo_split() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_cursor_parse_path_keeps_zero_cost_for_unpriced_composer_rows() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
@@ -1929,18 +2011,20 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let message_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        std::fs::create_dir_all(&message_dir).unwrap();
-        let path = message_dir.join("msg_001.json");
-        std::fs::write(
-            &path,
+        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
+        );
+        drop(conn);
 
-        let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
         // Provider deliberately wrong for the model: the cache-hit path
         // must re-run refresh_derived_fields (dates are derived from
         // timestamps since schema v24, so provider identity is the
@@ -1961,19 +2045,15 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
             0.0,
         );
 
-        let mut cache = message_cache::SourceMessageCache::load();
+        let mut cache = message_cache::SourceMessageCache::load().unwrap();
         cache.insert(message_cache::CachedSourceEntry::new_with_version(
             &path,
-            message_cache::ParserVersion::new(
-                message_cache::ParserId::OpenCodeJson,
-                crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
-            ),
+            unit.parser_version,
             fingerprint,
             vec![stale_message],
-            Vec::new(),
             None,
         ));
-        cache.save_if_dirty();
+        cache.save_if_dirty().unwrap();
 
         let messages = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
@@ -1996,119 +2076,492 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
     }
 }
 
-#[test]
-#[serial_test::serial]
-fn test_compute_source_digest_stable_and_sensitive() {
-    let source_home = tempfile::TempDir::new().unwrap();
-    let message_dir = source_home
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&message_dir).unwrap();
-    let first = message_dir.join("msg_001.json");
-    std::fs::write(&first, r#"{"id":"msg-1"}"#).unwrap();
+fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
+    LocalParseOptions {
+        home_dir: Some(home.to_string_lossy().into_owned()),
+        use_env_roots: false,
+        clients: Some(clients.iter().map(|client| (*client).to_string()).collect()),
+        scanner_settings: scanner::ScannerSettings::default(),
+        ..LocalParseOptions::default()
+    }
+}
 
-    let home = source_home.path().to_str().unwrap();
-    let clients = ["opencode".to_string()];
-    let settings = scanner::ScannerSettings::default();
+fn signature_for_test_units(
+    requested_clients: &[String],
+    client: ClientId,
+    units: Vec<crate::adapters::SourceUnit>,
+) -> super::SourceInventorySignature {
+    let group = prepared_test_group(client, units);
+    super::source_inventory_signature(requested_clients, &[group])
+}
 
-    let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
-    let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
-    assert_eq!(digest_one, digest_two, "unchanged sources must hash equal");
-
-    std::fs::write(&first, r#"{"id":"msg-1","grew":true}"#).unwrap();
-    let digest_changed = crate::compute_source_digest(home, &clients, false, &settings);
-    assert_ne!(
-        digest_one, digest_changed,
-        "content growth must change digest"
-    );
-
-    std::fs::write(message_dir.join("msg_002.json"), r#"{"id":"msg-2"}"#).unwrap();
-    let digest_added = crate::compute_source_digest(home, &clients, false, &settings);
-    assert_ne!(digest_changed, digest_added, "new files must change digest");
-
-    let digest_other_clients =
-        crate::compute_source_digest(home, &["claude".to_string()], false, &settings);
-    assert_ne!(
-        digest_added, digest_other_clients,
-        "client set is part of the digest"
-    );
+fn prepared_test_group(
+    client: ClientId,
+    units: Vec<crate::adapters::SourceUnit>,
+) -> crate::adapters::PreparedAdapterSources {
+    crate::adapters::PreparedAdapterSources {
+        adapter: crate::adapters::adapter_for(client).unwrap(),
+        units: units
+            .into_iter()
+            .map(crate::adapters::SourceUnit::prepare_snapshot)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+    }
 }
 
 #[test]
-#[serial_test::serial]
-fn test_compute_source_digest_tracks_adapter_zed_wal() {
-    let source_home = tempfile::TempDir::new().unwrap();
-    let threads_dir = source_home.path().join("zed-fixture/threads");
-    std::fs::create_dir_all(&threads_dir).unwrap();
-    let threads_db = threads_dir.join("threads.db");
-    std::fs::write(&threads_db, b"sqlite-placeholder").unwrap();
-    let wal_path = threads_dir.join("threads.db-wal");
-    std::fs::write(&wal_path, b"wal-1").unwrap();
-
-    let home = source_home.path().to_str().unwrap();
-    let clients = ["zed".to_string()];
-    let settings = scanner_settings_for_zed_threads_dir(threads_dir);
-
-    let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
-    std::fs::write(&wal_path, b"wal-contents-changed").unwrap();
-    let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
-
-    assert_ne!(
-        digest_one, digest_two,
-        "adapter-discovered Zed WAL changes must affect the source digest"
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn test_compute_source_digest_tracks_adapter_plain_file() {
-    let source_home = tempfile::TempDir::new().unwrap();
-    let amp_dir = source_home.path().join(".local/share/amp/threads");
+fn prepared_inventory_is_stable_sensitive_and_reads_no_source_bytes() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
-    let amp_file = amp_dir.join("T-digest.json");
-    std::fs::write(&amp_file, r#"{"id":"amp-digest"}"#).unwrap();
+    let first = amp_dir.join("T-first.json");
+    std::fs::write(&first, r#"{"id":"amp-first"}"#).unwrap();
+    message_cache::reset_source_read_stats(&first);
 
-    let home = source_home.path().to_str().unwrap();
-    let clients = ["amp".to_string()];
-    let settings = scanner::ScannerSettings::default();
+    let first_inventory =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let first_signature = first_inventory.source_inventory_signature();
+    let second_signature = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_eq!(first_signature, second_signature);
+    assert_eq!(
+        message_cache::get_source_read_stats(&first),
+        message_cache::SourceReadStats::default(),
+        "inventory signatures must use metadata only"
+    );
 
-    let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
-    std::fs::write(&amp_file, r#"{"id":"amp-digest","changed":true}"#).unwrap();
-    let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
+    std::fs::write(&first, r#"{"id":"amp-first","grew":true}"#).unwrap();
+    let changed = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_ne!(first_signature, changed);
 
-    assert_ne!(
-        digest_one, digest_two,
-        "adapter-discovered plain file changes must affect the source digest"
+    std::fs::write(amp_dir.join("T-second.json"), r#"{"id":"amp-second"}"#).unwrap();
+    let added = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_ne!(changed, added);
+
+    let other_client = super::prepare_local_sources(inventory_options(home.path(), &["claude"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_ne!(added, other_client);
+}
+
+#[test]
+fn inventory_signature_changes_for_same_size_same_mtime_atomic_replacement() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let source = amp_dir.join("T-first.json");
+    let replacement = amp_dir.join("replacement.json");
+    std::fs::write(&source, b"aaaaaaaa").unwrap();
+    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
+    let before = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_inventory_signature();
+
+    std::fs::write(&replacement, b"bbbbbbbb").unwrap();
+    std::fs::File::open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    #[cfg(windows)]
+    std::fs::remove_file(&source).unwrap();
+    std::fs::rename(&replacement, &source).unwrap();
+
+    let after = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_inventory_signature();
+    assert_ne!(before, after);
+}
+
+#[test]
+fn inventory_probe_revalidates_identity_without_rediscovery_or_source_reads() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let source = amp_dir.join("T-first.json");
+    let replacement = amp_dir.join("replacement.json");
+    std::fs::write(&source, b"aaaaaaaa").unwrap();
+    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
+
+    super::reset_prepare_discovery_count();
+    let mut prepared =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let stale = prepared.source_inventory_signature();
+    assert_eq!(super::prepare_discovery_count(), 1);
+    message_cache::reset_source_read_stats(&source);
+
+    std::fs::write(&replacement, b"bbbbbbbb").unwrap();
+    std::fs::File::open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    #[cfg(windows)]
+    std::fs::remove_file(&source).unwrap();
+    std::fs::rename(&replacement, &source).unwrap();
+
+    let refreshed = prepared.refresh_source_inventory_signature().unwrap();
+    assert_ne!(stale, refreshed);
+    assert_eq!(super::prepare_discovery_count(), 1);
+    assert_eq!(
+        message_cache::get_source_read_stats(&source),
+        message_cache::SourceReadStats::default(),
+        "inventory revalidation must not read or hash source bodies"
     );
 }
 
 #[test]
 #[serial_test::serial]
-fn test_compute_source_digest_tracks_adapter_no_message_cache_file() {
-    let source_home = tempfile::TempDir::new().unwrap();
-    let trae_dir = source_home
+fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let source = amp_dir.join("T-first.json");
+    let replacement = amp_dir.join("replacement.json");
+    let original = r#"{"id":"session-a","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":10,"outputTokens":2}}]}"#;
+    let changed = original
+        .replace("session-a", "session-b")
+        .replace("10", "11");
+    assert_eq!(original.len(), changed.len());
+    std::fs::write(&source, original).unwrap();
+    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
+    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let stale_signature = prepared.source_inventory_signature();
+
+    std::fs::write(&replacement, changed).unwrap();
+    std::fs::File::open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    #[cfg(windows)]
+    std::fs::remove_file(&source).unwrap();
+    std::fs::rename(&replacement, &source).unwrap();
+
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::load_prepared_usage_data_with_diagnostics(
+            prepared,
+            GroupBy::Model,
+        ))
+        .unwrap();
+    let confirmed_signature =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+            .unwrap()
+            .source_inventory_signature();
+    assert_ne!(stale_signature, result.source_inventory_signature);
+    assert_eq!(confirmed_signature, result.source_inventory_signature);
+    assert_eq!(result.data.total_tokens, 13);
+}
+
+#[test]
+fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let first = dir.path().join("first.db");
+    let second = dir.path().join("second.db");
+    let wal = dir.path().join("first.db-wal");
+    std::fs::write(&first, b"first").unwrap();
+    std::fs::write(&second, b"second").unwrap();
+    std::fs::write(&wal, b"wal-one").unwrap();
+    let clients = vec!["zed".to_string(), "amp".to_string()];
+
+    let ordered = signature_for_test_units(
+        &clients,
+        ClientId::Amp,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first.clone()),
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, second.clone()),
+        ],
+    );
+    let reordered = signature_for_test_units(
+        &clients,
+        ClientId::Amp,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, second),
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first.clone()),
+        ],
+    );
+    assert_ne!(ordered, reordered, "unit discovery order is significant");
+
+    let canonical_clients = signature_for_test_units(
+        &["amp".to_string(), "zed".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            first.clone(),
+        )],
+    );
+    let reversed_clients = signature_for_test_units(
+        &["zed".to_string(), "amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            first.clone(),
+        )],
+    );
+    assert_eq!(canonical_clients, reversed_clients);
+
+    let sqlite_before = signature_for_test_units(
+        &["zed".to_string()],
+        ClientId::Zed,
+        vec![crate::adapters::SourceUnit::sqlite_with_wal(
+            ClientId::Zed,
+            first.clone(),
+        )],
+    );
+    std::fs::write(&wal, b"wal-two-and-longer").unwrap();
+    let sqlite_after = signature_for_test_units(
+        &["zed".to_string()],
+        ClientId::Zed,
+        vec![crate::adapters::SourceUnit::sqlite_with_wal(
+            ClientId::Zed,
+            first.clone(),
+        )],
+    );
+    assert_ne!(
+        sqlite_before, sqlite_after,
+        "related WAL stamp is significant"
+    );
+
+    let parser_changed = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first).with_parser_version(
+                message_cache::ParserVersion::new(message_cache::ParserId::Amp, 999),
+            ),
+        ],
+    );
+    assert_ne!(canonical_clients, parser_changed);
+
+    let codebuddy_path = dir.path().join("codebuddy.jsonl");
+    std::fs::write(&codebuddy_path, b"codebuddy").unwrap();
+    let jsonl_meta = signature_for_test_units(
+        &["codebuddy".to_string()],
+        ClientId::CodeBuddy,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
+                .with_meta(crate::adapters::SourceUnitMeta::CodeBuddyJsonl),
+        ],
+    );
+    let extension_meta = signature_for_test_units(
+        &["codebuddy".to_string()],
+        ClientId::CodeBuddy,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
+                .with_meta(crate::adapters::SourceUnitMeta::CodeBuddyExtensionLog {
+                    source: crate::adapters::CodeBuddyLogSource::Extension,
+                }),
+        ],
+    );
+    assert_ne!(jsonl_meta, extension_meta, "unit subtype is significant");
+
+    let plain_policy = signature_for_test_units(
+        &["codebuddy".to_string()],
+        ClientId::CodeBuddy,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::CodeBuddy,
+            codebuddy_path.clone(),
+        )],
+    );
+    let no_cache_policy = signature_for_test_units(
+        &["codebuddy".to_string()],
+        ClientId::CodeBuddy,
+        vec![crate::adapters::SourceUnit::no_message_cache(
+            ClientId::CodeBuddy,
+            codebuddy_path,
+        )],
+    );
+    assert_ne!(plain_policy, no_cache_policy, "input policy is significant");
+
+    let amp_group_path = dir.path().join("amp-group.json");
+    let codebuddy_group_path = dir.path().join("codebuddy-group.json");
+    std::fs::write(&amp_group_path, b"amp").unwrap();
+    std::fs::write(&codebuddy_group_path, b"codebuddy").unwrap();
+    let amp_group = || {
+        prepared_test_group(
+            ClientId::Amp,
+            vec![crate::adapters::SourceUnit::plain_file(
+                ClientId::Amp,
+                amp_group_path.clone(),
+            )],
+        )
+    };
+    let codebuddy_group = || {
+        prepared_test_group(
+            ClientId::CodeBuddy,
+            vec![crate::adapters::SourceUnit::plain_file(
+                ClientId::CodeBuddy,
+                codebuddy_group_path.clone(),
+            )],
+        )
+    };
+    let group_order = super::source_inventory_signature(
+        &["amp".to_string(), "codebuddy".to_string()],
+        &[amp_group(), codebuddy_group()],
+    );
+    let reversed_group_order = super::source_inventory_signature(
+        &["amp".to_string(), "codebuddy".to_string()],
+        &[codebuddy_group(), amp_group()],
+    );
+    assert_ne!(
+        group_order, reversed_group_order,
+        "adapter order is significant"
+    );
+}
+
+#[test]
+fn inventory_preparation_rejects_unavailable_primary_snapshots() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let missing_a = dir.path().join("missing-a.json");
+    let error = crate::adapters::SourceUnit::plain_file(ClientId::Amp, missing_a.clone())
+        .prepare_snapshot()
+        .expect_err("missing primary inputs must fail before inventory hashing");
+    assert!(error.to_string().contains(missing_a.to_str().unwrap()));
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_signature_hashes_native_non_utf8_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let first = dir
         .path()
-        .join(".config/tokscale/trae-cache/sessions");
-    std::fs::create_dir_all(&trae_dir).unwrap();
-    let trae_file = trae_dir.join("usage.json");
-    std::fs::write(&trae_file, r#"[{"session_id":"trae-digest"}]"#).unwrap();
+        .join(std::ffi::OsString::from_vec(b"source-\x80.json".to_vec()));
+    let second = dir
+        .path()
+        .join(std::ffi::OsString::from_vec(b"source-\x81.json".to_vec()));
+    assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+    std::fs::write(&first, b"same").unwrap();
+    std::fs::write(&second, b"same").unwrap();
 
-    let home = source_home.path().to_str().unwrap();
-    let clients = ["trae".to_string()];
-    let settings = scanner::ScannerSettings::default();
+    let first_signature = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            first,
+        )],
+    );
+    let second_signature = signature_for_test_units(
+        &["amp".to_string()],
+        ClientId::Amp,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::Amp,
+            second,
+        )],
+    );
+    assert_ne!(first_signature, second_signature);
+}
 
-    let digest_one = crate::compute_source_digest(home, &clients, false, &settings);
+#[test]
+fn prepare_discovers_once_and_execute_consumes_the_same_inventory() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    super::reset_prepare_discovery_count();
+
+    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    assert_eq!(super::prepare_discovery_count(), 1);
+
     std::fs::write(
-        &trae_file,
-        r#"[{"session_id":"trae-digest","changed":true}]"#,
+        amp_dir.join("T-added-after-prepare.json"),
+        r#"{
+            "id": "added-after-prepare",
+            "created": 1747800000000,
+            "messages": [{
+                "role": "assistant",
+                "messageId": 1,
+                "usage": {
+                    "timestamp": "2026-05-21T04:00:00Z",
+                    "model": "claude-opus-4-7",
+                    "inputTokens": 10,
+                    "outputTokens": 2
+                }
+            }]
+        }"#,
     )
     .unwrap();
-    let digest_two = crate::compute_source_digest(home, &clients, false, &settings);
 
-    assert_ne!(
-        digest_one, digest_two,
-        "adapter-discovered no-message-cache file changes must affect the source digest"
+    let frozen =
+        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
+    assert_eq!(super::prepare_discovery_count(), 1);
+    assert_eq!(frozen.total_tokens, 0);
+
+    let ordinary = super::load_usage_data_with_pricing(
+        inventory_options(home.path(), &["amp"]),
+        GroupBy::Model,
+        None,
+    )
+    .unwrap();
+    assert_eq!(ordinary.total_tokens, 12);
+}
+
+#[test]
+fn ordinary_and_explicit_prepare_usage_loads_match() {
+    let home = tempfile::TempDir::new().unwrap();
+    let options = inventory_options(home.path(), &["amp"]);
+    let ordinary =
+        super::load_usage_data_with_pricing(options.clone(), GroupBy::Model, None).unwrap();
+    let prepared = super::prepare_local_sources(options).unwrap();
+    let explicit =
+        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
+
+    assert_eq!(ordinary.total_tokens, explicit.total_tokens);
+    assert_eq!(ordinary.total_cost, explicit.total_cost);
+    assert_eq!(ordinary.models.len(), explicit.models.len());
+}
+
+#[test]
+#[serial_test::serial]
+fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let model = "claude-c5-production-lifecycle-dead-model";
+    std::fs::write(
+        amp_dir.join("T-c5-lifecycle.json"),
+        format!(
+            r#"{{
+                "id": "c5-lifecycle-session",
+                "created": 1747800000000,
+                "messages": [{{
+                    "role": "assistant",
+                    "messageId": 1,
+                    "usage": {{
+                        "timestamp": "2026-05-21T04:00:00Z",
+                        "model": "{model}",
+                        "inputTokens": 10,
+                        "outputTokens": 2
+                    }}
+                }}]
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let externally_live = crate::sessions::intern::intern("c5-production-lifecycle-live");
+    let prune_before = crate::sessions::intern::prune_count();
+    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let usage =
+        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
+
+    assert_eq!(usage.models[0].model, model);
+    assert_eq!(crate::sessions::intern::prune_count(), prune_before + 1);
+    assert_eq!(crate::sessions::intern::indexed_live_count(model), 0);
+    assert_eq!(
+        crate::sessions::intern::indexed_live_count(&externally_live),
+        1
     );
+    assert!(Arc::ptr_eq(
+        &externally_live,
+        &crate::sessions::intern::intern(&externally_live)
+    ));
 }
 
 #[test]
@@ -2120,16 +2573,18 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let message_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        std::fs::create_dir_all(&message_dir).unwrap();
-        let path = message_dir.join("msg_001.json");
-        std::fs::write(
-            &path,
+        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
+        );
+        drop(conn);
+        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
 
         let home = source_home.path().to_str().unwrap();
         let clients = ["opencode".to_string()];
@@ -2145,33 +2600,31 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
         assert_eq!(cold, warm_first);
         assert_eq!(warm_first, warm_second);
 
-        let mut cache = message_cache::SourceMessageCache::load();
-        let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+        let mut cache = message_cache::SourceMessageCache::load().unwrap();
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
         assert_eq!(
             cache
                 .take_messages(&message_cache::CacheReadPlan::new(
                     &path,
-                    message_cache::ParserVersion::new(
-                        message_cache::ParserId::OpenCodeJson,
-                        crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
-                    ),
+                    unit.parser_version,
                     fingerprint.clone(),
                 ))
-                .map(|messages| messages.len()),
-            Some(1),
+                .expect("saved warm cache shard must remain readable")
+                .len(),
+            1,
             "warm parses must leave the cached entry intact on disk"
         );
-        assert_eq!(
+        assert!(matches!(
             cache.take_messages(&message_cache::CacheReadPlan::new(
-                std::path::Path::new("/nonexistent/source.json"),
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::OpenCodeJson,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
-                ),
+                std::path::Path::new("/nonexistent/opencode.db"),
+                unit.parser_version,
                 fingerprint,
             )),
-            None
-        );
+            Err(message_cache::CacheReadFailure {
+                reason: message_cache::CacheReadFailureReason::Open { .. },
+                ..
+            })
+        ));
     }
 
     match original_home {
@@ -2180,60 +2633,66 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 #[serial_test::serial]
-fn test_empty_parse_results_are_not_cached_for_optional_file_sources() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let message_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        std::fs::create_dir_all(&message_dir).unwrap();
-        let path = message_dir.join("msg_001.json");
-        std::fs::write(
-            &path,
-            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
+        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(&path).unwrap();
+        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let scanner_settings = scanner::ScannerSettings {
+            opencode_db_paths: vec![path.clone()],
+            ..scanner::ScannerSettings::default()
+        };
 
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o000);
-        std::fs::set_permissions(&path, permissions).unwrap();
-
-        let first_messages = parse_all_messages_with_pricing(
+        let first_error = parse_all_messages_with_pricing_with_env_strategy(
             source_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
+            false,
+            &scanner_settings,
         )
-        .unwrap();
-        assert!(first_messages.is_empty());
+        .unwrap_err();
+        assert!(
+            first_error.contains(path.to_str().unwrap()),
+            "{first_error}"
+        );
+        assert!(
+            first_error.contains("snapshot source metadata and content")
+                || first_error.contains("read source metadata and file identity")
+                || first_error.contains("open current OpenCode SQLite database"),
+            "error must identify the failed source operation: {first_error}"
+        );
 
-        let cache = message_cache::SourceMessageCache::load();
+        let cache = message_cache::SourceMessageCache::load().unwrap();
         assert!(cache
-            .get_meta(
-                &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::OpenCodeJson,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
-                )
-            )
+            .get_meta(&path, unit.parser_version)
+            .unwrap()
             .is_none());
 
-        let mut readable_permissions = std::fs::metadata(&path).unwrap().permissions();
-        readable_permissions.set_mode(0o644);
-        std::fs::set_permissions(&path, readable_permissions).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
+            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        );
+        drop(conn);
 
-        let second_messages = parse_all_messages_with_pricing(
+        let second_messages = parse_all_messages_with_pricing_with_env_strategy(
             source_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
+            false,
+            &scanner_settings,
         )
         .unwrap();
         assert_eq!(second_messages.len(), 1);
@@ -2247,38 +2706,36 @@ fn test_empty_parse_results_are_not_cached_for_optional_file_sources() {
 
 #[test]
 #[serial_test::serial]
-fn test_empty_cache_hits_are_reparsed_for_optional_file_sources() {
+fn test_empty_opencode_sqlite_cache_entries_are_reparsed() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let message_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
-        std::fs::create_dir_all(&message_dir).unwrap();
-        let path = message_dir.join("msg_001.json");
-        std::fs::write(
-            &path,
+        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
+        );
+        drop(conn);
 
-        let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
-        let mut cache = message_cache::SourceMessageCache::load();
+        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
+        let mut cache = message_cache::SourceMessageCache::load().unwrap();
         cache.insert(message_cache::CachedSourceEntry::new_with_version(
             &path,
-            message_cache::ParserVersion::new(
-                message_cache::ParserId::OpenCodeJson,
-                crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
-            ),
+            unit.parser_version,
             fingerprint,
-            Vec::new(),
             Vec::new(),
             None,
         ));
-        cache.save_if_dirty();
+        cache.save_if_dirty().unwrap();
 
         let messages = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
@@ -2288,15 +2745,12 @@ fn test_empty_cache_hits_are_reparsed_for_optional_file_sources() {
         .unwrap();
         assert_eq!(messages.len(), 1);
 
-        let mut loaded = message_cache::SourceMessageCache::load();
-        let repaired_fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
+        let mut loaded = message_cache::SourceMessageCache::load().unwrap();
+        let repaired_fingerprint = unit.source_input_policy().fingerprint().unwrap();
         let repaired_messages = loaded
             .take_messages(&message_cache::CacheReadPlan::new(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::OpenCodeJson,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
-                ),
+                unit.parser_version,
                 repaired_fingerprint,
             ))
             .unwrap();
@@ -2329,6 +2783,7 @@ fn test_sqlite_source_cache_invalidates_on_wal_change() {
         assert_eq!(journal_mode.to_lowercase(), "wal");
         conn.execute_batch(
             "PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
              CREATE TABLE message (
                  id TEXT PRIMARY KEY,
                  session_id TEXT NOT NULL,
@@ -2405,6 +2860,7 @@ fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
 
         let schema = "PRAGMA journal_mode=WAL;
              PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
              CREATE TABLE message (
                  id TEXT PRIMARY KEY,
                  session_id TEXT NOT NULL,
@@ -3010,9 +3466,9 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
         std::fs::write(
             &path,
             concat!(
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
                 "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
                 "\n"
             ),
         )
@@ -3027,6 +3483,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
         assert_eq!(initial_messages.len(), 1);
         assert_eq!(initial_messages[0].model_id.as_ref(), "gpt-5.4");
         assert!(message_cache::SourceMessageCache::load()
+            .unwrap()
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
@@ -3034,18 +3491,18 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
                     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
                 )
             )
+            .unwrap()
             .and_then(|meta| meta.codex_incremental)
             .is_some());
 
-        std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(
             &path,
             concat!(
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
                 "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
                 "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+                r#"{"timestamp":"2026-04-27T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
                 "\n"
             ),
         )
@@ -3080,9 +3537,8 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
 
 #[test]
 #[serial_test::serial]
-fn test_source_cache_keeps_untimestamped_rows_in_sync_after_append() {
+fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let fresh_cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
@@ -3094,7 +3550,7 @@ fn test_source_cache_keeps_untimestamped_rows_in_sync_after_append() {
         std::fs::write(
             &path,
             concat!(
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
                 "\n",
                 r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
                 "\n"
@@ -3102,108 +3558,22 @@ fn test_source_cache_keeps_untimestamped_rows_in_sync_after_append() {
         )
         .unwrap();
 
-        let first_messages = parse_all_messages_with_pricing(
+        let error = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap();
-        assert_eq!(first_messages.len(), 1);
+        .unwrap_err();
+        assert!(error.contains("codex parser `codex`"), "{error}");
+        assert!(
+            error.contains("validate Codex token-count event"),
+            "{error}"
+        );
+        assert!(error.contains(path.to_str().unwrap()), "{error}");
+        assert!(error.contains("timestamp is missing"), "{error}");
 
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        file.write_all(
-            concat!(
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
-                "\n"
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        file.flush().unwrap();
-
-        let warm_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
-            &["codex".to_string()],
-            None,
-        )
-        .unwrap();
-        std::env::set_var("HOME", fresh_cache_home.path());
-        let fresh_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
-            &["codex".to_string()],
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(warm_messages, fresh_messages);
-    }
-
-    match original_home {
-        Some(home) => std::env::set_var("HOME", home),
-        None => std::env::remove_var("HOME"),
-    }
-}
-
-#[test]
-#[serial_test::serial]
-fn test_source_cache_matches_cold_parse_after_malformed_json_append() {
-    let cache_home = tempfile::TempDir::new().unwrap();
-    let fresh_cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", cache_home.path());
-
-    {
-        let codex_dir = source_home.path().join(".codex/sessions");
-        std::fs::create_dir_all(&codex_dir).unwrap();
-        let path = codex_dir.join("session.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":999""#,
-                "\n"
-            ),
-        )
-        .unwrap();
-
-        let initial_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
-            &["codex".to_string()],
-            None,
-        )
-        .unwrap();
-        assert_eq!(initial_messages.len(), 1);
-
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        file.write_all(
-            concat!(
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
-                "\n"
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        file.flush().unwrap();
-
-        let warm_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
-            &["codex".to_string()],
-            None,
-        )
-        .unwrap();
         assert!(message_cache::SourceMessageCache::load()
+            .unwrap()
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
@@ -3211,17 +3581,8 @@ fn test_source_cache_matches_cold_parse_after_malformed_json_append() {
                     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
                 )
             )
+            .unwrap()
             .is_none());
-
-        std::env::set_var("HOME", fresh_cache_home.path());
-        let fresh_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
-            &["codex".to_string()],
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(warm_messages, fresh_messages);
     }
 
     match original_home {
@@ -3232,52 +3593,49 @@ fn test_source_cache_matches_cold_parse_after_malformed_json_append() {
 
 #[test]
 #[serial_test::serial]
-fn test_exact_hit_codex_cache_repairs_fallback_timestamps_without_incremental_state() {
+fn test_codex_malformed_json_suffix_returns_error_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let session_dir = source_home.path().join(".codex/sessions");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        let path = session_dir.join("session.jsonl");
+        let codex_dir = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let path = codex_dir.join("session.jsonl");
         std::fs::write(
             &path,
             concat!(
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
                 "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":999""#,
                 "\n"
             ),
         )
         .unwrap();
 
-        let expected = crate::sessions::codex::parse_codex_file(&path);
-        assert_eq!(expected.len(), 1);
-
-        let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
-        let mut stale_message = expected[0].clone();
-        stale_message.timestamp = 0;
-
-        let mut cache = message_cache::SourceMessageCache::default();
-        cache.insert(message_cache::CachedSourceEntry::new(
-            &path,
-            fingerprint,
-            vec![stale_message],
-            vec![0],
-            None,
-        ));
-        cache.save_if_dirty();
-
-        let messages = parse_all_messages_with_pricing(
+        let error = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap();
-
-        assert_eq!(messages, expected);
+        .unwrap_err();
+        assert!(error.contains("codex parser `codex`"), "{error}");
+        assert!(error.contains("decode Codex headless line"), "{error}");
+        assert!(error.contains(path.to_str().unwrap()), "{error}");
+        assert!(message_cache::SourceMessageCache::load()
+            .unwrap()
+            .get_meta(
+                &path,
+                message_cache::ParserVersion::new(
+                    message_cache::ParserId::Codex,
+                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                )
+            )
+            .unwrap()
+            .is_none());
     }
 
     match original_home {
@@ -3288,64 +3646,7 @@ fn test_exact_hit_codex_cache_repairs_fallback_timestamps_without_incremental_st
 
 #[test]
 #[serial_test::serial]
-fn test_codex_cache_repairs_fallback_timestamps_after_source_mtime_change() {
-    let cache_home = tempfile::TempDir::new().unwrap();
-    let fresh_cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", cache_home.path());
-
-    {
-        let session_dir = source_home.path().join(".codex/sessions");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        let path = session_dir.join("session.jsonl");
-        let contents = concat!(
-            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
-            "\n",
-            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
-            "\n"
-        );
-        std::fs::write(&path, contents).unwrap();
-
-        let initial_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
-            &["codex".to_string()],
-            None,
-        )
-        .unwrap();
-        assert_eq!(initial_messages.len(), 1);
-
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(&path, contents).unwrap();
-
-        let warm_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
-            &["codex".to_string()],
-            None,
-        )
-        .unwrap();
-
-        std::env::set_var("HOME", fresh_cache_home.path());
-        let fresh_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
-            &["codex".to_string()],
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(warm_messages, fresh_messages);
-        assert_ne!(warm_messages[0].timestamp, initial_messages[0].timestamp);
-    }
-
-    match original_home {
-        Some(home) => std::env::set_var("HOME", home),
-        None => std::env::remove_var("HOME"),
-    }
-}
-
-#[test]
-#[serial_test::serial]
-fn test_full_log_parse_preserves_valid_messages_before_invalid_line_error() {
+fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -3359,9 +3660,9 @@ fn test_full_log_parse_preserves_valid_messages_before_invalid_line_error() {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(
             concat!(
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
                 "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
                 "\n"
             )
             .as_bytes(),
@@ -3370,16 +3671,17 @@ fn test_full_log_parse_preserves_valid_messages_before_invalid_line_error() {
         file.write_all(&[0xff, b'\n']).unwrap();
         file.flush().unwrap();
 
-        let messages = parse_all_messages_with_pricing(
+        let error = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
+        .unwrap_err();
+        assert!(error.contains("codex parser `codex`"), "{error}");
+        assert!(error.contains("read Codex JSONL line"), "{error}");
+        assert!(error.contains(path.to_str().unwrap()), "{error}");
 
-        let cache = message_cache::SourceMessageCache::load();
+        let cache = message_cache::SourceMessageCache::load().unwrap();
         assert!(cache
             .get_meta(
                 &path,
@@ -3388,6 +3690,7 @@ fn test_full_log_parse_preserves_valid_messages_before_invalid_line_error() {
                     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
                 )
             )
+            .unwrap()
             .is_none());
     }
 
@@ -3399,7 +3702,7 @@ fn test_full_log_parse_preserves_valid_messages_before_invalid_line_error() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_cache_does_not_persist_unknown_before_later_turn_context() {
+fn test_codex_unknown_model_prefix_errors_without_shard_then_parses_when_completed() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let fresh_cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
@@ -3421,15 +3724,26 @@ fn test_codex_cache_does_not_persist_unknown_before_later_turn_context() {
         )
         .unwrap();
 
-        let initial_messages = parse_all_messages_with_pricing(
+        let initial_error = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap();
-        assert_eq!(initial_messages.len(), 1);
-        assert_eq!(initial_messages[0].model_id.as_ref(), "unknown");
+        .unwrap_err();
+        assert!(
+            initial_error.contains("resolve Codex token-count model"),
+            "{initial_error}"
+        );
+        assert!(
+            initial_error.contains(path.to_str().unwrap()),
+            "{initial_error}"
+        );
+        assert!(
+            initial_error.contains("model was never identified"),
+            "{initial_error}"
+        );
         assert!(message_cache::SourceMessageCache::load()
+            .unwrap()
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
@@ -3437,9 +3751,9 @@ fn test_codex_cache_does_not_persist_unknown_before_later_turn_context() {
                     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
                 )
             )
+            .unwrap()
             .is_none());
 
-        std::thread::sleep(std::time::Duration::from_millis(5));
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -3475,6 +3789,7 @@ fn test_codex_cache_does_not_persist_unknown_before_later_turn_context() {
 
         std::env::set_var("HOME", cache_home.path());
         assert!(message_cache::SourceMessageCache::load()
+            .unwrap()
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
@@ -3482,6 +3797,7 @@ fn test_codex_cache_does_not_persist_unknown_before_later_turn_context() {
                     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
                 )
             )
+            .unwrap()
             .is_some());
     }
 
@@ -3507,9 +3823,9 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
         std::fs::write(
             &path,
             concat!(
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
                 "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#
             ),
         )
         .unwrap();
@@ -3522,6 +3838,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
         .unwrap();
         assert_eq!(initial_messages.len(), 1);
         assert!(message_cache::SourceMessageCache::load()
+            .unwrap()
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
@@ -3529,9 +3846,9 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
                     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
                 )
             )
+            .unwrap()
             .is_none());
 
-        std::thread::sleep(std::time::Duration::from_millis(5));
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -3539,7 +3856,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
         file.write_all(
             concat!(
                 "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+                r#"{"timestamp":"2026-04-27T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
                 "\n"
             )
             .as_bytes(),
@@ -5031,17 +5348,18 @@ fn test_dedupe_latest_trae_messages_tiebreaks_by_dedup_key() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_real_client_filter() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let message_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&message_dir).unwrap();
-    std::fs::write(
-        message_dir.join("msg_001.json"),
+    let conn =
+        create_opencode_sqlite_db(&temp_dir.path().join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
         r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"hf:deepseek-ai/DeepSeek-V3-0324","providerID":"unknown","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    );
 
     let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
     let messages = parse_all_messages_with_pricing(
@@ -5058,17 +5376,18 @@ fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_real_client_
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_preserves_gateway_message_client_counts() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let message_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&message_dir).unwrap();
-    std::fs::write(
-        message_dir.join("msg_001.json"),
+    let conn =
+        create_opencode_sqlite_db(&temp_dir.path().join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
         r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    );
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5089,6 +5408,7 @@ fn test_local_message_loader_preserves_gateway_message_client_counts() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     // Regression guard: local message loading used to call
     // `scan_all_clients_with_env_strategy`, which silently dropped
@@ -5108,6 +5428,7 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     let conn = rusqlite::Connection::open(&external_db).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
+         CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
          CREATE TABLE message (
              id TEXT PRIMARY KEY,
              session_id TEXT NOT NULL,
@@ -5175,6 +5496,62 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
 }
 
 #[test]
+#[serial_test::serial]
+fn test_missing_configured_opencode_database_is_an_explicit_error() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/custom-current.db");
+
+    let error = load_local_messages_for_test(LocalParseOptions {
+        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        use_env_roots: false,
+        clients: Some(vec!["opencode".to_string()]),
+        scanner_settings: scanner::ScannerSettings {
+            opencode_db_paths: vec![missing_db.clone()],
+            ..Default::default()
+        },
+        ..LocalParseOptions::default()
+    })
+    .unwrap_err();
+
+    assert!(error.contains(missing_db.to_str().unwrap()), "{error}");
+    assert!(
+        error.contains("read source metadata and file identity")
+            || error.contains("open current OpenCode SQLite database"),
+        "error must identify the failed source operation: {error}"
+    );
+
+    let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, missing_db.clone())
+        .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+    assert!(message_cache::SourceMessageCache::load()
+        .unwrap()
+        .get_meta(&missing_db, unit.parser_version)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+#[serial_test::serial]
+fn test_opencode_auto_discovery_error_reaches_public_loader() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let data_root = temp_dir.path().join(".local/share/opencode");
+    std::fs::create_dir_all(data_root.parent().unwrap()).unwrap();
+    std::fs::write(&data_root, "not a directory").unwrap();
+
+    let error = load_local_messages_for_test(LocalParseOptions {
+        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        use_env_roots: false,
+        clients: Some(vec!["opencode".to_string()]),
+        ..LocalParseOptions::default()
+    })
+    .unwrap_err();
+
+    assert!(error.contains("failed to read OpenCode data directory"));
+    assert!(error.contains(data_root.to_str().unwrap()));
+}
+
+#[test]
+#[serial_test::serial]
 fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_db() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
@@ -5241,6 +5618,7 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let windows_threads_dir = temp_dir.path().join("AppData/Local/Zed/threads");
@@ -5295,6 +5673,7 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
 }
 
 #[test]
+#[serial_test::serial]
 fn test_default_graph_includes_antigravity_cache_rows() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let sessions_dir = temp_dir
@@ -5337,6 +5716,7 @@ fn test_default_graph_includes_antigravity_cache_rows() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_dedups_zed_threads_across_default_and_extra_dbs() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -5374,6 +5754,7 @@ fn test_local_message_loader_dedups_zed_threads_across_default_and_extra_dbs() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_zed_extra_scan_paths_nonexistent_dir_is_silent() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -5401,6 +5782,7 @@ fn test_local_message_loader_zed_extra_scan_paths_nonexistent_dir_is_silent() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_driver_uses_zed_adapter_when_only_zed_requested() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -5411,15 +5793,7 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
     insert_zed_thread(&zed_conn, "zed-only-thread", "claude-sonnet-4-5");
     drop(zed_conn);
 
-    let opencode_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    write_single_opencode_sqlite_fixture(temp_dir.path());
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5436,7 +5810,7 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
     assert_eq!(
         parsed.counts.get(ClientId::OpenCode),
         0,
-        "only adapter clients must not turn an empty legacy partition into an all-client scan"
+        "an explicit Zed-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(parsed.messages[0].client.as_ref(), "zed");
@@ -5444,6 +5818,7 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -5453,6 +5828,7 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
         amp_dir.join("T-simple.json"),
         r#"{
             "id": "amp-thread",
+            "created": 1747800000000,
             "messages": [
                 {
                     "role": "assistant",
@@ -5469,15 +5845,7 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
     )
     .unwrap();
 
-    let opencode_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    write_single_opencode_sqlite_fixture(temp_dir.path());
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5494,7 +5862,7 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
     assert_eq!(
         parsed.counts.get(ClientId::OpenCode),
         0,
-        "only C3.1 adapter clients must not turn an empty legacy partition into an all-client scan"
+        "an explicit Amp-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(parsed.messages[0].client.as_ref(), "amp");
@@ -5502,8 +5870,11 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
     let temp_dir = tempfile::TempDir::new().unwrap();
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
 
     let codebuff_dir = temp_dir
         .path()
@@ -5524,15 +5895,7 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
     )
     .unwrap();
 
-    let opencode_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    write_single_opencode_sqlite_fixture(temp_dir.path());
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5549,7 +5912,7 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
     assert_eq!(
         parsed.counts.get(ClientId::OpenCode),
         0,
-        "only C3.2 adapter clients must not turn an empty legacy partition into an all-client scan"
+        "an explicit Codebuff-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(parsed.messages[0].client.as_ref(), "codebuff");
@@ -5557,6 +5920,7 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_driver_uses_pi_and_omp_adapters_when_requested() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -5596,7 +5960,8 @@ fn test_driver_uses_pi_and_omp_adapters_when_requested() {
 }
 
 #[test]
-fn test_driver_all_clients_includes_adapter_and_legacy_without_duplicate() {
+#[serial_test::serial]
+fn test_driver_all_clients_includes_each_adapter_without_duplicate() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
     let zed_threads_dir = temp_dir.path().join("zed-fixture/threads");
@@ -5606,15 +5971,7 @@ fn test_driver_all_clients_includes_adapter_and_legacy_without_duplicate() {
     insert_zed_thread(&zed_conn, "zed-all-thread", "claude-sonnet-4-5");
     drop(zed_conn);
 
-    let opencode_dir = temp_dir
-        .path()
-        .join(".local/share/opencode/storage/message/project-1");
-    std::fs::create_dir_all(&opencode_dir).unwrap();
-    std::fs::write(
-        opencode_dir.join("msg_001.json"),
-        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
+    write_single_opencode_sqlite_fixture(temp_dir.path());
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -5640,6 +5997,7 @@ fn test_driver_all_clients_includes_adapter_and_legacy_without_duplicate() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_dedups_hermes_sessions_across_default_and_extra_dbs() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
@@ -5700,6 +6058,7 @@ fn test_local_message_loader_dedups_hermes_sessions_across_default_and_extra_dbs
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_paths() {
     // Regression guard for the scanner client-filter bypass: even
     // when `scanner.opencodeDbPaths` pins an external opencode db,
@@ -5731,6 +6090,7 @@ fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_
     let conn = rusqlite::Connection::open(&external_db).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
+         CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
          CREATE TABLE message (
              id TEXT PRIMARY KEY,
              session_id TEXT NOT NULL,
@@ -5793,6 +6153,7 @@ fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_claude_transcripts_count_only_usage_metadata() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let transcripts_dir = temp_dir.path().join(".claude/transcripts");
@@ -5839,14 +6200,16 @@ fn test_local_message_loader_claude_transcripts_count_only_usage_metadata() {
 }
 
 #[test]
-fn test_local_message_loader_amp_reads_upstream_thread_files() {
+#[serial_test::serial]
+fn test_local_message_loader_amp_reads_current_thread_files() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let amp_dir = temp_dir.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
     std::fs::write(
-        amp_dir.join("T-legacy.json"),
+        amp_dir.join("T-current.json"),
         r#"{
-            "id": "legacy-thread",
+            "id": "current-thread",
+            "created": 1747800000000,
             "messages": [
                 {
                     "role": "assistant",
@@ -5884,6 +6247,7 @@ fn test_local_message_loader_amp_reads_upstream_thread_files() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_local_message_loader_default_keeps_cursor_out_of_local_count() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");

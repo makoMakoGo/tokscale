@@ -5,7 +5,8 @@ use rayon::prelude::*;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
+    SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -17,22 +18,25 @@ impl LocalSourceAdapter for HermesAdapter {
         ClientId::Hermes
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::Hermes
             .local_def()
             .expect("Hermes adapter must have local scan policy");
         let mut paths = Vec::new();
 
         adapter_discover::push_existing_file(
-            std::path::PathBuf::from(
-                def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
-            ),
+            ClientId::Hermes,
+            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
             &mut paths,
-        );
+        )?;
         paths.extend(adapter_discover::scan_roots(
-            adapter_discover::extra_roots_for_client(ClientId::Hermes, ctx),
+            ClientId::Hermes,
+            adapter_discover::extra_roots_for_client(ClientId::Hermes, ctx)?,
             def.pattern,
-        ));
+        )?);
 
         adapter_discover::source_units_from_paths_preserving_order(
             ClientId::Hermes,
@@ -41,18 +45,30 @@ impl LocalSourceAdapter for HermesAdapter {
         )
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages = sessions::hermes::parse_hermes_sqlite(&unit.path);
+                let mut messages =
+                    sessions::hermes::parse_hermes_sqlite(&unit.path).map_err(|source| {
+                        SourceParseError::from_session(
+                            unit.client,
+                            &unit.path,
+                            unit.parser_version.parser_id,
+                            source,
+                        )
+                    })?;
                 crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                ParsedUnit {
+                Ok(ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
                     cache_write: None,
                     invalidate_cache: false,
-                }
+                })
             })
             .collect()
     }
@@ -62,20 +78,36 @@ impl LocalSourceAdapter for HermesAdapter {
         parsed: Vec<ParsedUnit>,
         _ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut seen = HashSet::new();
-        let mut messages = Vec::new();
-        for unit in parsed {
-            if let UnitMessageSource::Fresh(unit_messages) = unit.messages {
-                messages.extend(unit_messages);
-            }
+        fold_hermes_units(parsed, sink, &mut seen);
+        Ok(())
+    }
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
+        let mut seen = HashSet::new();
+        while let Some(parsed) = batches.next(ctx)? {
+            fold_hermes_units(parsed, sink, &mut seen);
         }
-        sink.extend_messages(
-            messages
-                .into_iter()
-                .filter(|message| crate::should_keep_deduped_message(&mut seen, message))
-                .collect(),
-        );
+        Ok(())
+    }
+}
+
+fn fold_hermes_units(parsed: Vec<ParsedUnit>, sink: &mut dyn MessageSink, seen: &mut HashSet<u64>) {
+    for unit in parsed {
+        if let UnitMessageSource::Fresh(messages) = unit.messages {
+            sink.extend_messages(
+                messages
+                    .into_iter()
+                    .filter(|message| crate::should_keep_deduped_message(seen, message))
+                    .collect(),
+            );
+        }
     }
 }
 
@@ -84,6 +116,40 @@ pub(crate) static HERMES_ADAPTER: HermesAdapter = HermesAdapter;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hermes_direct_parser_ignores_seeded_source_message_shard() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.db");
+        std::fs::write(&path, b"direct parser source").unwrap();
+        let unit = SourceUnit::sqlite_with_wal(ClientId::Hermes, path.clone())
+            .prepare_snapshot()
+            .unwrap();
+        let mut cache = crate::message_cache::SourceMessageCache::default();
+        cache.insert(crate::message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            unit.parser_version,
+            unit.source_input_policy().fingerprint().unwrap(),
+            vec![crate::UnifiedMessage::new(
+                "hermes",
+                "model",
+                "provider",
+                "cached-session",
+                1,
+                crate::TokenBreakdown {
+                    input: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )],
+            None,
+        ));
+
+        assert!(matches!(
+            HERMES_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
+            crate::adapters::CacheHitPlan::Miss(_)
+        ));
+    }
 
     #[test]
     fn hermes_adapter_discovers_default_then_extra_profile_dbs() {
@@ -108,7 +174,8 @@ mod tests {
         };
 
         let paths: Vec<_> = HERMES_ADAPTER
-            .discover(&ctx)
+            .discover_checked(&ctx)
+            .unwrap()
             .into_iter()
             .map(|unit| unit.path)
             .collect();

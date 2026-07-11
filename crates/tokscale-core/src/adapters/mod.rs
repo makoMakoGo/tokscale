@@ -5,6 +5,7 @@ mod codebuddy;
 mod codebuff;
 mod codex;
 pub(crate) mod discover;
+pub(crate) mod error;
 pub(crate) mod file;
 mod goose;
 mod hermes;
@@ -21,25 +22,65 @@ mod vscode_tasks;
 mod warp;
 mod zed;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+
+use rayon::prelude::*;
 
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserRevision, ParserVersion};
 use crate::{message_cache, pricing, scanner, UnifiedMessage};
 
+pub(crate) use error::{
+    SourceDiscoveryError, SourceParseError, SourcePipelineError, SourcePlanningError,
+};
+
 pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 2;
+pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
+    MODEL_ID_CANONICALIZATION_REVISION + 1;
 pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 pub(crate) trait LocalSourceAdapter: Sync {
     fn client(&self) -> ClientId;
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit>;
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError>;
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit>;
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError>;
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink);
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        _source_cache: &message_cache::SourceMessageCache,
+    ) -> Result<CacheHitPlan, SourcePlanningError> {
+        Ok(CacheHitPlan::Miss(unit))
+    }
+
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), SourcePipelineError>;
+
+    fn fold_batches(
+        &self,
+        batches: &mut ParsedBatchSource<'_>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), SourcePipelineError> {
+        while let Some(parsed) = batches.next(ctx)? {
+            self.fold(parsed, ctx, sink)?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct AdapterScanContext<'a> {
@@ -49,7 +90,6 @@ pub(crate) struct AdapterScanContext<'a> {
 }
 
 pub(crate) struct ParseContext<'a> {
-    pub source_cache: &'a message_cache::SourceMessageCache,
     pub pricing: Option<&'a pricing::PricingService>,
 }
 
@@ -81,6 +121,10 @@ pub(crate) struct SourceUnit {
     pub fingerprint_policy: FingerprintPolicy,
     pub meta: SourceUnitMeta,
     pub parser_version: ParserVersion,
+    prepared_snapshot: Option<message_cache::SourceInputSnapshot>,
+    snapshot_confirmed_for_execution: bool,
+    planned_cache_meta: Option<message_cache::CachedSourceMeta>,
+    cache_lookup_completed_no_hit: bool,
 }
 
 impl SourceUnit {
@@ -91,6 +135,10 @@ impl SourceUnit {
             fingerprint_policy: FingerprintPolicy::PlainFile,
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
+            prepared_snapshot: None,
+            snapshot_confirmed_for_execution: false,
+            planned_cache_meta: None,
+            cache_lookup_completed_no_hit: false,
         }
     }
 
@@ -101,6 +149,10 @@ impl SourceUnit {
             fingerprint_policy: FingerprintPolicy::SqliteWithWal,
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
+            prepared_snapshot: None,
+            snapshot_confirmed_for_execution: false,
+            planned_cache_meta: None,
+            cache_lookup_completed_no_hit: false,
         }
     }
 
@@ -111,17 +163,34 @@ impl SourceUnit {
             fingerprint_policy: FingerprintPolicy::NoMessageCache,
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
+            prepared_snapshot: None,
+            snapshot_confirmed_for_execution: false,
+            planned_cache_meta: None,
+            cache_lookup_completed_no_hit: false,
         }
     }
 
-    pub(crate) fn claude_code(client: ClientId, path: PathBuf, home_dir: PathBuf) -> Self {
-        Self {
+    pub(crate) fn claude_code(
+        client: ClientId,
+        path: PathBuf,
+        home_dir: PathBuf,
+    ) -> crate::sessions::error::SessionParseResult<Self> {
+        let variant_path =
+            crate::cc_mirror::variant_file_for_session_path_checked(&path, Some(&home_dir))?;
+        Ok(Self {
             client,
             path,
-            fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome { home_dir },
+            fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome {
+                home_dir,
+                variant_path,
+            },
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
-        }
+            prepared_snapshot: None,
+            snapshot_confirmed_for_execution: false,
+            planned_cache_meta: None,
+            cache_lookup_completed_no_hit: false,
+        })
     }
 
     pub(crate) fn with_meta(mut self, meta: SourceUnitMeta) -> Self {
@@ -135,37 +204,176 @@ impl SourceUnit {
         self
     }
 
+    pub(crate) fn prepare_snapshot(mut self) -> Result<Self, message_cache::SourceSnapshotError> {
+        if self.prepared_snapshot.is_none() {
+            self.prepared_snapshot = Some(self.source_input_policy().snapshot()?);
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn revalidate_snapshot_for_cache_decision(
+        &mut self,
+    ) -> Result<(), message_cache::SourceSnapshotError> {
+        if self.snapshot_confirmed_for_execution {
+            return Ok(());
+        }
+        self.prepared_snapshot = Some(self.source_input_policy().snapshot()?);
+        self.snapshot_confirmed_for_execution = true;
+        Ok(())
+    }
+
+    pub(crate) fn refresh_prepared_snapshot_for_inventory_probe(
+        &mut self,
+    ) -> Result<(), message_cache::SourceSnapshotError> {
+        self.prepared_snapshot = Some(self.source_input_policy().snapshot()?);
+        // An inventory probe may decide that no execution is needed. If this
+        // unit is executed, pricing or another await can still follow, so the
+        // cache-hit planner must confirm the snapshot again at its boundary.
+        self.snapshot_confirmed_for_execution = false;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn digest_paths(&self) -> Vec<PathBuf> {
+        self.source_input_policy().paths()
+    }
+
+    pub(crate) fn take_source_input_snapshot(
+        &mut self,
+    ) -> Result<message_cache::SourceInputSnapshot, message_cache::SourceSnapshotError> {
+        self.snapshot_confirmed_for_execution = false;
+        match self.prepared_snapshot.take() {
+            Some(snapshot) => Ok(snapshot),
+            None => self.source_input_policy().snapshot(),
+        }
+    }
+
+    pub(crate) fn prepared_source_input_snapshot(
+        &self,
+    ) -> Option<&message_cache::SourceInputSnapshot> {
+        self.prepared_snapshot.as_ref()
+    }
+
+    pub(crate) fn release_prepared_snapshot(&mut self) {
+        self.prepared_snapshot = None;
+        self.snapshot_confirmed_for_execution = false;
+    }
+
+    pub(crate) fn set_planned_cache_meta(&mut self, meta: message_cache::CachedSourceMeta) {
+        self.planned_cache_meta = Some(meta);
+    }
+
+    pub(crate) fn take_planned_cache_meta(&mut self) -> Option<message_cache::CachedSourceMeta> {
+        self.planned_cache_meta.take()
+    }
+
+    pub(crate) fn mark_cache_lookup_completed_no_hit(&mut self) {
+        self.cache_lookup_completed_no_hit = true;
+    }
+
+    pub(crate) fn take_cache_lookup_completed_no_hit(&mut self) -> bool {
+        std::mem::take(&mut self.cache_lookup_completed_no_hit)
+    }
+
+    pub(crate) fn update_inventory_signature(&self, hasher: &mut sha2::Sha256) {
+        use sha2::Digest;
+
+        let snapshot = self
+            .prepared_snapshot
+            .as_ref()
+            .expect("inventory units must carry a prepared source snapshot");
+        message_cache::hash_inventory_bytes(hasher, self.client.as_str().as_bytes());
+        message_cache::hash_inventory_bytes(
+            hasher,
+            self.parser_version.parser_id.stable_name().as_bytes(),
+        );
+        hasher.update(self.parser_version.revision.to_le_bytes());
+        self.update_meta_inventory_signature(hasher);
+        self.update_policy_inventory_signature(hasher);
+        self.source_input_policy()
+            .update_inventory_signature(snapshot, hasher);
+    }
+
+    pub(crate) fn inventory_signature_digest(&self) -> [u8; 32] {
+        use sha2::Digest;
+
+        let mut hasher = sha2::Sha256::new();
+        message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/source-inventory-unit");
+        self.update_inventory_signature(&mut hasher);
+        hasher.finalize().into()
+    }
+
+    fn update_meta_inventory_signature(&self, hasher: &mut sha2::Sha256) {
+        let (name, detail) = match self.meta {
+            SourceUnitMeta::None => ("none", None),
+            SourceUnitMeta::OpenCodeSqlite => ("opencode-sqlite", None),
+            SourceUnitMeta::AntigravityCacheJsonl => ("antigravity-cache-jsonl", None),
+            SourceUnitMeta::AntigravityCliSqlite => ("antigravity-cli-sqlite", None),
+            SourceUnitMeta::KiroFile => ("kiro-file", None),
+            SourceUnitMeta::KiroSqlite => ("kiro-sqlite", None),
+            SourceUnitMeta::KiroGlobalStorage => ("kiro-global-storage", None),
+            SourceUnitMeta::CodeBuddyJsonl => ("codebuddy-jsonl", None),
+            SourceUnitMeta::CodeBuddyExtensionLog { source } => (
+                "codebuddy-extension-log",
+                Some(match source {
+                    CodeBuddyLogSource::Extension => "extension",
+                    CodeBuddyLogSource::Host => "host",
+                }),
+            ),
+            SourceUnitMeta::Codex { is_headless } => (
+                "codex",
+                Some(if is_headless {
+                    "headless"
+                } else {
+                    "interactive"
+                }),
+            ),
+        };
+        message_cache::hash_inventory_bytes(hasher, name.as_bytes());
+        message_cache::hash_inventory_bytes(hasher, detail.unwrap_or("").as_bytes());
+    }
+
+    fn update_policy_inventory_signature(&self, hasher: &mut sha2::Sha256) {
         match &self.fingerprint_policy {
-            FingerprintPolicy::SqliteWithWal => {
-                vec![self.path.clone(), append_path_suffix(&self.path, "-wal")]
+            FingerprintPolicy::PlainFile => {
+                message_cache::hash_inventory_bytes(hasher, b"plain-file");
             }
-            FingerprintPolicy::ClaudeCodeWithHome { home_dir } => {
-                let mut paths = vec![self.path.clone()];
-                if let Some(stem) = self.path.file_stem().and_then(|s| s.to_str()) {
-                    paths.push(self.path.with_file_name(format!("{stem}.meta.json")));
-                }
-                if let Some(variant_path) =
-                    crate::cc_mirror::variant_file_for_session_path(&self.path, Some(home_dir))
-                {
-                    paths.push(variant_path);
-                }
-                paths
+            FingerprintPolicy::SqliteWithWal => {
+                message_cache::hash_inventory_bytes(hasher, b"sqlite-with-wal");
+            }
+            FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
+                message_cache::hash_inventory_bytes(hasher, b"claude-code-with-home");
+                message_cache::hash_inventory_path(hasher, home_dir);
             }
             FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
-                let mut paths = vec![self.path.clone()];
-                let parent = self.path.parent();
-                for sibling_name in *sibling_names {
-                    paths.push(
-                        parent
-                            .unwrap_or_else(|| std::path::Path::new("."))
-                            .join(sibling_name),
-                    );
+                message_cache::hash_inventory_bytes(hasher, b"primary-with-siblings");
+                message_cache::hash_inventory_len(hasher, sibling_names.len());
+                for name in *sibling_names {
+                    message_cache::hash_inventory_bytes(hasher, name.as_bytes());
                 }
-                paths
             }
+            FingerprintPolicy::NoMessageCache => {
+                message_cache::hash_inventory_bytes(hasher, b"no-message-cache");
+            }
+        }
+    }
+
+    pub(crate) fn source_input_policy(&self) -> message_cache::SourceInputPolicy {
+        match &self.fingerprint_policy {
             FingerprintPolicy::PlainFile | FingerprintPolicy::NoMessageCache => {
-                vec![self.path.clone()]
+                message_cache::SourceInputPolicy::plain(&self.path)
+            }
+            FingerprintPolicy::SqliteWithWal => {
+                message_cache::SourceInputPolicy::sqlite_with_wal(&self.path)
+            }
+            FingerprintPolicy::ClaudeCodeWithHome { variant_path, .. } => {
+                message_cache::SourceInputPolicy::claude_code(&self.path, variant_path.clone())
+            }
+            FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
+                message_cache::SourceInputPolicy::with_siblings(
+                    &self.path,
+                    sibling_names.iter().copied(),
+                )
             }
         }
     }
@@ -176,7 +384,6 @@ pub(crate) enum SourceUnitMeta {
     #[default]
     None,
     OpenCodeSqlite,
-    OpenCodeJson,
     AntigravityCacheJsonl,
     AntigravityCliSqlite,
     KiroFile,
@@ -205,10 +412,7 @@ impl SourceUnitMeta {
                 MODEL_ID_CANONICALIZATION_REVISION,
             ),
             Self::OpenCodeSqlite => {
-                ParserVersion::new(ParserId::OpenCodeSqlite, MODEL_ID_CANONICALIZATION_REVISION)
-            }
-            Self::OpenCodeJson => {
-                ParserVersion::new(ParserId::OpenCodeJson, MODEL_ID_CANONICALIZATION_REVISION)
+                ParserVersion::new(ParserId::OpenCodeSqlite, OPENCODE_CURRENT_SQLITE_REVISION)
             }
             Self::AntigravityCacheJsonl => ParserVersion::new(
                 ParserId::AntigravityCacheJsonl,
@@ -240,7 +444,7 @@ impl SourceUnitMeta {
 
 fn default_parser_id(client: ClientId) -> ParserId {
     match client {
-        ClientId::OpenCode => ParserId::OpenCode,
+        ClientId::OpenCode => ParserId::OpenCodeSqlite,
         ClientId::Claude => ParserId::Claude,
         ClientId::Codex => ParserId::Codex,
         ClientId::Cursor => ParserId::Cursor,
@@ -271,9 +475,6 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::CommandCode => ParserId::CommandCode,
         ClientId::Grok => ParserId::Grok,
         ClientId::Warp => ParserId::Warp,
-        ClientId::Crush => {
-            unreachable!("excluded clients do not create local source units")
-        }
     }
 }
 
@@ -283,6 +484,7 @@ pub(crate) enum FingerprintPolicy {
     SqliteWithWal,
     ClaudeCodeWithHome {
         home_dir: PathBuf,
+        variant_path: Option<PathBuf>,
     },
     PrimaryWithSiblings {
         sibling_names: &'static [&'static str],
@@ -293,11 +495,14 @@ pub(crate) enum FingerprintPolicy {
 #[derive(Debug)]
 pub(crate) enum UnitMessageSource {
     Fresh(Vec<UnifiedMessage>),
+    CodexFresh {
+        messages: Vec<UnifiedMessage>,
+        is_headless: bool,
+    },
     CacheHit(message_cache::CacheReadPlan),
     CodexCacheHit {
         read_plan: message_cache::CacheReadPlan,
         is_headless: bool,
-        fallback_timestamp: i64,
     },
     CodexAppend(Box<codex::CodexAppendSource>),
 }
@@ -306,7 +511,7 @@ pub(crate) enum UnitMessageSource {
 pub(crate) struct ParsedUnit {
     pub unit: SourceUnit,
     pub messages: UnitMessageSource,
-    pub cache_write: Option<message_cache::CacheWrite>,
+    pub cache_write: Option<Box<message_cache::CacheWritePlan>>,
     pub invalidate_cache: bool,
 }
 
@@ -348,7 +553,6 @@ pub(crate) fn local_source_adapters() -> &'static [&'static dyn LocalSourceAdapt
     &LOCAL_SOURCE_ADAPTERS
 }
 
-#[cfg(test)]
 pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalSourceAdapter> {
     local_source_adapters()
         .iter()
@@ -356,61 +560,740 @@ pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalSourceAd
         .find(|adapter| adapter.client() == client)
 }
 
-pub(crate) fn selected_adapters(clients: &[String]) -> Vec<&'static dyn LocalSourceAdapter> {
+pub(crate) fn selected_adapters(
+    clients: &[String],
+) -> Result<Vec<&'static dyn LocalSourceAdapter>, String> {
     let include_all = clients.is_empty();
-    let requested = requested_client_ids(clients);
-    local_source_adapters()
+    let requested = requested_client_ids(clients)?;
+
+    let missing = ClientId::iter().find(|client| {
+        (include_all || requested.contains(client)) && adapter_for(*client).is_none()
+    });
+    if let Some(client) = missing {
+        return Err(format!(
+            "catalog client `{}` is missing a local source adapter",
+            client.as_str()
+        ));
+    }
+
+    Ok(local_source_adapters()
         .iter()
         .copied()
         .filter(|adapter| include_all || requested.contains(&adapter.client()))
-        .collect()
+        .collect())
 }
 
-pub(crate) fn run_local_source_adapters(
-    adapters: &[&'static dyn LocalSourceAdapter],
-    scan_ctx: &AdapterScanContext<'_>,
+pub(crate) struct PreparedAdapterSources {
+    pub adapter: &'static dyn LocalSourceAdapter,
+    pub units: Vec<SourceUnit>,
+}
+
+pub(crate) struct ConfirmedAdapterSources {
+    pub client: ClientId,
+    pub unit_digests: Vec<[u8; 32]>,
+}
+
+pub(crate) struct ParsedBatchSource<'a> {
+    adapter: &'a dyn LocalSourceAdapter,
+    units: Option<Vec<SourceUnit>>,
+    planned: VecDeque<PlannedSourceUnit>,
+    confirmed_inventory_digests: Vec<[u8; 32]>,
+    batch_width: usize,
+}
+
+enum PlannedSourceUnit {
+    Hit(ParsedUnit),
+    Miss(SourceUnit),
+}
+
+#[derive(Debug)]
+pub(crate) enum CacheHitPlan {
+    Hit(ParsedUnit),
+    Miss(SourceUnit),
+}
+
+enum BatchSlot {
+    Hit,
+    Miss,
+}
+
+impl<'a> ParsedBatchSource<'a> {
+    fn new(adapter: &'a dyn LocalSourceAdapter, units: Vec<SourceUnit>) -> Self {
+        Self {
+            adapter,
+            units: Some(units),
+            planned: VecDeque::new(),
+            confirmed_inventory_digests: Vec::new(),
+            batch_width: rayon::current_num_threads().max(1),
+        }
+    }
+
+    fn next(
+        &mut self,
+        ctx: &FoldContext<'_>,
+    ) -> Result<Option<Vec<ParsedUnit>>, SourcePipelineError> {
+        self.plan_remaining_units(ctx)?;
+        if self.planned.is_empty() {
+            return Ok(None);
+        }
+
+        let mut slots = Vec::new();
+        let mut hit_units = VecDeque::new();
+        let mut miss_units = Vec::new();
+        while let Some(next) = self.planned.front() {
+            if matches!(next, PlannedSourceUnit::Miss(_)) && miss_units.len() == self.batch_width {
+                break;
+            }
+
+            let next = self.planned.pop_front().ok_or_else(|| {
+                SourcePipelineError::contract("planned source disappeared before batching")
+            })?;
+            match next {
+                PlannedSourceUnit::Hit(parsed) => {
+                    hit_units.push_back(parsed);
+                    slots.push(BatchSlot::Hit);
+                }
+                PlannedSourceUnit::Miss(unit) => {
+                    miss_units.push(unit);
+                    slots.push(BatchSlot::Miss);
+                }
+            }
+        }
+
+        let parsed_misses = if miss_units.is_empty() {
+            Vec::new()
+        } else {
+            self.adapter.parse_checked(
+                miss_units,
+                &ParseContext {
+                    pricing: ctx.pricing,
+                },
+            )?
+        };
+        let mut parsed_misses = parsed_misses.into_iter();
+        let mut parsed = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let unit = match slot {
+                BatchSlot::Hit => hit_units.pop_front().ok_or_else(|| {
+                    SourcePipelineError::contract("planned cache hit disappeared")
+                })?,
+                BatchSlot::Miss => parsed_misses.next().ok_or_else(|| {
+                    SourcePipelineError::contract(
+                        "adapter returned fewer parsed units than source misses",
+                    )
+                })?,
+            };
+            parsed.push(unit);
+        }
+        if !hit_units.is_empty() {
+            return Err(SourcePipelineError::contract(
+                "planned cache-hit count did not match batch slots",
+            ));
+        }
+        if parsed_misses.next().is_some() {
+            return Err(SourcePipelineError::contract(
+                "adapter returned more parsed units than source misses",
+            ));
+        }
+        Ok(Some(parsed))
+    }
+
+    fn take_all_planned_units(
+        &mut self,
+        ctx: &FoldContext<'_>,
+    ) -> Result<Vec<CacheHitPlan>, SourcePipelineError> {
+        self.plan_remaining_units(ctx)?;
+        Ok(self
+            .planned
+            .drain(..)
+            .map(|planned| match planned {
+                PlannedSourceUnit::Hit(parsed) => CacheHitPlan::Hit(parsed),
+                PlannedSourceUnit::Miss(unit) => CacheHitPlan::Miss(unit),
+            })
+            .collect())
+    }
+
+    fn batch_width(&self) -> usize {
+        self.batch_width
+    }
+
+    fn plan_remaining_units(&mut self, ctx: &FoldContext<'_>) -> Result<(), SourcePipelineError> {
+        let Some(units) = self.units.take() else {
+            return Ok(());
+        };
+        let planned: Result<Vec<_>, SourcePlanningError> = units
+            .into_par_iter()
+            .map(|mut unit| {
+                unit.revalidate_snapshot_for_cache_decision()?;
+                let inventory_digest = unit.inventory_signature_digest();
+                self.adapter
+                    .plan_cache_hit(unit, &*ctx.source_cache)
+                    .map(|plan| {
+                        let planned = match plan {
+                            CacheHitPlan::Hit(parsed) => PlannedSourceUnit::Hit(parsed),
+                            CacheHitPlan::Miss(unit) => PlannedSourceUnit::Miss(unit),
+                        };
+                        (planned, inventory_digest)
+                    })
+            })
+            .collect();
+        let planned = planned?;
+        self.confirmed_inventory_digests
+            .extend(planned.iter().map(|(_, digest)| *digest));
+        self.planned = planned.into_iter().map(|(planned, _)| planned).collect();
+        Ok(())
+    }
+}
+
+pub(crate) fn run_prepared_local_source_adapters(
+    prepared: Vec<PreparedAdapterSources>,
     source_cache: &mut message_cache::SourceMessageCache,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn MessageSink,
-) {
-    for adapter in adapters {
-        let units = adapter.discover(scan_ctx);
-        let parsed = {
-            let parse_ctx = ParseContext {
-                source_cache,
-                pricing,
-            };
-            adapter.parse(units, &parse_ctx)
-        };
+) -> Result<Vec<ConfirmedAdapterSources>, SourcePipelineError> {
+    let mut confirmed = Vec::with_capacity(prepared.len());
+    for PreparedAdapterSources { adapter, units } in prepared {
+        let mut batches = ParsedBatchSource::new(adapter, units);
         let mut fold_ctx = FoldContext {
             source_cache,
             pricing,
         };
-        adapter.fold(parsed, &mut fold_ctx, sink);
+        adapter.fold_batches(&mut batches, &mut fold_ctx, sink)?;
+        confirmed.push(ConfirmedAdapterSources {
+            client: adapter.client(),
+            unit_digests: batches.confirmed_inventory_digests,
+        });
     }
+    Ok(confirmed)
 }
 
-fn requested_client_ids(clients: &[String]) -> HashSet<ClientId> {
+fn requested_client_ids(clients: &[String]) -> Result<HashSet<ClientId>, String> {
     clients
         .iter()
-        .filter_map(|client| ClientId::from_str(client))
+        .map(|client| {
+            ClientId::from_str(client).ok_or_else(|| format!("unknown local client `{client}`"))
+        })
         .collect()
-}
-
-fn append_path_suffix(path: &std::path::Path, suffix: &str) -> PathBuf {
-    let mut os = std::ffi::OsString::from(path.as_os_str());
-    os.push(suffix);
-    PathBuf::from(os)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, Weak};
+
     use super::*;
 
+    struct RecordingAdapter {
+        batch_sizes: Mutex<Vec<usize>>,
+    }
+
+    struct BatchLifetimeAdapter {
+        previous_batch_message: Mutex<Option<Weak<str>>>,
+    }
+
+    struct PlannedWeaveAdapter {
+        parse_batch_sizes: Mutex<Vec<usize>>,
+        planner_calls: AtomicUsize,
+    }
+
     #[test]
-    fn crush_is_not_registered_as_local_adapter() {
-        assert!(adapter_for(ClientId::Crush).is_none());
-        assert!(selected_adapters(&["crush".to_string()]).is_empty());
+    fn local_adapter_registry_is_unique_and_covers_catalog() {
+        let adapters: Vec<ClientId> = local_source_adapters()
+            .iter()
+            .map(|adapter| adapter.client())
+            .collect();
+        let unique: HashSet<ClientId> = adapters.iter().copied().collect();
+        let catalog: HashSet<ClientId> = ClientId::iter().collect();
+
+        assert_eq!(
+            adapters.len(),
+            unique.len(),
+            "each catalog client must have exactly one local source adapter"
+        );
+        assert_eq!(
+            unique, catalog,
+            "catalog and local source adapter registry must cover the same clients"
+        );
+    }
+
+    impl LocalSourceAdapter for RecordingAdapter {
+        fn client(&self) -> ClientId {
+            ClientId::Amp
+        }
+
+        fn discover_checked(
+            &self,
+            _ctx: &AdapterScanContext<'_>,
+        ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+            unreachable!("test adapter does not discover sources")
+        }
+
+        fn parse_checked(
+            &self,
+            units: Vec<SourceUnit>,
+            _ctx: &ParseContext<'_>,
+        ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+            self.batch_sizes.lock().unwrap().push(units.len());
+            Ok(units
+                .into_iter()
+                .enumerate()
+                .map(|(index, unit)| ParsedUnit {
+                    messages: UnitMessageSource::Fresh(vec![UnifiedMessage::new(
+                        "amp",
+                        "model",
+                        "provider",
+                        unit.path.to_string_lossy(),
+                        index as i64,
+                        crate::TokenBreakdown::default(),
+                        0.0,
+                    )]),
+                    unit,
+                    cache_write: None,
+                    invalidate_cache: false,
+                })
+                .collect())
+        }
+
+        fn fold(
+            &self,
+            parsed: Vec<ParsedUnit>,
+            ctx: &mut FoldContext<'_>,
+            sink: &mut dyn MessageSink,
+        ) -> Result<(), SourcePipelineError> {
+            cache::fold_units(parsed, ctx, sink)
+        }
+    }
+
+    impl LocalSourceAdapter for BatchLifetimeAdapter {
+        fn client(&self) -> ClientId {
+            ClientId::Amp
+        }
+
+        fn discover_checked(
+            &self,
+            _ctx: &AdapterScanContext<'_>,
+        ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+            unreachable!("test adapter does not discover sources")
+        }
+
+        fn parse_checked(
+            &self,
+            units: Vec<SourceUnit>,
+            _ctx: &ParseContext<'_>,
+        ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+            let mut previous = self.previous_batch_message.lock().unwrap();
+            assert!(
+                previous
+                    .as_ref()
+                    .is_none_or(|message| message.upgrade().is_none()),
+                "the previous parsed batch must be folded and dropped before parsing the next"
+            );
+
+            let mut parsed = Vec::new();
+            for unit in units {
+                let session_id: Arc<str> = Arc::from(unit.path.to_string_lossy().into_owned());
+                *previous = Some(Arc::downgrade(&session_id));
+                let mut message = UnifiedMessage::new(
+                    "amp",
+                    "model",
+                    "provider",
+                    "placeholder",
+                    1,
+                    crate::TokenBreakdown::default(),
+                    0.0,
+                );
+                message.session_id = session_id;
+                parsed.push(ParsedUnit {
+                    messages: UnitMessageSource::Fresh(vec![message]),
+                    unit,
+                    cache_write: None,
+                    invalidate_cache: false,
+                });
+            }
+            Ok(parsed)
+        }
+
+        fn fold(
+            &self,
+            parsed: Vec<ParsedUnit>,
+            ctx: &mut FoldContext<'_>,
+            sink: &mut dyn MessageSink,
+        ) -> Result<(), SourcePipelineError> {
+            cache::fold_units(parsed, ctx, sink)
+        }
+    }
+
+    impl LocalSourceAdapter for PlannedWeaveAdapter {
+        fn client(&self) -> ClientId {
+            ClientId::Amp
+        }
+
+        fn discover_checked(
+            &self,
+            _ctx: &AdapterScanContext<'_>,
+        ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+            unreachable!("test adapter does not discover sources")
+        }
+
+        fn parse_checked(
+            &self,
+            units: Vec<SourceUnit>,
+            _ctx: &ParseContext<'_>,
+        ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+            self.parse_batch_sizes.lock().unwrap().push(units.len());
+            Ok(units
+                .into_iter()
+                .map(|unit| ParsedUnit {
+                    messages: UnitMessageSource::Fresh(vec![UnifiedMessage::new(
+                        "amp",
+                        "model",
+                        "provider",
+                        unit.path.file_name().unwrap().to_string_lossy(),
+                        1,
+                        crate::TokenBreakdown {
+                            input: 1,
+                            ..Default::default()
+                        },
+                        0.0,
+                    )]),
+                    unit,
+                    cache_write: None,
+                    invalidate_cache: false,
+                })
+                .collect())
+        }
+
+        fn plan_cache_hit(
+            &self,
+            unit: SourceUnit,
+            source_cache: &message_cache::SourceMessageCache,
+        ) -> Result<CacheHitPlan, SourcePlanningError> {
+            self.planner_calls.fetch_add(1, Ordering::Relaxed);
+            cache::plan_cache_hit(unit, source_cache)
+        }
+
+        fn fold(
+            &self,
+            parsed: Vec<ParsedUnit>,
+            ctx: &mut FoldContext<'_>,
+            sink: &mut dyn MessageSink,
+        ) -> Result<(), SourcePipelineError> {
+            cache::fold_units(parsed, ctx, sink)
+        }
+    }
+
+    struct DroppingSink;
+
+    impl MessageSink for DroppingSink {
+        fn push_message(&mut self, _message: UnifiedMessage) {}
+    }
+
+    #[test]
+    fn bounded_batches_use_rayon_width_and_preserve_unit_order() {
+        for (thread_count, expected_batch_sizes) in [(1, vec![1; 7]), (3, vec![3, 3, 1])] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(thread_count)
+                .build()
+                .unwrap();
+            let adapter = RecordingAdapter {
+                batch_sizes: Mutex::new(Vec::new()),
+            };
+            let dir = tempfile::TempDir::new().unwrap();
+            let source_paths: Vec<_> = (0..7)
+                .map(|index| {
+                    let path = dir.path().join(index.to_string());
+                    std::fs::write(&path, format!("source {index}")).unwrap();
+                    path
+                })
+                .collect();
+            let units = source_paths
+                .iter()
+                .cloned()
+                .map(|path| SourceUnit::plain_file(ClientId::Amp, path))
+                .collect();
+
+            let sessions = pool.install(|| {
+                let mut cache = message_cache::SourceMessageCache::default();
+                let mut sink = Vec::new();
+                let mut batches = ParsedBatchSource::new(&adapter, units);
+                adapter
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
+                sink.into_iter()
+                    .map(|message| message.session_id.to_string())
+                    .collect::<Vec<_>>()
+            });
+
+            assert_eq!(*adapter.batch_sizes.lock().unwrap(), expected_batch_sizes);
+            assert_eq!(
+                sessions,
+                source_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_batch_is_dropped_before_the_next_batch_is_parsed() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(|| {
+                let adapter = BatchLifetimeAdapter {
+                    previous_batch_message: Mutex::new(None),
+                };
+                let dir = tempfile::TempDir::new().unwrap();
+                let units = (0..5)
+                    .map(|index| {
+                        let path = dir.path().join(index.to_string());
+                        std::fs::write(&path, format!("source {index}")).unwrap();
+                        SourceUnit::plain_file(ClientId::Amp, path)
+                    })
+                    .collect();
+                let mut cache = message_cache::SourceMessageCache::default();
+                let mut batches = ParsedBatchSource::new(&adapter, units);
+                adapter
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut DroppingSink,
+                    )
+                    .unwrap();
+            });
+    }
+
+    #[test]
+    fn one_planning_pass_weaves_hits_with_bounded_misses_in_source_order() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(|| {
+                let dir = tempfile::TempDir::new().unwrap();
+                let units: Vec<_> = (0..6)
+                    .map(|index| {
+                        let path = dir.path().join(index.to_string());
+                        std::fs::write(&path, format!("source {index}")).unwrap();
+                        SourceUnit::plain_file(ClientId::Amp, path)
+                            .prepare_snapshot()
+                            .unwrap()
+                    })
+                    .collect();
+                let adapter = PlannedWeaveAdapter {
+                    parse_batch_sizes: Mutex::new(Vec::new()),
+                    planner_calls: AtomicUsize::new(0),
+                };
+                let mut cache = message_cache::SourceMessageCache::default();
+                for index in [0, 2, 4] {
+                    let unit = &units[index];
+                    cache.insert(message_cache::CachedSourceEntry::new_with_version(
+                        &unit.path,
+                        unit.parser_version,
+                        unit.source_input_policy().fingerprint().unwrap(),
+                        vec![UnifiedMessage::new(
+                            "amp",
+                            "model",
+                            "provider",
+                            index.to_string(),
+                            1,
+                            crate::TokenBreakdown {
+                                input: 1,
+                                ..Default::default()
+                            },
+                            0.0,
+                        )],
+                        None,
+                    ));
+                }
+                let mut sink = Vec::new();
+                let mut batches = ParsedBatchSource::new(&adapter, units);
+                adapter
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
+
+                assert_eq!(adapter.planner_calls.load(Ordering::Relaxed), 6);
+                assert_eq!(*adapter.parse_batch_sizes.lock().unwrap(), [2, 1]);
+                assert_eq!(
+                    sink.into_iter()
+                        .map(|message| message.session_id.to_string())
+                        .collect::<Vec<_>>(),
+                    ["0", "1", "2", "3", "4", "5"]
+                );
+            });
+    }
+
+    #[test]
+    fn all_planned_cache_hits_skip_adapter_parse() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(|| {
+                let dir = tempfile::TempDir::new().unwrap();
+                let units: Vec<_> = (0..4)
+                    .map(|index| {
+                        let path = dir.path().join(index.to_string());
+                        std::fs::write(&path, format!("source {index}")).unwrap();
+                        SourceUnit::plain_file(ClientId::Amp, path)
+                            .prepare_snapshot()
+                            .unwrap()
+                    })
+                    .collect();
+                let adapter = PlannedWeaveAdapter {
+                    parse_batch_sizes: Mutex::new(Vec::new()),
+                    planner_calls: AtomicUsize::new(0),
+                };
+                let mut cache = message_cache::SourceMessageCache::default();
+                for (index, unit) in units.iter().enumerate() {
+                    cache.insert(message_cache::CachedSourceEntry::new_with_version(
+                        &unit.path,
+                        unit.parser_version,
+                        unit.source_input_policy().fingerprint().unwrap(),
+                        vec![UnifiedMessage::new(
+                            "amp",
+                            "model",
+                            "provider",
+                            index.to_string(),
+                            1,
+                            crate::TokenBreakdown {
+                                input: 1,
+                                ..Default::default()
+                            },
+                            0.0,
+                        )],
+                        None,
+                    ));
+                    message_cache::reset_source_read_stats(&unit.path);
+                }
+                let mut sink = Vec::new();
+                let mut batches = ParsedBatchSource::new(&adapter, units);
+                adapter
+                    .fold_batches(
+                        &mut batches,
+                        &mut FoldContext {
+                            source_cache: &mut cache,
+                            pricing: None,
+                        },
+                        &mut sink,
+                    )
+                    .unwrap();
+
+                assert_eq!(adapter.planner_calls.load(Ordering::Relaxed), 4);
+                assert!(adapter.parse_batch_sizes.lock().unwrap().is_empty());
+                assert_eq!(
+                    sink.into_iter()
+                        .map(|message| message.session_id.to_string())
+                        .collect::<Vec<_>>(),
+                    ["0", "1", "2", "3"]
+                );
+            });
+    }
+
+    #[test]
+    fn direct_parse_adapter_ignores_seeded_source_shard() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("direct-source");
+        std::fs::write(&path, b"direct source").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+            .prepare_snapshot()
+            .unwrap();
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            unit.parser_version,
+            unit.source_input_policy().fingerprint().unwrap(),
+            vec![UnifiedMessage::new(
+                "amp",
+                "model",
+                "provider",
+                "cached-session",
+                1,
+                crate::TokenBreakdown {
+                    input: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )],
+            None,
+        ));
+        let adapter = RecordingAdapter {
+            batch_sizes: Mutex::new(Vec::new()),
+        };
+        let mut sink = Vec::new();
+        let mut batches = ParsedBatchSource::new(&adapter, vec![unit]);
+
+        adapter
+            .fold_batches(
+                &mut batches,
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .unwrap();
+
+        assert_eq!(*adapter.batch_sizes.lock().unwrap(), [1]);
+        assert_eq!(sink.len(), 1);
+        assert_ne!(sink[0].session_id.as_ref(), "cached-session");
+    }
+
+    #[test]
+    fn custom_batch_planning_records_confirmed_inventory_digests() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("source.jsonl");
+        std::fs::write(&path, b"source").unwrap();
+        let adapter = RecordingAdapter {
+            batch_sizes: Mutex::new(Vec::new()),
+        };
+        let mut batches =
+            ParsedBatchSource::new(&adapter, vec![SourceUnit::plain_file(ClientId::Amp, path)]);
+        let mut cache = message_cache::SourceMessageCache::default();
+        let fold_context = FoldContext {
+            source_cache: &mut cache,
+            pricing: None,
+        };
+
+        let planned = batches.take_all_planned_units(&fold_context).unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(batches.confirmed_inventory_digests.len(), 1);
+        let CacheHitPlan::Miss(unit) = &planned[0] else {
+            panic!("recording adapter must use its default cache-miss plan");
+        };
+        assert_eq!(
+            batches.confirmed_inventory_digests[0],
+            unit.inventory_signature_digest()
+        );
+    }
+
+    #[test]
+    fn plain_db_source_does_not_guess_a_wal_input() {
+        let path = PathBuf::from("/tmp/plain-history.db");
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+
+        assert_eq!(unit.digest_paths(), vec![path]);
     }
 
     #[test]
@@ -419,15 +1302,15 @@ mod tests {
             adapter_for(ClientId::Warp).map(|adapter| adapter.client()),
             Some(ClientId::Warp)
         );
-        assert_eq!(selected_adapters(&["warp".to_string()]).len(), 1);
+        assert_eq!(selected_adapters(&["warp".to_string()]).unwrap().len(), 1);
     }
 
     #[test]
     fn antigravity_uses_one_adapter_for_all_local_sources() {
-        let adapters = selected_adapters(&["antigravity".to_string()]);
+        let adapters = selected_adapters(&["antigravity".to_string()]).unwrap();
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].client(), ClientId::Antigravity);
-        assert!(selected_adapters(&["antigravity-cli".to_string()]).is_empty());
+        assert!(selected_adapters(&["antigravity-cli".to_string()]).is_err());
     }
 }

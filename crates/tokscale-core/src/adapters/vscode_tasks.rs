@@ -6,20 +6,25 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourcePipelineError,
+    SourceUnit,
 };
 use crate::clients::ClientId;
+use crate::sessions::error::SessionParseResult;
 use crate::{sessions, UnifiedMessage};
 
 const ROO_FAMILY_SIBLINGS: &[&str] = &["api_conversation_history.json"];
 
 pub(crate) struct VscodeTaskAdapter {
     client: ClientId,
-    parse: fn(&Path) -> Vec<UnifiedMessage>,
+    parse: fn(&Path) -> SessionParseResult<Vec<UnifiedMessage>>,
 }
 
 impl VscodeTaskAdapter {
-    pub(crate) const fn new(client: ClientId, parse: fn(&Path) -> Vec<UnifiedMessage>) -> Self {
+    pub(crate) const fn new(
+        client: ClientId,
+        parse: fn(&Path) -> SessionParseResult<Vec<UnifiedMessage>>,
+    ) -> Self {
         Self { client, parse }
     }
 }
@@ -29,32 +34,37 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
         self.client
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = self
             .client
             .local_def()
             .expect("VS Code task adapter must have local scan policy");
-        let mut roots = vec![PathBuf::from(
-            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
-        )];
+        let mut roots = vec![def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots)];
         roots.extend(match self.client {
             ClientId::RooCode => roocode_additional_roots(ctx.home_dir),
             ClientId::KiloCode => kilocode_additional_roots(ctx.home_dir),
             ClientId::Cline => cline_additional_roots(ctx.home_dir, ctx.use_env_roots),
             _ => Vec::new(),
         });
-        roots.extend(adapter_discover::extra_roots_for_client(self.client, ctx));
+        roots.extend(adapter_discover::extra_roots_for_client(self.client, ctx)?);
 
         adapter_discover::source_units_from_paths(
             self.client,
-            adapter_discover::scan_roots(roots, def.pattern),
+            adapter_discover::scan_roots(self.client, roots, def.pattern)?,
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names: ROO_FAMILY_SIBLINGS,
             },
         )
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         let parse = self.parse;
         units
             .into_par_iter()
@@ -62,8 +72,21 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
             .collect()
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
+    fn plan_cache_hit(
+        &self,
+        unit: SourceUnit,
+        source_cache: &crate::message_cache::SourceMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
+        adapter_cache::plan_cache_hit(unit, source_cache)
+    }
+
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), SourcePipelineError> {
+        adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 
@@ -150,12 +173,14 @@ mod tests {
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let roo_paths: Vec<_> = ROOCODE_ADAPTER
-            .discover(&ctx)
+            .discover_checked(&ctx)
+            .unwrap()
             .into_iter()
             .map(|unit| unit.path)
             .collect();
         let kilo_paths: Vec<_> = KILOCODE_ADAPTER
-            .discover(&ctx)
+            .discover_checked(&ctx)
+            .unwrap()
             .into_iter()
             .map(|unit| unit.path)
             .collect();
@@ -174,7 +199,7 @@ mod tests {
 
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let units = ROOCODE_ADAPTER.discover(&ctx);
+        let units = ROOCODE_ADAPTER.discover_checked(&ctx).unwrap();
 
         assert_eq!(units.len(), 1);
         assert_eq!(
@@ -219,7 +244,8 @@ mod tests {
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let actual: Vec<_> = CLINE_ADAPTER
-            .discover(&ctx)
+            .discover_checked(&ctx)
+            .unwrap()
             .into_iter()
             .map(|unit| unit.path)
             .collect();

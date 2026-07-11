@@ -3,7 +3,8 @@
 //! Parses JSONL files from ~/.qwen/projects/{projectPath}/chats/*.jsonl
 //! Token data comes from assistant messages with usageMetadata field.
 
-use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::parse_timestamp_str;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::model_aliases;
 use crate::TokenBreakdown;
@@ -37,50 +38,24 @@ struct UsageMetadata {
     cached_content_token_count: Option<i64>,
 }
 
-/// Default model name when not specified
-const DEFAULT_MODEL: &str = "unknown";
 const DEFAULT_PROVIDER: &str = "qwen";
 
-/// Extract session ID with fallback logic:
-/// 1. Use JSON session_id if present and non-empty
-/// 2. Otherwise derive from path including project name to avoid collisions
-///
-/// Path format: ~/.qwen/projects/{project}/chats/{filename}.jsonl
-pub fn extract_session_id_with_fallback(path: &Path, json_session_id: Option<&str>) -> String {
-    // Priority 1: Use JSON sessionId if present and non-empty
-    if let Some(id) = json_session_id {
-        if !id.is_empty() {
-            return id.to_string();
-        }
-    }
-
-    // Priority 2: Derive from path with project context
-    // Extract project name from path structure: .../projects/{project}/chats/{file}.jsonl
-    let filename = path
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    // Try to extract project name from the path
-    let project_name = path
-        .parent() // .../chats
-        .and_then(|p| p.parent()) // .../projects/{project}
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    // Combine project and filename for unique session ID
-    format!("{}-{}", project_name, filename)
+fn invalid_at_path(
+    path: &Path,
+    operation: &'static str,
+    detail: impl Into<String>,
+) -> SessionParseError {
+    SessionParseError::at_path(
+        path,
+        operation,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, detail.into()),
+    )
 }
 
 /// Parse a Qwen CLI JSONL file
-pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
-    let file_mtime = file_modified_timestamp_ms(path);
+pub fn parse_qwen_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
     let (workspace_key, workspace_label) = qwen_workspace_from_path(path);
 
     let reader = BufReader::new(file);
@@ -88,10 +63,8 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut message_index = 0usize;
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        let line =
+            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -99,10 +72,8 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
         }
 
         let mut bytes = trimmed.as_bytes().to_vec();
-        let qwen_line = match simd_json::from_slice::<QwenLine>(&mut bytes) {
-            Ok(q) => q,
-            Err(_) => continue,
-        };
+        let qwen_line = simd_json::from_slice::<QwenLine>(&mut bytes)
+            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
 
         // Only process assistant type messages with usageMetadata
         if qwen_line.msg_type.as_deref() != Some("assistant") {
@@ -114,13 +85,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
             None => continue,
         };
 
-        // Parse timestamp, fallback to file mtime
-        let timestamp_ms = qwen_line
-            .timestamp
-            .and_then(|ts| parse_timestamp_str(&ts))
-            .unwrap_or(file_mtime);
-
-        // Extract token counts with defaults
+        // Null token fields are equivalent to zero in Qwen's usage payload.
         let input = usage.prompt_token_count.unwrap_or(0).max(0);
         let output = usage.candidates_token_count.unwrap_or(0).max(0);
         let reasoning = usage.thoughts_token_count.unwrap_or(0).max(0);
@@ -132,15 +97,56 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         }
 
-        // Use model from line or fallback to "unknown"
-        let model = qwen_line
-            .model
-            .map(|model| model_aliases::canonicalize_source_model_id(&model).unwrap_or(model))
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let timestamp = qwen_line.timestamp.as_deref().ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate assistant timestamp",
+                "assistant record is missing timestamp",
+            )
+        })?;
+        let timestamp_ms = parse_timestamp_str(timestamp).ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate assistant timestamp",
+                format!("invalid Qwen timestamp `{timestamp}`"),
+            )
+        })?;
+        if timestamp_ms <= 0 {
+            return Err(invalid_at_path(
+                path,
+                "validate assistant timestamp",
+                format!("Qwen timestamp `{timestamp}` must resolve after the Unix epoch"),
+            ));
+        }
 
-        // Resolve session ID: prefer JSON sessionId, fallback to path-derived
-        let line_session_id =
-            extract_session_id_with_fallback(path, qwen_line.session_id.as_deref());
+        let raw_model = qwen_line
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .ok_or_else(|| {
+                invalid_at_path(
+                    path,
+                    "validate assistant model",
+                    "assistant record is missing a non-empty model",
+                )
+            })?;
+        let model = model_aliases::canonicalize_source_model_id(raw_model)
+            .unwrap_or_else(|| raw_model.to_string());
+
+        let line_session_id = qwen_line
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+            .ok_or_else(|| {
+                invalid_at_path(
+                    path,
+                    "validate assistant session",
+                    "assistant record is missing a non-empty sessionId",
+                )
+            })?
+            .to_string();
         let dedup_key =
             crate::sessions::dedup_hash_str(&format!("qwen:{line_session_id}:{message_index}"));
         message_index += 1;
@@ -165,7 +171,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
         messages.push(unified);
     }
 
-    messages
+    Ok(messages)
 }
 
 fn qwen_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
@@ -188,9 +194,14 @@ fn qwen_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
     use std::io::Write;
     use std::path::Path;
     use tempfile::{NamedTempFile, TempDir};
+
+    fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_qwen_file(path).unwrap()
+    }
 
     fn create_test_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -320,17 +331,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_qwen_malformed_lines() {
+    fn test_parse_qwen_rejects_malformed_lines() {
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}
 not valid json at all
 {"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:25:00.000Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 300, "candidatesTokenCount": 400, "thoughtsTokenCount": 20, "cachedContentTokenCount": 10}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_qwen_file(file.path());
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].tokens.input, 100);
-        assert_eq!(messages[1].tokens.input, 300);
+        let error = super::parse_qwen_file(file.path()).unwrap_err();
+        assert_eq!(error.operation(), "decode JSONL line");
     }
 
     #[test]
@@ -371,15 +379,26 @@ not valid json at all
     }
 
     #[test]
-    fn test_parse_qwen_unknown_model_fallback() {
+    fn test_parse_qwen_rejects_missing_model() {
         let content = r#"{"type": "assistant", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_qwen_file(file.path());
+        let error = super::parse_qwen_file(file.path()).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "unknown");
-        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(error.operation(), "validate assistant model");
+        assert_eq!(error.path(), Some(file.path()));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn test_parse_qwen_rejects_missing_timestamp() {
+        let content = r#"{"type":"assistant","model":"qwen3.5-plus","sessionId":"session1","usageMetadata":{"promptTokenCount":1}}"#;
+        let file = create_test_file(content);
+
+        let error = super::parse_qwen_file(file.path()).unwrap_err();
+
+        assert_eq!(error.operation(), "validate assistant timestamp");
+        assert_eq!(error.path(), Some(file.path()));
     }
 
     #[test]
@@ -395,115 +414,47 @@ not valid json at all
     }
 
     #[test]
-    fn test_session_id_fallback_when_empty_string() {
+    fn test_session_id_empty_string_is_rejected() {
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
         let (_dir, path) = create_test_file_with_name(content, "json_empty");
 
-        let messages = parse_qwen_file(&path);
+        let error = super::parse_qwen_file(&path).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        // Should fallback to path-derived ID (not empty string)
-        assert!(!messages[0].session_id.is_empty());
-        assert_ne!(messages[0].session_id.as_ref(), "");
-        // Verify it's not the JSON empty value
-        assert_ne!(messages[0].session_id.as_ref(), "");
+        assert_eq!(error.operation(), "validate assistant session");
+        assert_eq!(error.path(), Some(path.as_path()));
     }
 
     #[test]
-    fn test_session_id_fallback_when_missing() {
+    fn test_session_id_missing_is_rejected() {
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
         let (_dir, path) = create_test_file_with_name(content, "json_missing");
 
-        let messages = parse_qwen_file(&path);
+        let error = super::parse_qwen_file(&path).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        // Should fallback to path-derived ID
-        assert!(!messages[0].session_id.is_empty());
+        assert_eq!(error.operation(), "validate assistant session");
+        assert_eq!(error.path(), Some(path.as_path()));
     }
 
     #[test]
-    fn test_session_id_fallback_when_null() {
+    fn test_session_id_null_is_rejected() {
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": null, "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
         let (_dir, path) = create_test_file_with_name(content, "json_null");
 
-        let messages = parse_qwen_file(&path);
+        let error = super::parse_qwen_file(&path).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        // Should fallback to path-derived ID
-        assert!(!messages[0].session_id.is_empty());
-        assert_ne!(messages[0].session_id.as_ref(), "null");
+        assert_eq!(error.operation(), "validate assistant session");
+        assert_eq!(error.path(), Some(path.as_path()));
     }
 
     #[test]
-    fn test_cross_project_session_id_uniqueness() {
-        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
+    fn test_zero_usage_does_not_require_identity_fields() {
+        let content = r#"{"type":"assistant","usageMetadata":null}
+{"type": "assistant", "usageMetadata": {"promptTokenCount": null, "candidatesTokenCount": null, "thoughtsTokenCount": null, "cachedContentTokenCount": null}}"#;
+        let file = create_test_file(content);
 
-        // Create two files with same name in different projects
-        let (_dir1, path1) = create_test_file_with_name(content, "session");
+        let messages = parse_qwen_file(file.path());
 
-        // Manually create a second file in a different project
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path2 = temp_dir.path().join("other_project/chats/session.jsonl");
-        std::fs::create_dir_all(path2.parent().unwrap()).unwrap();
-        let mut file2 = std::fs::File::create(&path2).unwrap();
-        file2.write_all(content.as_bytes()).unwrap();
-
-        let messages1 = parse_qwen_file(&path1);
-        let messages2 = parse_qwen_file(&path2);
-
-        assert_eq!(messages1.len(), 1);
-        assert_eq!(messages2.len(), 1);
-
-        // Session IDs should be different despite same filename
-        assert_ne!(messages1[0].session_id, messages2[0].session_id);
-    }
-
-    #[test]
-    fn test_extract_session_id_with_fallback_uses_json_value() {
-        let path = Path::new("/home/user/.qwen/projects/myapp/chats/abc123.jsonl");
-        let json_session_id = Some("json_session_456");
-
-        let result = extract_session_id_with_fallback(path, json_session_id);
-
-        assert_eq!(result, "json_session_456");
-    }
-
-    #[test]
-    fn test_extract_session_id_with_fallback_empty_uses_path() {
-        let path = Path::new("/home/user/.qwen/projects/myapp/chats/abc123.jsonl");
-        let json_session_id = Some("");
-
-        let result = extract_session_id_with_fallback(path, json_session_id);
-
-        // Should use path-derived ID containing project and filename
-        assert!(result.contains("myapp") || result.contains("abc123"));
-    }
-
-    #[test]
-    fn test_extract_session_id_with_fallback_none_uses_path() {
-        let path = Path::new("/home/user/.qwen/projects/myapp/chats/abc123.jsonl");
-        let json_session_id: Option<&str> = None;
-
-        let result = extract_session_id_with_fallback(path, json_session_id);
-
-        // Should use path-derived ID containing project and filename
-        assert!(result.contains("myapp") || result.contains("abc123"));
-    }
-
-    #[test]
-    fn test_path_derived_session_id_includes_project() {
-        let path = Path::new("/home/user/.qwen/projects/some-project/chats/chat-session.jsonl");
-        let result = extract_session_id_with_fallback(path, None);
-
-        // Should include both project name and filename stem
-        assert!(
-            result.contains("some-project"),
-            "Session ID should contain project name"
-        );
-        assert!(
-            result.contains("chat-session"),
-            "Session ID should contain filename"
-        );
+        assert!(messages.is_empty());
     }
 
     #[test]
@@ -521,26 +472,15 @@ not valid json at all
     }
 
     #[test]
-    fn test_mixed_session_id_in_file() {
+    fn test_mixed_session_id_in_file_is_rejected() {
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "valid_id", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}
 {"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:25:00.000Z", "usageMetadata": {"promptTokenCount": 300, "candidatesTokenCount": 400, "thoughtsTokenCount": 20, "cachedContentTokenCount": 10}}
 {"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:26:00.000Z", "sessionId": "", "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 600, "thoughtsTokenCount": 30, "cachedContentTokenCount": 15}}"#;
         let (_dir, path) = create_test_file_with_name(content, "mixed");
 
-        let messages = parse_qwen_file(&path);
+        let error = super::parse_qwen_file(&path).unwrap_err();
 
-        assert_eq!(messages.len(), 3);
-        // First message uses JSON sessionId
-        assert_eq!(messages[0].session_id.as_ref(), "valid_id");
-        // Second message (no sessionId) uses fallback
-        assert!(
-            messages[1].session_id.contains("mixed")
-                || messages[1].session_id.contains("test_project")
-        );
-        // Third message (empty sessionId) uses fallback
-        assert!(
-            messages[2].session_id.contains("mixed")
-                || messages[2].session_id.contains("test_project")
-        );
+        assert_eq!(error.operation(), "validate assistant session");
+        assert_eq!(error.path(), Some(path.as_path()));
     }
 }

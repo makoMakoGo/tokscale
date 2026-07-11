@@ -5,7 +5,8 @@
 //!
 //! Kilo CLI uses a SQLite database similar to OpenCode.
 
-use super::utils::{file_modified_timestamp_ms, open_readonly_sqlite};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -49,81 +50,78 @@ pub struct KiloTime {
     pub completed: Option<f64>,
 }
 
-pub fn parse_kilo_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let fallback_timestamp = file_modified_timestamp_ms(db_path);
-    parse_kilo_sqlite_with_fallback(db_path, fallback_timestamp)
-}
-
-pub fn parse_kilo_sqlite_with_fallback(
-    db_path: &Path,
-    fallback_timestamp: i64,
-) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(db_path) else {
-        return Vec::new();
-    };
+pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let conn = open_readonly_sqlite(db_path)?;
 
     let query = r#"
         SELECT m.id, m.session_id, m.data
         FROM message m
-        WHERE json_valid(m.data)
-          AND json_extract(m.data, '$.role') = 'assistant'
-          AND json_extract(m.data, '$.tokens') IS NOT NULL
+        ORDER BY m.id
     "#;
 
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+    let mut stmt = conn
+        .prepare(query)
+        .map_err(|error| SessionParseError::new("prepare Kilo message query", error))?;
 
-    let rows = match stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let session_id: String = row.get(1)?;
-        let data_json: String = row.get(2)?;
-        Ok((id, session_id, data_json))
-    }) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
+    let rows = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let data_json: String = row.get(2)?;
+            Ok((id, session_id, data_json))
+        })
+        .map_err(|error| SessionParseError::new("execute Kilo message query", error))?;
 
     let mut messages = Vec::new();
 
     for row_result in rows {
-        let (row_id, row_session_id, data_json) = match row_result {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
+        let (row_id, row_session_id, data_json) =
+            row_result.map_err(|error| SessionParseError::new("decode Kilo message row", error))?;
 
         let mut bytes = data_json.into_bytes();
-        let msg: KiloMessage = match simd_json::from_slice(&mut bytes) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        let msg: KiloMessage = simd_json::from_slice(&mut bytes)
+            .map_err(|error| SessionParseError::new("decode Kilo message JSON", error))?;
 
         if msg.role != "assistant" {
             continue;
         }
 
-        let tokens = match msg.tokens {
-            Some(t) => t,
-            None => continue,
-        };
+        let tokens = msg.tokens.ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Kilo assistant message",
+                format!("assistant message `{row_id}` is missing tokens"),
+            )
+        })?;
 
         let dedup_key = msg
             .id
-            .or(Some(row_id))
+            .or(Some(row_id.clone()))
             .map(|key| crate::sessions::dedup_hash_str(&key));
 
-        let model_id = match msg.model_id {
-            Some(m) => m,
-            None => continue,
-        };
+        let model_id = msg
+            .model_id
+            .filter(|model| !model.trim().is_empty())
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Kilo assistant message",
+                    format!("assistant message `{row_id}` is missing modelID"),
+                )
+            })?;
 
         let agent = msg.agent.or(msg.mode);
         let session_id = msg.session_id.unwrap_or(row_session_id);
         let timestamp = msg
             .time
-            .map(|t| t.created as i64)
-            .unwrap_or(fallback_timestamp);
+            .map(|time| time.created)
+            .filter(|timestamp| timestamp.is_finite() && *timestamp > 0.0)
+            .filter(|timestamp| *timestamp <= i64::MAX as f64)
+            .map(|timestamp| timestamp as i64)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Kilo assistant message",
+                    format!("assistant message `{row_id}` is missing a valid created timestamp"),
+                )
+            })?;
 
         let provider = msg
             .provider_id
@@ -158,7 +156,7 @@ pub fn parse_kilo_sqlite_with_fallback(
         messages.push(unified);
     }
 
-    messages
+    Ok(messages)
 }
 
 #[cfg(test)]
@@ -239,7 +237,7 @@ mod tests {
         insert_kilo_message(&conn, "row-msg-1", "sess-1", data_json);
         drop(conn);
 
-        let messages = parse_kilo_sqlite_with_fallback(&db_path, 42);
+        let messages = parse_kilo_sqlite(&db_path).unwrap();
         assert_eq!(messages.len(), 1);
 
         let msg = &messages[0];
@@ -262,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_kilo_sqlite_skips_invalid_rows_and_clamps_values() {
+    fn test_parse_kilo_sqlite_reports_malformed_row() {
         let dir = TempDir::new().unwrap();
         let db_path = create_kilo_sqlite_db(&dir);
         let conn = Connection::open(&db_path).unwrap();
@@ -318,30 +316,13 @@ mod tests {
         );
         drop(conn);
 
-        let messages = parse_kilo_sqlite_with_fallback(&db_path, 1_800_000_000_000);
-        assert_eq!(messages.len(), 1);
-
-        let msg = &messages[0];
-        assert_eq!(msg.session_id.as_ref(), "sess-valid");
-        assert_eq!(msg.model_id.as_ref(), "gpt-5.4");
-        assert_eq!(msg.provider_id.as_ref(), "openai");
-        assert_eq!(msg.timestamp, 1_800_000_000_000);
-        assert_eq!(msg.tokens.input, 0);
-        assert_eq!(msg.tokens.output, 50);
-        assert_eq!(msg.tokens.reasoning, 0);
-        assert_eq!(msg.tokens.cache_read, 0);
-        assert_eq!(msg.tokens.cache_write, 0);
-        assert_eq!(msg.cost, 0.0);
-        assert_eq!(msg.agent.as_deref(), Some("debug"));
-        assert_eq!(
-            msg.dedup_key,
-            Some(crate::sessions::dedup_hash_str("row-valid"))
-        );
+        let error = parse_kilo_sqlite(&db_path).unwrap_err();
+        assert_eq!(error.operation(), "decode Kilo message JSON");
     }
 
     #[test]
-    fn test_parse_kilo_sqlite_returns_empty_for_missing_db() {
-        let messages = parse_kilo_sqlite(std::path::Path::new("/nonexistent/kilo.db"));
-        assert!(messages.is_empty());
+    fn test_parse_kilo_sqlite_reports_missing_db() {
+        let error = parse_kilo_sqlite(std::path::Path::new("/nonexistent/kilo.db")).unwrap_err();
+        assert_eq!(error.operation(), "open SQLite source read-only");
     }
 }
