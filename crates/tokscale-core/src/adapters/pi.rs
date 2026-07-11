@@ -14,9 +14,9 @@ pub(crate) struct PiAdapter;
 
 pub(crate) static PI_ADAPTER: PiAdapter = PiAdapter;
 
-// The immediately following revision was already emitted by builds containing
-// only model-ID canonicalization, with the previous usage-bucket semantics.
-const PI_USAGE_BUCKET_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 2;
+// Earlier revisions were emitted before malformed inclusive-reasoning
+// breakdowns were clamped to their authoritative output bucket.
+const PI_USAGE_BUCKET_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 3;
 
 impl LocalSourceAdapter for PiAdapter {
     fn client(&self) -> ClientId {

@@ -214,12 +214,12 @@ fn token_breakdown_from_pi_usage(
         validate_nonnegative_usage_value(field, value, client)?;
     }
 
-    if reasoning > raw_output {
-        return Err(SessionParseError::invalid(
-            usage_validation_operation(client),
-            format!("{reasoning_field} ({reasoning}) must not exceed output ({raw_output})"),
-        ));
-    }
+    // Xiaomi MiMo token-plan has emitted a length-stopped response with
+    // output=32_000 and reasoningTokens=32_123 even though totalTokens and
+    // cost both accounted for only 32_000 output tokens. Reasoning is merely a
+    // breakdown of inclusive output, so keep output authoritative and clamp
+    // only the malformed breakdown instead of invalidating the entire JSONL.
+    let reasoning = reasoning.min(raw_output);
 
     let expected_source_total = checked_usage_sum(
         [
@@ -1006,27 +1006,31 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pi_rejects_reasoning_above_output() {
+    fn test_parse_pi_clamps_reasoning_above_output() {
         let content = r#"{"type":"session","id":"pi_ses_reasoning_overflow","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":20,"cacheRead":10,"cacheWrite":5,"reasoning":21,"totalTokens":135}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_pi_file(file.path()).unwrap_err();
+        let messages = parse_pi_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("reasoning"));
-        assert!(error.to_string().contains("output"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].tokens.reasoning, 20);
+        assert_eq!(messages[0].tokens.total(), 135);
     }
 
     #[test]
-    fn test_parse_omp_rejects_reasoning_tokens_above_output() {
+    fn test_parse_omp_clamps_reasoning_tokens_above_output() {
         let content = r#"{"type":"session","id":"omp_ses_reasoning_overflow","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":20,"cacheRead":10,"cacheWrite":5,"reasoningTokens":21,"totalTokens":135}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_omp_file(file.path()).unwrap_err();
+        let messages = parse_omp_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("reasoningTokens"));
-        assert!(error.to_string().contains("output"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].tokens.reasoning, 20);
+        assert_eq!(messages[0].tokens.total(), 135);
     }
 
     #[test]

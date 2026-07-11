@@ -17,9 +17,9 @@ pub(crate) struct OmpAdapter;
 
 pub(crate) static OMP_ADAPTER: OmpAdapter = OmpAdapter;
 
-// The immediately following OMP revision was already emitted by builds
-// containing only model-ID canonicalization and title-slot parsing.
-const OMP_USAGE_AND_SWARM_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 3;
+// Earlier OMP revisions were emitted before malformed inclusive-reasoning
+// breakdowns were clamped to their authoritative output bucket.
+const OMP_USAGE_AND_SWARM_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 4;
 
 impl LocalSourceAdapter for OmpAdapter {
     fn client(&self) -> ClientId {

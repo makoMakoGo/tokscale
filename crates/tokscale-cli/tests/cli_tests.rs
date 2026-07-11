@@ -2415,6 +2415,38 @@ fn test_models_total_includes_split_reasoning_tokens() {
 }
 
 #[test]
+fn test_models_report_clamps_reasoning_above_output() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+    let sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("invalid-reasoning-breakdown.jsonl"),
+        concat!(
+            r#"{"type":"session","id":"reasoning-overflow-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"reasoning-overflow-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":51,"totalTokens":165}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let output = cmd_with_home(base)
+        .args(["models", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {output:?}");
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["entries"][0]["output"], 0);
+    assert_eq!(json["entries"][0]["reasoning"], 50);
+    assert_eq!(json["totalReasoning"], 50);
+    assert_eq!(json["totalTokens"], 165);
+    assert!(json.get("warnings").is_none());
+}
+
+#[test]
 fn test_models_group_by_model() {
     let tmp = create_temp_fixture_dir();
     let output = cmd_with_home(tmp.path())
