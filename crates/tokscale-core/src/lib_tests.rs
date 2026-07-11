@@ -3984,7 +3984,29 @@ fn test_apply_token_pricing_clears_existing_cost_without_pricing() {
 }
 
 #[test]
-fn test_finalize_token_priced_messages_prices_canonical_gpt_5_6_factory_model() {
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_prices_canonical_gpt_5_6_factory_model() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let source_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+    let session_dir = source_home.path().join(".factory/sessions/workspace");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(
+        session_dir.join("factory-session.settings.json"),
+        r#"{
+            "model": "custom:gpt-5.6-sol-xhigh",
+            "reasoningEffort": "xhigh",
+            "providerLock": "openai",
+            "providerLockTimestamp": "2026-07-11T13:38:03.820Z",
+            "tokenUsage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "thinkingTokens": 2
+            }
+        }"#,
+    )
+    .unwrap();
+
     let mut litellm = HashMap::new();
     litellm.insert(
         "gpt-5.6-sol".into(),
@@ -3995,25 +4017,17 @@ fn test_finalize_token_priced_messages_prices_canonical_gpt_5_6_factory_model() 
         },
     );
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
-    let mut messages = vec![UnifiedMessage::new(
-        "droid",
-        "gpt-5.6-sol-xhigh",
-        "openai",
-        "factory-session",
-        1_783_753_083_820,
-        TokenBreakdown {
-            input: 10,
-            output: 5,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 2,
-        },
-        0.0,
-    )];
+    let messages = parse_all_messages_with_pricing(
+        source_home.path().to_str().unwrap(),
+        &["droid".to_string()],
+        Some(&pricing),
+    )
+    .unwrap();
 
-    finalize_token_priced_messages(&mut messages, Some(&pricing));
-
+    assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].model_id.as_ref(), "gpt-5.6-sol");
+    assert_eq!(messages[0].provider_id.as_ref(), "openai");
+    assert_eq!(messages[0].tokens.reasoning, 2);
     assert_eq!(messages[0].cost, 0.024);
 }
 
