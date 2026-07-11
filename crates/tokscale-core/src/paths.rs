@@ -14,6 +14,33 @@
 
 use std::path::PathBuf;
 
+#[derive(Debug, thiserror::Error)]
+#[error("could not determine the tokscale configuration directory")]
+pub struct ConfigDirUnavailable;
+
+/// Resolve the configuration directory without inventing a process-relative
+/// storage location when the platform has no user configuration directory.
+pub fn try_get_config_dir() -> Result<PathBuf, ConfigDirUnavailable> {
+    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
+        if !custom.is_empty() {
+            return Ok(PathBuf::from(custom));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(home) = dirs::home_dir() {
+        return Ok(home.join(".config").join("tokscale"));
+    }
+
+    dirs::config_dir()
+        .map(|directory| directory.join("tokscale"))
+        .ok_or(ConfigDirUnavailable)
+}
+
+pub fn try_get_cache_dir() -> Result<PathBuf, ConfigDirUnavailable> {
+    try_get_config_dir().map(|directory| directory.join("cache"))
+}
+
 /// Resolve the tokscale config dir, honoring `TOKSCALE_CONFIG_DIR` first.
 ///
 /// Resolution order:
@@ -32,22 +59,7 @@ use std::path::PathBuf;
 /// 4. Windows (and any other platform): `dirs::config_dir().join("tokscale")`.
 /// 5. Last-ditch fallback: `./.tokscale` so a missing HOME never panics.
 pub fn get_config_dir() -> PathBuf {
-    if let Some(custom) = std::env::var_os("TOKSCALE_CONFIG_DIR") {
-        if !custom.is_empty() {
-            return PathBuf::from(custom);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(".config").join("tokscale");
-        }
-    }
-
-    dirs::config_dir()
-        .map(|d| d.join("tokscale"))
-        .unwrap_or_else(|| PathBuf::from(".tokscale"))
+    try_get_config_dir().unwrap_or_else(|_| PathBuf::from(".tokscale"))
 }
 
 /// Resolve the tokscale cache dir as `<config_dir>/cache`.

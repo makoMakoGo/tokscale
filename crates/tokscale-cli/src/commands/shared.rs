@@ -34,7 +34,7 @@ pub(crate) fn build_client_filter(
     flags: ClientFlags,
     home_dir: &Option<String>,
 ) -> Result<Option<Vec<String>>> {
-    let defaults = tui::settings::load_default_clients_for_home(home_dir);
+    let defaults = tui::settings::load_default_clients_for_home(home_dir)?;
     build_client_filter_with_defaults(flags, &defaults)
 }
 

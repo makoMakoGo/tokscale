@@ -454,7 +454,6 @@ pub(super) struct TuiAcc {
 }
 
 struct TuiModelBucket {
-    first_seen: usize,
     model: Arc<str>,
     providers: IdentitySet<Arc<str>>,
     client: Arc<str>,
@@ -500,7 +499,6 @@ struct DailySourceBucket {
 }
 
 struct DailyModelBucket {
-    first_seen: usize,
     provider: Arc<str>,
     workspace_label: Option<Arc<str>>,
     session_id: Option<Arc<str>>,
@@ -521,57 +519,10 @@ struct HourlyBucket {
 }
 
 struct HourlyModelBucket {
-    first_seen: usize,
     provider: Arc<str>,
     model: Arc<str>,
     tokens: UsageTokenBreakdown,
     cost: f64,
-}
-
-fn merge_performance(target: &mut ModelPerformance, source: ModelPerformance) {
-    target.total_duration_ms = target
-        .total_duration_ms
-        .saturating_add(source.total_duration_ms);
-    target.timed_tokens = target
-        .timed_tokens
-        .checked_add(source.timed_tokens)
-        .expect("timed token count exceeds i64::MAX");
-    target.sample_count = target.sample_count.saturating_add(source.sample_count);
-}
-
-fn merge_tui_model_bucket(
-    target: &mut TuiModelBucket,
-    source: TuiModelBucket,
-    merge_providers: bool,
-) {
-    if merge_providers {
-        target.providers.extend(source.providers);
-    }
-    target.sessions.extend(source.sessions);
-    if let Some(source_totals_by_client) = source.client_totals {
-        let target_totals_by_client = target
-            .client_totals
-            .as_mut()
-            .expect("colliding merge-client TUI buckets both track client totals");
-        for (client, source_totals) in *source_totals_by_client {
-            match target_totals_by_client.entry(client) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(source_totals);
-                }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    let totals = entry.get_mut();
-                    totals.first_seen = totals.first_seen.min(source_totals.first_seen);
-                    totals.total_tokens = totals
-                        .total_tokens
-                        .checked_add(source_totals.total_tokens)
-                        .expect("client token contribution exceeds u64::MAX");
-                }
-            }
-        }
-    }
-    add_tokens(&mut target.tokens, &source.tokens);
-    target.cost += source.cost;
-    merge_performance(&mut target.performance, source.performance);
 }
 
 fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
@@ -611,15 +562,6 @@ fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
     }
 }
 
-fn merge_daily_model_bucket(target: &mut DailyModelBucket, source: DailyModelBucket) {
-    add_tokens(&mut target.tokens, &source.tokens);
-    target.cost += source.cost;
-    target.messages = target
-        .messages
-        .checked_add(source.messages)
-        .expect("daily model message count exceeds u64::MAX");
-}
-
 fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> DailyModelInfo {
     let provider = model.provider.to_string();
     let display_name = daily_source_model_display_name(
@@ -642,34 +584,11 @@ fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> Daily
 fn materialize_daily(bucket: DailyBucket, group_by: &GroupBy) -> DailyUsage {
     let mut source_breakdown = BTreeMap::new();
     for (client, source) in bucket.sources {
-        let mut models = BTreeMap::new();
-        let mut risky_models = Vec::new();
-        for (key, model) in source.models {
-            if key.may_alias_legacy_key() {
-                risky_models.push((key, model));
-            } else {
-                models.insert(key.public_key(), materialize_daily_model(model, group_by));
-            }
-        }
-        if !risky_models.is_empty() {
-            risky_models.sort_by_key(|(_, model)| model.first_seen);
-            let mut public_models: HashMap<String, DailyModelBucket> = HashMap::new();
-            for (key, model) in risky_models {
-                match public_models.entry(key.public_key()) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(model);
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        merge_daily_model_bucket(entry.get_mut(), model);
-                    }
-                }
-            }
-            models.extend(
-                public_models
-                    .into_iter()
-                    .map(|(key, model)| (key, materialize_daily_model(model, group_by))),
-            );
-        }
+        let models = source
+            .models
+            .into_iter()
+            .map(|(key, model)| (key.map_key(), materialize_daily_model(model, group_by)))
+            .collect();
         source_breakdown.insert(
             client.to_string(),
             DailySourceInfo {
@@ -689,11 +608,6 @@ fn materialize_daily(bucket: DailyBucket, group_by: &GroupBy) -> DailyUsage {
     }
 }
 
-fn merge_hourly_model_bucket(target: &mut HourlyModelBucket, source: HourlyModelBucket) {
-    add_tokens(&mut target.tokens, &source.tokens);
-    target.cost += source.cost;
-}
-
 fn materialize_hourly_model(model: HourlyModelBucket, group_by: &GroupBy) -> HourlyModelInfo {
     let provider = model.provider.to_string();
     HourlyModelInfo {
@@ -706,34 +620,11 @@ fn materialize_hourly_model(model: HourlyModelBucket, group_by: &GroupBy) -> Hou
 }
 
 fn materialize_hourly(bucket: HourlyBucket, group_by: &GroupBy) -> HourlyUsage {
-    let mut models = BTreeMap::new();
-    let mut risky_models = Vec::new();
-    for (key, model) in bucket.models {
-        if key.may_alias_legacy_key() {
-            risky_models.push((key, model));
-        } else {
-            models.insert(key.public_key(), materialize_hourly_model(model, group_by));
-        }
-    }
-    if !risky_models.is_empty() {
-        risky_models.sort_by_key(|(_, model)| model.first_seen);
-        let mut public_models: HashMap<String, HourlyModelBucket> = HashMap::new();
-        for (key, model) in risky_models {
-            match public_models.entry(key.public_key()) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(model);
-                }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    merge_hourly_model_bucket(entry.get_mut(), model);
-                }
-            }
-        }
-        models.extend(
-            public_models
-                .into_iter()
-                .map(|(key, model)| (key, materialize_hourly_model(model, group_by))),
-        );
-    }
+    let models = bucket
+        .models
+        .into_iter()
+        .map(|(key, model)| (key.map_key(), materialize_hourly_model(model, group_by)))
+        .collect();
     let clients = bucket
         .clients
         .into_vec()
@@ -783,7 +674,6 @@ impl TuiAcc {
                 (None, None)
             };
             TuiModelBucket {
-                first_seen: sequence,
                 model: Arc::clone(&msg.model_id),
                 providers: IdentitySet::one(Arc::clone(&msg.provider_id)),
                 client: Arc::clone(&msg.client),
@@ -891,7 +781,6 @@ impl TuiAcc {
                 .models
                 .entry(daily_model_key)
                 .or_insert_with(|| DailyModelBucket {
-                    first_seen: sequence,
                     provider: Arc::clone(&msg.provider_id),
                     workspace_label: (*group_by == GroupBy::WorkspaceModel)
                         .then(|| workspace_fields(msg).1),
@@ -934,7 +823,6 @@ impl TuiAcc {
                 .models
                 .entry(hkey)
                 .or_insert_with(|| HourlyModelBucket {
-                    first_seen: sequence,
                     provider: Arc::clone(&msg.provider_id),
                     model: Arc::clone(&msg.model_id),
                     tokens: UsageTokenBreakdown::default(),
@@ -955,38 +843,10 @@ impl TuiAcc {
             ..
         } = self;
 
-        let mut keyed_models = Vec::with_capacity(model_map.len());
-        let mut risky_models = Vec::new();
-        for (key, bucket) in model_map {
-            if key.may_alias_legacy_key() {
-                risky_models.push((key, bucket));
-            } else {
-                keyed_models.push((key.public_key(), materialize_tui_model(bucket)));
-            }
-        }
-        if !risky_models.is_empty() {
-            risky_models.sort_by_key(|(_, bucket)| bucket.first_seen);
-            let mut public_models: HashMap<String, TuiModelBucket> = HashMap::new();
-            for (key, bucket) in risky_models {
-                match public_models.entry(key.public_key()) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(bucket);
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        merge_tui_model_bucket(
-                            entry.get_mut(),
-                            bucket,
-                            group_by != GroupBy::ClientProviderModel,
-                        );
-                    }
-                }
-            }
-            keyed_models.extend(
-                public_models
-                    .into_iter()
-                    .map(|(key, bucket)| (key, materialize_tui_model(bucket))),
-            );
-        }
+        let mut keyed_models: Vec<_> = model_map
+            .into_iter()
+            .map(|(key, bucket)| (key, materialize_tui_model(bucket)))
+            .collect();
         keyed_models.sort_by(|(a_key, a), (b_key, b)| {
             b.cost
                 .total_cmp(&a.cost)
@@ -1215,7 +1075,9 @@ mod tests {
 
         let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
         assert_eq!(daily_models.len(), 1);
-        let daily_model = daily_models.get("opencode:xiaomi:mimo-v2.5-pro").unwrap();
+        let daily_model = daily_models
+            .get("v1|cpm|8:opencode6:xiaomi13:mimo-v2.5-pro")
+            .unwrap();
         assert_eq!(daily_model.provider, "xiaomi");
         assert_eq!(daily_model.display_name, "mimo-v2.5-pro");
     }
@@ -1244,7 +1106,9 @@ mod tests {
 
         let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
         assert_eq!(daily_models.len(), 1);
-        let daily_model = daily_models.get("opencode:openai:gpt-5.5").unwrap();
+        let daily_model = daily_models
+            .get("v1|cpm|8:opencode6:openai7:gpt-5.5")
+            .unwrap();
         assert_eq!(daily_model.provider, "openai");
         assert_eq!(daily_model.display_name, "gpt-5.5");
     }
@@ -1282,8 +1146,8 @@ mod tests {
 
         let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
         assert_eq!(daily_models.len(), 2);
-        assert!(daily_models.contains_key("opencode:openai:gpt-5.5"));
-        assert!(daily_models.contains_key("opencode:microsoft:gpt-5.5"));
+        assert!(daily_models.contains_key("v1|cpm|8:opencode6:openai7:gpt-5.5"));
+        assert!(daily_models.contains_key("v1|cpm|8:opencode9:microsoft7:gpt-5.5"));
         assert!(daily_models
             .values()
             .all(|model| model.display_name == "gpt-5.5"));
@@ -1322,14 +1186,14 @@ mod tests {
 
         let daily_models = &usage.daily[0].source_breakdown["opencode"].models;
         assert_eq!(daily_models.len(), 2);
-        assert!(daily_models.contains_key("session-1:gpt-5.5"));
-        assert!(daily_models.contains_key("session-2:gpt-5.5"));
+        assert!(daily_models.contains_key("v1|sm|9:session-17:gpt-5.5"));
+        assert!(daily_models.contains_key("v1|sm|9:session-27:gpt-5.5"));
         assert_eq!(
-            daily_models["session-1:gpt-5.5"].display_name,
+            daily_models["v1|sm|9:session-17:gpt-5.5"].display_name,
             "session-1 / gpt-5.5"
         );
         assert_eq!(
-            daily_models["session-2:gpt-5.5"].display_name,
+            daily_models["v1|sm|9:session-27:gpt-5.5"].display_name,
             "session-2 / gpt-5.5"
         );
     }
@@ -1775,8 +1639,8 @@ mod tests {
         let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
         assert_eq!(claude.models.len(), 2);
 
-        let anthropic_key = "claude:anthropic:claude-sonnet-4.5";
-        let copilot_key = "claude:microsoft:claude-sonnet-4.5";
+        let anthropic_key = "v1|cpm|6:claude9:anthropic17:claude-sonnet-4.5";
+        let copilot_key = "v1|cpm|6:claude9:microsoft17:claude-sonnet-4.5";
         let anthropic_model = claude.models.get(anthropic_key).unwrap();
         assert_eq!(anthropic_model.display_name, "claude-sonnet-4.5");
         assert_eq!(anthropic_model.provider, "anthropic");
@@ -1837,14 +1701,14 @@ mod tests {
         let claude = usage.daily[0].source_breakdown.get("claude").unwrap();
         assert_eq!(claude.cost, 1.0);
         assert_eq!(claude.models.len(), 1);
-        let claude_model = claude.models.get("claude-sonnet-4.5").unwrap();
+        let claude_model = claude.models.get("v1|m|17:claude-sonnet-4.5").unwrap();
         assert_eq!(claude_model.display_name, "claude-sonnet-4.5");
         assert_eq!(claude_model.tokens.total(), 15);
 
         let cursor = usage.daily[0].source_breakdown.get("cursor").unwrap();
         assert_eq!(cursor.cost, 2.0);
         assert_eq!(cursor.models.len(), 1);
-        let cursor_model = cursor.models.get("claude-sonnet-4.5").unwrap();
+        let cursor_model = cursor.models.get("v1|m|17:claude-sonnet-4.5").unwrap();
         assert_eq!(cursor_model.display_name, "claude-sonnet-4.5");
         assert_eq!(cursor_model.tokens.total(), 30);
     }
@@ -2021,64 +1885,46 @@ mod tests {
     }
 
     #[test]
-    fn legacy_public_key_collisions_are_explicitly_coalesced_without_dropping_totals() {
+    fn top_level_models_preserve_structured_buckets_with_colliding_legacy_text() {
         let timestamp = 1_735_689_600_000;
         let cases = [
             (
                 GroupBy::ClientModel,
                 collision_message("a:b", "first", "same", "c", 10, timestamp),
                 collision_message("a", "second", "same", "b:c", 20, timestamp),
-                "a:b",
-                "c",
-                "first, second",
-                2,
             ),
             (
                 GroupBy::ClientProviderModel,
                 collision_message("a", "b:c", "same", "d", 10, timestamp),
                 collision_message("a", "b", "same", "c:d", 20, timestamp),
-                "a",
-                "d",
-                "b:c",
-                1,
             ),
             (
                 GroupBy::Session,
                 collision_message("a", "first", "b:c", "d", 10, timestamp),
                 collision_message("a", "second", "b", "c:d", 20, timestamp),
-                "a",
-                "d",
-                "first, second",
-                2,
             ),
             (
                 GroupBy::ClientSession,
                 collision_message("a", "first", "b:c", "d", 10, timestamp),
                 collision_message("a", "second", "b", "c:d", 20, timestamp),
-                "a",
-                "d",
-                "first, second",
-                2,
             ),
         ];
 
-        for (group_by, first, second, client, model, provider, sessions) in cases {
+        for (group_by, first, second) in cases {
             let mut acc = TuiAcc::new(group_by);
             acc.push(&first);
             acc.push(&second);
             let usage = acc.finish();
-            assert_eq!(usage.models.len(), 1);
-            assert_eq!(usage.models[0].client, client);
-            assert_eq!(usage.models[0].model, model);
-            assert_eq!(usage.models[0].provider, provider);
-            assert_eq!(usage.models[0].tokens.total(), 30);
-            assert_eq!(usage.models[0].cost, 30.0);
-            assert_eq!(usage.models[0].session_count, sessions);
+            assert_eq!(usage.models.len(), 2);
+            assert_eq!(usage.models[0].tokens.total(), 20);
+            assert_eq!(usage.models[0].cost, 20.0);
+            assert_eq!(usage.models[1].tokens.total(), 10);
+            assert_eq!(usage.models[1].cost, 10.0);
         }
     }
 
     #[test]
-    fn daily_and_hourly_collision_materialization_preserves_first_fields_and_all_totals() {
+    fn daily_and_hourly_maps_use_collision_free_structured_keys() {
         let timestamp = 1_735_689_600_000;
         let first = collision_message("a", "b:c", "same", "d", 10, timestamp);
         let second = collision_message("a", "b", "same", "c:d", 20, timestamp);
@@ -2088,21 +1934,88 @@ mod tests {
         let usage = acc.finish();
 
         let daily = &usage.daily[0].source_breakdown["a"].models;
-        assert_eq!(daily.len(), 1);
-        let daily_model = &daily["a:b:c:d"];
-        assert_eq!(daily_model.provider, "b:c");
-        assert_eq!(daily_model.display_name, "d");
-        assert_eq!(daily_model.tokens.total(), 30);
-        assert_eq!(daily_model.cost, 30.0);
-        assert_eq!(daily_model.messages, 2);
+        assert_eq!(daily.len(), 2);
+        let first_daily = &daily["v1|cpm|1:a3:b:c1:d"];
+        assert_eq!(first_daily.provider, "b:c");
+        assert_eq!(first_daily.display_name, "d");
+        assert_eq!(first_daily.tokens.total(), 10);
+        assert_eq!(first_daily.cost, 10.0);
+        assert_eq!(first_daily.messages, 1);
+        let second_daily = &daily["v1|cpm|1:a1:b3:c:d"];
+        assert_eq!(second_daily.provider, "b");
+        assert_eq!(second_daily.display_name, "c:d");
+        assert_eq!(second_daily.tokens.total(), 20);
+        assert_eq!(second_daily.cost, 20.0);
+        assert_eq!(second_daily.messages, 1);
 
         let hourly = &usage.hourly[0].models;
-        assert_eq!(hourly.len(), 1);
-        let hourly_model = &hourly["b:c:d"];
-        assert_eq!(hourly_model.provider, "b:c");
-        assert_eq!(hourly_model.display_name, "d");
-        assert_eq!(hourly_model.tokens.total(), 30);
-        assert_eq!(hourly_model.cost, 30.0);
+        assert_eq!(hourly.len(), 2);
+        let first_hourly = &hourly["v1|pm|3:b:c1:d"];
+        assert_eq!(first_hourly.provider, "b:c");
+        assert_eq!(first_hourly.display_name, "d");
+        assert_eq!(first_hourly.tokens.total(), 10);
+        assert_eq!(first_hourly.cost, 10.0);
+        let second_hourly = &hourly["v1|pm|1:b3:c:d"];
+        assert_eq!(second_hourly.provider, "b");
+        assert_eq!(second_hourly.display_name, "c:d");
+        assert_eq!(second_hourly.tokens.total(), 20);
+        assert_eq!(second_hourly.cost, 20.0);
+    }
+
+    #[test]
+    fn hourly_client_identity_order_is_deterministic() {
+        let timestamp = 1_735_689_600_000;
+        let mut acc = TuiAcc::new(GroupBy::Model);
+        acc.push(&collision_message(
+            "z-client",
+            "provider",
+            "session-z",
+            "model",
+            10,
+            timestamp,
+        ));
+        acc.push(&collision_message(
+            "a-client",
+            "provider",
+            "session-a",
+            "model",
+            20,
+            timestamp,
+        ));
+
+        let usage = acc.finish();
+
+        assert_eq!(
+            usage.hourly[0]
+                .clients
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["a-client", "z-client"]
+        );
+    }
+
+    #[test]
+    fn workspace_maps_tag_unknown_and_known_keys_separately() {
+        let timestamp = 1_735_689_600_000;
+        let mut unknown =
+            collision_message("client", "provider", "session", "model", 10, timestamp);
+        unknown.workspace_key = None;
+        unknown.workspace_label = None;
+        let mut known = collision_message("client", "provider", "session", "model", 20, timestamp);
+        known.workspace_key = Some(Arc::from(""));
+        known.workspace_label = Some(Arc::from("Empty workspace key"));
+
+        let mut acc = TuiAcc::new(GroupBy::WorkspaceModel);
+        acc.push(&unknown);
+        acc.push(&known);
+        let usage = acc.finish();
+
+        assert_eq!(usage.models.len(), 2);
+        let daily_models = &usage.daily[0].source_breakdown["client"].models;
+        assert_eq!(daily_models.len(), 2);
+        assert!(daily_models.contains_key("v1|wmu|5:model"));
+        assert!(daily_models.contains_key("v1|wmk|0:5:model"));
     }
 
     #[test]

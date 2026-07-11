@@ -2,7 +2,7 @@
 //!
 //! Junie stores local sessions under `~/.junie/sessions/<session-id>/events.jsonl`.
 
-use super::utils::file_modified_timestamp_ms;
+use super::error::{SessionParseError, SessionParseResult};
 use super::{dedup_hash_str, UnifiedMessage};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
@@ -20,30 +20,24 @@ const SKIP_EVENT_KINDS: &[&str] = &[
     "AgentPatchCreatedEvent",
 ];
 
-pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
+pub fn parse_junie_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| SessionParseError::new("open Junie events file", error))?;
 
-    let session_id = session_id_from_path(path);
-    let default_timestamp =
-        session_timestamp_from_id(&session_id).unwrap_or_else(|| file_modified_timestamp_ms(path));
+    let session_id = session_id_from_path(path)?;
+    let default_timestamp = session_timestamp_from_id(&session_id);
     let mut pending_turn_start = false;
     let mut messages = Vec::new();
     let mut seen = HashSet::new();
 
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
+        let line = line.map_err(|error| SessionParseError::new("read Junie JSONL line", error))?;
         if !line.contains(USAGE_EVENT_KIND) && !line.contains(USER_PROMPT_KIND) {
             continue;
         }
 
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
+        let value = serde_json::from_str::<Value>(&line)
+            .map_err(|error| SessionParseError::new("decode Junie JSONL line", error))?;
         if let Some(kind) = parsed_event_kind(&value) {
             if SKIP_EVENT_KINDS.contains(&kind) {
                 continue;
@@ -61,9 +55,17 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         };
 
-        let timestamp = number_field(&value, "timestampMs")
+        let timestamp = number_field(&value, "timestampMs")?
             .filter(|timestamp| *timestamp > 0)
-            .unwrap_or(default_timestamp);
+            .or(default_timestamp)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Junie usage timestamp",
+                    format!(
+                        "usage event has no timestampMs and session id `{session_id}` has no timestamp"
+                    ),
+                )
+            })?;
         let agent = agent_name(agent_event);
         let Some(usages) = agent_event.get("modelUsage").and_then(Value::as_array) else {
             continue;
@@ -76,8 +78,8 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
             };
             let model_id = model_aliases::canonicalize_source_model_id(model_raw)
                 .unwrap_or_else(|| model_raw.trim().to_string());
-            let provider_id = provider_from_usage(usage, &model_id);
-            let tokens = tokens_from_usage(usage);
+            let provider_id = provider_from_usage(usage, &model_id)?;
+            let tokens = tokens_from_usage(usage)?;
             if tokens.total() == 0 {
                 continue;
             }
@@ -105,7 +107,7 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
                 agent.clone(),
             );
             message.dedup_key = Some(dedup_hash_str(&dedup_key));
-            message.duration_ms = number_field(usage, "time").filter(|duration| *duration > 0);
+            message.duration_ms = number_field(usage, "time")?.filter(|duration| *duration > 0);
             if pending_turn_start && !turn_start_assigned {
                 message.is_turn_start = true;
                 turn_start_assigned = true;
@@ -115,16 +117,21 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
         pending_turn_start = false;
     }
 
-    messages
+    Ok(messages)
 }
 
-fn session_id_from_path(path: &Path) -> String {
+fn session_id_from_path(path: &Path) -> SessionParseResult<String> {
     path.parent()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or("unknown")
-        .to_string()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Junie events path",
+                "parent directory must contain a UTF-8 session id",
+            )
+        })
 }
 
 fn session_timestamp_from_id(session_id: &str) -> Option<i64> {
@@ -169,21 +176,26 @@ fn agent_name(agent_event: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn provider_from_usage(usage: &Value, model_id: &str) -> String {
+fn provider_from_usage(usage: &Value, model_id: &str) -> SessionParseResult<String> {
     string_field(usage, "provider")
         .and_then(provider_identity::canonical_provider)
         .or_else(|| provider_identity::inferred_provider_from_model(model_id).map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Junie usage row",
+                format!("cannot determine provider for model `{model_id}`"),
+            )
+        })
 }
 
-fn tokens_from_usage(usage: &Value) -> TokenBreakdown {
-    TokenBreakdown {
-        input: first_number_field(usage, &["inputTokens", "input"]),
-        output: first_number_field(usage, &["outputTokens", "output"]),
+fn tokens_from_usage(usage: &Value) -> SessionParseResult<TokenBreakdown> {
+    Ok(TokenBreakdown {
+        input: first_number_field(usage, &["inputTokens", "input"])?,
+        output: first_number_field(usage, &["outputTokens", "output"])?,
         cache_read: first_number_field(
             usage,
             &["cacheInputTokens", "cacheReadInputTokens", "cacheRead"],
-        ),
+        )?,
         cache_write: first_number_field(
             usage,
             &[
@@ -191,12 +203,12 @@ fn tokens_from_usage(usage: &Value) -> TokenBreakdown {
                 "cacheCreationInputTokens",
                 "cacheWrite",
             ],
-        ),
+        )?,
         reasoning: first_number_field(
             usage,
             &["reasoningTokens", "reasoningOutputTokens", "thinkingTokens"],
-        ),
-    }
+        )?,
+    })
 }
 
 fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -207,48 +219,83 @@ fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-fn first_number_field(value: &Value, fields: &[&str]) -> i64 {
-    fields
-        .iter()
-        .find_map(|field| number_field(value, field))
-        .unwrap_or(0)
+fn first_number_field(value: &Value, fields: &[&str]) -> SessionParseResult<i64> {
+    for field in fields {
+        if let Some(number) = number_field(value, field)? {
+            return Ok(number);
+        }
+    }
+    Ok(0)
 }
 
-fn number_field(value: &Value, field: &str) -> Option<i64> {
-    number_value(value.get(field)?)
+fn number_field(value: &Value, field: &str) -> SessionParseResult<Option<i64>> {
+    match value.get(field) {
+        Some(value) => number_value(value),
+        None => Ok(None),
+    }
 }
 
-fn number_value(value: &Value) -> Option<i64> {
+fn number_value(value: &Value) -> SessionParseResult<Option<i64>> {
     if let Some(value) = value.as_i64() {
-        return Some(value.max(0));
+        if value < 0 {
+            return Err(SessionParseError::invalid(
+                "validate Junie token count",
+                "token count must be non-negative",
+            ));
+        }
+        return Ok(Some(value));
     }
     if let Some(value) = value.as_u64() {
-        return Some(i64::try_from(value).expect("Junie token count exceeds i64::MAX"));
+        return i64::try_from(value).map(Some).map_err(|_| {
+            SessionParseError::invalid("validate Junie token count", "token count exceeds i64::MAX")
+        });
     }
     if let Some(value) = value.as_f64() {
         return nonnegative_f64_to_i64(value);
     }
-    let value = value.as_str()?.trim();
+    let value = value
+        .as_str()
+        .ok_or_else(|| {
+            SessionParseError::invalid("validate Junie token count", "token count must be numeric")
+        })?
+        .trim();
     if let Ok(value) = value.parse::<i64>() {
-        return Some(value.max(0));
+        if value < 0 {
+            return Err(SessionParseError::invalid(
+                "validate Junie token count",
+                "token count must be non-negative",
+            ));
+        }
+        return Ok(Some(value));
     }
     if let Ok(value) = value.parse::<u64>() {
-        return Some(i64::try_from(value).expect("Junie token count exceeds i64::MAX"));
+        return i64::try_from(value).map(Some).map_err(|_| {
+            SessionParseError::invalid("validate Junie token count", "token count exceeds i64::MAX")
+        });
     }
-    value.parse::<f64>().ok().and_then(nonnegative_f64_to_i64)
+    let value = value
+        .parse::<f64>()
+        .map_err(|error| SessionParseError::new("decode Junie token count", error))?;
+    nonnegative_f64_to_i64(value)
 }
 
-fn nonnegative_f64_to_i64(value: f64) -> Option<i64> {
-    if !value.is_finite() {
-        return None;
+fn nonnegative_f64_to_i64(value: f64) -> SessionParseResult<Option<i64>> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(SessionParseError::invalid(
+            "validate Junie token count",
+            "token count must be finite and non-negative",
+        ));
     }
-    if value <= 0.0 {
-        return Some(0);
+    if value == 0.0 {
+        return Ok(Some(0));
     }
     if value >= i64::MAX as f64 {
-        panic!("Junie token count exceeds i64::MAX");
+        return Err(SessionParseError::invalid(
+            "validate Junie token count",
+            "token count exceeds i64::MAX",
+        ));
     }
-    Some(value as i64)
+    Ok(Some(value as i64))
 }
 
 #[cfg(test)]
@@ -260,18 +307,18 @@ mod tests {
     #[test]
     fn string_encoded_i64_max_is_accepted() {
         assert_eq!(
-            number_value(&Value::String(i64::MAX.to_string())),
+            number_value(&Value::String(i64::MAX.to_string())).unwrap(),
             Some(i64::MAX)
         );
     }
 
     #[test]
-    #[should_panic(expected = "Junie token count exceeds i64::MAX")]
     fn string_encoded_value_above_i64_max_fails_explicitly() {
-        let _ = number_value(&Value::String((i64::MAX as u64 + 1).to_string()));
+        let error = number_value(&Value::String((i64::MAX as u64 + 1).to_string())).unwrap_err();
+        assert_eq!(error.operation(), "validate Junie token count");
     }
 
-    fn parse_events(content: &str) -> Vec<UnifiedMessage> {
+    fn parse_events_result(content: &str) -> SessionParseResult<Vec<UnifiedMessage>> {
         let dir = TempDir::new().unwrap();
         let session_dir = dir.path().join("session-250622-101010");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -280,6 +327,10 @@ mod tests {
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         parse_junie_file(&path)
+    }
+
+    fn parse_events(content: &str) -> Vec<UnifiedMessage> {
+        parse_events_result(content).unwrap()
     }
 
     fn usage_event(timestamp_ms: i64, model: &str, input: i64, output: i64) -> String {
@@ -324,14 +375,13 @@ mod tests {
     }
 
     #[test]
-    fn infers_or_marks_unknown_provider_without_using_client_id() {
-        let messages = parse_events(
+    fn rejects_usage_whose_provider_cannot_be_determined() {
+        let error = parse_events_result(
             r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"claude-opus-4-8","inputTokens":10,"outputTokens":2},{"model":"local-router","inputTokens":3,"outputTokens":4}]}}}"#,
-        );
+        )
+        .unwrap_err();
 
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
-        assert_eq!(messages[1].provider_id.as_ref(), "unknown");
+        assert_eq!(error.operation(), "validate Junie usage row");
     }
 
     #[test]

@@ -158,8 +158,8 @@ pub(crate) fn run_headless_command(
         dir.join(filename)
     };
 
-    let settings = tui::settings::Settings::load();
-    let timeout = settings.get_native_timeout();
+    let settings = tui::settings::Settings::load()?;
+    let timeout = settings.get_native_timeout()?;
 
     use colored::Colorize;
     println!("\n  {}", "Headless capture".cyan());

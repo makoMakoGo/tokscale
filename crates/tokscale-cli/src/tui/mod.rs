@@ -84,8 +84,10 @@ fn load_background_data(
     force: bool,
     last_digest: Option<u64>,
 ) -> Result<BackgroundLoad> {
-    let prepared = loader.prepare(clients)?;
-    let digest = prepared.source_digest();
+    let mut prepared = loader.prepare(clients)?;
+    let digest = prepared
+        .refresh_source_inventory_signature()?
+        .process_digest();
     if !force && last_digest == Some(digest) {
         return Ok(BackgroundLoad::Unchanged);
     }
@@ -97,6 +99,30 @@ fn load_background_data(
             source_inventory_signature: result.source_inventory_signature,
             pricing_diagnostics: result.pricing_diagnostics,
         })
+}
+
+fn persist_background_load(
+    result: Result<BackgroundLoad>,
+    enabled_clients: &HashSet<ClientId>,
+    group_by: &tokscale_core::GroupBy,
+    report_scope: &CacheReportScope,
+) -> Result<BackgroundLoad> {
+    let result = result?;
+    if let BackgroundLoad::Loaded {
+        data,
+        source_inventory_signature,
+        ..
+    } = &result
+    {
+        save_cached_data(
+            data,
+            enabled_clients,
+            group_by,
+            report_scope,
+            *source_inventory_signature,
+        )?;
+    }
+    Ok(result)
 }
 
 fn pricing_diagnostics_status(diagnostics: &[String]) -> Option<&'static str> {
@@ -154,6 +180,7 @@ pub fn run(
             .with_env_filter("debug")
             .try_init();
     }
+    config::TokscaleConfig::initialize()?;
 
     let config = TuiConfig {
         theme: theme.map(str::to_string),
@@ -240,24 +267,12 @@ pub fn run(
 
         thread::spawn(move || {
             let loader = background_data_loader(bg_since, bg_until, bg_year);
-            let result = load_background_data(&loader, &bg_clients, &bg_group_by, true, None);
-
-            if let Ok(BackgroundLoad::Loaded {
-                data,
-                source_inventory_signature,
-                ..
-            }) = &result
-            {
-                if let Err(err) = save_cached_data(
-                    data,
-                    &bg_enabled_clients,
-                    &bg_group_by,
-                    &bg_report_scope,
-                    *source_inventory_signature,
-                ) {
-                    tracing::error!("failed to save TUI cache: {err}");
-                }
-            }
+            let result = persist_background_load(
+                load_background_data(&loader, &bg_clients, &bg_group_by, true, None),
+                &bg_enabled_clients,
+                &bg_group_by,
+                &bg_report_scope,
+            );
 
             send_background_result(&tx, result);
         });
@@ -387,23 +402,12 @@ fn run_loop_with_background(
 
             thread::spawn(move || {
                 let loader = background_data_loader(since, until, year);
-                let result = load_background_data(&loader, &clients, &group_by, force, last_digest);
-                if let Ok(BackgroundLoad::Loaded {
-                    data,
-                    source_inventory_signature,
-                    ..
-                }) = &result
-                {
-                    if let Err(err) = save_cached_data(
-                        data,
-                        &enabled_clients,
-                        &group_by,
-                        &report_scope,
-                        *source_inventory_signature,
-                    ) {
-                        tracing::error!("failed to save TUI cache: {err}");
-                    }
-                }
+                let result = persist_background_load(
+                    load_background_data(&loader, &clients, &group_by, force, last_digest),
+                    &enabled_clients,
+                    &group_by,
+                    &report_scope,
+                );
                 send_background_result(&tx, result);
             });
         }
@@ -481,6 +485,7 @@ mod tests {
             format!(
                 r#"{{
                     "id": "refresh-thread",
+                    "created": 1747800000000,
                     "messages": [{{
                         "role": "assistant",
                         "messageId": 1,
@@ -550,9 +555,9 @@ mod tests {
         let loader = background_data_loader(None, None, None);
         let clients = [ClientId::Amp];
         let signature_a = loader
-            .prepare(&clients)
+            .load_with_diagnostics(&clients, &tokscale_core::GroupBy::Model)
             .unwrap()
-            .source_inventory_signature();
+            .source_inventory_signature;
         let (_, needs_load, baseline) =
             decide_initial_data(CacheResult::Fresh(UsageData::default(), signature_a));
         assert!(!needs_load);
@@ -595,7 +600,13 @@ mod tests {
         write_amp_source(home.path(), 10);
         let loader = background_data_loader(None, None, None);
         let clients = [ClientId::Amp];
-        let baseline = Some(loader.prepare(&clients).unwrap().source_digest());
+        let mut prepared = loader.prepare(&clients).unwrap();
+        let baseline = Some(
+            prepared
+                .refresh_source_inventory_signature()
+                .unwrap()
+                .process_digest(),
+        );
 
         for last_digest in [baseline, None, None] {
             assert!(matches!(

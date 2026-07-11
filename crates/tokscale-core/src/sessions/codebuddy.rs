@@ -4,6 +4,7 @@
 //! `~/.codebuddy/projects/<project-key>/*.jsonl`, and the IDE / VS Code
 //! extension writes final agent usage into extension logs.
 
+use super::error::{SessionParseError, SessionParseResult};
 use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use chrono::TimeZone;
@@ -13,8 +14,6 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "codebuddy";
-const DEFAULT_MODEL: &str = "unknown";
-const DEFAULT_PROVIDER: &str = "unknown";
 
 #[derive(Debug, Deserialize)]
 struct CodeBuddyLine {
@@ -130,34 +129,23 @@ impl CodeBuddyUsage {
     }
 }
 
-pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-
-    let fallback_session_id = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| SessionParseError::new("open CodeBuddy JSONL file", error))?;
     let mut keyed_indices: HashMap<u64, usize> = HashMap::new();
     let mut messages: Vec<UnifiedMessage> = Vec::new();
 
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
+        let line =
+            line.map_err(|error| SessionParseError::new("read CodeBuddy JSONL line", error))?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
         let mut bytes = trimmed.as_bytes().to_vec();
-        let item = match simd_json::from_slice::<CodeBuddyLine>(&mut bytes) {
-            Ok(item) => item,
-            Err(_) => continue,
-        };
+        let item = simd_json::from_slice::<CodeBuddyLine>(&mut bytes)
+            .map_err(|error| SessionParseError::new("decode CodeBuddy JSONL line", error))?;
 
         let is_assistant_message = item.line_type.as_deref() == Some("message")
             && item.role.as_deref() == Some("assistant");
@@ -202,17 +190,39 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
                     .and_then(|message| message.model.as_deref())
             })
             .filter(|model| !model.trim().is_empty())
-            .unwrap_or(DEFAULT_MODEL)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate CodeBuddy usage row",
+                    "usage row is missing model id",
+                )
+            })?
             .to_string();
         let provider_id = provider_identity::inferred_provider_from_model(&model_id)
-            .unwrap_or(DEFAULT_PROVIDER)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate CodeBuddy usage row",
+                    format!("cannot infer provider for model `{model_id}`"),
+                )
+            })?
             .to_string();
         let session_id = item
             .session_id
-            .unwrap_or_else(|| fallback_session_id.clone());
-        let Some(timestamp) = item.timestamp else {
-            continue;
-        };
+            .filter(|session_id| !session_id.trim().is_empty())
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate CodeBuddy usage row",
+                    "usage row is missing sessionId",
+                )
+            })?;
+        let timestamp = item
+            .timestamp
+            .filter(|timestamp| *timestamp > 0)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate CodeBuddy usage row",
+                    "usage row is missing a positive timestamp",
+                )
+            })?;
 
         let dedup_key = provider_data
             .and_then(|provider| provider.message_id.as_deref())
@@ -249,27 +259,30 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
         messages.push(message);
     }
 
-    messages
+    Ok(messages)
 }
 
-pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
+pub(crate) fn parse_codebuddy_extension_log_file(
+    path: &Path,
+) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| SessionParseError::new("open CodeBuddy extension log", error))?;
 
     let mut models_by_agent: HashMap<String, String> = HashMap::new();
     let mut messages = Vec::new();
 
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
+        let line = line
+            .map_err(|error| SessionParseError::new("read CodeBuddy extension log line", error))?;
 
         if line.contains("[CraftInvokableAgent]") && line.contains("Model prepared:") {
-            if let Some((agent_id, model_id)) = parse_model_prepared_line(&line) {
-                models_by_agent.insert(agent_id, model_id);
-            }
+            let (agent_id, model_id) = parse_model_prepared_line(&line).ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate CodeBuddy model log line",
+                    "Model prepared line is missing agent or model id",
+                )
+            })?;
+            models_by_agent.insert(agent_id, model_id);
             continue;
         }
 
@@ -279,34 +292,54 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMess
             continue;
         }
 
-        let Some(agent_id) = bracket_value_after(&line, "[AgentReporter]") else {
-            continue;
-        };
-        let Some(usage_json) = line.split("Agent execution successful with usage:").nth(1) else {
-            continue;
-        };
+        let agent_id = bracket_value_after(&line, "[AgentReporter]").ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate CodeBuddy usage log line",
+                "usage line is missing AgentReporter id",
+            )
+        })?;
+        let usage_json = line
+            .split("Agent execution successful with usage:")
+            .nth(1)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate CodeBuddy usage log line",
+                    "usage line is missing JSON payload",
+                )
+            })?;
         let usage_json = usage_json.trim();
-        let Some(usage_json) = first_json_object(usage_json) else {
-            continue;
-        };
+        let usage_json = first_json_object(usage_json).ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate CodeBuddy usage log line",
+                "usage line contains no complete JSON object",
+            )
+        })?;
         let mut bytes = usage_json.as_bytes().to_vec();
-        let usage = match simd_json::from_slice::<CodeBuddyUsage>(&mut bytes) {
-            Ok(usage) => usage,
-            Err(_) => continue,
-        };
+        let usage = simd_json::from_slice::<CodeBuddyUsage>(&mut bytes)
+            .map_err(|error| SessionParseError::new("decode CodeBuddy usage log JSON", error))?;
         let Some(tokens) = usage.to_breakdown() else {
             continue;
         };
 
-        let Some(timestamp) = parse_log_timestamp_ms(&line) else {
-            continue;
-        };
-        let model_id = models_by_agent
-            .get(&agent_id)
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let timestamp = parse_log_timestamp_ms(&line).ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate CodeBuddy usage log line",
+                "usage line has no valid timestamp",
+            )
+        })?;
+        let model_id = models_by_agent.get(&agent_id).cloned().ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate CodeBuddy usage log line",
+                format!("agent `{agent_id}` has no preceding model selection"),
+            )
+        })?;
         let provider_id = provider_identity::inferred_provider_from_model(&model_id)
-            .unwrap_or(DEFAULT_PROVIDER)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate CodeBuddy usage log line",
+                    format!("cannot infer provider for model `{model_id}`"),
+                )
+            })?
             .to_string();
         let mut message = UnifiedMessage::new_with_dedup(
             CLIENT_ID,
@@ -327,7 +360,7 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMess
         messages.push(message);
     }
 
-    messages
+    Ok(messages)
 }
 
 fn first_json_object(value: &str) -> Option<&str> {
@@ -452,6 +485,14 @@ fn workspace_from_log_path(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn parse_codebuddy_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_codebuddy_jsonl_file(path).unwrap()
+    }
+
+    fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_codebuddy_extension_log_file(path).unwrap()
+    }
+
     #[test]
     fn parse_codebuddy_jsonl_file_reads_message_usage() {
         let dir = tempfile::tempdir().unwrap();
@@ -547,7 +588,8 @@ mod tests {
         let path = dir.path().join("session.log");
         std::fs::write(
             &path,
-            r#"[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: [info] {"inputTokens":10,"outputTokens":2,"totalTokens":12,"label":"keeps } in strings"} trailing } text"#,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: [info] {"inputTokens":10,"outputTokens":2,"totalTokens":12,"label":"keeps } in strings"} trailing } text"#,
         )
         .unwrap();
 
@@ -566,7 +608,8 @@ mod tests {
         let extension_sink = dir.path().join("proj__session.log");
         std::fs::write(
             &extension_sink,
-            r#"[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":140732,"outputTokens":635,"totalTokens":141367}"#,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":140732,"outputTokens":635,"totalTokens":141367}"#,
         )
         .unwrap();
 
@@ -596,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_rows_without_timestamp_are_skipped() {
+    fn jsonl_rows_without_timestamp_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         std::fs::write(
@@ -605,13 +648,12 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_codebuddy_jsonl_file(&path);
-
-        assert!(messages.is_empty());
+        let error = super::parse_codebuddy_jsonl_file(&path).unwrap_err();
+        assert_eq!(error.operation(), "validate CodeBuddy usage row");
     }
 
     #[test]
-    fn extension_log_rows_without_timestamp_are_skipped() {
+    fn extension_log_rows_without_timestamp_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.log");
         std::fs::write(
@@ -620,8 +662,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_codebuddy_extension_log_file(&path);
-
-        assert!(messages.is_empty());
+        let error = super::parse_codebuddy_extension_log_file(&path).unwrap_err();
+        assert_eq!(error.operation(), "validate CodeBuddy usage log line");
     }
 }

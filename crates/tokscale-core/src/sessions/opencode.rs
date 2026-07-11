@@ -7,23 +7,163 @@ use super::{
 use crate::model_aliases;
 use crate::TokenBreakdown;
 use rusqlite::{Connection, OpenFlags};
-use serde::Deserialize;
+use serde::de::{self, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-#[derive(Debug, Deserialize)]
-struct RoleEnvelope {
-    role: String,
-}
+#[derive(Debug)]
+struct DecodedOpenCodeMessage(Option<OpenCodeAssistant>);
 
 #[derive(Debug, Deserialize)]
-struct OpenCodeAssistant {
-    #[serde(default)]
-    id: Option<String>,
+#[serde(field_identifier)]
+enum OpenCodeMessageField {
+    #[serde(rename = "role")]
+    Role,
+    #[serde(rename = "id")]
+    Id,
     #[serde(rename = "modelID")]
-    model_id: String,
+    ModelId,
     #[serde(rename = "providerID")]
+    ProviderId,
+    #[serde(rename = "tokens")]
+    Tokens,
+    #[serde(rename = "time")]
+    Time,
+    #[serde(rename = "agent")]
+    Agent,
+    #[serde(rename = "mode")]
+    Mode,
+    #[serde(other)]
+    Other,
+}
+
+struct OpenCodeMessageVisitor;
+
+impl<'de> Visitor<'de> for OpenCodeMessageVisitor {
+    type Value = DecodedOpenCodeMessage;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a current-format OpenCode message object")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        let mut role: Option<String> = None;
+        let mut id: Option<String> = None;
+        let mut model_id: Option<String> = None;
+        let mut provider_id: Option<String> = None;
+        let mut tokens: Option<NullableOpenCodeTokens> = None;
+        let mut time: Option<OpenCodeTime> = None;
+        let mut agent: Option<String> = None;
+        let mut mode: Option<String> = None;
+
+        let mut saw_id = false;
+        let mut saw_agent = false;
+        let mut saw_mode = false;
+
+        while let Some(field) = map.next_key::<OpenCodeMessageField>()? {
+            if role
+                .as_deref()
+                .is_some_and(|role: &str| role != "assistant")
+                && !matches!(field, OpenCodeMessageField::Role)
+            {
+                map.next_value::<IgnoredAny>()?;
+                continue;
+            }
+
+            match field {
+                OpenCodeMessageField::Role => {
+                    if role.is_some() {
+                        return Err(de::Error::duplicate_field("role"));
+                    }
+                    role = Some(map.next_value()?);
+                }
+                OpenCodeMessageField::Id => {
+                    if saw_id {
+                        return Err(de::Error::duplicate_field("id"));
+                    }
+                    saw_id = true;
+                    id = map.next_value()?;
+                }
+                OpenCodeMessageField::ModelId => {
+                    if model_id.is_some() {
+                        return Err(de::Error::duplicate_field("modelID"));
+                    }
+                    model_id = Some(map.next_value()?);
+                }
+                OpenCodeMessageField::ProviderId => {
+                    if provider_id.is_some() {
+                        return Err(de::Error::duplicate_field("providerID"));
+                    }
+                    provider_id = Some(map.next_value()?);
+                }
+                OpenCodeMessageField::Tokens => {
+                    if tokens.is_some() {
+                        return Err(de::Error::duplicate_field("tokens"));
+                    }
+                    tokens = Some(map.next_value()?);
+                }
+                OpenCodeMessageField::Time => {
+                    if time.is_some() {
+                        return Err(de::Error::duplicate_field("time"));
+                    }
+                    time = Some(map.next_value()?);
+                }
+                OpenCodeMessageField::Agent => {
+                    if saw_agent {
+                        return Err(de::Error::duplicate_field("agent"));
+                    }
+                    saw_agent = true;
+                    agent = map.next_value()?;
+                }
+                OpenCodeMessageField::Mode => {
+                    if saw_mode {
+                        return Err(de::Error::duplicate_field("mode"));
+                    }
+                    saw_mode = true;
+                    mode = map.next_value()?;
+                }
+                OpenCodeMessageField::Other => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        let role = role.ok_or_else(|| de::Error::missing_field("role"))?;
+        if role != "assistant" {
+            return Ok(DecodedOpenCodeMessage(None));
+        }
+
+        Ok(DecodedOpenCodeMessage(Some(OpenCodeAssistant {
+            id,
+            model_id: model_id.ok_or_else(|| de::Error::missing_field("modelID"))?,
+            provider_id: provider_id.ok_or_else(|| de::Error::missing_field("providerID"))?,
+            tokens: tokens.ok_or_else(|| de::Error::missing_field("tokens"))?,
+            time: time.ok_or_else(|| de::Error::missing_field("time"))?,
+            agent,
+            mode,
+        })))
+    }
+}
+
+impl<'de> Deserialize<'de> for DecodedOpenCodeMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(OpenCodeMessageVisitor)
+    }
+}
+
+#[derive(Debug)]
+struct OpenCodeAssistant {
+    id: Option<String>,
+    model_id: String,
     provider_id: String,
     tokens: NullableOpenCodeTokens,
     time: OpenCodeTime,
@@ -207,11 +347,7 @@ fn canonicalize_opencode_model_id(model_id: String) -> String {
 fn decode_opencode_assistant(
     data_json: &str,
 ) -> Result<Option<OpenCodeAssistant>, serde_json::Error> {
-    let envelope: RoleEnvelope = serde_json::from_str(data_json)?;
-    if envelope.role != "assistant" {
-        return Ok(None);
-    }
-    serde_json::from_str(data_json).map(Some)
+    serde_json::from_str(data_json).map(|message: DecodedOpenCodeMessage| message.0)
 }
 
 /// Parse a current-format OpenCode SQLite database.
@@ -415,6 +551,95 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<Vec<UnifiedMessage>, Open
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+
+    #[derive(Debug, Deserialize)]
+    struct TwoPassRoleEnvelope {
+        role: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct TwoPassOpenCodeAssistant {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(rename = "modelID")]
+        model_id: String,
+        #[serde(rename = "providerID")]
+        provider_id: String,
+        tokens: NullableOpenCodeTokens,
+        time: OpenCodeTime,
+        agent: Option<String>,
+        mode: Option<String>,
+    }
+
+    fn decode_opencode_assistant_two_pass_baseline(
+        data_json: &str,
+    ) -> Result<Option<TwoPassOpenCodeAssistant>, serde_json::Error> {
+        let envelope: TwoPassRoleEnvelope = serde_json::from_str(data_json)?;
+        if envelope.role != "assistant" {
+            return Ok(None);
+        }
+        serde_json::from_str(data_json).map(Some)
+    }
+
+    fn measure_decode<T>(
+        payload: &str,
+        iterations: usize,
+        decode: impl Fn(&str) -> Result<Option<T>, serde_json::Error>,
+    ) -> Duration {
+        let started = Instant::now();
+        for _ in 0..iterations {
+            black_box(decode(black_box(payload)).unwrap());
+        }
+        started.elapsed()
+    }
+
+    fn median_duration(mut samples: Vec<Duration>) -> Duration {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    fn benchmark_decode_pair(payload: &str, iterations: usize) -> (Duration, Duration) {
+        const SAMPLES: usize = 5;
+
+        black_box(decode_opencode_assistant_two_pass_baseline(payload).unwrap());
+        black_box(decode_opencode_assistant(payload).unwrap());
+
+        let mut baseline_samples = Vec::with_capacity(SAMPLES);
+        let mut single_pass_samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                baseline_samples.push(measure_decode(
+                    payload,
+                    iterations,
+                    decode_opencode_assistant_two_pass_baseline,
+                ));
+                single_pass_samples.push(measure_decode(
+                    payload,
+                    iterations,
+                    decode_opencode_assistant,
+                ));
+            } else {
+                single_pass_samples.push(measure_decode(
+                    payload,
+                    iterations,
+                    decode_opencode_assistant,
+                ));
+                baseline_samples.push(measure_decode(
+                    payload,
+                    iterations,
+                    decode_opencode_assistant_two_pass_baseline,
+                ));
+            }
+        }
+
+        (
+            median_duration(baseline_samples),
+            median_duration(single_pass_samples),
+        )
+    }
 
     fn create_current_db(path: &Path) -> Connection {
         let conn = Connection::open(path).unwrap();
@@ -828,6 +1053,91 @@ mod tests {
 
         assert!(payload.len() >= CONTENT_BYTES);
         assert!(decode_opencode_assistant(&payload).unwrap().is_none());
+    }
+
+    #[test]
+    fn large_user_payload_with_role_last_is_ignored_without_generic_materialization() {
+        const CONTENT_BYTES: usize = 10 * 1024 * 1024;
+
+        let mut payload = String::with_capacity(CONTENT_BYTES + 32);
+        payload.push_str(r#"{"content":""#);
+        payload.extend(std::iter::repeat_n('x', CONTENT_BYTES));
+        payload.push_str(r#"","role":"user"}"#);
+
+        assert!(payload.len() >= CONTENT_BYTES);
+        assert!(decode_opencode_assistant(&payload).unwrap().is_none());
+    }
+
+    #[test]
+    fn decodes_assistant_when_role_is_the_last_field() {
+        let payload = r#"{"modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"reasoning":2,"cache":{"read":3,"write":1}},"time":{"created":1766000000000,"completed":1766000000123},"mode":"build","role":"assistant"}"#;
+
+        let assistant = decode_opencode_assistant(payload).unwrap().unwrap();
+
+        assert_eq!(assistant.model_id, "gpt-5.5");
+        assert_eq!(assistant.provider_id, "openai");
+        assert_eq!(assistant.tokens.0.unwrap().input, 10);
+        assert_eq!(assistant.time.created, 1_766_000_000_000.0);
+        assert_eq!(assistant.mode.as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn role_last_assistant_type_errors_and_missing_role_are_explicit() {
+        let malformed_assistant = r#"{"modelID":42,"providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000},"role":"assistant"}"#;
+        let missing_role = r#"{"modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#;
+
+        assert!(decode_opencode_assistant(malformed_assistant)
+            .unwrap_err()
+            .to_string()
+            .contains("string"));
+        assert!(decode_opencode_assistant(missing_role)
+            .unwrap_err()
+            .to_string()
+            .contains("role"));
+    }
+
+    #[test]
+    fn duplicate_required_assistant_fields_are_explicit_decode_errors() {
+        let payloads = [
+            r#"{"role":"assistant","role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+            r#"{"role":"assistant","modelID":"gpt-5.5","modelID":"gpt-5.6","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+            r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+            r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+            r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000},"time":{"created":1766000000000}}"#,
+        ];
+
+        for payload in payloads {
+            assert!(decode_opencode_assistant(payload)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate field"));
+        }
+    }
+
+    #[test]
+    #[ignore = "deterministic microbenchmark; run explicitly in release mode"]
+    fn focused_decode_microbenchmark() {
+        const ASSISTANT_ITERATIONS: usize = 50_000;
+        const LARGE_USER_ITERATIONS: usize = 8;
+        const CONTENT_BYTES: usize = 10 * 1024 * 1024;
+
+        let assistant_payload = r#"{"id":"msg_1","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"reasoning":2,"cache":{"read":3,"write":1}},"time":{"created":1766000000000,"completed":1766000000123},"mode":"build","role":"assistant"}"#;
+        let mut large_user_payload = String::with_capacity(CONTENT_BYTES + 32);
+        large_user_payload.push_str(r#"{"role":"user","content":""#);
+        large_user_payload.extend(std::iter::repeat_n('x', CONTENT_BYTES));
+        large_user_payload.push_str(r#""}"#);
+
+        let (assistant_baseline, assistant_single_pass) =
+            benchmark_decode_pair(assistant_payload, ASSISTANT_ITERATIONS);
+        let (user_baseline, user_single_pass) =
+            benchmark_decode_pair(&large_user_payload, LARGE_USER_ITERATIONS);
+
+        eprintln!(
+            "assistant iterations={ASSISTANT_ITERATIONS}: two_pass={assistant_baseline:?}, single_pass={assistant_single_pass:?}"
+        );
+        eprintln!(
+            "10MiB user iterations={LARGE_USER_ITERATIONS}: two_pass={user_baseline:?}, single_pass={user_single_pass:?}"
+        );
     }
 
     #[test]

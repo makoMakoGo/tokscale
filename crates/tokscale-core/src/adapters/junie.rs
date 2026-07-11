@@ -4,7 +4,8 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
+    EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{sessions, ClientId};
@@ -16,12 +17,15 @@ impl LocalSourceAdapter for JunieAdapter {
         ClientId::Junie
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
-        adapter_discover::discover_default_scanned_units(
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+        let units = adapter_discover::discover_default_scanned_units(
             ClientId::Junie,
             ctx,
             FingerprintPolicy::PlainFile,
-        )
+        )?
         .into_iter()
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
@@ -29,10 +33,15 @@ impl LocalSourceAdapter for JunieAdapter {
                 EXPLICIT_TOKEN_OVERFLOW_REVISION,
             ))
         })
-        .collect()
+        .collect();
+        Ok(units)
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -47,12 +56,17 @@ impl LocalSourceAdapter for JunieAdapter {
         &self,
         unit: SourceUnit,
         source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<ParsedUnit, SourceUnit> {
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
         adapter_cache::plan_cache_hit(unit, source_cache)
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
-        adapter_cache::fold_units(parsed, ctx, sink);
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
+        adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 
@@ -104,22 +118,20 @@ mod tests {
         cache: &mut message_cache::SourceMessageCache,
         pricing: Option<&PricingService>,
     ) -> Vec<sessions::UnifiedMessage> {
-        let parsed = JUNIE_ADAPTER.parse(
-            units,
-            &ParseContext {
-                source_cache: cache,
-                pricing,
-            },
-        );
+        let parsed = JUNIE_ADAPTER
+            .parse_checked(units, &ParseContext { pricing })
+            .unwrap();
         let mut messages = Vec::new();
-        JUNIE_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: cache,
-                pricing,
-            },
-            &mut messages,
-        );
+        JUNIE_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: cache,
+                    pricing,
+                },
+                &mut messages,
+            )
+            .unwrap();
         messages
     }
 
@@ -144,7 +156,9 @@ mod tests {
         let path = write_session(home.path());
         let settings = ScannerSettings::default();
 
-        let units = JUNIE_ADAPTER.discover(&scan_context(home.path(), &settings));
+        let units = JUNIE_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .unwrap();
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].client, ClientId::Junie);
@@ -163,7 +177,7 @@ mod tests {
             &mut cache,
             None,
         );
-        let expected = sessions::junie::parse_junie_file(&path);
+        let expected = sessions::junie::parse_junie_file(&path).unwrap();
 
         assert_eq!(actual, expected);
     }
@@ -177,32 +191,29 @@ mod tests {
         unsafe { std::env::set_var("TOKSCALE_CONFIG_DIR", cache_home.path()) };
 
         let path = write_session(home.path());
-        let mut cache = message_cache::SourceMessageCache::load();
+        let mut cache = message_cache::SourceMessageCache::load().unwrap();
         let units = vec![SourceUnit::plain_file(ClientId::Junie, path.clone())];
 
         let fresh = fold_with_adapter(units.clone(), &mut cache, None);
-        let parsed = JUNIE_ADAPTER.parse(
-            units,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-        );
-
-        assert!(matches!(
-            parsed[0].messages,
-            crate::adapters::UnitMessageSource::CacheHit(_)
-        ));
+        let planned = JUNIE_ADAPTER
+            .plan_cache_hit(units.into_iter().next().unwrap(), &cache)
+            .unwrap();
+        let parsed = match planned {
+            crate::adapters::CacheHitPlan::Hit(parsed) => vec![parsed],
+            crate::adapters::CacheHitPlan::Miss(_) => panic!("expected Junie cache hit"),
+        };
 
         let mut cached = Vec::new();
-        JUNIE_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-            &mut cached,
-        );
+        JUNIE_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut cached,
+            )
+            .unwrap();
 
         assert_eq!(cached, fresh);
         restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
@@ -218,7 +229,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"junie-test-model","cost":0.123,"inputTokens":1000,"cacheInputTokens":2,"cacheCreateTokens":3,"outputTokens":250,"reasoningTokens":1}]}}}"#,
+            r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"junie-test-model","provider":"openai","cost":0.123,"inputTokens":1000,"cacheInputTokens":2,"cacheCreateTokens":3,"outputTokens":250,"reasoningTokens":1}]}}}"#,
         )
         .unwrap();
         let pricing = pricing_service();

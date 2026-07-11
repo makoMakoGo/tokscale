@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+Partially superseded by ADR 0020 for persisted file identity, snapshot
+revalidation, cache format and pruning, TUI schema, Codex fallback state, and
+structured-key collision behavior.
+
 ## Context
 
 On a real corpus (~255K messages, ~1.5GB of source transcripts) one parse
@@ -134,23 +138,16 @@ The parse pipeline must hold at most one owned copy of any message.
   any unrelated workspace or session field, and create public Strings only when
   a bucket is materialized. Distinct identity collections keep empty and
   singleton states inline and allocate a hash table only after a second value.
-  Historical delimiter-based public keys remain unchanged. Distinct structured
-  buckets that share one legacy public key are coalesced explicitly in
-  first-seen order at that boundary, preserving legacy totals and
-  representative-field rules without finish-time map overwrite.
-  Delimiter-free composite keys and ordinary length-prefixed workspace keys
-  are provably injective and materialize directly; only delimiter-bearing keys
-  and the unknown-workspace sentinel pair enter the compatibility table.
+  As superseded by ADR 0020, distinct structured buckets are never coalesced
+  through legacy delimiter-based public keys. Persisted DTO maps use a
+  versioned, variant-tagged, byte-length-prefixed storage key, including a
+  distinct tag for unknown workspace identity.
 - Serialization layout changes bump `CACHE_FORMAT_VERSION`; parser-only
   changes bump the relevant parser revision. The shard envelope stores a
-  fixed magic and format version before the bincode header. Current v3 shard
-  filenames hash native path bytes, an explicit stable parser name, and parser
-  revision rather than serialized enum order. Ordinary reads have one current
-  decoder and do not locate, migrate, or delete v2 files. Explicit pruning can
-  classify and remove the known v2 envelope without a compatibility decoder;
-  unknown, future, or malformed-current envelopes stop classification before
-  deletion. Stale shards rebuild instead of being decoded under incompatible
-  assumptions.
+  fixed magic and format version before the bincode header. As superseded by
+  ADR 0020, ordinary reads accept only v4; explicit pruning recognizes the
+  frozen v1, v2, and v3 envelopes only for deletion. Unknown, future, or
+  malformed-current envelopes stop classification before deletion.
 
 ADR 0018 implements the planned streaming follow-up with a bounded ordered
 source-fold pipeline. Aggregation paths no longer retain adapter-wide parsed

@@ -1,29 +1,14 @@
 //! OpenClaw session parser
 //!
 //! Parses OpenClaw transcript JSONL files from agent directories.
-//! Supports legacy sessions.json index parsing for compatibility.
+//! Current-format sources are individual transcript files.
 
-use super::utils::read_file_or_none;
+use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
-use crate::{model_aliases, TokenBreakdown};
+use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, Deserialize)]
-struct SessionIndex {
-    #[serde(flatten)]
-    sessions: HashMap<String, SessionEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionEntry {
-    #[serde(rename = "sessionId")]
-    session_id: String,
-    #[serde(rename = "sessionFile")]
-    session_file: Option<String>,
-}
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 struct OpenClawEntry {
@@ -67,32 +52,9 @@ struct OpenClawUsage {
     total_tokens: Option<i64>,
 }
 
-pub fn parse_openclaw_index(index_path: &Path) -> Vec<UnifiedMessage> {
-    let Some(data) = read_file_or_none(index_path) else {
-        return Vec::new();
-    };
-
-    let mut bytes = data;
-    let index: SessionIndex = match simd_json::from_slice(&mut bytes) {
-        Ok(i) => i,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut all_messages = Vec::new();
-    let index_dir = index_path.parent().unwrap_or_else(|| Path::new("."));
-
-    for (_key, entry) in index.sessions {
-        let session_path = resolve_session_path(index_dir, &entry);
-        if session_path.exists() {
-            let messages = parse_openclaw_session(&session_path, &entry.session_id);
-            all_messages.extend(messages);
-        }
-    }
-
-    all_messages
-}
-
-pub fn parse_openclaw_transcript(transcript_path: &Path) -> Vec<UnifiedMessage> {
+pub fn parse_openclaw_transcript(
+    transcript_path: &Path,
+) -> SessionParseResult<Vec<UnifiedMessage>> {
     let session_id = match transcript_path
         .file_name()
         .and_then(|n| {
@@ -103,44 +65,29 @@ pub fn parse_openclaw_transcript(transcript_path: &Path) -> Vec<UnifiedMessage> 
         .filter(|id| !id.is_empty())
     {
         Some(id) => id,
-        None => return Vec::new(),
+        None => {
+            return Err(SessionParseError::invalid(
+                "validate OpenClaw transcript path",
+                "transcript filename must contain a non-empty `.jsonl` session id",
+            ));
+        }
     };
 
     parse_openclaw_session(transcript_path, &session_id)
 }
 
-fn resolve_session_path(index_dir: &Path, entry: &SessionEntry) -> PathBuf {
-    match entry
-        .session_file
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(session_file) => {
-            let path = Path::new(session_file);
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                index_dir.join(path)
-            }
-        }
-        None => index_dir.join(format!("{}.jsonl", entry.session_id)),
+fn parse_openclaw_session(
+    session_path: &Path,
+    session_id: &str,
+) -> SessionParseResult<Vec<UnifiedMessage>> {
+    if session_id.trim().is_empty() {
+        return Err(SessionParseError::invalid(
+            "validate OpenClaw session",
+            "session id must not be empty",
+        ));
     }
-}
-
-fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(session_path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
-    // Get file modification time as fallback for missing timestamps
-    let file_mtime_ms = std::fs::metadata(session_path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let file = std::fs::File::open(session_path)
+        .map_err(|error| SessionParseError::new("open OpenClaw transcript", error))?;
 
     let reader = BufReader::new(file);
     let mut messages = Vec::with_capacity(64);
@@ -149,10 +96,8 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
     let mut buffer = Vec::with_capacity(4096);
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        let line =
+            line.map_err(|error| SessionParseError::new("read OpenClaw JSONL line", error))?;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -161,10 +106,8 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
 
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
-        let entry: OpenClawEntry = match simd_json::from_slice(&mut buffer) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let entry: OpenClawEntry = simd_json::from_slice(&mut buffer)
+            .map_err(|error| SessionParseError::new("decode OpenClaw JSONL line", error))?;
 
         match entry.entry_type.as_str() {
             "model_change" => {
@@ -206,21 +149,43 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
                         .filter(|m| !m.is_empty())
                         .map(|model| canonicalize_openclaw_model(&model))
                         .or_else(|| current_model.clone().filter(|m| !m.is_empty()));
+                    let model = model.ok_or_else(|| {
+                        SessionParseError::invalid(
+                            "validate OpenClaw assistant message",
+                            "assistant message has no model",
+                        )
+                    })?;
                     let provider = msg
                         .provider
                         .clone()
-                        .filter(|p| !p.is_empty())
-                        .or_else(|| current_provider.clone().filter(|p| !p.is_empty()))
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    let model = match model {
-                        Some(model) => model,
-                        None => continue,
-                    };
+                        .filter(|provider| !provider.trim().is_empty())
+                        .or_else(|| {
+                            current_provider
+                                .clone()
+                                .filter(|provider| !provider.trim().is_empty())
+                        })
+                        .or_else(|| {
+                            provider_identity::inferred_provider_from_model(&model)
+                                .map(str::to_string)
+                        })
+                        .ok_or_else(|| {
+                            SessionParseError::invalid(
+                                "validate OpenClaw assistant message",
+                                format!("cannot determine provider for model `{model}`"),
+                            )
+                        })?;
 
                     current_model = Some(model.clone());
                     current_provider = Some(provider.clone());
-                    let timestamp = msg.timestamp.unwrap_or(file_mtime_ms);
+                    let timestamp = msg
+                        .timestamp
+                        .filter(|timestamp| *timestamp > 0)
+                        .ok_or_else(|| {
+                            SessionParseError::invalid(
+                                "validate OpenClaw assistant message",
+                                "assistant message is missing a positive timestamp",
+                            )
+                        })?;
                     let tokens = TokenBreakdown {
                         input: usage.input.unwrap_or(0).max(0),
                         output: usage.output.unwrap_or(0).max(0),
@@ -241,7 +206,7 @@ fn parse_openclaw_session(session_path: &Path, session_id: &str) -> Vec<UnifiedM
         }
     }
 
-    messages
+    Ok(messages)
 }
 
 fn canonicalize_openclaw_model(model: &str) -> String {
@@ -254,6 +219,14 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
+
+    fn parse_openclaw_session(path: &Path, session_id: &str) -> Vec<UnifiedMessage> {
+        super::parse_openclaw_session(path, session_id).unwrap()
+    }
+
+    fn parse_openclaw_transcript(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_openclaw_transcript(path).unwrap()
+    }
 
     fn create_test_session(dir: &TempDir, filename: &str, content: &str) -> String {
         let path = dir.path().join(filename);
@@ -295,14 +268,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_openclaw_session_no_model_change() {
+    fn test_parse_openclaw_session_without_any_model_is_rejected() {
         let dir = TempDir::new().unwrap();
         let content = r#"{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(&dir, "session.jsonl", content);
-        let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
-
-        assert_eq!(messages.len(), 0);
+        let error =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap_err();
+        assert_eq!(error.operation(), "validate OpenClaw assistant message");
     }
 
     #[test]
@@ -395,17 +368,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_openclaw_session_preserves_unknown_provider_fallback() {
+    fn test_parse_openclaw_session_infers_provider_from_model() {
         let dir = TempDir::new().unwrap();
         let content = r#"{"type":"model_change","modelId":"claude-sonnet-4.6"}
 {"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":10,"output":5},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(&dir, "session.jsonl", content);
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
-
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
-        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
     #[test]
@@ -420,80 +391,5 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
-    }
-
-    fn create_test_index(dir: &TempDir, content: &str) -> PathBuf {
-        let index_path = dir.path().join("sessions.json");
-        let mut file = File::create(&index_path).unwrap();
-        file.write_all(content.as_bytes()).unwrap();
-        index_path
-    }
-
-    #[test]
-    fn test_parse_openclaw_index_absolute_session_file() {
-        let dir = TempDir::new().unwrap();
-
-        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4.6"}
-{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
-        let session_path = create_test_session(&dir, "session-abc.jsonl", session_content);
-
-        let index_content = format!(
-            r#"{{
-            "agent:main:main": {{
-                "sessionId": "abc-123",
-                "sessionFile": "{}"
-            }}
-        }}"#,
-            session_path.replace('\\', "\\\\")
-        );
-        let index_path = create_test_index(&dir, &index_content);
-
-        let messages = parse_openclaw_index(&index_path);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
-        assert_eq!(messages[0].session_id.as_ref(), "abc-123");
-    }
-
-    #[test]
-    fn test_parse_openclaw_index_relative_session_file() {
-        let dir = TempDir::new().unwrap();
-
-        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4.6"}
-{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
-        create_test_session(&dir, "session-relative.jsonl", session_content);
-
-        let index_content = r#"{
-            "agent:main:main": {
-                "sessionId": "relative-123",
-                "sessionFile": "session-relative.jsonl"
-            }
-        }"#;
-        let index_path = create_test_index(&dir, index_content);
-
-        let messages = parse_openclaw_index(&index_path);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
-        assert_eq!(messages[0].session_id.as_ref(), "relative-123");
-    }
-
-    #[test]
-    fn test_parse_openclaw_index_missing_session_file_fallback() {
-        let dir = TempDir::new().unwrap();
-
-        let session_content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4.6"}
-{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0},"timestamp":1700000000000}}"#;
-        create_test_session(&dir, "fallback-123.jsonl", session_content);
-
-        let index_content = r#"{
-            "agent:main:main": {
-                "sessionId": "fallback-123"
-            }
-        }"#;
-        let index_path = create_test_index(&dir, index_content);
-
-        let messages = parse_openclaw_index(&index_path);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
-        assert_eq!(messages[0].session_id.as_ref(), "fallback-123");
     }
 }

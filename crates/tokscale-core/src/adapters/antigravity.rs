@@ -7,14 +7,14 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceUnit, SourceUnitMeta,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
+    SourceUnit, SourceUnitMeta,
 };
 use crate::clients::{ClientId, PathRoot};
 use crate::sessions;
 
 const CLI_RELATIVE_PATH: &str = "antigravity-cli/conversations";
 const CLI_PATTERN: &str = "*.db";
-const LEGACY_CLI_CLIENT_ID: &str = "antigravity-cli";
 
 pub(crate) struct AntigravityAdapter;
 
@@ -23,21 +23,23 @@ impl LocalSourceAdapter for AntigravityAdapter {
         ClientId::Antigravity
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::Antigravity
             .local_def()
             .expect("Antigravity adapter requires a local scan policy");
-        let default_ide_root =
-            PathBuf::from(def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots));
-        let extra_roots = antigravity_extra_roots(ctx);
+        let default_ide_root = def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
+        let extra_roots = antigravity_extra_roots(ctx)?;
 
         let mut ide_roots = vec![default_ide_root];
         ide_roots.extend(extra_roots.iter().cloned());
         let mut units = adapter_discover::source_units_from_paths(
             ClientId::Antigravity,
-            adapter_discover::scan_roots(ide_roots, def.pattern),
+            adapter_discover::scan_roots(ClientId::Antigravity, ide_roots, def.pattern)?,
             FingerprintPolicy::NoMessageCache,
-        )
+        )?
         .into_iter()
         .map(|unit| unit.with_meta(SourceUnitMeta::AntigravityCacheJsonl))
         .collect::<Vec<_>>();
@@ -47,23 +49,27 @@ impl LocalSourceAdapter for AntigravityAdapter {
             fallback_relative: ".gemini",
         }
         .resolve_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
-        let mut cli_roots = vec![PathBuf::from(cli_root).join(CLI_RELATIVE_PATH)];
+        let mut cli_roots = vec![cli_root.join(CLI_RELATIVE_PATH)];
         cli_roots.extend(extra_roots);
 
         units.extend(
             adapter_discover::source_units_from_paths(
                 ClientId::Antigravity,
-                adapter_discover::scan_roots(cli_roots, CLI_PATTERN),
+                adapter_discover::scan_roots(ClientId::Antigravity, cli_roots, CLI_PATTERN)?,
                 FingerprintPolicy::SqliteWithWal,
-            )
+            )?
             .into_iter()
             .map(|unit| unit.with_meta(SourceUnitMeta::AntigravityCliSqlite)),
         );
 
-        units
+        Ok(units)
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
@@ -95,13 +101,18 @@ impl LocalSourceAdapter for AntigravityAdapter {
         &self,
         unit: SourceUnit,
         source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<ParsedUnit, SourceUnit> {
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
         adapter_cache::plan_cache_hit(unit, source_cache)
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut seen = HashSet::new();
-        fold_antigravity_units(parsed, ctx, sink, &mut seen);
+        fold_antigravity_units(parsed, ctx, sink, &mut seen)
     }
 
     fn fold_batches(
@@ -109,10 +120,10 @@ impl LocalSourceAdapter for AntigravityAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut seen = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
-            fold_antigravity_units(parsed, ctx, sink, &mut seen);
+            fold_antigravity_units(parsed, ctx, sink, &mut seen)?;
         }
         Ok(())
     }
@@ -123,17 +134,20 @@ fn fold_antigravity_units(
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
     seen: &mut HashSet<u64>,
-) {
+) -> Result<(), crate::adapters::SourcePipelineError> {
     for parsed_unit in parsed {
         let adapter_cache::ResolvedUnit {
             unit,
             messages,
             cache_write,
             invalidate_cache,
-        } = adapter_cache::resolve_unit(parsed_unit, ctx)
-            .expect("Antigravity cache recovery must parse its source");
+        } = adapter_cache::resolve_unit(parsed_unit, ctx)?;
         let path = unit.path.clone();
-        let cache_write_succeeded = adapter_cache::write_cache(cache_write, ctx, &messages);
+        let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
+        if cache_write_outcome.is_err() && invalidate_cache {
+            ctx.source_cache.remove(&path, unit.parser_version);
+        }
+        let cache_write_outcome = cache_write_outcome?;
         sink.extend_messages(
             messages
                 .into_iter()
@@ -141,67 +155,45 @@ fn fold_antigravity_units(
                 .collect(),
         );
 
-        if !cache_write_succeeded && invalidate_cache {
+        if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
             ctx.source_cache.remove(&path, unit.parser_version);
         }
     }
+    Ok(())
 }
 
 pub(crate) static ANTIGRAVITY_ADAPTER: AntigravityAdapter = AntigravityAdapter;
 
-fn antigravity_extra_roots(ctx: &AdapterScanContext<'_>) -> Vec<PathBuf> {
+fn antigravity_extra_roots(
+    ctx: &AdapterScanContext<'_>,
+) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
 
-    for root in adapter_discover::extra_roots_for_client(ClientId::Antigravity, ctx) {
-        push_unique_root(&mut roots, &mut seen, root);
+    for root in adapter_discover::extra_roots_for_client(ClientId::Antigravity, ctx)? {
+        push_unique_root(&mut roots, &mut seen, root)?;
     }
 
-    if let Some(paths) = ctx
-        .scanner_settings
-        .extra_scan_paths
-        .get(LEGACY_CLI_CLIENT_ID)
-    {
-        for path in paths {
-            if !path.as_os_str().is_empty() {
-                push_unique_root(&mut roots, &mut seen, path.clone());
-            }
-        }
-    }
-
-    if ctx.use_env_roots {
-        let extra_dirs = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
-        for root in parse_legacy_cli_extra_dirs(&extra_dirs) {
-            push_unique_root(&mut roots, &mut seen, root);
-        }
-    }
-
-    roots
+    Ok(roots)
 }
 
-fn parse_legacy_cli_extra_dirs(value: &str) -> Vec<PathBuf> {
-    value
-        .split(',')
-        .filter_map(|entry| {
-            let entry = entry.trim();
-            let (client, path) = entry.split_once(':')?;
-            if client.trim() != LEGACY_CLI_CLIENT_ID {
-                return None;
-            }
-            let path = path.trim();
-            if path.is_empty() {
-                return None;
-            }
-            Some(PathBuf::from(path))
-        })
-        .collect()
-}
-
-fn push_unique_root(roots: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, root: PathBuf) {
-    let key = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+fn push_unique_root(
+    roots: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    root: PathBuf,
+) -> Result<(), SourceDiscoveryError> {
+    let key = std::fs::canonicalize(&root).map_err(|source| {
+        SourceDiscoveryError::new(
+            ClientId::Antigravity,
+            &root,
+            "canonicalize configured scan root",
+            source,
+        )
+    })?;
     if seen.insert(key) {
         roots.push(root);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -239,7 +231,9 @@ mod tests {
         }
 
         let settings = ScannerSettings::default();
-        let units = ANTIGRAVITY_ADAPTER.discover(&scan_context(home.path(), &settings));
+        let units = ANTIGRAVITY_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .unwrap();
 
         assert_eq!(units.len(), 2);
         assert!(units.iter().any(|unit| {
@@ -271,7 +265,9 @@ mod tests {
             extra_scan_paths,
             ..ScannerSettings::default()
         };
-        let units = ANTIGRAVITY_ADAPTER.discover(&scan_context(home.path(), &settings));
+        let units = ANTIGRAVITY_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .unwrap();
 
         assert!(units.iter().any(|unit| {
             unit.path == jsonl_path
@@ -280,32 +276,6 @@ mod tests {
         }));
         assert!(units.iter().any(|unit| {
             unit.path == db_path
-                && unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal
-                && matches!(unit.meta, SourceUnitMeta::AntigravityCliSqlite)
-        }));
-    }
-
-    #[test]
-    fn discovers_legacy_cli_extra_roots_as_antigravity_sqlite_sources() {
-        let home = tempfile::TempDir::new().unwrap();
-        let extra = tempfile::TempDir::new().unwrap();
-        let db_path = extra.path().join("archived.db");
-        std::fs::write(&db_path, "").unwrap();
-
-        let mut extra_scan_paths = BTreeMap::new();
-        extra_scan_paths.insert(
-            LEGACY_CLI_CLIENT_ID.to_string(),
-            vec![extra.path().to_path_buf()],
-        );
-        let settings = ScannerSettings {
-            extra_scan_paths,
-            ..ScannerSettings::default()
-        };
-        let units = ANTIGRAVITY_ADAPTER.discover(&scan_context(home.path(), &settings));
-
-        assert!(units.iter().any(|unit| {
-            unit.client == ClientId::Antigravity
-                && unit.path == db_path
                 && unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal
                 && matches!(unit.meta, SourceUnitMeta::AntigravityCliSqlite)
         }));
@@ -356,14 +326,16 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
         let mut messages = Vec::new();
 
-        ANTIGRAVITY_ADAPTER.fold(
-            vec![ide, cli],
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-            &mut messages,
-        );
+        ANTIGRAVITY_ADAPTER
+            .fold(
+                vec![ide, cli],
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut messages,
+            )
+            .unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id.as_ref(), "ide-session");

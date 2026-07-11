@@ -68,7 +68,7 @@ fn test_parse_codebuff_emits_one_event_per_assistant_message_with_usage() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path);
+    let msgs = parse_codebuff_file(&path).unwrap();
     assert_eq!(msgs.len(), 2);
 
     let first = &msgs[0];
@@ -133,7 +133,7 @@ fn test_parse_codebuff_recovers_usage_from_run_state_history_when_metadata_is_em
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path);
+    let msgs = parse_codebuff_file(&path).unwrap();
     assert_eq!(msgs.len(), 1);
     let m = &msgs[0];
     assert_eq!(m.model_id.as_ref(), "openrouter/anthropic/claude-opus-4-1");
@@ -145,14 +145,14 @@ fn test_parse_codebuff_recovers_usage_from_run_state_history_when_metadata_is_em
 }
 
 #[test]
-fn test_parse_codebuff_returns_empty_for_missing_or_non_array_file() {
+fn test_parse_codebuff_reports_missing_or_non_array_file() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("chat-messages.json");
     fs::write(&path, r#"{"not":"an array"}"#).unwrap();
-    assert!(parse_codebuff_file(&path).is_empty());
+    assert!(parse_codebuff_file(&path).is_err());
 
     let missing = dir.path().join("nope.json");
-    assert!(parse_codebuff_file(&missing).is_empty());
+    assert!(parse_codebuff_file(&missing).is_err());
 }
 
 #[test]
@@ -177,14 +177,14 @@ fn test_parse_codebuff_uses_chat_id_for_timestamp_when_message_has_none() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path);
+    let msgs = parse_codebuff_file(&path).unwrap();
     assert_eq!(msgs.len(), 1);
     // 2025-12-14T10:00:00.000Z → epoch ms
     assert_eq!(msgs[0].timestamp, 1_765_706_400_000_i64);
 }
 
 #[test]
-fn test_parse_codebuff_unknown_model_falls_back_to_unknown_provider() {
+fn test_parse_codebuff_rejects_missing_model() {
     let dir = TempDir::new().unwrap();
     let path = write_chat(
         &dir,
@@ -202,14 +202,7 @@ fn test_parse_codebuff_unknown_model_falls_back_to_unknown_provider() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path);
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0].model_id.as_ref(), "codebuff-unknown");
-    assert_eq!(
-        msgs[0].provider_id.as_ref(),
-        "unknown",
-        "unknown models must not be silently attributed to anthropic"
-    );
+    assert!(parse_codebuff_file(&path).is_err());
 }
 
 #[test]
@@ -235,8 +228,8 @@ fn test_parse_codebuff_dedup_key_is_stable_for_same_history() {
         body,
     );
 
-    let msgs_a = parse_codebuff_file(&path_a);
-    let msgs_b = parse_codebuff_file(&path_b);
+    let msgs_a = parse_codebuff_file(&path_a).unwrap();
+    let msgs_b = parse_codebuff_file(&path_b).unwrap();
 
     assert_eq!(msgs_a.len(), 1);
     assert_eq!(msgs_b.len(), 1);
@@ -271,10 +264,10 @@ fn test_parse_codebuff_dedup_key_falls_back_when_id_missing() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path);
+    let msgs = parse_codebuff_file(&path).unwrap();
     assert_eq!(msgs.len(), 1);
     let key = msgs[0].dedup_key.expect("dedup_key required");
-    let reparsed = parse_codebuff_file(&path);
+    let reparsed = parse_codebuff_file(&path).unwrap();
     assert_eq!(
         reparsed[0].dedup_key,
         Some(key),
@@ -324,7 +317,7 @@ fn test_parse_codebuff_run_state_skips_entries_missing_provider_options() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path);
+    let msgs = parse_codebuff_file(&path).unwrap();
     assert_eq!(
         msgs.len(),
         1,
@@ -384,7 +377,7 @@ fn test_parse_codebuff_run_state_accumulates_across_entries_when_newest_has_mode
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path);
+    let msgs = parse_codebuff_file(&path).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].tokens.input, 4242);
     assert_eq!(msgs[0].tokens.output, 99);
@@ -419,7 +412,7 @@ fn test_parse_codebuff_dedup_key_distinguishes_id_less_messages_by_ordinal() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path);
+    let msgs = parse_codebuff_file(&path).unwrap();
     assert_eq!(msgs.len(), 2);
     let key_a = msgs[0].dedup_key.unwrap();
     let key_b = msgs[1].dedup_key.unwrap();

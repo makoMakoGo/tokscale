@@ -13,37 +13,30 @@
 //! `manicode-staging` roots. `chatId` is the chat's ISO-8601 timestamp with
 //! `:` replaced by `-` for filesystem safety (e.g. `2025-12-14T10-00-00.000Z`).
 
-use super::utils::{
-    file_modified_timestamp_ms, parse_timestamp_str, parse_timestamp_value, read_file_or_none,
-};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::{parse_timestamp_str, parse_timestamp_value, read_file};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
 
-const DEFAULT_MODEL: &str = "codebuff-unknown";
-
 /// Parse a single `chat-messages.json` file into UnifiedMessages.
-pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
-    let Some(bytes) = read_file_or_none(path) else {
-        return Vec::new();
-    };
-    let mut bytes = bytes;
-    let root: Value = match simd_json::from_slice(&mut bytes) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let mut bytes = read_file(path)?;
+    let root: Value = simd_json::from_slice(&mut bytes)
+        .map_err(|error| SessionParseError::new("decode Codebuff chat file", error))?;
 
-    let messages = match root.as_array() {
-        Some(arr) => arr,
-        None => return Vec::new(),
-    };
+    let messages = root.as_array().ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate Codebuff chat file",
+            "top-level value must be an array",
+        )
+    })?;
 
-    let (channel, project_basename, chat_id) = derive_context_from_path(path);
+    let (channel, project_basename, chat_id) = derive_context_from_path(path)?;
     let session_id = format!("{}/{}/{}", channel, project_basename, chat_id);
 
     let chat_id_ts = parse_chat_id_to_millis(&chat_id).unwrap_or(0);
-    let file_mtime_ms = file_modified_timestamp_ms(path);
 
     let mut results = Vec::new();
     for (ordinal, msg) in messages.iter().enumerate() {
@@ -61,15 +54,30 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
         } else {
             None
         };
-        let ts = message_timestamp(msg)
-            .or(chat_id_fallback)
-            .unwrap_or(file_mtime_ms);
+        let ts = message_timestamp(msg).or(chat_id_fallback).ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Codebuff assistant message",
+                format!("assistant message {ordinal} has no valid timestamp"),
+            )
+        })?;
 
         let model = usage
             .model
             .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        let provider = provider_identity::inferred_provider_from_model(&model).unwrap_or("unknown");
+            .filter(|model| !model.trim().is_empty())
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Codebuff assistant message",
+                    format!("assistant message {ordinal} has no model id"),
+                )
+            })?;
+        let provider =
+            provider_identity::inferred_provider_from_model(&model).ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Codebuff assistant message",
+                    format!("cannot infer provider for model `{model}`"),
+                )
+            })?;
 
         let dedup_key = upstream_message_id(msg)
             .unwrap_or_else(|| derive_dedup_key(&session_id, ts, &model, &usage, ordinal));
@@ -92,7 +100,7 @@ pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
         ));
     }
 
-    results
+    Ok(results)
 }
 
 /// Extract the upstream `ChatMessage.id` if present, so dedup keys remain
@@ -146,15 +154,20 @@ fn parse_chat_id_to_millis(chat_id: &str) -> Option<i64> {
 
 /// Walks up a `chat-messages.json` file path and returns
 /// `(channel, project_basename, chat_id)` by reading the three relevant
-/// ancestor directory names. Missing ancestors fall back to empty strings so
-/// that malformed layouts still produce a deterministic (but lossy) session
-/// identifier instead of panicking.
-fn derive_context_from_path(path: &Path) -> (String, String, String) {
+/// ancestor directory names. The current layout is required because these
+/// components form the durable session identity.
+fn derive_context_from_path(path: &Path) -> SessionParseResult<(String, String, String)> {
     let chat_id = path
         .parent()
         .and_then(|p| p.file_name())
         .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Codebuff chat path",
+                "chat directory must contain a UTF-8 chat id",
+            )
+        })?
         .to_string();
 
     // chats/<chatId>/chat-messages.json → jump up to projects/<project>/chats
@@ -163,7 +176,13 @@ fn derive_context_from_path(path: &Path) -> (String, String, String) {
         .and_then(|p| p.parent())
         .and_then(|p| p.file_name())
         .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Codebuff chat path",
+                "project directory must contain a UTF-8 name",
+            )
+        })?
         .to_string();
 
     // ../<project>/chats/<chatId>/ → projects dir’s parent is the channel root
@@ -173,10 +192,16 @@ fn derive_context_from_path(path: &Path) -> (String, String, String) {
         .and_then(|p| p.parent()) // channel root (e.g. manicode[-dev])
         .and_then(|p| p.file_name())
         .and_then(|s| s.to_str())
-        .unwrap_or("manicode")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Codebuff chat path",
+                "channel directory must contain a UTF-8 name",
+            )
+        })?
         .to_string();
 
-    (channel, project_basename, chat_id)
+    Ok((channel, project_basename, chat_id))
 }
 
 fn is_assistant_role(msg: &Value) -> bool {
@@ -400,12 +425,25 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_codebuff_file(path).unwrap()
+    }
+
+    #[test]
+    fn malformed_chat_file_is_reported() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"not-json").unwrap();
+
+        let error = super::parse_codebuff_file(file.path()).unwrap_err();
+        assert_eq!(error.operation(), "decode Codebuff chat file");
+    }
+
     #[test]
     fn test_derive_context_from_path_extracts_channel_project_and_chat_id() {
         let p = PathBuf::from(
             "/tmp/home/.config/manicode-dev/projects/sandbox/chats/2025-12-14T10-00-00.000Z/chat-messages.json",
         );
-        let (channel, project, chat_id) = derive_context_from_path(&p);
+        let (channel, project, chat_id) = derive_context_from_path(&p).unwrap();
         assert_eq!(channel, "manicode-dev");
         assert_eq!(project, "sandbox");
         assert_eq!(chat_id, "2025-12-14T10-00-00.000Z");

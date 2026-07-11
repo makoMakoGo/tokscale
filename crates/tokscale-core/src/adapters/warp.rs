@@ -3,7 +3,8 @@ use rayon::prelude::*;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceUnit, UnitMessageSource,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
+    UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::local_clients;
@@ -16,19 +17,24 @@ impl LocalSourceAdapter for WarpAdapter {
         ClientId::Warp
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::Warp
             .local_def()
             .expect("Warp adapter must have local scan policy");
 
         let mut paths = adapter_discover::scan_roots(
+            ClientId::Warp,
             local_clients::warp_sqlite_roots_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
             def.pattern,
-        );
+        )?;
         paths.extend(adapter_discover::scan_roots(
-            adapter_discover::extra_roots_for_client(ClientId::Warp, ctx),
+            ClientId::Warp,
+            adapter_discover::extra_roots_for_client(ClientId::Warp, ctx)?,
             def.pattern,
-        ));
+        )?);
 
         adapter_discover::source_units_from_paths(
             ClientId::Warp,
@@ -37,18 +43,30 @@ impl LocalSourceAdapter for WarpAdapter {
         )
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages = sessions::warp::parse_warp_sqlite(&unit.path);
+                let mut messages =
+                    sessions::warp::parse_warp_sqlite(&unit.path).map_err(|source| {
+                        SourceParseError::from_session(
+                            unit.client,
+                            &unit.path,
+                            unit.parser_version.parser_id,
+                            source,
+                        )
+                    })?;
                 crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                ParsedUnit {
+                Ok(ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
                     cache_write: None,
                     invalidate_cache: false,
-                }
+                })
             })
             .collect()
     }
@@ -58,12 +76,13 @@ impl LocalSourceAdapter for WarpAdapter {
         parsed: Vec<ParsedUnit>,
         _ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         for unit in parsed {
             if let UnitMessageSource::Fresh(messages) = unit.messages {
                 sink.extend_messages(messages);
             }
         }
+        Ok(())
     }
 }
 
@@ -96,7 +115,7 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = WARP_ADAPTER.discover(&ctx);
+        let units = WARP_ADAPTER.discover_checked(&ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![default_db, extra_db]);

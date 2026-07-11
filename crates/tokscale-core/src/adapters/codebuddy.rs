@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rayon::prelude::*;
 
@@ -7,7 +7,8 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, CodeBuddyLogSource, FingerprintPolicy, FoldContext, LocalSourceAdapter,
-    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceUnit, SourceUnitMeta,
+    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError,
+    SourceParseError, SourceUnit, SourceUnitMeta,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -22,24 +23,28 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         ClientId::CodeBuddy
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let def = ClientId::CodeBuddy
             .local_def()
             .expect("CodeBuddy adapter must have local scan policy");
-        let default_root =
-            PathBuf::from(def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots));
+        let default_root = def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
 
-        let mut jsonl_paths = adapter_discover::scan_roots([default_root], def.pattern);
+        let mut jsonl_paths =
+            adapter_discover::scan_roots(ClientId::CodeBuddy, [default_root], def.pattern)?;
         jsonl_paths.extend(adapter_discover::scan_roots(
-            adapter_discover::extra_roots_for_client(ClientId::CodeBuddy, ctx),
+            ClientId::CodeBuddy,
+            adapter_discover::extra_roots_for_client(ClientId::CodeBuddy, ctx)?,
             def.pattern,
-        ));
+        )?);
 
         let mut units = adapter_discover::source_units_from_paths(
             ClientId::CodeBuddy,
             jsonl_paths,
             FingerprintPolicy::PlainFile,
-        )
+        )?
         .into_iter()
         .map(|unit| unit.with_meta(SourceUnitMeta::CodeBuddyJsonl))
         .collect::<Vec<_>>();
@@ -47,13 +52,17 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         units.extend(codebuddy_extension_log_units(
             ctx.home_dir,
             ctx.use_env_roots,
-        ));
-        dedup_units_by_canonical_path(&mut units);
+        )?);
+        dedup_units_by_canonical_path(&mut units)?;
         units.sort_by(|left, right| left.path.cmp(&right.path));
-        units
+        Ok(units)
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
@@ -76,15 +85,20 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         &self,
         unit: SourceUnit,
         source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<ParsedUnit, SourceUnit> {
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
         adapter_cache::plan_cache_hit(unit, source_cache)
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut deduper = CodeBuddyDeduper::default();
         adapter_cache::fold_units_with_filter(parsed, ctx, sink, |unit, messages| {
             deduper.filter(unit, messages)
-        });
+        })
     }
 
     fn fold_batches(
@@ -92,18 +106,21 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut deduper = CodeBuddyDeduper::default();
         while let Some(parsed) = batches.next(ctx)? {
             adapter_cache::fold_units_with_filter(parsed, ctx, sink, |unit, messages| {
                 deduper.filter(unit, messages)
-            });
+            })?;
         }
         Ok(())
     }
 }
 
-fn codebuddy_extension_log_units(home_dir: &str, use_env_roots: bool) -> Vec<SourceUnit> {
+fn codebuddy_extension_log_units(
+    home_dir: &str,
+    use_env_roots: bool,
+) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
     let home = PathBuf::from(home_dir);
     let mut roots = vec![
         (
@@ -157,7 +174,7 @@ fn codebuddy_extension_log_units(home_dir: &str, use_env_roots: bool) -> Vec<Sou
 
     let mut units = Vec::new();
     for (root, source, require_extension_component) in roots {
-        let paths = adapter_discover::scan_roots([root], "*.log")
+        let paths = adapter_discover::scan_roots(ClientId::CodeBuddy, [root], "*.log")?
             .into_iter()
             .filter(|path| !require_extension_component || has_codebuddy_extension_component(path))
             .collect::<Vec<_>>();
@@ -166,21 +183,34 @@ fn codebuddy_extension_log_units(home_dir: &str, use_env_roots: bool) -> Vec<Sou
                 ClientId::CodeBuddy,
                 paths,
                 FingerprintPolicy::PlainFile,
-            )
+            )?
             .into_iter()
             .map(|unit| unit.with_meta(SourceUnitMeta::CodeBuddyExtensionLog { source })),
         );
     }
-    units
+    Ok(units)
 }
 
-fn dedup_units_by_canonical_path(units: &mut Vec<SourceUnit>) {
+fn dedup_units_by_canonical_path(units: &mut Vec<SourceUnit>) -> Result<(), SourceDiscoveryError> {
     let mut seen = HashSet::new();
-    units.retain(|unit| seen.insert(canonical_path_key(&unit.path)));
-}
-
-fn canonical_path_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    let mut keys = Vec::with_capacity(units.len());
+    for unit in units.iter() {
+        keys.push(std::fs::canonicalize(&unit.path).map_err(|source| {
+            SourceDiscoveryError::new(
+                ClientId::CodeBuddy,
+                &unit.path,
+                "canonicalize discovered source",
+                source,
+            )
+        })?);
+    }
+    let mut index = 0;
+    units.retain(|_| {
+        let keep = seen.insert(keys[index].clone());
+        index += 1;
+        keep
+    });
+    Ok(())
 }
 
 fn has_codebuddy_extension_component(path: &std::path::Path) -> bool {
@@ -295,22 +325,20 @@ mod tests {
 
     fn fold_with_units(units: Vec<SourceUnit>) -> Vec<crate::UnifiedMessage> {
         let mut cache = message_cache::SourceMessageCache::default();
-        let parsed = CODEBUDDY_ADAPTER.parse(
-            units,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-        );
+        let parsed = CODEBUDDY_ADAPTER
+            .parse_checked(units, &ParseContext { pricing: None })
+            .unwrap();
         let mut sink = Vec::new();
-        CODEBUDDY_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-            &mut sink,
-        );
+        CODEBUDDY_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .unwrap();
         sink
     }
 
@@ -332,7 +360,7 @@ mod tests {
 
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let mut units = CODEBUDDY_ADAPTER.discover(&ctx);
+        let mut units = CODEBUDDY_ADAPTER.discover_checked(&ctx).unwrap();
         units.sort_by(|left, right| left.path.cmp(&right.path));
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let metas: Vec<_> = units.iter().map(|unit| unit.meta).collect();
@@ -369,7 +397,8 @@ mod tests {
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let units = CODEBUDDY_ADAPTER
-            .discover(&ctx)
+            .discover_checked(&ctx)
+            .unwrap()
             .into_iter()
             .filter(|unit| matches!(unit.meta, SourceUnitMeta::CodeBuddyExtensionLog { .. }))
             .collect::<Vec<_>>();
@@ -396,7 +425,7 @@ mod tests {
             ),
         ];
 
-        dedup_units_by_canonical_path(&mut units);
+        dedup_units_by_canonical_path(&mut units).unwrap();
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, path);
@@ -414,7 +443,7 @@ mod tests {
             .with_meta(SourceUnitMeta::CodeBuddyJsonl)];
 
         let actual = fold_with_units(units);
-        let expected = finalized(sessions::codebuddy::parse_codebuddy_jsonl_file(&path));
+        let expected = finalized(sessions::codebuddy::parse_codebuddy_jsonl_file(&path).unwrap());
 
         assert_eq!(actual, expected);
     }
@@ -426,11 +455,13 @@ mod tests {
         let second = dir.path().join("second.log");
         write_file(
             &first,
-            r#"[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
         );
         write_file(
             &second,
-            r#"2026-07-01 16:56:02.201 [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+            r#"2026-07-01 16:56:01.100 [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+2026-07-01 16:56:02.201 [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
         );
         let units = [first, second]
             .into_iter()
@@ -454,11 +485,13 @@ mod tests {
         let second = dir.path().join("second.log");
         write_file(
             &first,
-            r#"[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
         );
         write_file(
             &second,
-            r#"[2026/7/1 16:56:02.201] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+            r#"[2026/7/1 16:56:01.101] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[2026/7/1 16:56:02.201] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
         );
         let units = [first, second]
             .into_iter()

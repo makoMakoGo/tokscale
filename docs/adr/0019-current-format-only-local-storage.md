@@ -2,6 +2,9 @@
 
 Status: Accepted
 
+ADR 0020 supersedes the cache-format and maintenance details below while
+preserving this ADR's current-format-only storage boundary.
+
 ## Context
 
 Supporting retired local storage formats makes discovery, precedence,

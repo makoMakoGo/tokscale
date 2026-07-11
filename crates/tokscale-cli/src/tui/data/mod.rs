@@ -34,13 +34,13 @@ pub use tokscale_core::{
 /// hermetic across developer machines; production builds still honor
 /// user-configured paths.
 #[cfg(not(test))]
-fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
+fn data_loader_scanner_settings() -> Result<tokscale_core::scanner::ScannerSettings> {
     crate::tui::settings::load_scanner_settings()
 }
 
 #[cfg(test)]
-fn data_loader_scanner_settings() -> tokscale_core::scanner::ScannerSettings {
-    tokscale_core::scanner::ScannerSettings::default()
+fn data_loader_scanner_settings() -> Result<tokscale_core::scanner::ScannerSettings> {
+    Ok(tokscale_core::scanner::ScannerSettings::default())
 }
 
 /// Return freed allocator pages to the OS after the parse peak. glibc
@@ -72,12 +72,10 @@ pub struct PreparedDataLoad {
 }
 
 impl PreparedDataLoad {
-    pub fn source_inventory_signature(&self) -> SourceInventorySignature {
-        self.sources.source_inventory_signature()
-    }
-
-    pub fn source_digest(&self) -> u64 {
-        self.sources.source_digest()
+    pub fn refresh_source_inventory_signature(&mut self) -> Result<SourceInventorySignature> {
+        self.sources
+            .refresh_source_inventory_signature()
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -129,7 +127,7 @@ impl DataLoader {
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
-            scanner_settings: data_loader_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings()?,
         };
 
         prepare_local_sources(opts)
@@ -142,8 +140,6 @@ impl DataLoader {
         prepared: PreparedDataLoad,
         group_by: &GroupBy,
     ) -> Result<DataLoadResult> {
-        let source_inventory_signature = prepared.source_inventory_signature();
-        let source_digest = prepared.source_digest();
         let group_by = group_by.clone();
 
         let usage_data = if Handle::try_current().is_ok() {
@@ -170,8 +166,8 @@ impl DataLoader {
             .map(|result| DataLoadResult {
                 data: result.data,
                 pricing_diagnostics: result.pricing_diagnostics,
-                source_inventory_signature,
-                source_digest,
+                source_inventory_signature: result.source_inventory_signature,
+                source_digest: result.source_inventory_signature.process_digest(),
             })
             .map_err(anyhow::Error::msg)
     }
@@ -201,7 +197,7 @@ impl DataLoader {
             until: self.until.clone(),
             year: self.year.clone(),
             use_env_roots: false,
-            scanner_settings: data_loader_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings()?,
         };
 
         let usage_data =
@@ -277,7 +273,7 @@ mod tests {
             since: loader.since.clone(),
             until: loader.until.clone(),
             year: loader.year.clone(),
-            scanner_settings: data_loader_scanner_settings(),
+            scanner_settings: data_loader_scanner_settings()?,
         };
 
         tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), pricing)
@@ -477,7 +473,7 @@ mod tests {
         // instead it asserts the cfg(test) helper returns a default
         // ScannerSettings regardless of what the real settings file
         // contains on the developer's machine.
-        let settings = super::data_loader_scanner_settings();
+        let settings = super::data_loader_scanner_settings().unwrap();
         assert!(
             settings.opencode_db_paths.is_empty(),
             "under #[cfg(test)] data_loader_scanner_settings must return \

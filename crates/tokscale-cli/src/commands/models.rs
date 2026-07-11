@@ -62,6 +62,7 @@ pub(crate) fn run_models_report(
     let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
+    let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
     let rt = Runtime::new()?;
     let report = rt
@@ -74,7 +75,7 @@ pub(crate) fn run_models_report(
                 until: until.clone(),
                 year: year.clone(),
                 group_by: group_by.clone(),
-                scanner_settings: tui::settings::load_scanner_settings_for_home(&home_dir),
+                scanner_settings,
             })
             .await
         })
@@ -762,9 +763,9 @@ pub(crate) fn run_models_report(
 
         io::stdout().flush()?;
 
-        let settings = tui::settings::Settings::load();
+        let settings = tui::settings::Settings::load()?;
         if resolve_should_write_cache(cli_write_cache, cli_no_write_cache, &settings) {
-            write_light_cache(&home_dir, &clients, &since, &until, &year, &group_by);
+            write_light_cache(&home_dir, &clients, &since, &until, &year, &group_by)?;
         }
     }
 

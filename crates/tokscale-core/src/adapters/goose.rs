@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FoldContext, LocalSourceAdapter, MessageSink, ParseContext, ParsedUnit,
-    SourceUnit, UnitMessageSource,
+    SourceDiscoveryError, SourceParseError, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -17,26 +17,41 @@ impl LocalSourceAdapter for GooseAdapter {
         ClientId::Goose
     }
 
-    fn discover(&self, ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
-        goose_db_candidates(ctx)
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+        Ok(goose_db_candidates(ctx)?
             .into_iter()
-            .find(|path| path.is_file())
+            .next()
             .map(|path| vec![SourceUnit::sqlite_with_wal(ClientId::Goose, path)])
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
-    fn parse(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(
+        &self,
+        units: Vec<SourceUnit>,
+        ctx: &ParseContext<'_>,
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages = sessions::goose::parse_goose_sqlite(&unit.path);
+                let mut messages =
+                    sessions::goose::parse_goose_sqlite(&unit.path).map_err(|source| {
+                        SourceParseError::from_session(
+                            unit.client,
+                            &unit.path,
+                            unit.parser_version.parser_id,
+                            source,
+                        )
+                    })?;
                 crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                ParsedUnit {
+                Ok(ParsedUnit {
                     unit,
                     messages: UnitMessageSource::Fresh(messages),
                     cache_write: None,
                     invalidate_cache: false,
-                }
+                })
             })
             .collect()
     }
@@ -46,23 +61,33 @@ impl LocalSourceAdapter for GooseAdapter {
         parsed: Vec<ParsedUnit>,
         _ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) {
+    ) -> Result<(), crate::adapters::SourcePipelineError> {
         for unit in parsed {
             if let UnitMessageSource::Fresh(messages) = unit.messages {
                 sink.extend_messages(messages);
             }
         }
+        Ok(())
     }
 }
 
-fn goose_db_candidates(ctx: &AdapterScanContext<'_>) -> Vec<PathBuf> {
+fn goose_db_candidates(ctx: &AdapterScanContext<'_>) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
     let mut candidates = Vec::new();
 
     if ctx.use_env_roots {
-        if let Ok(custom_root) = std::env::var("GOOSE_PATH_ROOT") {
-            let trimmed = custom_root.trim();
-            if !trimmed.is_empty() {
-                candidates.push(PathBuf::from(trimmed).join("data/sessions/sessions.db"));
+        match std::env::var("GOOSE_PATH_ROOT") {
+            Ok(custom_root) if !custom_root.trim().is_empty() => {
+                candidates
+                    .push(PathBuf::from(custom_root.trim()).join("data/sessions/sessions.db"));
+            }
+            Ok(_) | Err(std::env::VarError::NotPresent) => {}
+            Err(source) => {
+                return Err(SourceDiscoveryError::new(
+                    ClientId::Goose,
+                    "GOOSE_PATH_ROOT",
+                    "read environment variable",
+                    source,
+                ));
             }
         }
     }
@@ -70,27 +95,16 @@ fn goose_db_candidates(ctx: &AdapterScanContext<'_>) -> Vec<PathBuf> {
     let def = ClientId::Goose
         .local_def()
         .expect("Goose adapter must have local scan policy");
-    candidates.push(PathBuf::from(
-        def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
-    ));
+    candidates.push(def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots));
     candidates.push(PathBuf::from(format!(
         "{}/Library/Application Support/goose/sessions/sessions.db",
         ctx.home_dir
     )));
-    candidates.push(PathBuf::from(format!(
-        "{}/Library/Application Support/Block/goose/sessions/sessions.db",
-        ctx.home_dir
-    )));
-    candidates.push(PathBuf::from(format!(
-        "{}/.local/share/Block/goose/sessions/sessions.db",
-        ctx.home_dir
-    )));
-
     let mut paths = Vec::new();
     for candidate in candidates {
-        adapter_discover::push_existing_file(candidate, &mut paths);
+        adapter_discover::push_existing_file(ClientId::Goose, candidate, &mut paths)?;
     }
-    paths
+    Ok(paths)
 }
 
 pub(crate) static GOOSE_ADAPTER: GooseAdapter = GooseAdapter;
@@ -117,7 +131,7 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = GOOSE_ADAPTER.discover(&ctx);
+        let units = GOOSE_ADAPTER.discover_checked(&ctx).unwrap();
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, xdg_db);

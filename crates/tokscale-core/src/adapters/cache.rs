@@ -1,35 +1,37 @@
 use std::path::Path;
 
 use crate::adapters::{
-    FingerprintPolicy, FoldContext, MessageSink, ParseContext, ParsedUnit, SourceUnit,
-    UnitMessageSource,
+    CacheHitPlan, FingerprintPolicy, FoldContext, MessageSink, ParseContext, ParsedUnit,
+    SourcePipelineError, SourcePlanningError, SourceUnit, UnitMessageSource,
 };
 use crate::{message_cache, UnifiedMessage};
 
 pub(crate) fn plan_cache_hit(
     mut unit: SourceUnit,
     source_cache: &message_cache::SourceMessageCache,
-) -> Result<ParsedUnit, SourceUnit> {
+) -> Result<CacheHitPlan, SourcePlanningError> {
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
-        return Err(unit);
+        return Ok(CacheHitPlan::Miss(unit));
     }
-    let Some(cached) = source_cache.get_meta(&unit.path, unit.parser_version) else {
+    unit.revalidate_snapshot_for_cache_decision()?;
+    let Some(cached) = source_cache.get_meta(&unit.path, unit.parser_version)? else {
         unit.mark_cache_lookup_completed_no_hit();
-        return Err(unit);
+        return Ok(CacheHitPlan::Miss(unit));
     };
-    let Some(snapshot) = unit.prepared_source_input_snapshot() else {
-        return Err(unit);
-    };
-    let Some(stamp) = unit.source_input_policy().stamp_from_snapshot(snapshot) else {
-        return Err(unit);
-    };
+    let snapshot = unit.prepared_source_input_snapshot().ok_or_else(|| {
+        message_cache::SourceSnapshotError::InvalidSnapshot {
+            path: unit.path.clone(),
+            detail: "cache planner lost its freshly validated snapshot".to_string(),
+        }
+    })?;
+    let stamp = unit.source_input_policy().stamp_from_snapshot(snapshot)?;
     if cached.fingerprint.stamp != stamp || !cached.has_messages {
         unit.mark_cache_lookup_completed_no_hit();
-        return Err(unit);
+        return Ok(CacheHitPlan::Miss(unit));
     }
     unit.release_prepared_snapshot();
 
-    Ok(ParsedUnit {
+    Ok(CacheHitPlan::Hit(ParsedUnit {
         messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
             &unit.path,
             unit.parser_version,
@@ -38,31 +40,50 @@ pub(crate) fn plan_cache_hit(
         unit,
         cache_write: None,
         invalidate_cache: false,
-    })
+    }))
 }
 
 pub(crate) fn load_or_parse_unit_with<F>(
     unit: SourceUnit,
     ctx: &ParseContext<'_>,
     parse: F,
-) -> ParsedUnit
+) -> Result<ParsedUnit, crate::adapters::SourceParseError>
 where
-    F: Fn(&Path) -> Vec<UnifiedMessage>,
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<Vec<UnifiedMessage>>,
 {
-    load_or_parse_unit_with_policy(unit, ctx, |path| (parse(path), true))
+    load_or_parse_unit_with_policy(unit, ctx, |path| {
+        parse(path).map(|messages| (messages, true))
+    })
 }
 
 pub(crate) fn load_or_parse_unit_with_result<F>(
     mut unit: SourceUnit,
     ctx: &ParseContext<'_>,
     parse: F,
-) -> Result<ParsedUnit, String>
+) -> Result<ParsedUnit, crate::adapters::SourceParseError>
 where
-    F: Fn(&Path) -> Result<Vec<UnifiedMessage>, String>,
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<Vec<UnifiedMessage>>,
 {
+    let client = unit.client;
+    let source_path = unit.path.clone();
+    let parser = unit.parser_version.parser_id;
+    let parse_source = |path: &Path| {
+        parse(path).map_err(|source| {
+            crate::adapters::SourceParseError::from_session(client, &source_path, parser, source)
+        })
+    };
+    let snapshot_error = |source| {
+        crate::adapters::SourceParseError::new(
+            client,
+            &source_path,
+            parser,
+            "snapshot source metadata and content",
+            source,
+        )
+    };
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
         unit.release_prepared_snapshot();
-        let mut messages = parse(&unit.path)?;
+        let mut messages = parse_source(&unit.path)?;
         crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
         return Ok(ParsedUnit {
             unit,
@@ -72,50 +93,20 @@ where
         });
     }
 
-    let cached = if unit.take_cache_lookup_completed_no_hit() {
-        None
-    } else {
-        ctx.source_cache.get_meta(&unit.path, unit.parser_version)
-    };
+    let cache_lookup_completed_no_hit = unit.take_cache_lookup_completed_no_hit();
+    if !cache_lookup_completed_no_hit {
+        unit.revalidate_snapshot_for_cache_decision()
+            .map_err(snapshot_error)?;
+    }
     let input_policy = unit.source_input_policy();
-    let snapshot = unit.take_source_input_snapshot();
-    if let Some(cached) = cached {
-        let stamp = snapshot
-            .as_ref()
-            .and_then(|snapshot| input_policy.stamp_from_snapshot(snapshot));
-        if stamp.as_ref() == Some(&cached.fingerprint.stamp) && cached.has_messages {
-            return Ok(ParsedUnit {
-                messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
-                    &unit.path,
-                    unit.parser_version,
-                    cached.fingerprint,
-                )),
-                unit,
-                cache_write: None,
-                invalidate_cache: false,
-            });
-        }
-    }
+    let snapshot = unit.take_source_input_snapshot().map_err(snapshot_error)?;
+    let fingerprint = input_policy
+        .fingerprint_from_snapshot(&snapshot)
+        .map_err(snapshot_error)?;
 
-    let Some(fingerprint) = snapshot
-        .as_ref()
-        .and_then(|snapshot| input_policy.fingerprint_from_snapshot(snapshot))
-    else {
-        let mut messages = parse(&unit.path)?;
-        crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-        return Ok(ParsedUnit {
-            unit,
-            messages: UnitMessageSource::Fresh(messages),
-            cache_write: None,
-            invalidate_cache: false,
-        });
-    };
-
-    let mut messages = parse(&unit.path)?;
+    let mut messages = parse_source(&unit.path)?;
     crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-    let source_unchanged = snapshot
-        .as_ref()
-        .is_some_and(|before| input_policy.snapshot().as_ref() == Some(before));
+    let source_unchanged = input_policy.snapshot().map_err(snapshot_error)? == snapshot;
     let cache_write = if messages.is_empty() || !source_unchanged {
         None
     } else {
@@ -123,7 +114,6 @@ where
             &unit.path,
             unit.parser_version,
             fingerprint,
-            Vec::new(),
             None,
         )))
     };
@@ -140,66 +130,53 @@ pub(crate) fn load_or_parse_unit_with_policy<F>(
     mut unit: SourceUnit,
     ctx: &ParseContext<'_>,
     parse: F,
-) -> ParsedUnit
+) -> Result<ParsedUnit, crate::adapters::SourceParseError>
 where
-    F: Fn(&Path) -> (Vec<UnifiedMessage>, bool),
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<(Vec<UnifiedMessage>, bool)>,
 {
+    let client = unit.client;
+    let source_path = unit.path.clone();
+    let parser = unit.parser_version.parser_id;
+    let parse_source = |path: &Path| {
+        parse(path).map_err(|source| {
+            crate::adapters::SourceParseError::from_session(client, &source_path, parser, source)
+        })
+    };
+    let snapshot_error = |source| {
+        crate::adapters::SourceParseError::new(
+            client,
+            &source_path,
+            parser,
+            "snapshot source metadata and content",
+            source,
+        )
+    };
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
         unit.release_prepared_snapshot();
-        let (mut messages, _) = parse(&unit.path);
+        let (mut messages, _) = parse_source(&unit.path)?;
         crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-        return ParsedUnit {
+        return Ok(ParsedUnit {
             unit,
             messages: UnitMessageSource::Fresh(messages),
             cache_write: None,
             invalidate_cache: false,
-        };
+        });
     }
 
-    let cached = if unit.take_cache_lookup_completed_no_hit() {
-        None
-    } else {
-        ctx.source_cache.get_meta(&unit.path, unit.parser_version)
-    };
+    let cache_lookup_completed_no_hit = unit.take_cache_lookup_completed_no_hit();
+    if !cache_lookup_completed_no_hit {
+        unit.revalidate_snapshot_for_cache_decision()
+            .map_err(snapshot_error)?;
+    }
     let input_policy = unit.source_input_policy();
-    let snapshot = unit.take_source_input_snapshot();
-    if let Some(cached) = cached {
-        let stamp = snapshot
-            .as_ref()
-            .and_then(|snapshot| input_policy.stamp_from_snapshot(snapshot));
-        if stamp.as_ref() == Some(&cached.fingerprint.stamp) && cached.has_messages {
-            return ParsedUnit {
-                messages: UnitMessageSource::CacheHit(message_cache::CacheReadPlan::new(
-                    &unit.path,
-                    unit.parser_version,
-                    cached.fingerprint,
-                )),
-                unit,
-                cache_write: None,
-                invalidate_cache: false,
-            };
-        }
-    }
+    let snapshot = unit.take_source_input_snapshot().map_err(snapshot_error)?;
+    let fingerprint = input_policy
+        .fingerprint_from_snapshot(&snapshot)
+        .map_err(snapshot_error)?;
 
-    let Some(fingerprint) = snapshot
-        .as_ref()
-        .and_then(|snapshot| input_policy.fingerprint_from_snapshot(snapshot))
-    else {
-        let (mut messages, _) = parse(&unit.path);
-        crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-        return ParsedUnit {
-            unit,
-            messages: UnitMessageSource::Fresh(messages),
-            cache_write: None,
-            invalidate_cache: false,
-        };
-    };
-
-    let (mut messages, cacheable) = parse(&unit.path);
+    let (mut messages, cacheable) = parse_source(&unit.path)?;
     crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-    let source_unchanged = snapshot
-        .as_ref()
-        .is_some_and(|before| input_policy.snapshot().as_ref() == Some(before));
+    let source_unchanged = input_policy.snapshot().map_err(snapshot_error)? == snapshot;
     let cache_write = if messages.is_empty() || !cacheable || !source_unchanged {
         None
     } else {
@@ -207,25 +184,24 @@ where
             &unit.path,
             unit.parser_version,
             fingerprint,
-            Vec::new(),
             None,
         )))
     };
 
-    ParsedUnit {
+    Ok(ParsedUnit {
         unit,
         messages: UnitMessageSource::Fresh(messages),
         cache_write,
         invalidate_cache: !cacheable || !source_unchanged,
-    }
+    })
 }
 
 pub(crate) fn fold_units(
     parsed: Vec<ParsedUnit>,
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
-) {
-    fold_units_with_filter(parsed, ctx, sink, |_, messages| messages);
+) -> Result<(), SourcePipelineError> {
+    fold_units_with_filter(parsed, ctx, sink, |_, messages| messages)
 }
 
 pub(crate) fn fold_units_with_filter<F>(
@@ -233,7 +209,8 @@ pub(crate) fn fold_units_with_filter<F>(
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
     mut filter: F,
-) where
+) -> Result<(), SourcePipelineError>
+where
     F: FnMut(&SourceUnit, Vec<UnifiedMessage>) -> Vec<UnifiedMessage>,
 {
     for parsed_unit in parsed {
@@ -242,19 +219,23 @@ pub(crate) fn fold_units_with_filter<F>(
             messages,
             cache_write,
             invalidate_cache,
-        } = resolve_unit(parsed_unit, ctx)
-            .expect("ordinary adapter cache recovery must parse its source");
+        } = resolve_unit(parsed_unit, ctx)?;
         debug_assert!(unit.client.local_def().is_some());
         let path = unit.path.clone();
         let parser_version = unit.parser_version;
-        let cache_write_succeeded = write_cache(cache_write, ctx, &messages);
+        let cache_write_outcome = write_cache(cache_write, ctx, &messages);
+        if cache_write_outcome.is_err() && invalidate_cache {
+            ctx.source_cache.remove(&path, parser_version);
+        }
+        let cache_write_outcome = cache_write_outcome?;
         let messages = filter(&unit, messages);
         sink.extend_messages(messages);
 
-        if !cache_write_succeeded && invalidate_cache {
+        if cache_write_outcome == CacheWriteOutcome::NotPlanned && invalidate_cache {
             ctx.source_cache.remove(&path, parser_version);
         }
     }
+    Ok(())
 }
 
 pub(crate) struct ResolvedUnit {
@@ -267,7 +248,7 @@ pub(crate) struct ResolvedUnit {
 pub(crate) fn resolve_unit(
     mut parsed: ParsedUnit,
     ctx: &mut FoldContext<'_>,
-) -> Result<ResolvedUnit, String> {
+) -> Result<ResolvedUnit, SourcePipelineError> {
     let mut recovery_requires_removal = false;
     loop {
         let ParsedUnit {
@@ -289,10 +270,9 @@ pub(crate) fn resolve_unit(
                 });
             }
             Err(failure) => {
-                assert!(
-                    failure.is_recoverable_body_fault(),
-                    "non-recoverable source-cache pipeline failure: {failure}"
-                );
+                if !failure.is_recoverable_body_fault() {
+                    return Err(failure.into());
+                }
                 debug_assert_eq!(failure.source_path, unit.path);
                 debug_assert_eq!(failure.parser_version, unit.parser_version);
                 report_cache_read_failure(&failure);
@@ -311,19 +291,18 @@ pub(crate) fn resolve_unit(
                 let mut reparsed = adapter.parse_checked(
                     vec![unit],
                     &ParseContext {
-                        source_cache: &*ctx.source_cache,
                         pricing: ctx.pricing,
                     },
                 )?;
                 if reparsed.len() != 1 {
-                    return Err(format!(
+                    return Err(SourcePipelineError::contract(format!(
                         "single-source cache recovery returned {} parsed units instead of one",
                         reparsed.len()
-                    ));
+                    )));
                 }
-                parsed = reparsed
-                    .pop()
-                    .expect("single-source cache recovery result disappeared");
+                parsed = reparsed.pop().ok_or_else(|| {
+                    SourcePipelineError::contract("single-source cache recovery result disappeared")
+                })?;
             }
         }
     }
@@ -346,15 +325,22 @@ pub(crate) fn cache_read_failure_diagnostic(failure: &message_cache::CacheReadFa
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CacheWriteOutcome {
+    Written,
+    NotPlanned,
+}
+
 pub(crate) fn write_cache(
     cache_write: Option<Box<message_cache::CacheWritePlan>>,
     ctx: &mut FoldContext<'_>,
     messages: &[UnifiedMessage],
-) -> bool {
+) -> Result<CacheWriteOutcome, message_cache::SourceCacheError> {
     if let Some(plan) = cache_write {
-        return ctx.source_cache.write_messages(*plan, messages);
+        ctx.source_cache.write_messages(*plan, messages)?;
+        return Ok(CacheWriteOutcome::Written);
     }
-    false
+    Ok(CacheWriteOutcome::NotPlanned)
 }
 
 pub(crate) fn resolve_messages(
@@ -405,6 +391,26 @@ mod tests {
         SourceUnit::plain_file(ClientId::Pi, path.to_path_buf())
     }
 
+    fn expect_cache_hit(
+        result: Result<CacheHitPlan, crate::adapters::SourcePlanningError>,
+        message: &str,
+    ) -> ParsedUnit {
+        match result.expect(message) {
+            CacheHitPlan::Hit(parsed) => parsed,
+            CacheHitPlan::Miss(_) => panic!("{message}"),
+        }
+    }
+
+    fn expect_cache_miss(
+        result: Result<CacheHitPlan, crate::adapters::SourcePlanningError>,
+        message: &str,
+    ) -> SourceUnit {
+        match result.expect(message) {
+            CacheHitPlan::Miss(unit) => unit,
+            CacheHitPlan::Hit(_) => panic!("{message}"),
+        }
+    }
+
     fn seed_disk_cache(
         cache_dir: &Path,
         unit: &SourceUnit,
@@ -428,10 +434,9 @@ mod tests {
                 },
                 0.0,
             )],
-            Vec::new(),
             None,
         ));
-        cache.save_if_dirty();
+        cache.save_if_dirty().unwrap();
         fingerprint
     }
 
@@ -439,6 +444,13 @@ mod tests {
         parsed: ParsedUnit,
         cache: &mut message_cache::SourceMessageCache,
     ) -> Vec<UnifiedMessage> {
+        fold_planned_unit_result(parsed, cache).unwrap()
+    }
+
+    fn fold_planned_unit_result(
+        parsed: ParsedUnit,
+        cache: &mut message_cache::SourceMessageCache,
+    ) -> Result<Vec<UnifiedMessage>, SourcePipelineError> {
         let mut sink = Vec::new();
         fold_units(
             vec![parsed],
@@ -447,13 +459,13 @@ mod tests {
                 pricing: None,
             },
             &mut sink,
-        );
-        sink
+        )?;
+        Ok(sink)
     }
 
     fn assert_warm_hit_reads_no_source_bytes(unit: SourceUnit) {
         let cache_home = tempfile::TempDir::new().unwrap();
-        let unit = unit.prepare_snapshot();
+        let unit = unit.prepare_snapshot().unwrap();
         let policy = unit.source_input_policy();
         let stamp = policy.stamp().unwrap();
         let fingerprint = policy.fingerprint_from_stamp(stamp).unwrap();
@@ -463,16 +475,18 @@ mod tests {
             unit.parser_version,
             fingerprint,
             vec![cached_message()],
-            Vec::new(),
             None,
         ));
-        cache.save_if_dirty();
+        cache.save_if_dirty().unwrap();
         let cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         for path in policy.paths() {
             message_cache::reset_source_read_stats(&path);
         }
 
-        let parsed = plan_cache_hit(unit, &cache).expect("exact stamp should plan a cache hit");
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit, &cache),
+            "exact stamp should plan a cache hit",
+        );
 
         assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
         assert!(
@@ -521,11 +535,9 @@ mod tests {
         std::fs::write(&meta_path, b"meta contents").unwrap();
         std::fs::write(&variant_path, b"{\"name\":\"Kimi\"}").unwrap();
 
-        assert_warm_hit_reads_no_source_bytes(SourceUnit::claude_code(
-            ClientId::Claude,
-            path,
-            home.path().to_path_buf(),
-        ));
+        assert_warm_hit_reads_no_source_bytes(
+            SourceUnit::claude_code(ClientId::Claude, path, home.path().to_path_buf()).unwrap(),
+        );
     }
 
     #[test]
@@ -541,21 +553,25 @@ mod tests {
             old_unit.parser_version,
             old_fingerprint,
             vec![cached_message()],
-            Vec::new(),
             None,
         ));
 
         std::fs::write(&path, b"new and larger contents").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone()).prepare_snapshot();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+            .prepare_snapshot()
+            .unwrap();
         let expected_snapshot = unit.source_input_policy().snapshot().unwrap();
         message_cache::reset_source_read_stats(&path);
 
-        let mut miss = plan_cache_hit(unit, &cache).expect_err("stale stamp must remain a miss");
+        let mut miss = expect_cache_miss(
+            plan_cache_hit(unit, &cache),
+            "stale stamp must remain a miss",
+        );
 
         assert!(miss.cache_lookup_completed_no_hit);
         assert_eq!(
-            miss.take_source_input_snapshot(),
-            Some(expected_snapshot),
+            miss.take_source_input_snapshot().unwrap(),
+            expected_snapshot,
             "planning a miss must return the prepared inventory snapshot unchanged"
         );
         assert_eq!(
@@ -570,10 +586,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"source contents").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone()).prepare_snapshot();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+            .prepare_snapshot()
+            .unwrap();
         let mut cache = message_cache::SourceMessageCache::default();
 
-        let miss = plan_cache_hit(unit, &cache).expect_err("empty cache must plan a miss");
+        let miss = expect_cache_miss(plan_cache_hit(unit, &cache), "empty cache must plan a miss");
         assert!(miss.cache_lookup_completed_no_hit);
         assert!(miss.prepared_source_input_snapshot().is_some());
         cache.insert(message_cache::CachedSourceEntry::new_with_version(
@@ -581,22 +599,15 @@ mod tests {
             miss.parser_version,
             miss.source_input_policy().fingerprint().unwrap(),
             vec![cached_message()],
-            Vec::new(),
             None,
         ));
         let parse_called = std::cell::Cell::new(false);
 
-        let parsed = load_or_parse_unit_with(
-            miss,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |_| {
-                parse_called.set(true);
-                vec![cached_message()]
-            },
-        );
+        let parsed = load_or_parse_unit_with(miss, &ParseContext { pricing: None }, |_| {
+            parse_called.set(true);
+            Ok(vec![cached_message()])
+        })
+        .unwrap();
 
         assert!(parse_called.get());
         assert!(matches!(parsed.messages, UnitMessageSource::Fresh(_)));
@@ -604,13 +615,42 @@ mod tests {
     }
 
     #[test]
-    fn result_parser_error_preserves_same_key_v2_envelope() {
+    fn result_parser_error_preserves_typed_source_context() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let source_path = source_dir.path().join("session.jsonl");
+        std::fs::write(&source_path, PI_SOURCE).unwrap();
+        let unit = pi_unit(&source_path);
+
+        let result = load_or_parse_unit_with_result(
+            unit.prepare_snapshot().unwrap(),
+            &ParseContext { pricing: None },
+            |_| {
+                Err(crate::sessions::error::SessionParseError::invalid(
+                    "parse test SQLite",
+                    "sqlite root cause",
+                ))
+            },
+        );
+
+        match result {
+            Err(error) => {
+                let text = error.to_string();
+                assert!(text.contains("pi"));
+                assert!(text.contains(source_path.to_str().unwrap()));
+                assert!(text.contains("sqlite root cause"));
+            }
+            Ok(_) => panic!("parser error must not produce a ParsedUnit"),
+        }
+    }
+
+    #[test]
+    fn previous_format_lookup_fails_without_parsing_or_mutating_the_shard() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
         std::fs::write(&source_path, PI_SOURCE).unwrap();
         let unit = pi_unit(&source_path);
-        seed_disk_cache(cache_dir.path(), &unit, "v2-cache-session");
+        seed_disk_cache(cache_dir.path(), &unit, "v3-cache-session");
         let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
             cache_dir.path(),
             &source_path,
@@ -618,140 +658,24 @@ mod tests {
         );
         let before = std::fs::read(&shard_path).unwrap();
         let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-
-        let result = load_or_parse_unit_with_result(
-            unit.prepare_snapshot(),
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |_| Err("sqlite root cause".to_string()),
-        );
-
-        match result {
-            Err(error) => assert_eq!(error, "sqlite root cause"),
-            Ok(_) => panic!("parser error must not produce a ParsedUnit"),
-        }
+        let error = plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache)
+            .expect_err("v3 shards must fail current-format lookup");
+        assert!(matches!(
+            error,
+            crate::adapters::SourcePlanningError::CacheLookup(message_cache::CacheLookupFailure {
+                reason: message_cache::CacheReadFailureReason::PreviousFormat { actual: 3, .. },
+                ..
+            })
+        ));
         assert_eq!(
             std::fs::read(shard_path).unwrap(),
             before,
-            "parse failure must not replace or delete a known v2 shard"
+            "ordinary lookup must not mutate a previous-format shard"
         );
     }
 
     #[test]
-    fn same_key_v2_envelope_is_reparsed_and_atomically_replaced_during_scan() {
-        let source_dir = tempfile::TempDir::new().unwrap();
-        let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
-        seed_disk_cache(cache_dir.path(), &unit, "v2-cache-session");
-        message_cache::mark_current_key_shard_as_previous_format_for_test(
-            cache_dir.path(),
-            &source_path,
-            unit.parser_version,
-        );
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-
-        let miss = plan_cache_hit(unit.clone().prepare_snapshot(), &cache)
-            .expect_err("v2 shards must not enter the current-format decode path");
-        let parsed = load_or_parse_unit_with(
-            miss,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            crate::sessions::pi::parse_pi_file,
-        );
-        let messages = fold_planned_unit(parsed, &mut cache);
-        assert_eq!(messages[0].session_id.as_ref(), "source-session");
-
-        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let warm = plan_cache_hit(unit.prepare_snapshot(), &warm_cache)
-            .expect("successful scan must replace v2 with a warm-readable v3 shard");
-        assert!(matches!(warm.messages, UnitMessageSource::CacheHit(_)));
-    }
-
-    #[test]
-    fn noncacheable_reparse_preserves_same_key_v2_envelope() {
-        let source_dir = tempfile::TempDir::new().unwrap();
-        let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
-        seed_disk_cache(cache_dir.path(), &unit, "v2-cache-session");
-        let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
-            cache_dir.path(),
-            &source_path,
-            unit.parser_version,
-        );
-        let before = std::fs::read(&shard_path).unwrap();
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-
-        let miss = plan_cache_hit(unit.prepare_snapshot(), &cache)
-            .expect_err("v2 shards must be reparsed");
-        let parsed = load_or_parse_unit_with_policy(
-            miss,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |path| (crate::sessions::pi::parse_pi_file(path), false),
-        );
-        assert!(parsed.cache_write.is_none());
-        assert!(parsed.invalidate_cache);
-        let messages = fold_planned_unit(parsed, &mut cache);
-        assert_eq!(messages[0].session_id.as_ref(), "source-session");
-        assert_eq!(
-            std::fs::read(shard_path).unwrap(),
-            before,
-            "non-cacheable reparses must not delete a v2 shard"
-        );
-    }
-
-    #[test]
-    fn source_race_during_reparse_preserves_same_key_v2_envelope() {
-        let source_dir = tempfile::TempDir::new().unwrap();
-        let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
-        seed_disk_cache(cache_dir.path(), &unit, "v2-cache-session");
-        let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
-            cache_dir.path(),
-            &source_path,
-            unit.parser_version,
-        );
-        let before = std::fs::read(&shard_path).unwrap();
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-
-        let miss = plan_cache_hit(unit.prepare_snapshot(), &cache)
-            .expect_err("v2 shards must be reparsed");
-        let parsed = load_or_parse_unit_with(
-            miss,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |path| {
-                let messages = crate::sessions::pi::parse_pi_file(path);
-                std::fs::write(path, PI_REPLACEMENT_SOURCE).unwrap();
-                messages
-            },
-        );
-        assert!(parsed.cache_write.is_none());
-        assert!(parsed.invalidate_cache);
-        fold_planned_unit(parsed, &mut cache);
-        assert_eq!(
-            std::fs::read(shard_path).unwrap(),
-            before,
-            "a source race must not delete an unrecognized-on-read v2 shard"
-        );
-    }
-
-    #[test]
-    fn unprepared_planner_miss_rechecks_cache_during_parse() {
+    fn unprepared_planner_refreshes_snapshot_and_accepts_exact_hit() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"source contents").unwrap();
@@ -762,33 +686,30 @@ mod tests {
             unit.parser_version,
             unit.source_input_policy().fingerprint().unwrap(),
             vec![cached_message()],
-            Vec::new(),
             None,
         ));
 
-        let miss = plan_cache_hit(unit, &cache)
-            .expect_err("an unprepared unit cannot make a definitive stamp decision");
-        assert!(!miss.cache_lookup_completed_no_hit);
-        let parsed = load_or_parse_unit_with(
-            miss,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |_| panic!("indeterminate planner miss must recheck the cache"),
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit, &cache),
+            "cache planning must refresh metadata at the acceptance boundary",
         );
-
         assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
     }
 
     #[test]
-    fn same_size_rewrite_with_restored_mtime_remains_a_stamp_hit() {
+    fn same_size_same_mtime_atomic_replacement_revalidates_to_a_cache_miss() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"original").unwrap();
         let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+            .prepare_snapshot()
+            .unwrap();
         let policy = unit.source_input_policy();
+        let original_modified_ms = unit
+            .prepared_source_input_snapshot()
+            .unwrap()
+            .primary_modified_ms();
         let original_stamp = policy.stamp().unwrap();
         let fingerprint = policy
             .fingerprint_from_stamp(original_stamp.clone())
@@ -800,39 +721,46 @@ mod tests {
             unit.parser_version,
             fingerprint,
             vec![cached_message()],
-            Vec::new(),
             None,
         ));
 
-        std::fs::write(&path, b"rewritte").unwrap();
-        std::fs::File::open(&path)
+        let replacement = dir.path().join("replacement.json");
+        std::fs::write(&replacement, b"rewritte").unwrap();
+        std::fs::File::open(&replacement)
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
             .unwrap();
-        assert_eq!(policy.stamp().unwrap(), original_stamp);
+        #[cfg(windows)]
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let replacement_stamp = policy.stamp().unwrap();
+        assert_eq!(
+            replacement_stamp.primary_size(),
+            original_stamp.primary_size()
+        );
+        assert_eq!(
+            policy.snapshot().unwrap().primary_modified_ms(),
+            original_modified_ms
+        );
+        assert_ne!(replacement_stamp, original_stamp);
         assert_ne!(
             policy
-                .fingerprint_from_stamp(policy.stamp().unwrap())
+                .fingerprint_from_stamp(replacement_stamp)
                 .unwrap()
                 .content_hash,
             original_content_hash,
-            "the rewrite really changed content even though its stamp was restored"
+            "the replacement really changed content even though size and mtime were restored"
         );
         message_cache::reset_source_read_stats(&path);
+        let parse_called = std::cell::Cell::new(false);
 
-        let parsed = load_or_parse_unit_with(
-            unit,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |_| panic!("same stamp is the documented freshness contract"),
-        );
-        assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
-        assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats::default()
-        );
+        let parsed = load_or_parse_unit_with(unit, &ParseContext { pricing: None }, |_| {
+            parse_called.set(true);
+            Ok(vec![cached_message()])
+        })
+        .unwrap();
+        assert!(parse_called.get());
+        assert!(matches!(parsed.messages, UnitMessageSource::Fresh(_)));
     }
 
     #[test]
@@ -841,19 +769,11 @@ mod tests {
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"before").unwrap();
         let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
-        let cache = message_cache::SourceMessageCache::default();
-
-        let parsed = load_or_parse_unit_with(
-            unit,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |_| {
-                std::fs::write(&path, b"after-and-different-size").unwrap();
-                vec![cached_message()]
-            },
-        );
+        let parsed = load_or_parse_unit_with(unit, &ParseContext { pricing: None }, |_| {
+            std::fs::write(&path, b"after-and-different-size").unwrap();
+            Ok(vec![cached_message()])
+        })
+        .unwrap();
 
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
@@ -867,19 +787,11 @@ mod tests {
         std::fs::write(&path, b"database").unwrap();
         std::fs::write(&wal_path, b"wal-before").unwrap();
         let unit = SourceUnit::sqlite_with_wal(ClientId::Zed, path);
-        let cache = message_cache::SourceMessageCache::default();
-
-        let parsed = load_or_parse_unit_with(
-            unit,
-            &ParseContext {
-                source_cache: &cache,
-                pricing: None,
-            },
-            |_| {
-                std::fs::write(&wal_path, b"wal-after-and-larger").unwrap();
-                vec![cached_message()]
-            },
-        );
+        let parsed = load_or_parse_unit_with(unit, &ParseContext { pricing: None }, |_| {
+            std::fs::write(&wal_path, b"wal-after-and-larger").unwrap();
+            Ok(vec![cached_message()])
+        })
+        .unwrap();
 
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
@@ -926,8 +838,10 @@ mod tests {
         assert!(diagnostic.contains("reparsing the current source"));
 
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let parsed = plan_cache_hit(unit.clone().prepare_snapshot(), &cache)
-            .expect("valid header must still plan a cache hit");
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
+            "valid header must still plan a cache hit",
+        );
         let repaired = fold_planned_unit(parsed, &mut cache);
         assert_eq!(repaired.len(), 1);
         assert_eq!(repaired[0].session_id.as_ref(), "source-session");
@@ -935,8 +849,10 @@ mod tests {
 
         let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
         message_cache::reset_source_read_stats(&source_path);
-        let warm = plan_cache_hit(unit.prepare_snapshot(), &warm_cache)
-            .expect("successful recovery must atomically replace the failed shard");
+        let warm = expect_cache_hit(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &warm_cache),
+            "successful recovery must atomically replace the failed shard",
+        );
         let warm_messages = fold_planned_unit(warm, &mut warm_cache);
         assert_eq!(warm_messages[0].session_id.as_ref(), "source-session");
         assert_eq!(
@@ -944,6 +860,115 @@ mod tests {
             message_cache::SourceReadStats::default(),
             "second warm hit after repair must not read or hash source bytes"
         );
+    }
+
+    #[test]
+    fn corrupt_shard_removal_is_saved_when_recovery_parser_fails() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let source_path = source_dir.path().join("opencode.db");
+        std::fs::write(&source_path, b"not-a-database").unwrap();
+        let unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, source_path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
+        let mut seed = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        seed.insert(message_cache::CachedSourceEntry::new_with_version(
+            &source_path,
+            unit.parser_version,
+            fingerprint,
+            vec![cached_message()],
+            None,
+        ));
+        seed.save_if_dirty().unwrap();
+        let shard_path = message_cache::truncate_shard_after_header_for_test(
+            cache_dir.path(),
+            &source_path,
+            unit.parser_version,
+        );
+
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
+            "valid header must plan a cache hit before body recovery",
+        );
+        std::fs::remove_file(&source_path).unwrap();
+        std::fs::create_dir(&source_path).unwrap();
+        let mut ctx = FoldContext {
+            source_cache: &mut cache,
+            pricing: None,
+        };
+        let error = match resolve_unit(parsed, &mut ctx) {
+            Ok(_) => panic!("the recovery parser must expose the invalid SQLite source"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("opencode"));
+
+        ctx.source_cache.save_if_dirty().unwrap();
+        assert!(
+            !shard_path.exists(),
+            "body corruption removal must persist even when recovery parsing fails"
+        );
+    }
+
+    #[test]
+    fn recovery_parse_and_cache_deletion_failures_are_both_retained() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let source_path = source_dir.path().join("opencode.db");
+        std::fs::write(&source_path, b"not-a-database").unwrap();
+        let unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, source_path.clone())
+            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
+        let mut seed = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        seed.insert(message_cache::CachedSourceEntry::new_with_version(
+            &source_path,
+            unit.parser_version,
+            fingerprint,
+            vec![cached_message()],
+            None,
+        ));
+        seed.save_if_dirty().unwrap();
+        let shard_path = message_cache::truncate_shard_after_header_for_test(
+            cache_dir.path(),
+            &source_path,
+            unit.parser_version,
+        );
+
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
+            "valid header must plan a cache hit before body recovery",
+        );
+        std::fs::remove_file(&source_path).unwrap();
+        std::fs::create_dir(&source_path).unwrap();
+        let mut ctx = FoldContext {
+            source_cache: &mut cache,
+            pricing: None,
+        };
+        let parse_error = match resolve_unit(parsed, &mut ctx) {
+            Ok(_) => panic!("strict recovery parsing must expose the invalid SQLite source"),
+            Err(error) => error,
+        };
+
+        std::fs::remove_file(&shard_path).unwrap();
+        std::fs::create_dir(&shard_path).unwrap();
+        let cache_error = ctx
+            .source_cache
+            .save_if_dirty()
+            .expect_err("a directory at the shard path must make deletion fail");
+        let combined = SourcePipelineError::with_finalization(parse_error, cache_error);
+
+        assert!(matches!(
+            &combined,
+            SourcePipelineError::Finalization { .. }
+        ));
+        let diagnostic = combined.to_string();
+        assert!(diagnostic.contains("opencode"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("cache finalization also failed"),
+            "{diagnostic}"
+        );
+        assert!(shard_path.is_dir());
     }
 
     #[test]
@@ -962,8 +987,10 @@ mod tests {
         );
 
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let parsed = plan_cache_hit(unit.prepare_snapshot(), &cache)
-            .expect("mismatched body count remains a planned header hit");
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
+            "mismatched body count remains a planned header hit",
+        );
         let messages = fold_planned_unit(parsed, &mut cache);
 
         assert_eq!(messages.len(), 1);
@@ -972,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_planned_shard_is_reparsed_and_recreated() {
+    fn deleted_planned_shard_is_an_explicit_read_error() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
@@ -981,22 +1008,25 @@ mod tests {
         seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
 
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let parsed = plan_cache_hit(unit.clone().prepare_snapshot(), &cache)
-            .expect("seeded shard must plan a cache hit");
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
+            "seeded shard must plan a cache hit",
+        );
         let shard_path =
             message_cache::shard_path_for_test(cache_dir.path(), &source_path, unit.parser_version);
         std::fs::remove_file(&shard_path).unwrap();
 
-        let messages = fold_planned_unit(parsed, &mut cache);
-        assert_eq!(messages[0].session_id.as_ref(), "source-session");
+        let error = fold_planned_unit_result(parsed, &mut cache)
+            .expect_err("a shard deleted after planning must not degrade to reparsing");
+        assert!(error.to_string().contains("failed to open shard"));
         assert!(
-            shard_path.is_file(),
-            "successful repair must recreate shard"
+            !shard_path.exists(),
+            "a failed read must not silently recreate the deleted shard"
         );
     }
 
     #[test]
-    fn replaced_shard_fingerprint_is_reparsed_from_current_source() {
+    fn replaced_shard_fingerprint_is_an_explicit_race_error() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
@@ -1005,24 +1035,27 @@ mod tests {
         seed_disk_cache(cache_dir.path(), &unit, "initial-cache-session");
 
         let mut reader = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let parsed = plan_cache_hit(unit.clone().prepare_snapshot(), &reader)
-            .expect("initial shard must plan a cache hit");
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &reader),
+            "initial shard must plan a cache hit",
+        );
 
         std::fs::write(&source_path, PI_REPLACEMENT_SOURCE).unwrap();
-        seed_disk_cache(cache_dir.path(), &unit, "replacement-cache-poison");
+        seed_disk_cache(cache_dir.path(), &unit, "replacement-source-session");
 
-        let messages = fold_planned_unit(parsed, &mut reader);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0].session_id.as_ref(),
-            "replacement-source-session",
-            "stale read plan must not consume an atomically replaced shard"
+        let error = fold_planned_unit_result(parsed, &mut reader)
+            .expect_err("stale read plan must expose the replaced shard race");
+        assert!(
+            error.to_string().contains("fingerprint no longer matches"),
+            "unexpected error: {error}"
         );
 
         let mut repaired_cache =
             message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let repaired = plan_cache_hit(unit.prepare_snapshot(), &repaired_cache)
-            .expect("current source fingerprint must have a repaired shard");
+        let repaired = expect_cache_hit(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &repaired_cache),
+            "current source fingerprint must have a repaired shard",
+        );
         let cached = fold_planned_unit(repaired, &mut repaired_cache);
         assert_eq!(cached[0].session_id.as_ref(), "replacement-source-session");
     }
@@ -1037,8 +1070,10 @@ mod tests {
         seed_disk_cache(cache_dir.path(), &unit, "initial-cache-session");
 
         let mut reader = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let parsed = plan_cache_hit(unit.clone().prepare_snapshot(), &reader)
-            .expect("initial shard must plan a cache hit");
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &reader),
+            "initial shard must plan a cache hit",
+        );
         std::fs::write(&source_path, PI_REPLACEMENT_SOURCE).unwrap();
         seed_disk_cache(cache_dir.path(), &unit, "replacement-cache-session");
         let shard_path =
@@ -1046,9 +1081,10 @@ mod tests {
         let replacement_bytes = std::fs::read(&shard_path).unwrap();
         std::fs::write(&source_path, b"not a pi jsonl session").unwrap();
 
-        let messages = fold_planned_unit(parsed, &mut reader);
-        assert!(messages.is_empty());
-        reader.save_if_dirty();
+        let error = fold_planned_unit_result(parsed, &mut reader)
+            .expect_err("replaced shard races must not fall back to source parsing");
+        assert!(error.to_string().contains("fingerprint no longer matches"));
+        reader.save_if_dirty().unwrap();
         assert_eq!(
             std::fs::read(shard_path).unwrap(),
             replacement_bytes,
@@ -1066,8 +1102,10 @@ mod tests {
         seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
 
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let parsed = plan_cache_hit(unit.clone().prepare_snapshot(), &cache)
-            .expect("seeded shard must plan a cache hit");
+        let parsed = expect_cache_hit(
+            plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
+            "seeded shard must plan a cache hit",
+        );
         let shard_path = message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
             &source_path,
@@ -1075,9 +1113,10 @@ mod tests {
         );
         std::fs::write(&source_path, b"not a pi jsonl session").unwrap();
 
-        let messages = fold_planned_unit(parsed, &mut cache);
-        assert!(messages.is_empty());
-        cache.save_if_dirty();
+        let error = fold_planned_unit_result(parsed, &mut cache)
+            .expect_err("strict parser failure must propagate during cache recovery");
+        assert!(error.to_string().contains("pi"));
+        cache.save_if_dirty().unwrap();
         assert!(
             !shard_path.exists(),
             "known-corrupt derived shard must be removed when recovery cannot replace it"
@@ -1085,16 +1124,16 @@ mod tests {
 
         std::fs::write(&source_path, PI_SOURCE).unwrap();
         let cold_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let cold_unit = plan_cache_hit(unit.prepare_snapshot(), &cold_cache)
-            .expect_err("next run must cold-parse instead of planning the removed bad shard");
+        let cold_unit = expect_cache_miss(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &cold_cache),
+            "next run must cold-parse instead of planning the removed bad shard",
+        );
         let cold_parsed = load_or_parse_unit_with(
             cold_unit,
-            &ParseContext {
-                source_cache: &cold_cache,
-                pricing: None,
-            },
+            &ParseContext { pricing: None },
             crate::sessions::pi::parse_pi_file,
-        );
+        )
+        .unwrap();
         let mut cold_cache = cold_cache;
         let cold_messages = fold_planned_unit(cold_parsed, &mut cold_cache);
         assert_eq!(cold_messages[0].session_id.as_ref(), "source-session");
@@ -1109,25 +1148,26 @@ mod tests {
         let unit = pi_unit(&source_path);
         seed_disk_cache(cache_dir.path(), &unit, "cached-session");
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let first = plan_cache_hit(unit.clone().prepare_snapshot(), &cache).unwrap();
-        let second = plan_cache_hit(unit.prepare_snapshot(), &cache).unwrap();
+        let first = expect_cache_hit(
+            plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
+            "first planned read must hit",
+        );
+        let second = expect_cache_hit(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
+            "second planned read must hit",
+        );
         let mut sink = Vec::new();
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            fold_units(
-                vec![first, second],
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut sink,
-            );
-        }));
-
-        assert!(
-            panic.is_err(),
-            "second consumption must expose a pipeline bug"
-        );
+        let error = fold_units(
+            vec![first, second],
+            &mut FoldContext {
+                source_cache: &mut cache,
+                pricing: None,
+            },
+            &mut sink,
+        )
+        .expect_err("second consumption must expose a typed pipeline error");
+        assert!(error.to_string().contains("already consumed"));
         assert_eq!(
             sink.len(),
             1,

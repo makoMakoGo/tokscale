@@ -2,7 +2,7 @@
 //!
 //! Parses JSON files from ~/.local/share/amp/threads/
 
-use super::utils::read_file_or_none;
+use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -69,8 +69,13 @@ pub struct AmpThread {
 }
 
 /// Get provider from model name
-fn get_provider_from_model(model: &str) -> &'static str {
-    provider_identity::inferred_provider_from_model(model).unwrap_or("unknown")
+fn get_provider_from_model(model: &str) -> SessionParseResult<&'static str> {
+    provider_identity::inferred_provider_from_model(model).ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate usage provider",
+            format!("Amp cannot determine a provider for model `{model}`"),
+        )
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -88,134 +93,150 @@ impl AmpUsageRecord {
         self.model == other.model && self.tokens == other.tokens
     }
 
-    fn into_unified(self, thread_id: &str) -> UnifiedMessage {
-        UnifiedMessage::new(
+    fn into_unified(self, thread_id: &str) -> SessionParseResult<UnifiedMessage> {
+        let provider = get_provider_from_model(&self.model)?;
+        Ok(UnifiedMessage::new(
             "amp",
             &self.model,
-            get_provider_from_model(&self.model),
+            provider,
             thread_id,
             self.timestamp,
             self.tokens,
             0.0,
-        )
+        ))
     }
 }
 
-fn parse_amp_timestamp(timestamp: Option<String>) -> Option<i64> {
-    timestamp
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-        .map(|dt| dt.timestamp_millis())
-        .filter(|timestamp| *timestamp != 0)
-}
-
-fn fallback_amp_timestamp(
-    explicit: Option<i64>,
-    thread_created_ms: i64,
-    file_mtime_ms: i64,
-) -> i64 {
-    explicit
-        .filter(|timestamp| *timestamp != 0)
-        .or_else(|| (thread_created_ms != 0).then_some(thread_created_ms))
-        .unwrap_or(file_mtime_ms)
+fn parse_amp_timestamp(timestamp: Option<String>) -> SessionParseResult<Option<i64>> {
+    let Some(timestamp) = timestamp else {
+        return Ok(None);
+    };
+    let parsed = chrono::DateTime::parse_from_rfc3339(&timestamp)
+        .map_err(|error| SessionParseError::new("decode usage timestamp", error))?
+        .timestamp_millis();
+    if parsed == 0 {
+        return Err(SessionParseError::invalid(
+            "validate usage timestamp",
+            "Amp timestamp resolved to zero",
+        ));
+    }
+    Ok(Some(parsed))
 }
 
 fn parse_amp_ledger_records(
     usage_ledger: Option<AmpUsageLedger>,
-    thread_created_ms: i64,
-    file_mtime_ms: i64,
-) -> Vec<AmpUsageRecord> {
+) -> SessionParseResult<Vec<AmpUsageRecord>> {
     let Some(ledger) = usage_ledger else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(events) = ledger.events else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
-    events
-        .into_iter()
-        .filter_map(|event| {
-            let model = event.model?;
-            let explicit_timestamp = parse_amp_timestamp(event.timestamp);
-            let timestamp =
-                fallback_amp_timestamp(explicit_timestamp, thread_created_ms, file_mtime_ms);
-            let tokens = event.tokens.unwrap_or(AmpTokens {
-                input: Some(0),
-                output: Some(0),
-                cache_read_input_tokens: Some(0),
-                cache_creation_input_tokens: Some(0),
-            });
+    let mut records = Vec::new();
+    for event in events {
+        let Some(tokens) = event.tokens else {
+            continue;
+        };
+        let tokens = TokenBreakdown {
+            input: tokens.input.unwrap_or(0).max(0),
+            output: tokens.output.unwrap_or(0).max(0),
+            cache_read: tokens.cache_read_input_tokens.unwrap_or(0).max(0),
+            cache_write: tokens.cache_creation_input_tokens.unwrap_or(0).max(0),
+            reasoning: 0,
+        };
+        if crate::positive_token_total(&tokens) == 0 {
+            continue;
+        }
+        let model = event
+            .model
+            .filter(|model| !model.trim().is_empty())
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate usage event",
+                    "Amp usage event is missing a non-empty model",
+                )
+            })?;
+        let explicit_timestamp = parse_amp_timestamp(event.timestamp)?.ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate usage timestamp",
+                "Amp usage event with positive tokens is missing a timestamp",
+            )
+        })?;
 
-            let tokens = TokenBreakdown {
-                input: tokens.input.unwrap_or(0).max(0),
-                output: tokens.output.unwrap_or(0).max(0),
-                cache_read: tokens.cache_read_input_tokens.unwrap_or(0).max(0),
-                cache_write: tokens.cache_creation_input_tokens.unwrap_or(0).max(0),
-                reasoning: 0,
-            };
-            if crate::positive_token_total(&tokens) == 0 {
-                return None;
-            }
-
-            Some(AmpUsageRecord {
-                model,
-                timestamp,
-                has_explicit_timestamp: explicit_timestamp.is_some(),
-                message_id: None,
-                ledger_to_message_id: event.to_message_id.filter(|id| *id > 0),
-                tokens,
-            })
-        })
-        .collect()
+        records.push(AmpUsageRecord {
+            model,
+            timestamp: explicit_timestamp,
+            has_explicit_timestamp: true,
+            message_id: None,
+            ledger_to_message_id: event.to_message_id.filter(|id| *id > 0),
+            tokens,
+        });
+    }
+    Ok(records)
 }
 
 fn parse_amp_message_records(
     thread_messages: Option<Vec<AmpMessage>>,
-    thread_created_ms: i64,
-    file_mtime_ms: i64,
-) -> Vec<AmpUsageRecord> {
+    thread_created_ms: Option<i64>,
+) -> SessionParseResult<Vec<AmpUsageRecord>> {
     let Some(thread_messages) = thread_messages else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
-    let base_timestamp = if thread_created_ms != 0 {
-        thread_created_ms
-    } else {
-        file_mtime_ms
-    };
+    let mut records = Vec::new();
+    for msg in thread_messages {
+        if msg.role.as_deref() != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = msg.usage else {
+            continue;
+        };
+        let tokens = TokenBreakdown {
+            input: usage.input_tokens.unwrap_or(0).max(0),
+            output: usage.output_tokens.unwrap_or(0).max(0),
+            cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
+            cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
+            reasoning: 0,
+        };
+        if crate::positive_token_total(&tokens) == 0 {
+            continue;
+        }
+        let model = usage
+            .model
+            .filter(|model| !model.trim().is_empty())
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate assistant usage",
+                    "Amp assistant usage is missing a non-empty model",
+                )
+            })?;
+        let message_id = msg.message_id.filter(|id| *id > 0).ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate assistant usage",
+                "Amp assistant usage is missing a positive messageId",
+            )
+        })?;
+        let base_timestamp = thread_created_ms
+            .filter(|timestamp| *timestamp > 0)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate thread timestamp",
+                    "Amp thread with assistant usage is missing a positive created timestamp",
+                )
+            })?;
+        let timestamp = base_timestamp.saturating_add(message_id.saturating_mul(1000));
 
-    thread_messages
-        .into_iter()
-        .filter_map(|msg| {
-            if msg.role.as_deref() != Some("assistant") {
-                return None;
-            }
-
-            let usage = msg.usage?;
-            let model = usage.model?;
-            let message_id = msg.message_id.unwrap_or(0).max(0);
-            let timestamp = base_timestamp.saturating_add(message_id.saturating_mul(1000));
-
-            let tokens = TokenBreakdown {
-                input: usage.input_tokens.unwrap_or(0).max(0),
-                output: usage.output_tokens.unwrap_or(0).max(0),
-                cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
-                cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
-                reasoning: 0,
-            };
-            if crate::positive_token_total(&tokens) == 0 {
-                return None;
-            }
-
-            Some(AmpUsageRecord {
-                model,
-                timestamp,
-                has_explicit_timestamp: false,
-                message_id: Some(message_id).filter(|id| *id > 0),
-                ledger_to_message_id: None,
-                tokens,
-            })
-        })
-        .collect()
+        records.push(AmpUsageRecord {
+            model,
+            timestamp,
+            has_explicit_timestamp: false,
+            message_id: Some(message_id),
+            ledger_to_message_id: None,
+            tokens,
+        });
+    }
+    Ok(records)
 }
 
 fn find_matching_ledger_record(
@@ -265,37 +286,24 @@ fn merge_amp_records(
 }
 
 /// Parse an Amp thread JSON file
-pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
-    let Some(content) = read_file_or_none(path) else {
-        return Vec::new();
-    };
-
-    // Get file mtime as last-resort timestamp fallback
-    let file_mtime_ms = std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+pub fn parse_amp_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let content = std::fs::read(path)
+        .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
 
     let mut bytes = content;
-    let thread: AmpThread = match simd_json::from_slice(&mut bytes) {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
+    let thread: AmpThread = simd_json::from_slice(&mut bytes)
+        .map_err(|error| SessionParseError::at_path(path, "decode JSON", error))?;
 
-    let thread_id = thread.id.clone().unwrap_or_else(|| {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string()
-    });
+    let thread_id = thread
+        .id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            SessionParseError::invalid("validate thread", "Amp thread is missing a non-empty id")
+        })?;
 
-    let thread_created_ms = thread.created.unwrap_or(0);
-    let mut ledger_records =
-        parse_amp_ledger_records(thread.usage_ledger, thread_created_ms, file_mtime_ms);
-    let message_records =
-        parse_amp_message_records(thread.messages, thread_created_ms, file_mtime_ms);
+    let thread_created_ms = thread.created;
+    let mut ledger_records = parse_amp_ledger_records(thread.usage_ledger)?;
+    let message_records = parse_amp_message_records(thread.messages, thread_created_ms)?;
 
     if ledger_records.is_empty() {
         let mut message_records = message_records;
@@ -303,7 +311,7 @@ pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
         return message_records
             .into_iter()
             .map(|record| record.into_unified(&thread_id))
-            .collect();
+            .collect::<SessionParseResult<Vec<_>>>();
     }
 
     let mut consumed = vec![false; ledger_records.len()];
@@ -328,13 +336,17 @@ pub fn parse_amp_file(path: &Path) -> Vec<UnifiedMessage> {
     ledger_records
         .into_iter()
         .map(|record| record.into_unified(&thread_id))
-        .collect()
+        .collect::<SessionParseResult<Vec<_>>>()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_amp_file;
+    use super::parse_amp_file as parse_amp_file_result;
     use std::path::Path;
+
+    fn parse_amp_file(path: &Path) -> Vec<crate::UnifiedMessage> {
+        parse_amp_file_result(path).unwrap()
+    }
 
     fn write_amp_thread(path: &Path, content: &str) {
         std::fs::write(path, content).unwrap();
@@ -547,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_amp_prefers_message_timestamp_when_ledger_timestamp_missing() {
+    fn test_parse_amp_rejects_positive_ledger_usage_without_timestamp() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let path = temp_dir.path().join("T-missing-ledger-ts.json");
         let thread_created = timestamp_ms("2026-04-04T12:00:00Z");
@@ -582,13 +594,12 @@ mod tests {
             .to_string(),
         );
 
-        let messages = parse_amp_file(&path);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].timestamp, thread_created + 7000);
+        let error = parse_amp_file_result(&path).unwrap_err();
+        assert_eq!(error.operation(), "validate usage timestamp");
     }
 
     #[test]
-    fn test_parse_amp_uses_file_mtime_when_thread_created_missing() {
+    fn test_parse_amp_rejects_message_usage_when_thread_created_missing() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let path = temp_dir.path().join("T-no-created.json");
 
@@ -611,15 +622,12 @@ mod tests {
             }"#,
         );
 
-        let file_mtime_ms = crate::sessions::utils::file_modified_timestamp_ms(&path);
-        let messages = parse_amp_file(&path);
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].timestamp >= file_mtime_ms);
-        assert_ne!(messages[0].date_string(), "1970-01-01");
+        let error = parse_amp_file_result(&path).unwrap_err();
+        assert_eq!(error.operation(), "validate thread timestamp");
     }
 
     #[test]
-    fn test_parse_amp_does_not_default_unknown_models_to_anthropic() {
+    fn test_parse_amp_rejects_models_without_a_known_provider() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let path = temp_dir.path().join("T-unknown-model.json");
 
@@ -643,8 +651,23 @@ mod tests {
             .to_string(),
         );
 
-        let messages = parse_amp_file(&path);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
+        let error = parse_amp_file_result(&path).unwrap_err();
+        assert_eq!(error.operation(), "validate usage provider");
+    }
+
+    #[test]
+    fn test_parse_amp_ignores_null_and_zero_token_usage_without_identity_fields() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir.path().join("T-empty-usage.json");
+        write_amp_thread(
+            &path,
+            r#"{
+                "id": "thread-empty-usage",
+                "usageLedger": {"events": [{"tokens": null}, {"tokens": {}}]},
+                "messages": [{"role": "assistant", "usage": {}}]
+            }"#,
+        );
+
+        assert!(parse_amp_file(&path).is_empty());
     }
 }

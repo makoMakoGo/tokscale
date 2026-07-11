@@ -40,7 +40,6 @@ pub(super) struct ModelEntries {
 }
 
 struct ModelBucket {
-    first_seen: usize,
     client: Arc<str>,
     workspace_key: Option<Arc<str>>,
     workspace_label: Option<Arc<str>>,
@@ -105,7 +104,6 @@ impl ModelEntries {
                 (None, None)
             };
             ModelBucket {
-                first_seen: sequence,
                 client: Arc::clone(&msg.client),
                 workspace_key,
                 workspace_label,
@@ -156,41 +154,11 @@ impl ModelEntries {
     }
 
     pub(super) fn finish(self) -> Vec<ModelUsage> {
-        let Self {
-            group_by,
-            model_map,
-            ..
-        } = self;
-        let merge_providers = group_by != GroupBy::ClientProviderModel;
-        let mut entries = Vec::with_capacity(model_map.len());
-        let mut risky_buckets = Vec::new();
-        for (key, bucket) in model_map {
-            if key.may_alias_legacy_key() {
-                risky_buckets.push((key, bucket));
-            } else {
-                entries.push(materialize_model_bucket(bucket));
-            }
-        }
-
-        // Delimiter-free keys are injective and materialize directly. Only
-        // keys that can alias the historical text enter this compatibility
-        // table, avoiding a second corpus-sized map and one String per normal
-        // high-cardinality bucket.
-        if !risky_buckets.is_empty() {
-            risky_buckets.sort_by_key(|(_, bucket)| bucket.first_seen);
-            let mut public_buckets: HashMap<String, ModelBucket> = HashMap::new();
-            for (key, bucket) in risky_buckets {
-                match public_buckets.entry(key.public_key()) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(bucket);
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        merge_model_bucket(entry.get_mut(), bucket, merge_providers);
-                    }
-                }
-            }
-            entries.extend(public_buckets.into_values().map(materialize_model_bucket));
-        }
+        let Self { model_map, .. } = self;
+        let mut entries: Vec<_> = model_map
+            .into_values()
+            .map(materialize_model_bucket)
+            .collect();
 
         entries.sort_by(|a, b| {
             let cost = match (a.cost.is_nan(), b.cost.is_nan()) {
@@ -248,55 +216,6 @@ fn materialize_model_bucket(mut entry: ModelBucket) -> ModelUsage {
         cost: entry.cost,
         performance: entry.performance,
     }
-}
-
-fn merge_model_bucket(target: &mut ModelBucket, source: ModelBucket, merge_providers: bool) {
-    if merge_providers {
-        target.providers.extend(source.providers);
-    }
-    if let Some(source_totals_by_client) = source.client_totals {
-        let target_totals_by_client = target
-            .client_totals
-            .as_mut()
-            .expect("colliding merge-client buckets both track client totals");
-        for (client, source_totals) in *source_totals_by_client {
-            match target_totals_by_client.entry(client) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(source_totals);
-                }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    let totals = entry.get_mut();
-                    totals.first_seen = totals.first_seen.min(source_totals.first_seen);
-                    totals.total_tokens = totals
-                        .total_tokens
-                        .checked_add(source_totals.total_tokens)
-                        .expect("client token contribution exceeds u64::MAX");
-                }
-            }
-        }
-    }
-    target.input = checked_token_add(target.input, source.input);
-    target.output = checked_token_add(target.output, source.output);
-    target.cache_read = checked_token_add(target.cache_read, source.cache_read);
-    target.cache_write = checked_token_add(target.cache_write, source.cache_write);
-    target.reasoning = checked_token_add(target.reasoning, source.reasoning);
-    target.message_count = target
-        .message_count
-        .checked_add(source.message_count)
-        .expect("model message count exceeds i32::MAX");
-    target.cost += source.cost;
-    target.performance.total_duration_ms = target
-        .performance
-        .total_duration_ms
-        .saturating_add(source.performance.total_duration_ms);
-    target.performance.timed_tokens = checked_token_add(
-        target.performance.timed_tokens,
-        source.performance.timed_tokens,
-    );
-    target.performance.sample_count = target
-        .performance
-        .sample_count
-        .saturating_add(source.performance.sample_count);
 }
 
 /// Month accumulator — port of `MonthAggregator` + the month fold.
@@ -591,8 +510,7 @@ pub(super) struct SessionAcc {
     totals: DailyTotals,
     token_breakdown: TokenBreakdown,
     clients: HashMap<ClientProviderModelIdentity, SessionClientContributionAcc>,
-    top_identity: Option<ClientProviderModelIdentity>,
-    top_cost: f64,
+    next_sequence: usize,
     first_seen: i64,
     last_seen: i64,
 }
@@ -604,6 +522,7 @@ struct SessionClientContributionAcc {
     tokens: TokenBreakdown,
     cost: f64,
     messages: i32,
+    first_seen: usize,
 }
 
 impl Default for SessionAcc {
@@ -612,16 +531,35 @@ impl Default for SessionAcc {
             totals: DailyTotals::default(),
             token_breakdown: TokenBreakdown::default(),
             clients: HashMap::with_capacity(2),
-            top_identity: None,
-            top_cost: f64::NEG_INFINITY,
+            next_sequence: 0,
             first_seen: i64::MAX,
             last_seen: i64::MIN,
         }
     }
 }
 
+/// Ordering used when selecting the representative identity for a session.
+/// Larger comparable costs rank first; NaN ranks after every comparable value,
+/// including negative infinity. Equal ranks retain the later first-seen and
+/// structured-identity tie breakers at the call site.
+fn compare_session_cost_rank(left: f64, right: f64) -> std::cmp::Ordering {
+    match (left.is_nan(), right.is_nan()) {
+        (false, false) => right
+            .partial_cmp(&left)
+            .expect("non-NaN session costs are comparable"),
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        (true, true) => std::cmp::Ordering::Equal,
+    }
+}
+
 impl SessionAcc {
     pub(super) fn push(&mut self, msg: &UnifiedMessage) {
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("session aggregation sequence exceeds usize::MAX");
         let total_tokens = msg.tokens.total();
 
         self.totals.tokens = checked_token_add(self.totals.tokens, total_tokens);
@@ -648,6 +586,7 @@ impl SessionAcc {
                     tokens: TokenBreakdown::default(),
                     cost: 0.0,
                     messages: 0,
+                    first_seen: sequence,
                 });
 
         add_token_breakdown(&mut client_entry.tokens, &msg.tokens);
@@ -655,15 +594,6 @@ impl SessionAcc {
         client_entry.messages = client_entry
             .messages
             .saturating_add(msg.message_count.max(0));
-
-        if client_entry.cost > self.top_cost {
-            self.top_cost = client_entry.cost;
-            self.top_identity = Some((
-                Arc::clone(&msg.client),
-                Arc::clone(&msg.provider_id),
-                Arc::clone(&msg.model_id),
-            ));
-        }
 
         let secs = if msg.timestamp.abs() > 1_000_000_000_000 {
             msg.timestamp / 1000
@@ -679,6 +609,16 @@ impl SessionAcc {
     }
 
     fn into_contribution(self, session_id: String) -> SessionContribution {
+        let top_identity = self
+            .clients
+            .iter()
+            .min_by(|(left_identity, left), (right_identity, right)| {
+                compare_session_cost_rank(left.cost, right.cost)
+                    .then_with(|| left.first_seen.cmp(&right.first_seen))
+                    .then_with(|| left_identity.cmp(right_identity))
+            })
+            .map(|(identity, _)| identity.clone())
+            .expect("session accumulator contains at least one identity");
         let token_breakdown = TokenBreakdown {
             input: self.token_breakdown.input.max(0),
             output: self.token_breakdown.output.max(0),
@@ -725,9 +665,7 @@ impl SessionAcc {
             self.last_seen
         };
 
-        let (client, provider, model) = self
-            .top_identity
-            .expect("session accumulator contains at least one identity");
+        let (client, provider, model) = top_identity;
         SessionContribution {
             session_id,
             client: client.to_string(),
@@ -903,54 +841,151 @@ mod tests {
     }
 
     #[test]
-    fn model_report_coalesces_legacy_public_key_collisions_explicitly() {
+    fn model_report_preserves_structured_buckets_with_colliding_legacy_text() {
         let cases = [
             (
                 GroupBy::ClientModel,
                 message("a:b", "first", "same", "c", 10),
                 message("a", "second", "same", "b:c", 20),
-                "a:b",
-                "c",
-                "first, second",
             ),
             (
                 GroupBy::ClientProviderModel,
                 message("a", "b:c", "same", "d", 10),
                 message("a", "b", "same", "c:d", 20),
-                "a",
-                "d",
-                "b:c",
             ),
             (
                 GroupBy::Session,
                 message("a", "first", "b:c", "d", 10),
                 message("a", "second", "b", "c:d", 20),
-                "a",
-                "d",
-                "first, second",
             ),
             (
                 GroupBy::ClientSession,
                 message("a", "first", "b:c", "d", 10),
                 message("a", "second", "b", "c:d", 20),
-                "a",
-                "d",
-                "first, second",
             ),
         ];
 
-        for (group_by, first, second, client, model, provider) in cases {
+        for (group_by, first, second) in cases {
             let mut entries = ModelEntries::new(group_by);
             entries.push(&first);
             entries.push(&second);
             let entries = entries.finish();
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].client, client);
-            assert_eq!(entries[0].model, model);
-            assert_eq!(entries[0].provider, provider);
-            assert_eq!(entries[0].input, 30);
-            assert_eq!(entries[0].cost, 30.0);
-            assert_eq!(entries[0].message_count, 2);
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].input, 20);
+            assert_eq!(entries[0].cost, 20.0);
+            assert_eq!(entries[0].message_count, 1);
+            assert_eq!(entries[1].input, 10);
+            assert_eq!(entries[1].cost, 10.0);
+            assert_eq!(entries[1].message_count, 1);
         }
+    }
+
+    #[test]
+    fn model_report_keeps_unknown_and_known_workspace_buckets_distinct() {
+        let mut unknown = message("client", "provider", "session", "model", 10);
+        unknown.workspace_key = None;
+        unknown.workspace_label = None;
+        let mut known = message("client", "provider", "session", "model", 20);
+        known.workspace_key = Some(Arc::from(""));
+        known.workspace_label = Some(Arc::from("Empty workspace key"));
+
+        let mut entries = ModelEntries::new(GroupBy::WorkspaceModel);
+        entries.push(&unknown);
+        entries.push(&known);
+        let entries = entries.finish();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].workspace_key.as_deref(), Some(""));
+        assert_eq!(entries[1].workspace_key, None);
+    }
+
+    fn session_message(client: &str, provider: &str, model: &str, cost: f64) -> UnifiedMessage {
+        let mut message = message(client, provider, "session", model, 1);
+        message.cost = cost;
+        message
+    }
+
+    fn session_identity(acc: SessionAcc) -> (String, String, String) {
+        let contribution = acc.into_contribution("session".to_string());
+        (
+            contribution.client,
+            contribution.provider,
+            contribution.model,
+        )
+    }
+
+    #[test]
+    fn session_identity_uses_final_accumulated_cost() {
+        let mut acc = SessionAcc::default();
+        acc.push(&session_message("eventual", "provider", "model", 4.0));
+        acc.push(&session_message("early", "provider", "model", 7.0));
+        acc.push(&session_message("eventual", "provider", "model", 4.0));
+
+        assert_eq!(
+            session_identity(acc),
+            ("eventual".into(), "provider".into(), "model".into())
+        );
+    }
+
+    #[test]
+    fn session_identity_prefers_infinite_and_finite_costs_over_nan() {
+        for preferred_cost in [f64::NEG_INFINITY, 0.0, f64::INFINITY] {
+            let mut acc = SessionAcc::default();
+            acc.push(&session_message("nan", "provider", "model", f64::NAN));
+            acc.push(&session_message(
+                "comparable",
+                "provider",
+                "model",
+                preferred_cost,
+            ));
+
+            assert_eq!(session_identity(acc).0, "comparable");
+        }
+    }
+
+    #[test]
+    fn session_identity_breaks_equal_cost_ties_by_first_seen() {
+        let mut acc = SessionAcc::default();
+        acc.push(&session_message("first", "z-provider", "z-model", 2.0));
+        acc.push(&session_message("second", "a-provider", "a-model", 2.0));
+
+        assert_eq!(session_identity(acc).0, "first");
+    }
+
+    #[test]
+    fn session_identity_uses_structured_identity_as_the_final_tie_break() {
+        let mut acc = SessionAcc::default();
+        acc.push(&session_message("z-client", "provider", "model", 2.0));
+        acc.push(&session_message("a-client", "provider", "model", 2.0));
+        for contribution in acc.clients.values_mut() {
+            contribution.first_seen = 0;
+        }
+
+        assert_eq!(session_identity(acc).0, "a-client");
+    }
+
+    #[test]
+    fn all_nan_session_identity_is_deterministic_and_does_not_panic() {
+        let mut acc = SessionAcc::default();
+        acc.push(&session_message("first", "z-provider", "z-model", f64::NAN));
+        acc.push(&session_message(
+            "second",
+            "a-provider",
+            "a-model",
+            f64::NAN,
+        ));
+
+        assert_eq!(session_identity(acc).0, "first");
+    }
+
+    #[test]
+    fn single_nan_session_identity_is_non_empty_and_does_not_panic() {
+        let mut acc = SessionAcc::default();
+        acc.push(&session_message("only", "provider", "model", f64::NAN));
+
+        assert_eq!(
+            session_identity(acc),
+            ("only".into(), "provider".into(), "model".into())
+        );
     }
 }

@@ -5,22 +5,20 @@
 //! input/output/cache/reasoning buckets, so each total-token row is allocated
 //! with Tokscale's fixed local-history token bucket ratios.
 
-use super::utils::{extract_i64, file_modified_timestamp_ms, open_readonly_sqlite};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::open_readonly_sqlite;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::{provider_identity, token_imputation};
+use crate::{model_aliases, provider_identity, token_imputation};
 use chrono::TimeZone;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use tracing::warn;
 
 const CLIENT_ID: &str = "warp";
-const UNKNOWN_MODEL: &str = "warp-unknown";
 
 #[derive(Debug, Clone, Default)]
 struct ConversationMeta {
-    latest_query_timestamp: Option<i64>,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
 }
@@ -37,17 +35,12 @@ struct PendingWarpMessage {
     dedup_key: u64,
 }
 
-pub fn parse_warp_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    let Some(conn) = open_readonly_sqlite(db_path) else {
-        warn!(
-            db_path = %db_path.display(),
-            "Failed to open Warp SQLite database"
-        );
-        return Vec::new();
-    };
+pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let conn = open_readonly_sqlite(db_path).map_err(|source| {
+        SessionParseError::at_path(db_path, "open Warp database read-only", source)
+    })?;
 
-    let query_metadata = load_query_metadata(&conn);
-    let fallback_timestamp = file_modified_timestamp_ms(db_path);
+    let query_metadata = load_query_metadata(&conn, db_path)?;
     let query = r#"
         SELECT conversation_id, conversation_data, last_modified_at
         FROM agent_conversations
@@ -55,92 +48,101 @@ pub fn parse_warp_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
           AND TRIM(conversation_data) != ''
         ORDER BY id
     "#;
-    let mut stmt = match conn.prepare(query) {
-        Ok(stmt) => stmt,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to prepare Warp conversation query"
-            );
-            return Vec::new();
-        }
-    };
+    let mut stmt = conn.prepare(query).map_err(|error| {
+        SessionParseError::at_path(db_path, "prepare Warp conversation query", error)
+    })?;
 
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-        ))
-    }) {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!(
-                db_path = %db_path.display(),
-                error = %err,
-                "Failed to execute Warp conversation query"
-            );
-            return Vec::new();
-        }
-    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|error| {
+            SessionParseError::at_path(db_path, "execute Warp conversation query", error)
+        })?;
 
     let mut pending_messages = Vec::new();
     for row in rows {
-        let (conversation_id, conversation_data, last_modified_at) = match row {
-            Ok(row) => row,
-            Err(err) => {
-                warn!(
-                    db_path = %db_path.display(),
-                    error = %err,
-                    "Failed to decode Warp conversation row"
-                );
-                continue;
-            }
-        };
-        let value = match serde_json::from_str::<Value>(&conversation_data) {
-            Ok(value) => value,
-            Err(err) => {
-                warn!(
-                    db_path = %db_path.display(),
-                    conversation_id = %conversation_id,
-                    error = %err,
-                    "Failed to parse Warp conversation_data JSON"
-                );
-                continue;
-            }
-        };
-        let Some(token_usage) = conversation_token_usage(&value) else {
+        let (conversation_id, conversation_data, last_modified_at) = row.map_err(|error| {
+            SessionParseError::at_path(db_path, "decode Warp conversation row", error)
+        })?;
+        let value = serde_json::from_str::<Value>(&conversation_data).map_err(|error| {
+            SessionParseError::at_path(db_path, "decode Warp conversation JSON", error)
+        })?;
+        let Some(token_usage) = conversation_token_usage(db_path, &value)? else {
             continue;
         };
 
         let meta = query_metadata.get(&conversation_id);
-        let timestamp = last_modified_at
-            .as_deref()
-            .and_then(parse_warp_timestamp)
-            .or_else(|| meta.and_then(|meta| meta.latest_query_timestamp))
-            .unwrap_or(fallback_timestamp);
 
         for (index, item) in token_usage.iter().enumerate() {
-            let total = warp_token_total(item);
+            let total = warp_token_total(db_path, item, &conversation_id, index)?;
             if total <= 0 {
                 continue;
             }
 
-            let model_id = item
+            let conversation_id = conversation_id.trim();
+            if conversation_id.is_empty() {
+                return Err(invalid_at_path(
+                    db_path,
+                    "validate Warp conversation row",
+                    "token-bearing conversation has an empty conversation_id",
+                ));
+            }
+            let raw_timestamp = last_modified_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|timestamp| !timestamp.is_empty())
+                .ok_or_else(|| {
+                    invalid_at_path(
+                        db_path,
+                        "validate Warp conversation row",
+                        format!("conversation `{conversation_id}` is missing last_modified_at"),
+                    )
+                })?;
+            let timestamp = parse_warp_timestamp(raw_timestamp)
+                .filter(|timestamp| *timestamp > 0)
+                .ok_or_else(|| {
+                    invalid_at_path(
+                        db_path,
+                        "validate Warp conversation row",
+                        format!("invalid last_modified_at `{raw_timestamp}`"),
+                    )
+                })?;
+
+            let raw_model_id = item
                 .get("model_id")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|model| !model.is_empty())
-                .unwrap_or(UNKNOWN_MODEL);
-            let provider_id = provider_identity::inferred_provider_from_model(model_id)
-                .unwrap_or("unknown")
+                .ok_or_else(|| {
+                    invalid_at_path(
+                        db_path,
+                        "validate Warp token usage",
+                        format!(
+                            "conversation `{conversation_id}` usage row {index} is missing model_id"
+                        ),
+                    )
+                })?;
+            let model_id = model_aliases::canonicalize_source_model_id(raw_model_id)
+                .unwrap_or_else(|| raw_model_id.to_string());
+            let provider_id = provider_identity::inferred_provider_from_model(&model_id)
+                .ok_or_else(|| {
+                    invalid_at_path(
+                        db_path,
+                        "validate Warp token usage",
+                        format!("cannot infer provider for model `{raw_model_id}`"),
+                    )
+                })?
                 .to_string();
             let dedup_key =
                 super::dedup_hash_str(&format!("warp:{conversation_id}:{index}:{model_id}"));
             pending_messages.push(PendingWarpMessage {
-                conversation_id: conversation_id.clone(),
-                model_id: model_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                model_id,
                 provider_id,
                 timestamp,
                 workspace_key: meta.and_then(|meta| meta.workspace_key.clone()),
@@ -157,7 +159,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         .collect();
     let token_rows = token_imputation::impute_total_only_token_breakdowns(&totals);
 
-    pending_messages
+    Ok(pending_messages
         .into_iter()
         .zip(token_rows)
         .map(|(pending, tokens)| {
@@ -174,59 +176,41 @@ pub fn parse_warp_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             message.set_workspace(pending.workspace_key, pending.workspace_label);
             message
         })
-        .collect()
+        .collect())
 }
 
-fn load_query_metadata(conn: &Connection) -> HashMap<String, ConversationMeta> {
-    let mut stmt = match conn.prepare(
-        r#"
-        SELECT conversation_id, start_ts, working_directory
+fn load_query_metadata(
+    conn: &Connection,
+    db_path: &Path,
+) -> SessionParseResult<HashMap<String, ConversationMeta>> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+        SELECT conversation_id, working_directory
         FROM ai_queries
         WHERE conversation_id IS NOT NULL
           AND TRIM(conversation_id) != ''
-        ORDER BY conversation_id, start_ts
+        ORDER BY conversation_id
         "#,
-    ) {
-        Ok(stmt) => stmt,
-        Err(err) => {
-            warn!(error = %err, "Failed to prepare Warp ai_queries metadata query");
-            return HashMap::new();
-        }
-    };
+        )
+        .map_err(|error| {
+            SessionParseError::at_path(db_path, "prepare Warp query metadata query", error)
+        })?;
 
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-        ))
-    }) {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!(error = %err, "Failed to execute Warp ai_queries metadata query");
-            return HashMap::new();
-        }
-    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| {
+            SessionParseError::at_path(db_path, "execute Warp query metadata query", error)
+        })?;
 
     let mut metadata = HashMap::new();
     for row in rows {
-        let (conversation_id, start_ts, working_directory) = match row {
-            Ok(row) => row,
-            Err(err) => {
-                warn!(error = %err, "Failed to decode Warp ai_queries metadata row");
-                continue;
-            }
-        };
+        let (conversation_id, working_directory) = row.map_err(|error| {
+            SessionParseError::at_path(db_path, "decode Warp query metadata row", error)
+        })?;
         let entry: &mut ConversationMeta = metadata.entry(conversation_id).or_default();
-
-        if let Some(timestamp) = start_ts.as_deref().and_then(parse_warp_timestamp) {
-            if entry
-                .latest_query_timestamp
-                .is_none_or(|current| timestamp > current)
-            {
-                entry.latest_query_timestamp = Some(timestamp);
-            }
-        }
 
         if entry.workspace_key.is_none() {
             if let Some(workspace) = working_directory.as_deref() {
@@ -238,23 +222,102 @@ fn load_query_metadata(conn: &Connection) -> HashMap<String, ConversationMeta> {
         }
     }
 
-    metadata
+    Ok(metadata)
 }
 
-fn conversation_token_usage(value: &Value) -> Option<&[Value]> {
-    value
-        .get("conversation_usage_metadata")?
-        .get("token_usage")?
+fn conversation_token_usage<'a>(
+    db_path: &Path,
+    value: &'a Value,
+) -> SessionParseResult<Option<&'a [Value]>> {
+    let Some(metadata) = value.get("conversation_usage_metadata") else {
+        return Ok(None);
+    };
+    let metadata = metadata.as_object().ok_or_else(|| {
+        invalid_at_path(
+            db_path,
+            "validate Warp conversation JSON",
+            "conversation_usage_metadata must be an object",
+        )
+    })?;
+    let Some(token_usage) = metadata.get("token_usage") else {
+        return Ok(None);
+    };
+    if token_usage.is_null() {
+        return Ok(None);
+    }
+    token_usage
         .as_array()
         .map(Vec::as_slice)
+        .map(Some)
+        .ok_or_else(|| {
+            invalid_at_path(
+                db_path,
+                "validate Warp conversation JSON",
+                "conversation_usage_metadata.token_usage must be an array or null",
+            )
+        })
 }
 
-fn warp_token_total(item: &Value) -> i64 {
-    ["warp_tokens", "byok_tokens", "custom_endpoint_tokens"]
-        .into_iter()
-        .filter_map(|field| extract_i64(item.get(field)))
-        .map(|tokens| tokens.max(0))
-        .sum()
+fn warp_token_total(
+    db_path: &Path,
+    item: &Value,
+    conversation_id: &str,
+    index: usize,
+) -> SessionParseResult<i64> {
+    let item = item.as_object().ok_or_else(|| {
+        invalid_at_path(
+            db_path,
+            "validate Warp token usage",
+            format!("conversation `{conversation_id}` usage row {index} must be an object"),
+        )
+    })?;
+    let mut total = 0_i64;
+    for field in ["warp_tokens", "byok_tokens", "custom_endpoint_tokens"] {
+        let Some(value) = item.get(field) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let tokens = value.as_i64().ok_or_else(|| {
+            invalid_at_path(
+                db_path,
+                "validate Warp token usage",
+                format!(
+                    "conversation `{conversation_id}` usage row {index} field `{field}` must be an integer or null"
+                ),
+            )
+        })?;
+        if tokens < 0 {
+            return Err(invalid_at_path(
+                db_path,
+                "validate Warp token usage",
+                format!(
+                    "conversation `{conversation_id}` usage row {index} field `{field}` is negative"
+                ),
+            ));
+        }
+        total = total.checked_add(tokens).ok_or_else(|| {
+            invalid_at_path(
+                db_path,
+                "sum Warp token usage",
+                format!("conversation `{conversation_id}` usage row {index} overflows i64"),
+            )
+        })?;
+    }
+    Ok(total)
+}
+
+fn invalid_at_path(
+    path: &Path,
+    operation: &'static str,
+    detail: impl Into<String>,
+) -> SessionParseError {
+    SessionParseError::at_path(
+        path,
+        operation,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, detail.into()),
+    )
 }
 
 fn parse_warp_timestamp(value: &str) -> Option<i64> {
@@ -357,7 +420,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut messages = parse_warp_sqlite(&db_path);
+        let mut messages = parse_warp_sqlite(&db_path).unwrap();
         crate::finalize_token_priced_messages(&mut messages, None);
 
         assert_eq!(messages.len(), 2);
@@ -399,5 +462,74 @@ mod tests {
             parse_warp_timestamp("2026-07-04 15:33:07.822302200"),
             Some(1_783_179_187_822)
         );
+    }
+
+    #[test]
+    fn token_usage_with_invalid_timestamp_is_rejected() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        let data = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [{"model_id":"gpt-5","warp_tokens":1}]
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+            params!["conversation-1", data, "not a timestamp"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = parse_warp_sqlite(&db_path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Warp conversation row");
+        assert_eq!(error.path(), Some(db_path.as_path()));
+    }
+
+    #[test]
+    fn string_token_count_is_rejected() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        let data = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [{"model_id":"gpt-5","warp_tokens":"1"}]
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+            params!["conversation-1", data, "2026-07-04T10:20:30Z"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = parse_warp_sqlite(&db_path).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Warp token usage");
+        assert_eq!(error.path(), Some(db_path.as_path()));
+    }
+
+    #[test]
+    fn null_usage_does_not_require_timestamp() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        let data = serde_json::json!({
+            "conversation_usage_metadata": {"token_usage": null}
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+            params!["conversation-1", data, "not a timestamp"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_warp_sqlite(&db_path).unwrap();
+
+        assert!(messages.is_empty());
     }
 }

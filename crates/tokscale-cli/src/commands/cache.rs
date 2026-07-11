@@ -20,7 +20,8 @@ use tokscale_core::ClientId;
 /// wants another, the cache key mismatches, and the warming becomes a
 /// wasted background scan.
 pub(crate) fn resolve_default_tui_filter_set() -> Result<std::collections::HashSet<ClientId>> {
-    resolve_default_tui_filter_set_with(&tui::settings::load_default_clients())
+    let configured = tui::settings::load_default_clients()?;
+    resolve_default_tui_filter_set_with(&configured)
 }
 
 /// Pure variant of `resolve_default_tui_filter_set` for unit-testable
@@ -68,45 +69,33 @@ pub(crate) fn write_light_cache(
     until: &Option<String>,
     year: &Option<String>,
     group_by: &tokscale_core::GroupBy,
-) {
+) -> Result<()> {
     use crate::tui::{save_cached_data, CacheReportScope, DataLoader};
 
     // The TUI cache key includes date filters, but not `--home`. Writing
     // home-scoped data would still poison the default cache, so keep that
     // guard until home is part of the cache key.
     if !can_write_light_cache(home_dir) {
-        eprintln!(
-            "tokscale: --write-cache skipped because --home is set; \
-             the TUI cache key does not include that filter and writing would poison future TUI launches."
+        anyhow::bail!(
+            "--write-cache cannot be combined with --home because the TUI cache key does not include that filter"
         );
-        return;
     }
 
     let enabled_set = resolve_light_cache_filter_set(clients);
     let mut scan_clients: Vec<tokscale_core::ClientId> = enabled_set.iter().copied().collect();
     scan_clients.sort_by_key(|client| *client as usize);
 
-    // The report has already been flushed to stdout by the time we reach
-    // here. Keep the report exit code stable, but expose cache scan/write
-    // failures instead of swallowing them.
     let loader = DataLoader::with_filters(None, since.clone(), until.clone(), year.clone());
     let report_scope = CacheReportScope::new(since.clone(), until.clone(), year.clone());
-    match loader.load_with_diagnostics(&scan_clients, group_by) {
-        Ok(result) => {
-            if let Err(err) = save_cached_data(
-                &result.data,
-                &enabled_set,
-                group_by,
-                &report_scope,
-                result.source_inventory_signature,
-            ) {
-                eprintln!("tokscale: --write-cache failed to save TUI cache: {err}");
-            }
-        }
-        Err(err) => {
-            eprintln!("tokscale: --write-cache failed to scan TUI data: {err}");
-        }
-    }
+    let result = loader.load_with_diagnostics(&scan_clients, group_by)?;
+    save_cached_data(
+        &result.data,
+        &enabled_set,
+        group_by,
+        &report_scope,
+        result.source_inventory_signature,
+    )?;
+    Ok(())
 }
 
 pub(crate) fn can_write_light_cache(home_dir: &Option<String>) -> bool {

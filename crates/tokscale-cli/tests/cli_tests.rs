@@ -40,10 +40,9 @@ fn prime_override_pricing_cache(config_dir: &Path) {
     fs::write(cache_dir.join("pricing-openrouter.json"), &payload).unwrap();
 }
 
-fn create_opencode_sqlite(base: &Path) -> Connection {
-    let data_dir = base.join(".local/share/opencode");
-    fs::create_dir_all(&data_dir).unwrap();
-    let conn = Connection::open(data_dir.join("opencode.db")).unwrap();
+fn create_opencode_sqlite_at(db_path: &Path) -> Connection {
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let conn = Connection::open(db_path).unwrap();
     conn.execute_batch(
         "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
          CREATE TABLE message (
@@ -86,7 +85,7 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
         prime_pricing_cache(base);
     }
 
-    let conn = create_opencode_sqlite(base);
+    let conn = create_opencode_sqlite_at(&base.join(".local/share/opencode/opencode.db"));
 
     // 2024-06-15 12:00:00 UTC = 1718452800000 ms
     let msg_a = r#"{
@@ -275,7 +274,9 @@ fn create_empty_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
     prime_pricing_cache(base);
-    drop(create_opencode_sqlite(base));
+    drop(create_opencode_sqlite_at(
+        &base.join(".local/share/opencode/opencode.db"),
+    ));
     tmp
 }
 
@@ -284,7 +285,7 @@ fn create_timezone_boundary_fixture_dir() -> TempDir {
     let base = tmp.path();
     prime_pricing_cache(base);
 
-    let conn = create_opencode_sqlite(base);
+    let conn = create_opencode_sqlite_at(&base.join(".local/share/opencode/opencode.db"));
 
     // 2026-03-02 18:00:00 UTC = 2026-03-02 10:00:00 in America/Los_Angeles
     let msg_a = r#"{
@@ -349,9 +350,9 @@ fn create_codex_fixture_dir() -> TempDir {
     fs::write(
         sessions_dir.join("session-1.jsonl"),
         concat!(
-            r#"{"type":"turn_context","payload":{"model":"gpt-4o-mini"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-4o-mini"}}"#,
             "\n",
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"total_tokens":150},"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"total_tokens":150}}}}"#,
             "\n"
         ),
     )
@@ -370,11 +371,11 @@ fn create_codex_workspace_fixture_dir() -> TempDir {
     fs::write(
         sessions_dir.join("workspace-session.jsonl"),
         concat!(
-            r#"{"type":"session_meta","payload":{"source":"chat","cwd":"/Users/alice/codex-workspace"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"source":"chat","cwd":"/Users/alice/codex-workspace"}}"#,
             "\n",
-            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
             "\n",
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"total_tokens":150},"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"total_tokens":150}}}}"#,
             "\n"
         ),
     )
@@ -422,6 +423,7 @@ fn create_mixed_workspace_fixture_dir() -> TempDir {
         format!(
             "{}\n{}\n{}\n",
             serde_json::json!({
+                "timestamp": "2026-01-01T00:00:00Z",
                 "type": "session_meta",
                 "payload": {
                     "source": "chat",
@@ -429,6 +431,7 @@ fn create_mixed_workspace_fixture_dir() -> TempDir {
                 }
             }),
             serde_json::json!({
+                "timestamp": "2026-01-01T00:00:01Z",
                 "type": "turn_context",
                 "payload": {
                     "model": "gpt-5.4"
@@ -440,10 +443,17 @@ fn create_mixed_workspace_fixture_dir() -> TempDir {
                 "payload": {
                     "type": "token_count",
                     "info": {
+                        "total_token_usage": {
+                            "input_tokens": 20,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 10,
+                            "total_tokens": 30
+                        },
                         "last_token_usage": {
                             "input_tokens": 20,
                             "cached_input_tokens": 0,
-                            "output_tokens": 10
+                            "output_tokens": 10,
+                            "total_tokens": 30
                         }
                     }
                 }
@@ -528,7 +538,7 @@ fn create_opencode_workspace_fixture_dir() -> TempDir {
     let base = tmp.path();
     prime_pricing_cache(base);
 
-    let conn = create_opencode_sqlite(base);
+    let conn = create_opencode_sqlite_at(&base.join(".local/share/opencode/opencode.db"));
 
     let msg = r#"{
         "id": "workspace_msg",
@@ -561,7 +571,7 @@ fn create_conflicting_opencode_fixture_dir() -> TempDir {
     let base = tmp.path();
     prime_pricing_cache(base);
 
-    let conn = create_opencode_sqlite(base);
+    let conn = create_opencode_sqlite_at(&base.join(".local/share/opencode/opencode.db"));
 
     let msg = r#"{
         "id": "conflict_msg",
@@ -593,9 +603,9 @@ fn create_conflicting_codex_fixture_dir() -> TempDir {
     fs::write(
         sessions_dir.join("conflicting-session.jsonl"),
         concat!(
-            r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}"#,
             "\n",
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":900,"cached_input_tokens":90,"output_tokens":45}}}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900,"cached_input_tokens":90,"output_tokens":45,"total_tokens":945},"last_token_usage":{"input_tokens":900,"cached_input_tokens":90,"output_tokens":45,"total_tokens":945}}}}"#,
             "\n"
         ),
     )
@@ -763,6 +773,7 @@ fn settings_json_path(base: &Path) -> std::path::PathBuf {
 fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, output: i64) {
     fs::create_dir_all(dir).unwrap();
     let turn_context = serde_json::json!({
+        "timestamp": "2026-01-01T00:00:00Z",
         "type": "turn_context",
         "payload": {
             "model": model
@@ -774,10 +785,17 @@ fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, ou
         "payload": {
             "type": "token_count",
             "info": {
+                "total_token_usage": {
+                    "input_tokens": input,
+                    "cached_input_tokens": 0,
+                    "output_tokens": output,
+                    "total_tokens": input + output
+                },
                 "last_token_usage": {
                     "input_tokens": input,
                     "cached_input_tokens": 0,
-                    "output_tokens": output
+                    "output_tokens": output,
+                    "total_tokens": input + output
                 }
             }
         }
@@ -1118,7 +1136,7 @@ fn test_opencode_obsolete_sqlite_schema_is_an_explicit_cli_error() {
 fn test_opencode_invalid_sqlite_payload_is_an_explicit_cli_error() {
     let tmp = TempDir::new().unwrap();
     prime_pricing_cache(tmp.path());
-    let conn = create_opencode_sqlite(tmp.path());
+    let conn = create_opencode_sqlite_at(&tmp.path().join(".local/share/opencode/opencode.db"));
     conn.execute(
         "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
         rusqlite::params![
@@ -2777,6 +2795,21 @@ fn test_clients_command() {
 }
 
 #[test]
+fn test_clients_command_reports_malformed_settings() {
+    let tmp = create_empty_fixture_dir();
+    write_settings_json(tmp.path(), r#"{"scanner":{"extraScanPaths":[]}"#);
+
+    cmd_with_home(tmp.path())
+        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to parse settings JSON"))
+        .stderr(predicate::str::contains(
+            settings_json_path(tmp.path()).display().to_string(),
+        ));
+}
+
+#[test]
 fn test_clients_json() {
     let tmp = create_empty_fixture_dir();
     let output = cmd_with_home(tmp.path())
@@ -2842,16 +2875,7 @@ fn test_clients_json_opencode_diagnostics_match_adapter_for_non_utf8_xdg() {
         .join(OsString::from_vec(b"xdg-data-\xff".to_vec()));
     let data_dir = xdg_data_home.join("opencode");
     fs::create_dir_all(&data_dir).unwrap();
-    let conn = Connection::open(data_dir.join("opencode.db")).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
-         CREATE TABLE message (
-             id TEXT PRIMARY KEY,
-             session_id TEXT NOT NULL,
-             data TEXT NOT NULL
-         );",
-    )
-    .unwrap();
+    let conn = create_opencode_sqlite_at(&data_dir.join("opencode.db"));
     insert_opencode_message(
         &conn,
         "msg-non-utf8",
@@ -3133,6 +3157,54 @@ fn test_clients_command_includes_settings_extra_paths_text() {
         .stdout(predicate::str::contains(
             "extra (settings): /tmp/project-a/.codex/sessions ✗",
         ));
+}
+
+#[test]
+fn test_clients_command_groups_opencode_database_paths_by_source() {
+    let tmp = create_empty_fixture_dir();
+    let configured_db = tmp.path().join("external/opencode.db");
+    drop(create_opencode_sqlite_at(&configured_db));
+    let configured_db_json = serde_json::to_string(&configured_db).unwrap();
+    write_settings_json(
+        tmp.path(),
+        &format!(
+            r#"{{
+                "scanner": {{
+                    "opencodeDbPaths": [{configured_db_json}]
+                }}
+            }}"#
+        ),
+    );
+
+    cmd_with_home(tmp.path())
+        .arg("clients")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "extra (scanner.opencodeDbPaths): ~/external/opencode.db ✓",
+        ));
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let opencode = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "opencode")
+        .unwrap();
+    assert!(opencode["extraPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| {
+            entry["path"] == serde_json::json!(configured_db)
+                && entry["exists"] == true
+                && entry["source"] == "scanner.opencodeDbPaths"
+        }));
 }
 
 // ── Light mode tests ───────────────────────────────────────────────────────

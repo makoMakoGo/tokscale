@@ -6,7 +6,8 @@
 //! text: input is the cumulative conversation context before the assistant
 //! response, output is the assistant response content.
 
-use super::utils::{file_modified_timestamp_ms, parse_timestamp_str};
+use super::error::{SessionParseError, SessionParseResult};
+use super::utils::parse_timestamp_str;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -14,8 +15,6 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "commandcode";
-const PROVIDER_ID: &str = "commandcode";
-const UNKNOWN_MODEL: &str = "unknown";
 
 #[derive(Debug, Deserialize)]
 struct CommandCodeEntry {
@@ -28,33 +27,25 @@ struct CommandCodeEntry {
 
 #[derive(Debug, Deserialize)]
 struct CommandCodeConfig {
-    model: Option<String>,
+    provider: String,
+    model: String,
 }
 
-pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
+pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
     if path
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".checkpoints.jsonl"))
     {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
+    let file = std::fs::File::open(path)
+        .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-    let raw_model = model_from_config(path);
-    let provider_id = raw_model
-        .as_deref()
-        .and_then(provider_hint_for_model)
-        .unwrap_or(PROVIDER_ID);
-    let model_id = raw_model
-        .map(|model| canonicalize_model(&model))
-        .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
-    let session_id_from_path = session_id_from_path(path);
+    let (raw_model, configured_provider) = model_from_config(path)?;
+    let provider_id = provider_hint_for_model(&raw_model).unwrap_or(&configured_provider);
+    let model_id = canonicalize_model(&raw_model);
     let workspace_key = workspace_key_from_path(path);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
@@ -65,18 +56,15 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut assistant_index = 0usize;
 
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
+        let line =
+            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let entry = match serde_json::from_str::<CommandCodeEntry>(trimmed) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
+        let entry = serde_json::from_str::<CommandCodeEntry>(trimmed)
+            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
 
         if session_id.is_none() {
             if let Some(id) = entry.session_id.as_deref().filter(|id| !id.is_empty()) {
@@ -84,7 +72,10 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
             }
         }
 
-        let chars = entry.content.as_ref().map(content_chars).unwrap_or(0);
+        let chars = match entry.content.as_ref() {
+            Some(content) => content_chars(content)?,
+            None => 0,
+        };
         match entry.role.as_deref() {
             Some("assistant") => {
                 let input = estimate_tokens(turn_input_chars);
@@ -96,14 +87,28 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
                     continue;
                 }
 
-                let resolved_session = session_id
-                    .clone()
-                    .unwrap_or_else(|| session_id_from_path.clone());
-                let timestamp = entry
-                    .timestamp
-                    .as_deref()
-                    .and_then(parse_timestamp_str)
-                    .unwrap_or(fallback_timestamp);
+                let resolved_session = session_id.clone().ok_or_else(|| {
+                    SessionParseError::invalid(
+                        "validate assistant session",
+                        "Command Code assistant turn is missing a non-empty sessionId",
+                    )
+                })?;
+                let timestamp = match entry.timestamp.as_deref() {
+                    Some(timestamp) => parse_timestamp_str(timestamp)
+                        .filter(|timestamp| *timestamp > 0)
+                        .ok_or_else(|| {
+                            SessionParseError::invalid(
+                                "validate assistant timestamp",
+                                format!("invalid Command Code timestamp `{timestamp}`"),
+                            )
+                        })?,
+                    None => {
+                        return Err(SessionParseError::invalid(
+                            "validate assistant timestamp",
+                            "Command Code assistant turn is missing a timestamp",
+                        ))
+                    }
+                };
                 let dedup_key = crate::sessions::dedup_hash_str(&format!(
                     "commandcode:{resolved_session}:{assistant_index}"
                 ));
@@ -140,18 +145,19 @@ pub fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
         }
     }
 
-    messages
+    Ok(messages)
 }
 
-fn content_chars(content: &serde_json::Value) -> usize {
-    match content {
+fn content_chars(content: &serde_json::Value) -> SessionParseResult<usize> {
+    Ok(match content {
         serde_json::Value::Null => 0,
         serde_json::Value::Array(items) if items.is_empty() => 0,
         serde_json::Value::Object(map) if map.is_empty() => 0,
         _ => serde_json::to_string(content)
-            .map(|serialized| serialized.chars().count())
-            .unwrap_or(0),
-    }
+            .map_err(|error| SessionParseError::new("encode transcript content", error))?
+            .chars()
+            .count(),
+    })
 }
 
 fn estimate_tokens(chars: usize) -> i64 {
@@ -176,19 +182,37 @@ fn provider_hint_for_model(model: &str) -> Option<&'static str> {
     crate::provider_identity::inferred_provider_from_model(model)
 }
 
-fn model_from_config(session_path: &Path) -> Option<String> {
-    let commandcode_root = session_path.parent()?.parent()?.parent()?;
+fn model_from_config(session_path: &Path) -> SessionParseResult<(String, String)> {
+    let Some(commandcode_root) = session_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    else {
+        return Err(SessionParseError::invalid(
+            "locate model config",
+            "Command Code session path is outside the current projects layout",
+        ));
+    };
     let config_path = commandcode_root.join("config.json");
-    let bytes = std::fs::read(config_path).ok()?;
-    let config: CommandCodeConfig = serde_json::from_slice(&bytes).ok()?;
-    config.model.filter(|model| !model.trim().is_empty())
-}
-
-fn session_id_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("unknown")
-        .to_string()
+    let bytes = std::fs::read(&config_path)
+        .map_err(|error| SessionParseError::at_path(&config_path, "read model config", error))?;
+    let config: CommandCodeConfig = serde_json::from_slice(&bytes)
+        .map_err(|error| SessionParseError::at_path(&config_path, "decode model config", error))?;
+    let model = config.model.trim();
+    if model.is_empty() {
+        return Err(SessionParseError::invalid(
+            "validate model config",
+            "Command Code config has an empty model",
+        ));
+    }
+    let provider = config.provider.trim();
+    if provider.is_empty() {
+        return Err(SessionParseError::invalid(
+            "validate model config",
+            "Command Code config has an empty provider",
+        ));
+    }
+    Ok((model.to_string(), provider.to_string()))
 }
 
 fn workspace_key_from_path(path: &Path) -> Option<String> {
@@ -203,6 +227,10 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+
+    fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_commandcode_file(path).unwrap()
+    }
 
     fn write_config(root: &Path, model: &str) {
         std::fs::write(
@@ -247,10 +275,13 @@ mod tests {
         assert_eq!(message.provider_id.as_ref(), "minimax");
         assert_eq!(message.model_id.as_ref(), "MiniMax-M3");
         assert_eq!(message.session_id.as_ref(), "sess-1");
-        assert_eq!(message.tokens.input, estimate_tokens(content_chars(&user)));
+        assert_eq!(
+            message.tokens.input,
+            estimate_tokens(content_chars(&user).unwrap())
+        );
         assert_eq!(
             message.tokens.output,
-            estimate_tokens(content_chars(&assistant))
+            estimate_tokens(content_chars(&assistant).unwrap())
         );
         assert!(message.is_turn_start);
         assert_eq!(message.timestamp, 1781589500332);
@@ -262,13 +293,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_config(dir.path(), "model-x");
         let jsonl = concat!(
-            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#,
+            r#"{"role":"user","sessionId":"s","timestamp":"2026-06-16T05:58:15Z","content":[{"type":"text","text":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#,
             "\n",
-            r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"bbbb"}]}"#,
+            r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-16T05:58:20Z","content":[{"type":"text","text":"bbbb"}]}"#,
             "\n",
-            r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"d"}]}"#,
+            r#"{"role":"user","sessionId":"s","timestamp":"2026-06-16T05:58:25Z","content":[{"type":"text","text":"d"}]}"#,
             "\n",
-            r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"e"}]}"#
+            r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-16T05:58:30Z","content":[{"type":"text","text":"e"}]}"#
         );
         let path = write_session(dir.path(), "proj", "s", jsonl);
 
@@ -303,7 +334,7 @@ mod tests {
             concat!(
                 r#"{"role":"user","sessionId":"s","content":[{"type":"text","text":"hello there how are you"}]}"#,
                 "\n",
-                r#"{"role":"assistant","sessionId":"s","content":[{"type":"text","text":"doing great thanks"}]}"#
+                r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-16T05:58:20Z","content":[{"type":"text","text":"doing great thanks"}]}"#
             ),
         );
 
@@ -343,5 +374,44 @@ mod tests {
         );
 
         assert!(parse_commandcode_file(&path).is_empty());
+    }
+
+    #[test]
+    fn rejects_missing_required_session_model_and_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "MiniMaxAI/MiniMax-M3-Free");
+        let missing_session = write_session(
+            dir.path(),
+            "proj",
+            "missing-session",
+            r#"{"role":"assistant","timestamp":"2026-06-16T05:58:20Z","content":"response"}"#,
+        );
+        assert_eq!(
+            super::parse_commandcode_file(&missing_session)
+                .unwrap_err()
+                .operation(),
+            "validate assistant session"
+        );
+
+        let missing_timestamp = write_session(
+            dir.path(),
+            "proj",
+            "missing-timestamp",
+            r#"{"role":"assistant","sessionId":"s","content":"response"}"#,
+        );
+        assert_eq!(
+            super::parse_commandcode_file(&missing_timestamp)
+                .unwrap_err()
+                .operation(),
+            "validate assistant timestamp"
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"provider":"minimax"}"#).unwrap();
+        assert_eq!(
+            super::parse_commandcode_file(&missing_timestamp)
+                .unwrap_err()
+                .operation(),
+            "decode model config"
+        );
     }
 }

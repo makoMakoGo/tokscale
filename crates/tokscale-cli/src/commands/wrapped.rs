@@ -270,7 +270,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
             until: Some(until),
             year: Some(year.clone()),
             group_by: GroupBy::default(),
-            scanner_settings: crate::tui::settings::load_scanner_settings(),
+            scanner_settings: crate::tui::settings::load_scanner_settings()?,
         },
         views,
         Some(pricing.as_ref()),

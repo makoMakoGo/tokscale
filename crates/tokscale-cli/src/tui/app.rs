@@ -410,7 +410,7 @@ pub struct App {
 
 impl App {
     pub fn new_with_cached_data(config: TuiConfig, cached_data: Option<UsageData>) -> Result<Self> {
-        let settings = Settings::load();
+        let settings = Settings::load()?;
         Self::new_with_cached_data_and_settings(config, cached_data, settings)
     }
 
@@ -419,6 +419,7 @@ impl App {
         cached_data: Option<UsageData>,
         settings: Settings,
     ) -> Result<Self> {
+        super::config::TokscaleConfig::initialize()?;
         let theme_name = match config.theme.as_deref() {
             Some(theme) => theme.parse::<ThemeName>().map_err(|_| {
                 let valid = ThemeName::all()
@@ -428,7 +429,7 @@ impl App {
                     .join(", ");
                 anyhow::anyhow!("invalid theme `{theme}`; expected one of: {valid}")
             })?,
-            None => settings.theme_name(),
+            None => settings.theme_name()?,
         };
         let theme = Theme::from_name_for_current_terminal(theme_name);
 

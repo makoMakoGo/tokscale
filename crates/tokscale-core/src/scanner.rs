@@ -72,6 +72,46 @@ pub struct ScannerSettings {
     pub extra_scan_paths: BTreeMap<String, Vec<PathBuf>>,
 }
 
+impl ScannerSettings {
+    pub fn validate(&self) -> Result<(), ScannerSettingsError> {
+        for path in &self.opencode_db_paths {
+            if path.as_os_str().is_empty() {
+                return Err(ScannerSettingsError::EmptyPath {
+                    setting: "opencodeDbPaths".to_string(),
+                });
+            }
+        }
+        for (client_name, paths) in &self.extra_scan_paths {
+            let client = ClientId::from_str(client_name).ok_or_else(|| {
+                ScannerSettingsError::UnknownClient {
+                    client: client_name.clone(),
+                }
+            })?;
+            if !supports_extra_dir_scanning(client) {
+                return Err(ScannerSettingsError::UnsupportedClient {
+                    client: client_name.clone(),
+                });
+            }
+            if paths.iter().any(|path| path.as_os_str().is_empty()) {
+                return Err(ScannerSettingsError::EmptyPath {
+                    setting: format!("extraScanPaths.{client_name}"),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScannerSettingsError {
+    #[error("scanner.extraScanPaths contains unknown client `{client}`")]
+    UnknownClient { client: String },
+    #[error("scanner.extraScanPaths client `{client}` does not support extra scan roots")]
+    UnsupportedClient { client: String },
+    #[error("scanner.{setting} contains an empty path")]
+    EmptyPath { setting: String },
+}
+
 /// Result of scanning all session directories
 #[derive(Debug)]
 pub struct ScanResult {
@@ -185,13 +225,24 @@ impl ScanResult {
     }
 }
 
+fn configured_path_env(variable: &'static str) -> Option<PathBuf> {
+    let value = std::env::var_os(variable)?;
+    if value.is_empty() {
+        return None;
+    }
+    match value.to_str() {
+        Some(value) => {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+        }
+        None => Some(PathBuf::from(value)),
+    }
+}
+
 pub fn headless_roots_with_env_strategy(home_dir: &Path, use_env_roots: bool) -> Vec<PathBuf> {
     if use_env_roots {
-        if let Ok(path) = std::env::var("TOKSCALE_HEADLESS_DIR") {
-            let trimmed = path.trim();
-            if !trimmed.is_empty() {
-                return vec![PathBuf::from(trimmed)];
-            }
+        if let Some(path) = configured_path_env("TOKSCALE_HEADLESS_DIR") {
+            return vec![path];
         }
     }
 
@@ -219,13 +270,7 @@ pub fn copilot_exporter_path_with_env_strategy(use_env_roots: bool) -> Option<Pa
         return None;
     }
 
-    let path = std::env::var("COPILOT_OTEL_FILE_EXPORTER_PATH").ok()?;
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    Some(PathBuf::from(trimmed))
+    configured_path_env("COPILOT_OTEL_FILE_EXPORTER_PATH")
 }
 
 /// Resolve the OpenCode data directory without requiring a UTF-8 environment path.
@@ -242,23 +287,66 @@ pub fn opencode_data_dir_with_env_strategy(home_dir: &str, use_env_roots: bool) 
     data_home.join("opencode")
 }
 
-/// Scan a single directory for session files
-pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
-    if !std::path::Path::new(root).exists() {
-        return Vec::new();
+#[derive(Debug, thiserror::Error)]
+pub enum ScanDirectoryError {
+    #[error("failed to read scan root metadata `{root}`: {source}")]
+    ReadRootMetadata {
+        root: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed while walking scan root `{root}`: {source}")]
+    WalkRoot {
+        root: PathBuf,
+        #[source]
+        source: walkdir::Error,
+    },
+}
+
+/// Scan a single directory for session files.
+///
+/// An absent root means that the client has no local data. Once a root exists,
+/// every traversal error is returned instead of being misreported as an empty
+/// source set.
+pub fn scan_directory(
+    root: impl AsRef<Path>,
+    pattern: &str,
+) -> Result<Vec<PathBuf>, ScanDirectoryError> {
+    let root = root.as_ref();
+    match std::fs::metadata(root) {
+        Ok(_) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(ScanDirectoryError::ReadRootMetadata {
+                root: root.to_path_buf(),
+                source,
+            });
+        }
     }
 
-    let mut paths: Vec<PathBuf> = WalkDir::new(root)
+    let entries = WalkDir::new(root)
         .into_iter()
         .par_bridge()
-        .filter_map(|e| e.ok())
+        .map(|entry| {
+            entry.map_err(|source| ScanDirectoryError::WalkRoot {
+                root: root.to_path_buf(),
+                source,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut paths: Vec<PathBuf> = entries
+        .into_par_iter()
         .filter(|e| {
             let path = e.path();
-            if !path.is_file() {
+            if !e.file_type().is_file() {
                 return false;
             }
 
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let file_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default();
 
             let is_in_archive_dir = path.components().any(|c| {
                 c.as_os_str()
@@ -349,7 +437,14 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
     // requirement for PathBuf) and avoids allocation. Note: ordering is byte-lexical,
     // not case-normalized (known Windows/macOS caveat for mixed-case paths).
     paths.sort_unstable();
-    paths
+    Ok(paths)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid TOKSCALE_EXTRA_DIRS entry `{entry}`: {reason}")]
+pub struct ExtraDirsParseError {
+    entry: String,
+    reason: &'static str,
 }
 
 /// Parse a `TOKSCALE_EXTRA_DIRS`-formatted string into (ClientId, path) pairs.
@@ -360,69 +455,81 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
 /// Only returns entries whose client is present in `enabled`.
 /// This is a pure function — the caller is responsible for reading the
 /// environment variable and passing its value here.
-pub fn parse_extra_dirs(value: &str, enabled: &HashSet<ClientId>) -> Vec<(ClientId, String)> {
+pub fn parse_extra_dirs(
+    value: &str,
+    enabled: &HashSet<ClientId>,
+) -> Result<Vec<(ClientId, String)>, ExtraDirsParseError> {
     if value.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    value
-        .split(',')
-        .filter_map(|entry| {
-            let entry = entry.trim();
-            let (client_str, path) = entry.split_once(':')?;
-            let client_id = ClientId::from_str(client_str.trim())?;
-            if !enabled.contains(&client_id) || !supports_extra_dir_scanning(client_id) {
-                return None;
-            }
-            let path = path.trim().to_string();
-            if path.is_empty() {
-                return None;
-            }
-            Some((client_id, path))
-        })
-        .collect()
+    let mut parsed = Vec::new();
+    for raw_entry in value.split(',') {
+        let entry = raw_entry.trim();
+        let (client_str, path) = entry.split_once(':').ok_or_else(|| ExtraDirsParseError {
+            entry: entry.to_string(),
+            reason: "expected `client:path`",
+        })?;
+        let client_id =
+            ClientId::from_str(client_str.trim()).ok_or_else(|| ExtraDirsParseError {
+                entry: entry.to_string(),
+                reason: "unknown client",
+            })?;
+        if !supports_extra_dir_scanning(client_id) {
+            return Err(ExtraDirsParseError {
+                entry: entry.to_string(),
+                reason: "client does not support extra directory scanning",
+            });
+        }
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(ExtraDirsParseError {
+                entry: entry.to_string(),
+                reason: "path is blank",
+            });
+        }
+        if enabled.contains(&client_id) {
+            parsed.push((client_id, path.to_string()));
+        }
+    }
+    Ok(parsed)
 }
 
 pub fn extra_scan_paths_for(
     settings: &ScannerSettings,
     enabled: &HashSet<ClientId>,
-) -> Vec<(ClientId, PathBuf)> {
-    settings
-        .extra_scan_paths
-        .iter()
-        .filter_map(|(client_str, paths)| {
-            let client_id = ClientId::from_str(client_str)?;
-            if !enabled.contains(&client_id) || !supports_extra_dir_scanning(client_id) {
-                return None;
-            }
-            Some(
-                paths
-                    .iter()
-                    .filter(|path| !path.as_os_str().is_empty())
-                    .cloned()
-                    .map(move |path| (client_id, path)),
-            )
-        })
-        .flatten()
-        .collect()
+) -> Result<Vec<(ClientId, PathBuf)>, ScannerSettingsError> {
+    settings.validate()?;
+    let mut result = Vec::new();
+    for (client_name, paths) in &settings.extra_scan_paths {
+        let client =
+            ClientId::from_str(client_name).ok_or_else(|| ScannerSettingsError::UnknownClient {
+                client: client_name.clone(),
+            })?;
+        if enabled.contains(&client) {
+            result.extend(paths.iter().cloned().map(|path| (client, path)));
+        }
+    }
+    Ok(result)
 }
 
 pub fn built_in_extra_scan_paths_for(
     home_dir: &Path,
     enabled: &HashSet<ClientId>,
-) -> Vec<(ClientId, PathBuf)> {
+) -> Result<Vec<(ClientId, PathBuf)>, ScannerError> {
     let mut paths = Vec::new();
 
     if enabled.contains(&ClientId::Claude) {
         paths.push((ClientId::Claude, home_dir.join(".claude/transcripts")));
         paths.extend(
             crate::cc_mirror::discover_claude_project_roots(home_dir)
+                .map_err(ScannerError::ClaudeMirror)?
                 .into_iter()
                 .map(|path| (ClientId::Claude, path)),
         );
     }
 
-    paths
+    Ok(paths)
 }
 
 /// Discover every OpenCode SQLite database under the opencode data dir.
@@ -465,6 +572,30 @@ pub enum OpenCodeDiscoveryError {
         #[source]
         source: io::Error,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScannerError {
+    #[error(transparent)]
+    OpenCode(#[from] OpenCodeDiscoveryError),
+    #[error(transparent)]
+    ScanDirectory(#[from] ScanDirectoryError),
+    #[error("failed to discover Claude mirror scan roots: {0}")]
+    ClaudeMirror(#[source] crate::sessions::error::SessionParseError),
+    #[error(transparent)]
+    ExtraDirs(#[from] ExtraDirsParseError),
+    #[error(transparent)]
+    Settings(#[from] ScannerSettingsError),
+    #[error("failed to read environment variable `{variable}`: {source}")]
+    Environment {
+        variable: &'static str,
+        #[source]
+        source: std::env::VarError,
+    },
+    #[error("unknown scanner client `{client}`")]
+    UnknownClient { client: String },
+    #[error("client `{client}` does not support directory scanning")]
+    UnsupportedClient { client: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,7 +821,7 @@ pub fn scan_all_clients_with_scanner_settings(
     clients: &[String],
     use_env_roots: bool,
     scanner_settings: &ScannerSettings,
-) -> Result<ScanResult, OpenCodeDiscoveryError> {
+) -> Result<ScanResult, ScannerError> {
     scan_all_clients_with_env_strategy_inner(home_dir, clients, use_env_roots, scanner_settings)
 }
 
@@ -699,7 +830,7 @@ pub fn scan_all_clients_with_env_strategy(
     home_dir: &str,
     clients: &[String],
     use_env_roots: bool,
-) -> Result<ScanResult, OpenCodeDiscoveryError> {
+) -> Result<ScanResult, ScannerError> {
     scan_all_clients_with_scanner_settings(
         home_dir,
         clients,
@@ -713,7 +844,8 @@ fn scan_all_clients_with_env_strategy_inner(
     clients: &[String],
     use_env_roots: bool,
     scanner_settings: &ScannerSettings,
-) -> Result<ScanResult, OpenCodeDiscoveryError> {
+) -> Result<ScanResult, ScannerError> {
+    scanner_settings.validate()?;
     let mut result = ScanResult::default();
 
     let include_all = clients.is_empty();
@@ -722,11 +854,20 @@ fn scan_all_clients_with_env_strategy_inner(
             .filter(|client| scanner_enabled_client(*client))
             .collect()
     } else {
-        clients
-            .iter()
-            .filter_map(|s| ClientId::from_str(s))
-            .filter(|client| scanner_enabled_client(*client))
-            .collect()
+        let mut enabled = HashSet::new();
+        for client in clients {
+            let client_id =
+                ClientId::from_str(client).ok_or_else(|| ScannerError::UnknownClient {
+                    client: client.clone(),
+                })?;
+            if !scanner_enabled_client(client_id) {
+                return Err(ScannerError::UnsupportedClient {
+                    client: client.clone(),
+                });
+            }
+            enabled.insert(client_id);
+        }
+        enabled
     };
 
     let home_path = Path::new(home_dir);
@@ -767,20 +908,29 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
+    for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled)? {
         warn_if_escapes_home(client_id, &path);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
-    for (client_id, path) in built_in_extra_scan_paths_for(home_path, &enabled) {
+    for (client_id, path) in built_in_extra_scan_paths_for(home_path, &enabled)? {
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
     // Extra scan directories are part of the caller's environment, so they are
     // intentionally ignored when an explicit --home override disables env roots.
     if use_env_roots {
-        let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
-        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
+        let extra_dirs_val = match std::env::var("TOKSCALE_EXTRA_DIRS") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => String::new(),
+            Err(source) => {
+                return Err(ScannerError::Environment {
+                    variable: "TOKSCALE_EXTRA_DIRS",
+                    source,
+                });
+            }
+        };
+        for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled)? {
             warn_if_escapes_home(client_id, &PathBuf::from(&path));
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
@@ -822,11 +972,10 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::Codex) {
         // Codex: ~/.codex/sessions/**/*.jsonl
-        let codex_home = if use_env_roots {
-            std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir))
-        } else {
-            format!("{}/.codex", home_dir)
-        };
+        let codex_home = use_env_roots
+            .then(|| configured_path_env("CODEX_HOME"))
+            .flatten()
+            .unwrap_or_else(|| PathBuf::from(home_dir).join(".codex"));
         let codex_path =
             local_def(ClientId::Codex).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(
@@ -837,7 +986,7 @@ fn scan_all_clients_with_env_strategy_inner(
         );
 
         // Codex archived sessions: ~/.codex/archived_sessions/**/*.jsonl
-        let codex_archived_path = format!("{}/archived_sessions", codex_home);
+        let codex_archived_path = codex_home.join("archived_sessions");
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
@@ -956,7 +1105,7 @@ fn scan_all_clients_with_env_strategy_inner(
         let kilo_db_path =
             local_def(ClientId::Kilo).resolve_path_with_env_strategy(home_dir, use_env_roots);
         if std::path::Path::new(&kilo_db_path).exists() {
-            result.kilo_db = Some(PathBuf::from(kilo_db_path));
+            result.kilo_db = Some(kilo_db_path);
         }
     }
 
@@ -964,26 +1113,23 @@ fn scan_all_clients_with_env_strategy_inner(
         let hermes_db_path =
             local_def(ClientId::Hermes).resolve_path_with_env_strategy(home_dir, use_env_roots);
         if std::path::Path::new(&hermes_db_path).exists() {
-            result.hermes_db = Some(PathBuf::from(hermes_db_path));
+            result.hermes_db = Some(hermes_db_path);
         }
     }
 
     if enabled.contains(&ClientId::Goose) {
         if use_env_roots {
-            if let Ok(custom_root) = std::env::var("GOOSE_PATH_ROOT") {
-                let trimmed = custom_root.trim();
-                if !trimmed.is_empty() {
-                    let custom_path = PathBuf::from(trimmed).join("data/sessions/sessions.db");
-                    if custom_path.is_file() {
-                        result.goose_db = Some(custom_path);
-                    }
+            if let Some(custom_root) = configured_path_env("GOOSE_PATH_ROOT") {
+                let custom_path = custom_root.join("data/sessions/sessions.db");
+                if custom_path.is_file() {
+                    result.goose_db = Some(custom_path);
                 }
             }
         }
         if result.goose_db.is_none() {
             let xdg_path =
                 local_def(ClientId::Goose).resolve_path_with_env_strategy(home_dir, use_env_roots);
-            let xdg = PathBuf::from(xdg_path);
+            let xdg = xdg_path;
             if xdg.is_file() {
                 result.goose_db = Some(xdg);
             }
@@ -997,30 +1143,12 @@ fn scan_all_clients_with_env_strategy_inner(
                 result.goose_db = Some(macos_path);
             }
         }
-        if result.goose_db.is_none() {
-            let legacy_macos_path = PathBuf::from(format!(
-                "{}/Library/Application Support/Block/goose/sessions/sessions.db",
-                home_dir
-            ));
-            if legacy_macos_path.is_file() {
-                result.goose_db = Some(legacy_macos_path);
-            }
-        }
-        if result.goose_db.is_none() {
-            let legacy_xdg_path = PathBuf::from(format!(
-                "{}/.local/share/Block/goose/sessions/sessions.db",
-                home_dir
-            ));
-            if legacy_xdg_path.is_file() {
-                result.goose_db = Some(legacy_xdg_path);
-            }
-        }
     }
 
     if enabled.contains(&ClientId::Zed) {
         let zed_db_path =
             local_def(ClientId::Zed).resolve_path_with_env_strategy(home_dir, use_env_roots);
-        let xdg = PathBuf::from(zed_db_path);
+        let xdg = zed_db_path;
         if xdg.is_file() {
             result.zed_db = Some(xdg);
         }
@@ -1071,22 +1199,19 @@ fn scan_all_clients_with_env_strategy_inner(
         //   - ~/.config/manicode (primary / legacy name — Codebuff was "Manicode")
         //   - ~/.config/manicode-dev
         //   - ~/.config/manicode-staging
-        let trimmed_override = if use_env_roots {
-            std::env::var("CODEBUFF_DATA_DIR")
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
+        let configured_root = if use_env_roots {
+            configured_path_env("CODEBUFF_DATA_DIR")
         } else {
             None
         };
 
-        let mut codebuff_roots: Vec<String> = Vec::new();
-        if let Some(root) = trimmed_override {
-            codebuff_roots.push(format!("{}/projects", root.trim_end_matches('/')));
+        let mut codebuff_roots: Vec<PathBuf> = Vec::new();
+        if let Some(root) = configured_root {
+            codebuff_roots.push(root.join("projects"));
         } else {
-            let config_dir = format!("{}/.config", home_dir);
+            let config_dir = PathBuf::from(home_dir).join(".config");
             for channel in ["manicode", "manicode-dev", "manicode-staging"] {
-                codebuff_roots.push(format!("{}/{}/projects", config_dir, channel));
+                codebuff_roots.push(config_dir.join(channel).join("projects"));
             }
         }
 
@@ -1105,10 +1230,9 @@ fn scan_all_clients_with_env_strategy_inner(
     let scan_results: Vec<(ClientId, Vec<PathBuf>)> = tasks
         .into_par_iter()
         .map(|(client_id, path, pattern)| {
-            let files = scan_directory(&path, pattern);
-            (client_id, files)
+            scan_directory(&path, pattern).map(|files| (client_id, files))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     // Aggregate results, deduplicating file paths across overlapping directories
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -1314,7 +1438,7 @@ mod tests {
         File::create(path.join("data.txt")).unwrap();
         File::create(path.join("other.jsonl")).unwrap();
 
-        let json_files = scan_directory(path.to_str().unwrap(), "*.json");
+        let json_files = scan_directory(path.to_str().unwrap(), "*.json").unwrap();
         assert_eq!(json_files.len(), 2);
         assert!(json_files.iter().all(|p| p.extension().unwrap() == "json"));
     }
@@ -1328,7 +1452,7 @@ mod tests {
         File::create(path.join("session.jsonl")).unwrap();
         File::create(path.join("session.txt")).unwrap();
 
-        let session_files = scan_directory(path.to_str().unwrap(), "*.json|*.jsonl");
+        let session_files = scan_directory(path.to_str().unwrap(), "*.json|*.jsonl").unwrap();
         assert_eq!(session_files.len(), 2);
         assert_eq!(
             session_files
@@ -1348,7 +1472,7 @@ mod tests {
         File::create(path.join("log.jsonl")).unwrap();
         File::create(path.join("data.json")).unwrap();
 
-        let jsonl_files = scan_directory(path.to_str().unwrap(), "*.jsonl");
+        let jsonl_files = scan_directory(path.to_str().unwrap(), "*.jsonl").unwrap();
         assert_eq!(jsonl_files.len(), 2);
         assert!(jsonl_files
             .iter()
@@ -1366,7 +1490,7 @@ mod tests {
         File::create(session_dir.join("events.jsonl")).unwrap();
         File::create(session_dir.join("updates.json")).unwrap();
 
-        let updates_files = scan_directory(path.to_str().unwrap(), "updates.jsonl");
+        let updates_files = scan_directory(path.to_str().unwrap(), "updates.jsonl").unwrap();
         assert_eq!(updates_files.len(), 1);
         assert!(updates_files[0].ends_with("updates.jsonl"));
     }
@@ -1381,7 +1505,7 @@ mod tests {
         File::create(path.join("other.json")).unwrap();
         File::create(path.join("session.json")).unwrap(); // Shouldn't match
 
-        let session_files = scan_directory(path.to_str().unwrap(), "session-*.json");
+        let session_files = scan_directory(path.to_str().unwrap(), "session-*.json").unwrap();
         assert_eq!(session_files.len(), 2);
         assert!(session_files.iter().all(|p| {
             let name = p.file_name().unwrap().to_str().unwrap();
@@ -1402,7 +1526,7 @@ mod tests {
         File::create(workspace.join("execution")).unwrap();
         File::create(workspace.join("index.sqlite")).unwrap();
 
-        let files = scan_directory(root.to_str().unwrap(), "kiro-globalstorage");
+        let files = scan_directory(root.to_str().unwrap(), "kiro-globalstorage").unwrap();
         let names: Vec<_> = files
             .iter()
             .map(|path| path.file_name().unwrap().to_str().unwrap())
@@ -1425,7 +1549,7 @@ mod tests {
         File::create(tasks.join("task-b").join("ui_messages.json")).unwrap();
         File::create(tasks.join("task-c").join("api_conversation_history.json")).unwrap();
 
-        let files = scan_directory(path.to_str().unwrap(), "ui_messages.json");
+        let files = scan_directory(path.to_str().unwrap(), "ui_messages.json").unwrap();
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|p| {
             p.file_name()
@@ -1450,7 +1574,7 @@ mod tests {
         File::create(sub2.join("session.json")).unwrap();
         File::create(path.join("root.json")).unwrap();
 
-        let files = scan_directory(path.to_str().unwrap(), "*.json");
+        let files = scan_directory(path.to_str().unwrap(), "*.json").unwrap();
         assert_eq!(files.len(), 3);
     }
 
@@ -1463,7 +1587,7 @@ mod tests {
         File::create(path.join("data.csv")).unwrap();
         File::create(path.join("other.json")).unwrap();
 
-        let csv_files = scan_directory(path.to_str().unwrap(), "*.csv");
+        let csv_files = scan_directory(path.to_str().unwrap(), "*.csv").unwrap();
         assert_eq!(csv_files.len(), 2);
         assert!(csv_files.iter().all(|p| p.extension().unwrap() == "csv"));
     }
@@ -1481,7 +1605,7 @@ mod tests {
         File::create(path.join("other.json")).unwrap();
         File::create(archive.join("usage.json")).unwrap();
 
-        let usage_files = scan_directory(path.to_str().unwrap(), "usage*.json");
+        let usage_files = scan_directory(path.to_str().unwrap(), "usage*.json").unwrap();
         let names: Vec<_> = usage_files
             .iter()
             .map(|path| path.file_name().unwrap().to_str().unwrap())
@@ -1492,14 +1616,34 @@ mod tests {
 
     #[test]
     fn test_scan_directory_nonexistent() {
-        let files = scan_directory("/nonexistent/path/that/does/not/exist", "*.json");
+        let files = scan_directory("/nonexistent/path/that/does/not/exist", "*.json").unwrap();
         assert!(files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_directory_reports_root_metadata_error() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("not-a-directory");
+        File::create(&file).unwrap();
+        let invalid_root = file.join("child");
+
+        let error = scan_directory(&invalid_root, "*.json").unwrap_err();
+        match error {
+            ScanDirectoryError::ReadRootMetadata { root, source } => {
+                assert_eq!(root, invalid_root);
+                assert_eq!(source.kind(), std::io::ErrorKind::NotADirectory);
+            }
+            ScanDirectoryError::WalkRoot { .. } => {
+                panic!("invalid root must fail before directory traversal")
+            }
+        }
     }
 
     #[test]
     fn test_scan_directory_empty() {
         let dir = TempDir::new().unwrap();
-        let files = scan_directory(dir.path().to_str().unwrap(), "*.json");
+        let files = scan_directory(dir.path().to_str().unwrap(), "*.json").unwrap();
         assert!(files.is_empty());
     }
 
@@ -1512,9 +1656,9 @@ mod tests {
             File::create(path.join(name)).unwrap();
         }
 
-        let first = scan_directory(path.to_str().unwrap(), "*.jsonl");
-        let second = scan_directory(path.to_str().unwrap(), "*.jsonl");
-        let third = scan_directory(path.to_str().unwrap(), "*.jsonl");
+        let first = scan_directory(path.to_str().unwrap(), "*.jsonl").unwrap();
+        let second = scan_directory(path.to_str().unwrap(), "*.jsonl").unwrap();
+        let third = scan_directory(path.to_str().unwrap(), "*.jsonl").unwrap();
 
         assert_eq!(first, second, "Repeated scans must return identical order");
         assert_eq!(second, third, "Repeated scans must return identical order");
@@ -2738,14 +2882,14 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_all_clients_skips_crush_but_scans_warp_sqlite() {
+    fn test_scan_all_clients_rejects_crush_and_scans_warp_sqlite() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         let settings = ScannerSettings {
-            extra_scan_paths: BTreeMap::from([
-                ("warp".to_string(), vec![home.join("extra-warp-data")]),
-                ("crush".to_string(), vec![home.join(".local/share/crush")]),
-            ]),
+            extra_scan_paths: BTreeMap::from([(
+                "warp".to_string(),
+                vec![home.join("extra-warp-data")],
+            )]),
             ..Default::default()
         };
 
@@ -2755,10 +2899,6 @@ mod tests {
         let extra_warp_db = home.join("extra-warp-data/warp.sqlite");
         fs::create_dir_all(extra_warp_db.parent().unwrap()).unwrap();
         File::create(&extra_warp_db).unwrap();
-
-        let crush_db = home.join(".local/share/crush/project/crush.db");
-        fs::create_dir_all(crush_db.parent().unwrap()).unwrap();
-        File::create(&crush_db).unwrap();
 
         let all_clients =
             scan_all_clients_with_scanner_settings(home.to_str().unwrap(), &[], false, &settings)
@@ -2776,7 +2916,7 @@ mod tests {
             false,
             &settings,
         )
-        .unwrap();
+        .unwrap_err();
 
         assert_eq!(
             all_clients.get(ClientId::Warp),
@@ -2787,7 +2927,10 @@ mod tests {
             explicit_warp.get(ClientId::Warp),
             &vec![default_warp_db, extra_warp_db]
         );
-        assert_eq!(explicit_crush.total_files(), 0);
+        assert!(matches!(
+            explicit_crush,
+            ScannerError::UnsupportedClient { client } if client == "crush"
+        ));
     }
 
     #[test]
@@ -3008,7 +3151,8 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        let dirs = parse_extra_dirs("claude:/tmp/mac-sessions,openclaw:/tmp/oc-extra", &enabled);
+        let dirs =
+            parse_extra_dirs("claude:/tmp/mac-sessions,openclaw:/tmp/oc-extra", &enabled).unwrap();
         assert_eq!(dirs.len(), 2);
         assert_eq!(dirs[0].0, ClientId::Claude);
         assert_eq!(dirs[0].1, "/tmp/mac-sessions");
@@ -3022,33 +3166,33 @@ mod tests {
         let dirs = parse_extra_dirs(
             "claude:/tmp/mac-sessions,gemini:/tmp/gemini-extra",
             &enabled,
-        );
+        )
+        .unwrap();
         assert_eq!(dirs.len(), 1);
         assert_eq!(dirs[0].0, ClientId::Claude);
     }
 
     #[test]
-    fn test_parse_extra_dirs_skips_unsupported_clients() {
+    fn test_parse_extra_dirs_rejects_unsupported_clients() {
         let enabled: HashSet<ClientId> =
             [ClientId::Claude, ClientId::Kilo].iter().copied().collect();
-        let dirs = parse_extra_dirs("claude:/tmp/mac-sessions,kilo:/tmp/kilo", &enabled);
-        assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0].0, ClientId::Claude);
-        assert_eq!(dirs[0].1, "/tmp/mac-sessions");
+        let error =
+            parse_extra_dirs("claude:/tmp/mac-sessions,kilo:/tmp/kilo", &enabled).unwrap_err();
+        assert!(error.to_string().contains("does not support"));
     }
 
     #[test]
     fn test_parse_extra_dirs_empty_string() {
         let enabled: HashSet<ClientId> = ClientId::iter().collect();
-        let dirs = parse_extra_dirs("", &enabled);
+        let dirs = parse_extra_dirs("", &enabled).unwrap();
         assert!(dirs.is_empty());
     }
 
     #[test]
     fn test_parse_extra_dirs_invalid_client() {
         let enabled: HashSet<ClientId> = ClientId::iter().collect();
-        let dirs = parse_extra_dirs("nonexistent:/tmp/foo", &enabled);
-        assert!(dirs.is_empty());
+        let error = parse_extra_dirs("nonexistent:/tmp/foo", &enabled).unwrap_err();
+        assert!(error.to_string().contains("unknown client"));
     }
 
     #[test]

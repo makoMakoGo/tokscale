@@ -318,6 +318,34 @@ impl PreparedLocalSources {
     pub fn source_digest(&self) -> u64 {
         self.signature.process_digest()
     }
+
+    /// Refresh metadata and stable identity without rediscovering sources or
+    /// reading their bodies. This is the narrow probe used by TUI auto-refresh
+    /// before it decides that a prepared inventory is unchanged.
+    pub fn refresh_source_inventory_signature(
+        &mut self,
+    ) -> Result<SourceInventorySignature, String> {
+        for group in &mut self.groups {
+            for unit in &mut group.units {
+                let client = unit.client;
+                let path = unit.path.clone();
+                let parser = unit.parser_version.parser_id;
+                unit.refresh_prepared_snapshot_for_inventory_probe()
+                    .map_err(|source| {
+                        adapters::SourceParseError::new(
+                            client,
+                            path,
+                            parser,
+                            "refresh source inventory metadata and identity",
+                            source,
+                        )
+                        .to_string()
+                    })?;
+            }
+        }
+        self.signature = source_inventory_signature(&self.clients, &self.groups);
+        Ok(self.signature)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -495,13 +523,15 @@ pub struct HourlyReport {
 }
 
 pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, String> {
-    home_dir_option
-        .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .or_else(|| dirs::home_dir().map(|p| p.to_string_lossy().into_owned()))
-        .ok_or_else(|| {
-            "HOME directory not specified and could not determine home directory".to_string()
-        })
+    if let Some(home_dir) = home_dir_option {
+        return Ok(home_dir.clone());
+    }
+    let home_dir = dirs::home_dir().ok_or_else(|| {
+        "HOME directory not specified and could not determine home directory".to_string()
+    })?;
+    home_dir.into_os_string().into_string().map_err(|_| {
+        "HOME directory contains non-UTF-8 data unsupported by the local parser API".to_string()
+    })
 }
 
 #[cfg(test)]
@@ -543,14 +573,16 @@ fn fold_prepared_local_sources_with_pricing(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn adapters::MessageSink,
-) -> Result<(), String> {
+) -> Result<SourceInventorySignature, String> {
     let PreparedLocalSources {
         clients, groups, ..
     } = prepared;
-    let mut source_cache = message_cache::SourceMessageCache::load();
+    let mut source_cache = message_cache::SourceMessageCache::load()
+        .map_err(adapters::SourcePipelineError::from)
+        .map_err(|error| error.to_string())?;
 
-    if clients.is_empty() {
-        adapters::run_prepared_local_source_adapters(groups, &mut source_cache, pricing, sink)?;
+    let parse_result = if clients.is_empty() {
+        adapters::run_prepared_local_source_adapters(groups, &mut source_cache, pricing, sink)
     } else {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
         let mut filtered_sink = RequestedClientFilterSink {
@@ -562,12 +594,21 @@ fn fold_prepared_local_sources_with_pricing(
             &mut source_cache,
             pricing,
             &mut filtered_sink,
-        )?;
-    }
+        )
+    };
 
-    source_cache.save_if_dirty();
-
-    Ok(())
+    let cache_result = source_cache.save_if_dirty();
+    let result = match (parse_result, cache_result) {
+        (Ok(confirmed), Ok(())) => Ok(confirmed),
+        (Err(parse_error), Ok(())) => Err(parse_error),
+        (Ok(_), Err(cache_error)) => Err(cache_error.into()),
+        (Err(parse_error), Err(cache_error)) => Err(
+            adapters::SourcePipelineError::with_finalization(parse_error, cache_error),
+        ),
+    };
+    result
+        .map(|confirmed| confirmed_source_inventory_signature(&clients, &confirmed))
+        .map_err(|error| error.to_string())
 }
 
 struct RequestedClientFilterSink<'a> {
@@ -633,14 +674,18 @@ fn stream_local_sources_into_engine(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
     engine: &mut crate::aggregate::AggregationEngine,
-) -> Result<(), String> {
+) -> Result<SourceInventorySignature, String> {
     let mut sink = AggregationSink(engine);
     fold_prepared_local_sources_with_pricing(prepared, pricing, &mut sink)
 }
 
 pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocalSources, String> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
-    let selected_adapters = adapters::selected_adapters(&clients);
+    options
+        .scanner_settings
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let selected_adapters = adapters::selected_adapters(&clients)?;
     let scan_ctx = adapters::AdapterScanContext {
         home_dir: &home_dir,
         use_env_roots: options.use_env_roots,
@@ -651,16 +696,26 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
         .map(|adapter| {
             #[cfg(test)]
             PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
-            Ok(adapters::PreparedAdapterSources {
-                adapter,
-                units: adapter
-                    .discover_checked(&scan_ctx)?
-                    .into_iter()
-                    .map(adapters::SourceUnit::prepare_snapshot)
-                    .collect(),
-            })
+            let units = adapter
+                .discover_checked(&scan_ctx)?
+                .into_iter()
+                .map(|unit| {
+                    let client = unit.client;
+                    let path = unit.path.clone();
+                    unit.prepare_snapshot().map_err(|source| {
+                        adapters::SourceDiscoveryError::new(
+                            client,
+                            path,
+                            "snapshot source metadata and identity",
+                            source,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, adapters::SourceDiscoveryError>>()?;
+            Ok(adapters::PreparedAdapterSources { adapter, units })
         })
-        .collect::<Result<_, String>>()?;
+        .collect::<Result<_, adapters::SourceDiscoveryError>>()
+        .map_err(|error| error.to_string())?;
     let signature = source_inventory_signature(&clients, &groups);
     Ok(PreparedLocalSources {
         options,
@@ -691,7 +746,7 @@ fn source_inventory_signature(
 ) -> SourceInventorySignature {
     let mut hasher = Sha256::new();
     message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-source-inventory");
-    hasher.update(1_u32.to_le_bytes());
+    hasher.update(2_u32.to_le_bytes());
     let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
     sorted_clients.sort_unstable();
     sorted_clients.dedup();
@@ -707,7 +762,32 @@ fn source_inventory_signature(
         );
         message_cache::hash_inventory_len(&mut hasher, group.units.len());
         for unit in &group.units {
-            unit.update_inventory_signature(&mut hasher);
+            hasher.update(unit.inventory_signature_digest());
+        }
+    }
+    SourceInventorySignature(hasher.finalize().into())
+}
+
+fn confirmed_source_inventory_signature(
+    clients: &[String],
+    groups: &[adapters::ConfirmedAdapterSources],
+) -> SourceInventorySignature {
+    let mut hasher = Sha256::new();
+    message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-source-inventory");
+    hasher.update(2_u32.to_le_bytes());
+    let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
+    sorted_clients.sort_unstable();
+    sorted_clients.dedup();
+    message_cache::hash_inventory_len(&mut hasher, sorted_clients.len());
+    for client in sorted_clients {
+        message_cache::hash_inventory_bytes(&mut hasher, client.as_bytes());
+    }
+    message_cache::hash_inventory_len(&mut hasher, groups.len());
+    for group in groups {
+        message_cache::hash_inventory_bytes(&mut hasher, group.client.as_str().as_bytes());
+        message_cache::hash_inventory_len(&mut hasher, group.unit_digests.len());
+        for digest in &group.unit_digests {
+            hasher.update(digest);
         }
     }
     SourceInventorySignature(hasher.finalize().into())
@@ -854,8 +934,8 @@ fn normalize_token_breakdown(tokens: &mut TokenBreakdown) {
 fn resolve_report_request(options: &ReportOptions) -> Result<(String, Vec<String>), String> {
     let home_dir = get_home_dir_string(&options.home_dir)?;
     let clients = options.clients.clone().unwrap_or_else(|| {
-        ClientId::ALL
-            .iter()
+        ClientId::iter()
+            .filter(|client| client.parse_local())
             .map(|c| c.as_str().to_string())
             .collect()
     });
@@ -892,6 +972,7 @@ fn load_aggregated_views_resolved(
         request.views,
         request.pricing,
     )
+    .map(|(views, _)| views)
 }
 
 fn load_prepared_aggregated_views(
@@ -900,24 +981,28 @@ fn load_prepared_aggregated_views(
     date_range: DateRange,
     views: ViewSet,
     pricing: Option<&pricing::PricingService>,
-) -> Result<AggregatedViews, String> {
+) -> Result<(AggregatedViews, SourceInventorySignature), String> {
     let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
         group_by,
         date_range,
         views,
     });
-    if let Err(error) = stream_local_sources_into_engine(prepared, pricing, &mut engine) {
-        drop(engine);
-        sessions::intern::prune_dead();
-        return Err(error);
-    }
+    let source_inventory_signature =
+        match stream_local_sources_into_engine(prepared, pricing, &mut engine) {
+            Ok(signature) => signature,
+            Err(error) => {
+                drop(engine);
+                sessions::intern::prune_dead();
+                return Err(error);
+            }
+        };
     let views = engine.finish();
     // The streaming sink has dropped every source message and `finish` has
     // consumed all Arc-backed accumulators. Public views own Strings, so this
     // is the narrow lifecycle seam where dead weak identity indices can be
     // reclaimed without sweeping caller-owned generic message slices.
     sessions::intern::prune_dead();
-    Ok(views)
+    Ok((views, source_inventory_signature))
 }
 
 fn load_aggregated_views_for_resolved_report(
@@ -1270,6 +1355,13 @@ fn resolve_local_parse_request(
             .map(|c| c.as_str().to_string())
             .collect()
     });
+    for client in &clients {
+        let client_id =
+            ClientId::from_str(client).ok_or_else(|| format!("unknown local client `{client}`"))?;
+        if adapters::adapter_for(client_id).is_none() {
+            return Err(format!("client `{client}` does not support local parsing"));
+        }
+    }
     Ok((home_dir, clients))
 }
 
@@ -1339,7 +1431,7 @@ pub fn load_prepared_usage_data_with_pricing(
         until: prepared.options.until.clone(),
         year: prepared.options.year.clone(),
     };
-    let views =
+    let (views, _) =
         load_prepared_aggregated_views(prepared, group_by, date_range, ViewSet::TUI, pricing)?;
     Ok(views.tui_usage.expect("tui view requested"))
 }
@@ -1348,6 +1440,7 @@ pub fn load_prepared_usage_data_with_pricing(
 pub struct UsageDataWithDiagnostics {
     pub data: usage_views::UsageData,
     pub pricing_diagnostics: pricing::PricingDiagnostics,
+    pub source_inventory_signature: SourceInventorySignature,
 }
 
 pub async fn load_usage_data_with_diagnostics(
@@ -1364,10 +1457,23 @@ pub async fn load_prepared_usage_data_with_diagnostics(
 ) -> Result<UsageDataWithDiagnostics, String> {
     let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
     let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
-    let data = load_prepared_usage_data_with_pricing(prepared, group_by, pricing.as_deref())?;
+    let date_range = DateRange {
+        since: prepared.options.since.clone(),
+        until: prepared.options.until.clone(),
+        year: prepared.options.year.clone(),
+    };
+    let (views, source_inventory_signature) = load_prepared_aggregated_views(
+        prepared,
+        group_by,
+        date_range,
+        ViewSet::TUI,
+        pricing.as_deref(),
+    )?;
+    let data = views.tui_usage.expect("tui view requested");
     Ok(UsageDataWithDiagnostics {
         data,
         pricing_diagnostics,
+        source_inventory_signature,
     })
 }
 

@@ -5,7 +5,14 @@ use std::{collections::HashSet, hash::Hash, sync::Arc};
 use crate::{sessions, GroupBy, UnifiedMessage};
 
 pub const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
-const UNKNOWN_WORKSPACE_GROUP_KEY: &str = "\0unknown-workspace";
+
+fn push_len_prefixed(output: &mut String, value: &str) {
+    output.push_str(&value.len().to_string());
+    output.push(':');
+    output.push_str(value);
+}
+
+const STORAGE_KEY_VERSION: &str = "v1|";
 
 /// Allocation-free for the empty and singleton cases; a hash table is
 /// created only when a second distinct identity is actually observed.
@@ -43,24 +50,6 @@ where
                 true
             }
             Self::Many(values) => values.insert(value),
-        }
-    }
-
-    pub(crate) fn extend(&mut self, other: Self) {
-        if matches!(self, Self::Empty) {
-            *self = other;
-            return;
-        }
-        match other {
-            Self::Empty => {}
-            Self::One(value) => {
-                self.insert(value);
-            }
-            Self::Many(values) => {
-                for value in *values {
-                    self.insert(value);
-                }
-            }
         }
     }
 
@@ -131,13 +120,6 @@ impl WorkspaceKey {
             .as_ref()
             .map_or(Self::Unknown, |key| Self::Known(Arc::clone(key)))
     }
-
-    fn legacy_group_key(&self) -> &str {
-        match self {
-            Self::Known(key) => key,
-            Self::Unknown => UNKNOWN_WORKSPACE_GROUP_KEY,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -201,54 +183,59 @@ impl GroupedModelKey {
         matches!(self, Self::Model(_) | Self::WorkspaceModel { .. })
     }
 
-    /// Whether a different structured key can produce the same historical
-    /// public key text. Delimiter-free composite components are injective by
-    /// separator count; workspace length-prefixing is injective except for the
-    /// deliberate Unknown sentinel and a literal workspace with that value.
-    pub(crate) fn may_alias_legacy_key(&self) -> bool {
+    /// Stable, collision-free key for DTO maps that cannot retain the
+    /// structured enum directly. Every component is byte-length-prefixed and
+    /// each enum variant, including known versus unknown workspace, has its
+    /// own tag.
+    pub(crate) fn map_key(&self) -> String {
+        let mut output = String::from(STORAGE_KEY_VERSION);
         match self {
-            Self::Model(_) => false,
-            Self::ClientModel { client, model } => client.contains(':') || model.contains(':'),
-            Self::ClientProviderModel {
-                client,
-                provider,
-                model,
-            } => client.contains(':') || provider.contains(':') || model.contains(':'),
-            Self::WorkspaceModel { workspace, .. } => match workspace {
-                WorkspaceKey::Unknown => true,
-                WorkspaceKey::Known(key) => key.as_ref() == UNKNOWN_WORKSPACE_GROUP_KEY,
-            },
-            Self::SessionModel { session, model } => session.contains(':') || model.contains(':'),
-            Self::ClientSessionModel {
-                client,
-                session,
-                model,
-            } => client.contains(':') || session.contains(':') || model.contains(':'),
-        }
-    }
-
-    /// Preserve the existing public/cache key text. This string is created at
-    /// output materialization, never for a hot-path map lookup.
-    pub(crate) fn public_key(&self) -> String {
-        match self {
-            Self::Model(model) => model.to_string(),
-            Self::ClientModel { client, model } => format!("{client}:{model}"),
-            Self::ClientProviderModel {
-                client,
-                provider,
-                model,
-            } => format!("{client}:{provider}:{model}"),
-            Self::WorkspaceModel { workspace, model } => {
-                let workspace = workspace.legacy_group_key();
-                format!("{}:{workspace}:{model}", workspace.len())
+            Self::Model(model) => {
+                output.push_str("m|");
+                push_len_prefixed(&mut output, model);
             }
-            Self::SessionModel { session, model } => format!("{session}:{model}"),
+            Self::ClientModel { client, model } => {
+                output.push_str("cm|");
+                push_len_prefixed(&mut output, client);
+                push_len_prefixed(&mut output, model);
+            }
+            Self::ClientProviderModel {
+                client,
+                provider,
+                model,
+            } => {
+                output.push_str("cpm|");
+                push_len_prefixed(&mut output, client);
+                push_len_prefixed(&mut output, provider);
+                push_len_prefixed(&mut output, model);
+            }
+            Self::WorkspaceModel { workspace, model } => {
+                match workspace {
+                    WorkspaceKey::Known(workspace) => {
+                        output.push_str("wmk|");
+                        push_len_prefixed(&mut output, workspace);
+                    }
+                    WorkspaceKey::Unknown => output.push_str("wmu|"),
+                }
+                push_len_prefixed(&mut output, model);
+            }
+            Self::SessionModel { session, model } => {
+                output.push_str("sm|");
+                push_len_prefixed(&mut output, session);
+                push_len_prefixed(&mut output, model);
+            }
             Self::ClientSessionModel {
                 client,
                 session,
                 model,
-            } => format!("{client}:{session}:{model}"),
+            } => {
+                output.push_str("csm|");
+                push_len_prefixed(&mut output, client);
+                push_len_prefixed(&mut output, session);
+                push_len_prefixed(&mut output, model);
+            }
         }
+        output
     }
 }
 
@@ -270,20 +257,20 @@ impl HourlyModelKey {
         }
     }
 
-    pub(crate) fn public_key(&self) -> String {
+    pub(crate) fn map_key(&self) -> String {
+        let mut output = String::from(STORAGE_KEY_VERSION);
         match self {
-            Self::Model(model) => model.to_string(),
-            Self::ProviderModel { provider, model } => format!("{provider}:{model}"),
-        }
-    }
-
-    pub(crate) fn may_alias_legacy_key(&self) -> bool {
-        match self {
-            Self::Model(_) => false,
+            Self::Model(model) => {
+                output.push_str("m|");
+                push_len_prefixed(&mut output, model);
+            }
             Self::ProviderModel { provider, model } => {
-                provider.contains(':') || model.contains(':')
+                output.push_str("pm|");
+                push_len_prefixed(&mut output, provider);
+                push_len_prefixed(&mut output, model);
             }
         }
+        output
     }
 }
 
@@ -369,7 +356,9 @@ mod tests {
         let left = GroupedModelKey::from_message(&GroupBy::ClientModel, &left);
         let right = GroupedModelKey::from_message(&GroupBy::ClientModel, &right);
         assert_ne!(left, right);
-        assert_eq!(left.public_key(), right.public_key());
+        assert_ne!(left.map_key(), right.map_key());
+        assert_eq!(left.map_key(), "v1|cm|3:a:b1:c");
+        assert_eq!(right.map_key(), "v1|cm|1:a3:b:c");
     }
 
     #[test]
@@ -401,94 +390,53 @@ mod tests {
         let left = HourlyModelKey::from_message(&GroupBy::ClientProviderModel, &left);
         let right = HourlyModelKey::from_message(&GroupBy::ClientProviderModel, &right);
         assert_ne!(left, right);
-        assert_eq!(left.public_key(), right.public_key());
-        assert!(left.may_alias_legacy_key());
-        assert!(right.may_alias_legacy_key());
+        assert_ne!(left.map_key(), right.map_key());
+        assert_eq!(left.map_key(), "v1|pm|3:a:b1:c");
+        assert_eq!(right.map_key(), "v1|pm|1:a3:b:c");
     }
 
     #[test]
-    fn legacy_alias_classifier_separates_injective_and_ambiguous_keys() {
+    fn map_keys_tag_every_grouping_variant() {
         let msg = message();
-        for group_by in [
-            GroupBy::Model,
-            GroupBy::ClientModel,
-            GroupBy::ClientProviderModel,
-            GroupBy::Session,
-            GroupBy::ClientSession,
-        ] {
-            assert!(!GroupedModelKey::from_message(&group_by, &msg).may_alias_legacy_key());
-        }
-
-        let mut ambiguous = message();
-        ambiguous.session_id = Arc::from("session:child");
-        assert!(GroupedModelKey::from_message(&GroupBy::Session, &ambiguous).may_alias_legacy_key());
-        assert!(
-            GroupedModelKey::from_message(&GroupBy::ClientSession, &ambiguous)
-                .may_alias_legacy_key()
-        );
-        ambiguous = message();
-        ambiguous.provider_id = Arc::from("provider:route");
-        assert!(
-            GroupedModelKey::from_message(&GroupBy::ClientProviderModel, &ambiguous)
-                .may_alias_legacy_key()
-        );
-
-        let unknown = {
-            let mut message = message();
-            message.workspace_key = None;
-            GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &message)
-        };
-        let literal_sentinel = {
-            let mut message = message();
-            message.workspace_key = Some(Arc::from(UNKNOWN_WORKSPACE_GROUP_KEY));
-            GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &message)
-        };
-        let ordinary = GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &msg);
-        assert!(unknown.may_alias_legacy_key());
-        assert!(literal_sentinel.may_alias_legacy_key());
-        assert!(!ordinary.may_alias_legacy_key());
-        assert_eq!(unknown.public_key(), literal_sentinel.public_key());
-        assert_ne!(unknown.public_key(), ordinary.public_key());
-    }
-
-    #[test]
-    fn safe_and_risky_delimiter_keys_cannot_share_public_text() {
-        let safe = message();
-        let mut client_risky = message();
-        client_risky.client = Arc::from("client:child");
-        let mut provider_risky = message();
-        provider_risky.provider_id = Arc::from("provider:route");
-        let mut session_risky = message();
-        session_risky.session_id = Arc::from("session:child");
         let cases = [
-            (GroupBy::ClientModel, &client_risky, 1),
-            (GroupBy::ClientProviderModel, &provider_risky, 2),
-            (GroupBy::Session, &session_risky, 1),
-            (GroupBy::ClientSession, &session_risky, 2),
+            (GroupBy::Model, "v1|m|"),
+            (GroupBy::ClientModel, "v1|cm|"),
+            (GroupBy::ClientProviderModel, "v1|cpm|"),
+            (GroupBy::WorkspaceModel, "v1|wmk|"),
+            (GroupBy::Session, "v1|sm|"),
+            (GroupBy::ClientSession, "v1|csm|"),
         ];
-
-        for (group_by, risky_message, separator_count) in cases {
-            let safe_key = GroupedModelKey::from_message(&group_by, &safe);
-            let risky_key = GroupedModelKey::from_message(&group_by, risky_message);
-            assert!(!safe_key.may_alias_legacy_key());
-            assert!(risky_key.may_alias_legacy_key());
-            assert_eq!(safe_key.public_key().matches(':').count(), separator_count);
-            assert!(risky_key.public_key().matches(':').count() > separator_count);
-            assert_ne!(safe_key.public_key(), risky_key.public_key());
+        for (group_by, prefix) in cases {
+            assert!(GroupedModelKey::from_message(&group_by, &msg)
+                .map_key()
+                .starts_with(prefix));
         }
     }
 
     #[test]
-    fn unknown_workspace_does_not_alias_literal_legacy_sentinel() {
+    fn map_key_lengths_count_utf8_bytes() {
+        let mut msg = message();
+        msg.model_id = Arc::from("雪");
+
+        assert_eq!(
+            GroupedModelKey::from_message(&GroupBy::Model, &msg).map_key(),
+            "v1|m|3:雪"
+        );
+    }
+
+    #[test]
+    fn unknown_workspace_has_a_distinct_variant_tag() {
         let mut unknown = message();
         unknown.workspace_key = None;
         let mut literal = message();
-        literal.workspace_key = Some(Arc::from(UNKNOWN_WORKSPACE_GROUP_KEY));
+        literal.workspace_key = Some(Arc::from(""));
 
-        assert_ne!(
-            GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &unknown),
-            GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &literal)
-        );
+        let unknown = GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &unknown);
+        let literal = GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &literal);
+        assert_ne!(unknown, literal);
+        assert!(unknown.map_key().starts_with("v1|wmu|"));
+        assert!(literal.map_key().starts_with("v1|wmk|"));
+        assert_ne!(unknown.map_key(), literal.map_key());
     }
 
     #[test]

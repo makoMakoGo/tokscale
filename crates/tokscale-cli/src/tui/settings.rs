@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokscale_core::scanner::ScannerSettings;
 
@@ -73,7 +73,7 @@ pub struct Settings {
     /// (e.g. `["opencode", "claude", "zed"]`). Validation against the
     /// client catalog happens at the CLI/TUI boundary. CLI flags always
     /// override this list completely.
-    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
+    #[serde(default)]
     pub default_clients: Vec<String>,
     #[serde(default)]
     pub light: LightSettings,
@@ -86,30 +86,11 @@ pub struct Settings {
     /// Empty means "show cached Usage content only; never fetch remote
     /// subscription quota providers". Stored as stable lowercase provider ids
     /// such as `codex`, `zai`, and `minimax-token-plan-cn`.
-    #[serde(default, deserialize_with = "deserialize_string_array_lossy")]
+    #[serde(default)]
     pub usage_providers: Vec<String>,
     #[cfg(test)]
     #[serde(skip)]
     pub save_path_override: Option<PathBuf>,
-}
-
-/// Lossy deserializer for `defaultClients`: accepts an array of arbitrary
-/// JSON values, keeps only string elements, and silently drops anything
-/// else. Hand-edited settings.json files sometimes end up with stray nulls,
-/// numbers, or trailing trash; failing the whole load over one bad element
-/// would silently fall back to defaults for *every* setting in the file
-/// (theme, scanner paths, etc.), which is a much worse user experience
-/// than dropping the bad entry.
-fn deserialize_string_array_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value: Option<Vec<serde_json::Value>> = Option::deserialize(deserializer).ok().flatten();
-    Ok(value
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect())
 }
 
 fn default_color_palette() -> String {
@@ -147,50 +128,72 @@ impl Default for Settings {
 ///
 /// Every CLI entry point that builds `LocalParseOptions`/`ReportOptions`
 /// calls this so user-configured scanner paths are honored on every
-/// invocation. Errors during load fall through to
-/// [`ScannerSettings::default`] — a missing or malformed settings.json
-/// should never break `tokscale` runs.
-pub fn load_scanner_settings() -> ScannerSettings {
-    Settings::load().scanner
+/// invocation. A missing file means the user has not configured scanner
+/// overrides; malformed or unreadable files are reported to the command.
+pub fn load_scanner_settings() -> Result<ScannerSettings> {
+    Settings::load().map(|settings| settings.scanner)
 }
 
-pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> ScannerSettings {
-    Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).scanner
+pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> Result<ScannerSettings> {
+    Settings::load_for_home_override(home_dir.as_deref().map(Path::new))
+        .map(|settings| settings.scanner)
 }
 
 /// Returns the user's configured `defaultClients` list as raw lowercase
 /// ids. Validation against the live client catalog happens at the CLI/TUI
 /// boundary so this module stays independent of CLI state.
 ///
-/// Returns an empty `Vec` when settings.json is missing, malformed, or
-/// the field is unset — never errors.
-pub fn load_default_clients() -> Vec<String> {
-    Settings::load().default_clients
+/// A missing file or unset field produces an empty list. Malformed or
+/// unreadable settings are reported to the command.
+pub fn load_default_clients() -> Result<Vec<String>> {
+    Settings::load().map(|settings| settings.default_clients)
 }
 
-pub fn load_default_clients_for_home(home_dir: &Option<String>) -> Vec<String> {
-    Settings::load_for_home_override(home_dir.as_deref().map(Path::new)).default_clients
+pub fn load_default_clients_for_home(home_dir: &Option<String>) -> Result<Vec<String>> {
+    Settings::load_for_home_override(home_dir.as_deref().map(Path::new))
+        .map(|settings| settings.default_clients)
 }
 
 impl Settings {
-    fn normalize(mut self) -> Self {
-        self.auto_refresh_ms = self
-            .auto_refresh_ms
-            .clamp(MIN_AUTO_REFRESH_MS, MAX_AUTO_REFRESH_MS);
-        self.native_timeout_ms = self
-            .native_timeout_ms
-            .clamp(MIN_NATIVE_TIMEOUT_MS, MAX_NATIVE_TIMEOUT_MS);
-        self
+    fn validate(self) -> Result<Self> {
+        if !(MIN_AUTO_REFRESH_MS..=MAX_AUTO_REFRESH_MS).contains(&self.auto_refresh_ms) {
+            anyhow::bail!(
+                "invalid autoRefreshMs {}; expected {}..={}",
+                self.auto_refresh_ms,
+                MIN_AUTO_REFRESH_MS,
+                MAX_AUTO_REFRESH_MS
+            );
+        }
+        if !(MIN_NATIVE_TIMEOUT_MS..=MAX_NATIVE_TIMEOUT_MS).contains(&self.native_timeout_ms) {
+            anyhow::bail!(
+                "invalid nativeTimeoutMs {}; expected {}..={}",
+                self.native_timeout_ms,
+                MIN_NATIVE_TIMEOUT_MS,
+                MAX_NATIVE_TIMEOUT_MS
+            );
+        }
+        self.theme_name()?;
+        self.scanner
+            .validate()
+            .context("invalid scanner settings")?;
+        Ok(self)
     }
 
     fn config_path() -> Result<PathBuf> {
-        let config_dir = crate::paths::get_config_dir();
+        crate::paths::try_get_config_dir()
+            .map(|directory| directory.join("settings.json"))
+            .map_err(anyhow::Error::new)
+    }
 
-        if !config_dir.exists() {
-            fs::create_dir_all(&config_dir)?;
-        }
-
-        Ok(config_dir.join("settings.json"))
+    fn writable_config_path() -> Result<PathBuf> {
+        let path = Self::config_path()?;
+        let parent = path
+            .parent()
+            .expect("settings path must have a configuration directory");
+        fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create settings directory `{}`", parent.display())
+        })?;
+        Ok(path)
     }
 
     fn explicit_home_config_path_for_layout(
@@ -214,60 +217,42 @@ impl Settings {
         Self::explicit_home_config_path_for_layout(home_dir, ExplicitHomeConfigLayout::current())
     }
 
-    fn explicit_home_legacy_macos_path(home_dir: &Path) -> PathBuf {
-        home_dir.join("Library/Application Support/tokscale/settings.json")
-    }
-
-    /// Returns the legacy `~/Library/Application Support/tokscale/settings.json`
-    /// path on macOS so `load()` can fall back to it during the transition.
-    /// Returns `None` on other platforms or when HOME cannot be resolved.
-    fn legacy_macos_path() -> Option<PathBuf> {
-        crate::paths::legacy_macos_config_dir().map(|d| d.join("settings.json"))
-    }
-
-    pub fn load() -> Self {
-        let primary = Self::config_path()
-            .ok()
-            .and_then(|path| fs::read_to_string(path).ok());
-
-        // Transparent macOS fallback: pre-fix releases wrote settings.json under
-        // `~/Library/Application Support/tokscale/`. Read it once if the new
-        // path is empty so users don't lose theme / scanner / defaultClients
-        // preferences after upgrading. The next `save()` lands at the new
-        // canonical path under `~/.config/tokscale/`. Skipped when the user
-        // has explicitly pinned a config root via `TOKSCALE_CONFIG_DIR` so
-        // CI sandboxes and isolated profiles stay hermetic instead of
-        // silently ingesting personal settings from the legacy macOS path.
-        let raw = primary.or_else(|| {
-            if crate::paths::is_config_dir_overridden() {
-                return None;
+    fn load_from_path(path: &Path) -> Result<Self> {
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
             }
-            Self::legacy_macos_path().and_then(|legacy| fs::read_to_string(legacy).ok())
-        });
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read settings file `{}`", path.display()));
+            }
+        };
 
-        raw.and_then(|content| serde_json::from_str(&content).ok())
-            .map(Settings::normalize)
-            .unwrap_or_default()
+        serde_json::from_str::<Self>(&content)
+            .with_context(|| format!("failed to parse settings JSON `{}`", path.display()))?
+            .validate()
+            .with_context(|| format!("invalid settings in `{}`", path.display()))
     }
 
-    pub fn load_for_home_override(home_dir: Option<&Path>) -> Self {
+    pub fn load() -> Result<Self> {
+        Self::load_from_path(&Self::config_path()?)
+    }
+
+    pub fn load_for_home_override(home_dir: Option<&Path>) -> Result<Self> {
         let Some(home_dir) = home_dir else {
             return Self::load();
         };
 
-        let raw = fs::read_to_string(Self::explicit_home_config_path(home_dir))
-            .ok()
-            .or_else(|| fs::read_to_string(Self::explicit_home_legacy_macos_path(home_dir)).ok());
-
-        raw.and_then(|content| serde_json::from_str(&content).ok())
-            .map(Settings::normalize)
-            .unwrap_or_default()
+        Self::load_from_path(&Self::explicit_home_config_path(home_dir))
     }
 
     pub fn save(&self) -> Result<()> {
+        self.clone().validate()?;
+
         #[cfg(test)]
         let path = self.save_path_override.clone().map_or_else(
-            Self::config_path,
+            Self::writable_config_path,
             |path| -> Result<PathBuf> {
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)?;
@@ -277,7 +262,7 @@ impl Settings {
         )?;
 
         #[cfg(not(test))]
-        let path = Self::config_path()?;
+        let path = Self::writable_config_path()?;
 
         let content = serde_json::to_string_pretty(self)?;
 
@@ -291,8 +276,18 @@ impl Settings {
         self
     }
 
-    pub fn theme_name(&self) -> ThemeName {
-        self.color_palette.parse().unwrap_or(ThemeName::Blue)
+    pub fn theme_name(&self) -> Result<ThemeName> {
+        self.color_palette.parse().map_err(|_| {
+            let valid = ThemeName::all()
+                .iter()
+                .map(ThemeName::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!(
+                "invalid colorPalette `{}`; expected one of: {valid}",
+                self.color_palette
+            )
+        })
     }
 
     pub fn set_theme(&mut self, theme: ThemeName) {
@@ -307,15 +302,22 @@ impl Settings {
         }
     }
 
-    pub fn get_native_timeout(&self) -> Duration {
-        let timeout_ms = if let Ok(env_val) = std::env::var("TOKSCALE_NATIVE_TIMEOUT_MS") {
-            env_val.parse::<u64>().unwrap_or(self.native_timeout_ms)
-        } else {
-            self.native_timeout_ms
+    pub fn get_native_timeout(&self) -> Result<Duration> {
+        let timeout_ms = match std::env::var("TOKSCALE_NATIVE_TIMEOUT_MS") {
+            Ok(value) => value
+                .parse::<u64>()
+                .with_context(|| "TOKSCALE_NATIVE_TIMEOUT_MS must be a positive integer")?,
+            Err(std::env::VarError::NotPresent) => self.native_timeout_ms,
+            Err(source) => {
+                return Err(source).context("failed to read TOKSCALE_NATIVE_TIMEOUT_MS");
+            }
         };
-
-        let clamped = timeout_ms.clamp(MIN_NATIVE_TIMEOUT_MS, MAX_NATIVE_TIMEOUT_MS);
-        Duration::from_millis(clamped)
+        if !(MIN_NATIVE_TIMEOUT_MS..=MAX_NATIVE_TIMEOUT_MS).contains(&timeout_ms) {
+            anyhow::bail!(
+                "invalid TOKSCALE_NATIVE_TIMEOUT_MS {timeout_ms}; expected {MIN_NATIVE_TIMEOUT_MS}..={MAX_NATIVE_TIMEOUT_MS}"
+            );
+        }
+        Ok(Duration::from_millis(timeout_ms))
     }
 }
 
@@ -357,104 +359,112 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = Settings::load_for_home_override(Some(temp.path()));
+        let loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
         assert_eq!(loaded.color_palette, "halloween");
         assert_eq!(loaded.default_clients, vec!["codex".to_string()]);
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    #[serial_test::serial]
-    fn load_falls_back_to_legacy_macos_path_when_new_path_missing() {
-        // Sandbox HOME so the test never reads or writes a real user's
-        // settings.json. Existing macOS users upgrading to the unified
-        // path must keep the theme + scanner settings they already have
-        // under `~/Library/Application Support/tokscale/`.
-        use std::env;
+    fn load_for_home_override_defaults_only_when_settings_are_missing() {
         let temp = tempfile::TempDir::new().unwrap();
-        let prev_home = env::var_os("HOME");
-        let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            env::set_var("HOME", temp.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
 
-        let legacy_dir = temp.path().join("Library/Application Support/tokscale");
-        fs::create_dir_all(&legacy_dir).unwrap();
-        fs::write(
-            legacy_dir.join("settings.json"),
-            r#"{"colorPalette":"halloween","defaultClients":["opencode"]}"#,
-        )
-        .unwrap();
+        let loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
 
-        // Sanity: new path must be empty so the fallback is what we exercise.
-        let new_path = temp.path().join(".config/tokscale/settings.json");
-        assert!(!new_path.exists());
-
-        let loaded = Settings::load();
-        assert_eq!(loaded.color_palette, "halloween");
-        assert_eq!(loaded.default_clients, vec!["opencode".to_string()]);
-
-        unsafe {
-            match prev_home {
-                Some(v) => env::set_var("HOME", v),
-                None => env::remove_var("HOME"),
-            }
-            match prev_override {
-                Some(v) => env::set_var("TOKSCALE_CONFIG_DIR", v),
-                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
-            }
-        }
+        assert_eq!(loaded.color_palette, Settings::default().color_palette);
+        assert!(loaded.default_clients.is_empty());
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    #[serial_test::serial]
-    fn load_skips_legacy_macos_fallback_when_config_dir_overridden() {
-        // The whole point of TOKSCALE_CONFIG_DIR is hermeticity. CI sandboxes,
-        // tests, and isolated profiles MUST NOT silently inherit theme /
-        // scanner / defaultClients from `~/Library/Application Support/`
-        // when the user explicitly pinned a config root.
-        use std::env;
+    fn load_for_home_override_does_not_read_legacy_macos_path() {
         let temp = tempfile::TempDir::new().unwrap();
-        let legacy_root = tempfile::TempDir::new().unwrap();
-        let prev_home = env::var_os("HOME");
-        let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            env::set_var("HOME", legacy_root.path());
-            env::set_var("TOKSCALE_CONFIG_DIR", temp.path());
-        }
-
-        let legacy_dir = legacy_root
+        let legacy_path = temp
             .path()
-            .join("Library/Application Support/tokscale");
-        fs::create_dir_all(&legacy_dir).unwrap();
-        fs::write(
-            legacy_dir.join("settings.json"),
-            r#"{"colorPalette":"halloween","defaultClients":["opencode"]}"#,
-        )
-        .unwrap();
+            .join("Library/Application Support/tokscale/settings.json");
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, r#"{"colorPalette":"halloween"}"#).unwrap();
 
-        let loaded = Settings::load();
-        assert_eq!(
-            loaded.color_palette,
-            Settings::default().color_palette,
-            "override must yield default settings, not the legacy file's halloween palette"
-        );
+        let loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
+
+        assert_eq!(loaded.color_palette, Settings::default().color_palette);
+    }
+
+    #[test]
+    fn load_for_home_override_reports_malformed_json_with_path_and_source() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"colorPalette":"blue""#).unwrap();
+
+        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("parse settings JSON"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
         assert!(
-            loaded.default_clients.is_empty(),
-            "override must not leak defaultClients from the legacy macOS path"
+            error.source().is_some(),
+            "parse error must remain in the chain"
+        );
+    }
+
+    #[test]
+    fn load_for_home_override_reports_non_file_path_with_operation_and_source() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        fs::create_dir_all(&path).unwrap();
+
+        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("read settings file"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(
+            error.source().is_some(),
+            "I/O error must remain in the chain"
+        );
+    }
+
+    #[test]
+    fn load_for_home_override_rejects_invalid_ranges_instead_of_clamping() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"autoRefreshMs":1,"nativeTimeoutMs":300000}"#).unwrap();
+
+        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("invalid settings"), "{message}");
+        assert!(message.contains("autoRefreshMs 1"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+    }
+
+    #[test]
+    fn load_for_home_override_rejects_unknown_color_palette() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"colorPalette":"ultraviolet"}"#).unwrap();
+
+        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("colorPalette `ultraviolet`"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_timeout_environment_rejects_invalid_values() {
+        let previous = std::env::var_os("TOKSCALE_NATIVE_TIMEOUT_MS");
+        unsafe { std::env::set_var("TOKSCALE_NATIVE_TIMEOUT_MS", "not-a-number") };
+
+        let error = Settings::default().get_native_timeout().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("must be a positive integer"),
+            "{error:#}"
         );
 
-        unsafe {
-            match prev_home {
-                Some(v) => env::set_var("HOME", v),
-                None => env::remove_var("HOME"),
-            }
-            match prev_override {
-                Some(v) => env::set_var("TOKSCALE_CONFIG_DIR", v),
-                None => env::remove_var("TOKSCALE_CONFIG_DIR"),
-            }
+        match previous {
+            Some(value) => unsafe { std::env::set_var("TOKSCALE_NATIVE_TIMEOUT_MS", value) },
+            None => unsafe { std::env::remove_var("TOKSCALE_NATIVE_TIMEOUT_MS") },
         }
     }
 
@@ -643,17 +653,12 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_clients_drops_non_string_elements_silently() {
+    fn settings_default_clients_rejects_non_string_elements() {
         let json = r#"{
             "colorPalette": "halloween",
             "defaultClients": ["opencode", 123, null, "claude", true, {"x":1}]
         }"#;
-        let parsed: Settings = serde_json::from_str(json).expect("settings should still load");
-        assert_eq!(parsed.color_palette, "halloween");
-        assert_eq!(
-            parsed.default_clients,
-            vec!["opencode".to_string(), "claude".to_string()]
-        );
+        assert!(serde_json::from_str::<Settings>(json).is_err());
     }
 
     #[test]
@@ -734,16 +739,11 @@ mod tests {
     }
 
     #[test]
-    fn settings_usage_providers_drop_non_string_elements_silently() {
+    fn settings_usage_providers_reject_non_string_elements() {
         let json = r#"{
             "colorPalette": "blue",
             "usageProviders": ["codex", 123, null, "zai", true]
         }"#;
-        let parsed: Settings = serde_json::from_str(json).unwrap();
-
-        assert_eq!(
-            parsed.usage_providers,
-            vec!["codex".to_string(), "zai".to_string()]
-        );
+        assert!(serde_json::from_str::<Settings>(json).is_err());
     }
 }

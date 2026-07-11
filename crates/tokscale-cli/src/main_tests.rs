@@ -845,16 +845,6 @@ fn headless_roots_trim_env_override() {
 }
 
 #[test]
-fn parse_legacy_antigravity_cli_extra_dirs_accepts_only_legacy_key() {
-    assert_eq!(
-        parse_legacy_antigravity_cli_extra_dirs(
-            "antigravity-cli:/tmp/agy-cli,antigravity:/tmp/agy,broken"
-        ),
-        vec!["/tmp/agy-cli".to_string()]
-    );
-}
-
-#[test]
 fn cursor_auto_sync_enabled_for_default_report() {
     assert!(should_auto_sync_cursor_for_local_report(&None, &None));
 }

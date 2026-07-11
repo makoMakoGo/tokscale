@@ -4,32 +4,26 @@
 //! Copilot Chat monitoring. Chat spans and inference log records are preferred;
 //! aggregate agent records are only used as a fallback to avoid double counting.
 
-use super::utils::file_modified_timestamp_ms;
+use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
-use crate::provider_identity::inferred_provider_from_model;
+use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
 use crate::TokenBreakdown;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-
-    let Some(trace_contexts) = collect_trace_contexts(path) else {
-        return Vec::new();
-    };
+pub fn parse_copilot_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let trace_contexts = collect_trace_contexts(path)?;
 
     let mut candidates = Vec::new();
-    if !for_each_json_record(path, |index, record| {
-        if let Some(candidate) =
-            usage_candidate_from_record(record, index, fallback_timestamp, &trace_contexts)
+    for_each_json_record(path, |index, record| {
+        if let Some(candidate) = usage_candidate_from_record(path, record, index, &trace_contexts)?
         {
             candidates.push(candidate);
         }
-    }) {
-        return Vec::new();
-    }
+        Ok(())
+    })?;
 
     let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::ChatSpan);
     let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::InferenceLog);
@@ -40,7 +34,7 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
     let agent_turn_response_ids =
         candidate_response_ids(&candidates, CopilotUsageSource::AgentTurnLog);
 
-    candidates
+    Ok(candidates
         .into_iter()
         .filter(|candidate| {
             should_emit_candidate(
@@ -54,34 +48,33 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
             )
         })
         .map(CopilotUsageCandidate::into_message)
-        .collect()
+        .collect())
 }
 
-fn for_each_json_record(path: &Path, mut handle: impl FnMut(usize, &Value)) -> bool {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return false,
-    };
+fn for_each_json_record(
+    path: &Path,
+    mut handle: impl FnMut(usize, &Value) -> SessionParseResult<()>,
+) -> SessionParseResult<()> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let mut record_index = 0;
     for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
+        let line =
+            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        if let Ok(record) = serde_json::from_str::<Value>(trimmed) {
-            handle(record_index, &record);
-            record_index += 1;
-        }
+        let record = serde_json::from_str::<Value>(trimmed)
+            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
+        handle(record_index, &record)?;
+        record_index += 1;
     }
 
-    true
+    Ok(())
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -94,6 +87,7 @@ enum CopilotUsageSource {
 
 struct TraceContext {
     model: Option<String>,
+    provider: Option<String>,
     session_id: Option<String>,
     session_id_priority: SessionIdPriority,
     agent_name: Option<String>,
@@ -139,22 +133,23 @@ impl CopilotUsageCandidate {
     }
 }
 
-fn collect_trace_contexts(path: &Path) -> Option<HashMap<String, TraceContext>> {
+fn collect_trace_contexts(path: &Path) -> SessionParseResult<HashMap<String, TraceContext>> {
     let mut contexts = HashMap::new();
 
-    if !for_each_json_record(path, |_, record| {
+    for_each_json_record(path, |_, record| {
         let Some(trace_id) = trace_id_from_record(record) else {
-            return;
+            return Ok(());
         };
 
         let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
-            return;
+            return Ok(());
         };
 
         let context = contexts
             .entry(trace_id.to_string())
             .or_insert(TraceContext {
                 model: None,
+                provider: None,
                 session_id: None,
                 session_id_priority: SessionIdPriority::Missing,
                 agent_name: None,
@@ -162,6 +157,10 @@ fn collect_trace_contexts(path: &Path) -> Option<HashMap<String, TraceContext>> 
 
         if context.model.is_none() {
             context.model = first_non_empty_attr(attributes, MODEL_ATTRS).map(str::to_string);
+        }
+
+        if context.provider.is_none() {
+            context.provider = first_non_empty_attr(attributes, PROVIDER_ATTRS).map(str::to_string);
         }
 
         if let Some((session_id, priority)) = best_session_attr(attributes) {
@@ -176,20 +175,21 @@ fn collect_trace_contexts(path: &Path) -> Option<HashMap<String, TraceContext>> 
                 context.agent_name = Some(super::normalize_copilot_agent_name(agent_name));
             }
         }
-    }) {
-        return None;
-    }
+        Ok(())
+    })?;
 
-    Some(contexts)
+    Ok(contexts)
 }
 
 fn usage_candidate_from_record(
+    path: &Path,
     record: &Value,
     index: usize,
-    fallback_timestamp: i64,
     trace_contexts: &HashMap<String, TraceContext>,
-) -> Option<CopilotUsageCandidate> {
-    let attributes = record.get("attributes").and_then(Value::as_object)?;
+) -> SessionParseResult<Option<CopilotUsageCandidate>> {
+    let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
+        return Ok(None);
+    };
     let trace_id = trace_id_from_record(record).map(str::to_string);
     let trace_context = trace_id
         .as_deref()
@@ -197,64 +197,64 @@ fn usage_candidate_from_record(
 
     if is_chat_span_record(record, attributes) {
         return candidate_from_attributes(
+            path,
             CopilotUsageSource::ChatSpan,
             record,
             attributes,
             trace_id,
             trace_context,
             index,
-            fallback_timestamp,
         );
     }
 
     if is_inference_log_record(record, attributes) {
         return candidate_from_attributes(
+            path,
             CopilotUsageSource::InferenceLog,
             record,
             attributes,
             trace_id,
             trace_context,
             index,
-            fallback_timestamp,
         );
     }
 
     if is_agent_turn_log_record(record, attributes) {
         return candidate_from_attributes(
+            path,
             CopilotUsageSource::AgentTurnLog,
             record,
             attributes,
             trace_id,
             trace_context,
             index,
-            fallback_timestamp,
         );
     }
 
     if is_agent_summary_span_record(record, attributes) {
         return candidate_from_attributes(
+            path,
             CopilotUsageSource::AgentSummarySpan,
             record,
             attributes,
             trace_id,
             trace_context,
             index,
-            fallback_timestamp,
         );
     }
 
-    None
+    Ok(None)
 }
 
 fn candidate_from_attributes(
+    path: &Path,
     source: CopilotUsageSource,
     record: &Value,
     attributes: &Map<String, Value>,
     trace_id: Option<String>,
     trace_context: Option<&TraceContext>,
     index: usize,
-    fallback_timestamp: i64,
-) -> Option<CopilotUsageCandidate> {
+) -> SessionParseResult<Option<CopilotUsageCandidate>> {
     let input = attr_i64_first(attributes, &["gen_ai.usage.input_tokens"]);
     let output = attr_i64_first(attributes, &["gen_ai.usage.output_tokens"]);
     let cache_read = attr_i64_first(
@@ -283,7 +283,7 @@ fn candidate_from_attributes(
 
     let tokens = normalize_input_tokens(input, output, cache_read, cache_write, reasoning);
     if tokens.total() == 0 {
-        return None;
+        return Ok(None);
     }
 
     let response_id = attributes
@@ -295,18 +295,51 @@ fn candidate_from_attributes(
 
     let model = first_non_empty_attr(attributes, MODEL_ATTRS)
         .or_else(|| trace_context.and_then(|context| context.model.as_deref()))
-        .unwrap_or("unknown")
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate Copilot usage model",
+                format!("usage record {index} is missing a non-empty model"),
+            )
+        })?
         .to_string();
-    let provider_id = inferred_provider_from_model(&model)
-        .unwrap_or("github-copilot")
-        .to_string();
+    let provider_id = if let Some(provider) = inferred_provider_from_model(&model) {
+        provider.to_string()
+    } else {
+        let raw_provider = first_non_empty_attr(attributes, PROVIDER_ATTRS)
+            .or_else(|| trace_context.and_then(|context| context.provider.as_deref()))
+            .ok_or_else(|| {
+                invalid_at_path(
+                    path,
+                    "validate Copilot usage provider",
+                    format!(
+                        "usage record {index} has model `{model}` with no inferable or explicit provider"
+                    ),
+                )
+            })?;
+        canonical_provider(raw_provider).unwrap_or_else(|| raw_provider.to_string())
+    };
     let session_id = best_session_attr(attributes)
         .map(|(session_id, _)| session_id)
         .or_else(|| trace_context.and_then(|context| context.session_id.as_deref()))
         .or(trace_id.as_deref())
-        .unwrap_or("unknown-session")
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate Copilot usage session",
+                format!("usage record {index} is missing a session or trace identifier"),
+            )
+        })?
         .to_string();
-    let timestamp_ms = timestamp_ms_from_record(record).unwrap_or(fallback_timestamp);
+    let timestamp_ms = timestamp_ms_from_record(record)
+        .filter(|timestamp| *timestamp > 0)
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate Copilot usage timestamp",
+                format!("usage record {index} is missing a valid positive timestamp"),
+            )
+        })?;
     let duration_ms = duration_ms_from_record(record);
     let dedup_key = dedup_key_for_record(
         source,
@@ -318,7 +351,7 @@ fn candidate_from_attributes(
         index,
     );
 
-    Some(CopilotUsageCandidate {
+    Ok(Some(CopilotUsageCandidate {
         source,
         trace_id,
         response_id,
@@ -333,7 +366,19 @@ fn candidate_from_attributes(
             .map(super::normalize_copilot_agent_name)
             .or_else(|| trace_context.and_then(|tc| tc.agent_name.clone()))
             .or_else(|| Some("Default".to_string())),
-    })
+    }))
+}
+
+fn invalid_at_path(
+    path: &Path,
+    operation: &'static str,
+    detail: impl Into<String>,
+) -> SessionParseError {
+    SessionParseError::at_path(
+        path,
+        operation,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, detail.into()),
+    )
 }
 
 fn candidate_trace_contexts(
@@ -403,6 +448,7 @@ fn should_emit_candidate(
 }
 
 const MODEL_ATTRS: &[&str] = &["gen_ai.response.model", "gen_ai.request.model"];
+const PROVIDER_ATTRS: &[&str] = &["gen_ai.provider.name", "gen_ai.system"];
 const AGENT_NAME_ATTRS: &[&str] = &["gen_ai.agent.name"];
 const SESSION_ATTRS: &[(&str, SessionIdPriority)] = &[
     ("gen_ai.conversation.id", SessionIdPriority::Session),
@@ -488,23 +534,33 @@ fn is_span_record(value: &Value) -> bool {
 }
 
 fn trace_id_from_record(value: &Value) -> Option<&str> {
-    value.get("traceId").and_then(Value::as_str).or_else(|| {
-        value
-            .get("spanContext")
-            .and_then(Value::as_object)
-            .and_then(|context| context.get("traceId"))
-            .and_then(Value::as_str)
-    })
+    value
+        .get("traceId")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("spanContext")
+                .and_then(Value::as_object)
+                .and_then(|context| context.get("traceId"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|trace_id| !trace_id.is_empty())
 }
 
 fn span_id_from_record(value: &Value) -> Option<&str> {
-    value.get("spanId").and_then(Value::as_str).or_else(|| {
-        value
-            .get("spanContext")
-            .and_then(Value::as_object)
-            .and_then(|context| context.get("spanId"))
-            .and_then(Value::as_str)
-    })
+    value
+        .get("spanId")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("spanContext")
+                .and_then(Value::as_object)
+                .and_then(|context| context.get("spanId"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|span_id| !span_id.is_empty())
 }
 
 fn dedup_key_for_record(
@@ -704,8 +760,7 @@ fn timestamp_ms_from_scalar(value: &Value) -> Option<i64> {
 fn timestamp_ms_from_unix_nanos(value: &Value) -> Option<i64> {
     // OTel `timeUnixNano` is unsigned-by-spec; a negative or zero value is
     // malformed. Refuse it and let the caller fall through to the next
-    // timestamp source (or the file modified time) instead of producing a
-    // pre-1970 timestamp downstream.
+    // timestamp source instead of producing a pre-1970 timestamp downstream.
     value_as_i64(value)
         .filter(|raw| *raw > 0)
         .map(|raw| raw / 1_000_000)
@@ -716,6 +771,10 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_copilot_file(path).unwrap()
+    }
 
     const LARGE_COPILOT_FIXTURE_BYTES: usize = 50 * 1024 * 1024;
 
@@ -846,7 +905,7 @@ mod tests {
     #[test]
     fn test_parse_copilot_ignores_non_chat_spans() {
         let content = r#"{"type":"span","traceId":"trace-1","spanId":"tool-1","name":"execute_tool rg","attributes":{"gen_ai.operation.name":"execute_tool","gen_ai.tool.name":"rg"}}
-{"type":"span","traceId":"trace-1","spanId":"invoke-1","name":"invoke_agent","attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.usage.input_tokens":999,"gen_ai.usage.output_tokens":111}}
+{"type":"span","traceId":"trace-1","spanId":"invoke-1","name":"invoke_agent","endTime":[1775934263,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.usage.input_tokens":999,"gen_ai.usage.output_tokens":111}}
 {"type":"span","traceId":"trace-1","spanId":"chat-1","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":5}}"#;
         let file = create_test_file(content);
 
@@ -862,17 +921,36 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_copilot_falls_back_to_trace_and_provider() {
-        let content = r#"{"type":"span","traceId":"trace-fallback","spanId":"span-fallback","name":"chat custom-model","attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"custom-model","gen_ai.usage.input_tokens":"7","gen_ai.usage.output_tokens":"9"}}"#;
+    fn test_parse_copilot_rejects_model_without_provider_identity() {
+        let content = r#"{"type":"span","traceId":"trace-provider","spanId":"span-provider","name":"chat custom-model","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"custom-model","gen_ai.usage.input_tokens":"7","gen_ai.usage.output_tokens":"9"}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_copilot_file(file.path());
+        let error = super::parse_copilot_file(file.path()).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id.as_ref(), "github-copilot");
-        assert_eq!(messages[0].session_id.as_ref(), "trace-fallback");
-        assert_eq!(messages[0].tokens.input, 7);
-        assert_eq!(messages[0].tokens.output, 9);
+        assert_eq!(error.operation(), "validate Copilot usage provider");
+        assert_eq!(error.path(), Some(file.path()));
+    }
+
+    #[test]
+    fn test_parse_copilot_rejects_usage_without_model() {
+        let content = r#"{"type":"span","traceId":"trace-model","spanId":"span-model","name":"chat","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.conversation.id":"conv-model","gen_ai.provider.name":"github","gen_ai.usage.input_tokens":7}}"#;
+        let file = create_test_file(content);
+
+        let error = super::parse_copilot_file(file.path()).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Copilot usage model");
+        assert_eq!(error.path(), Some(file.path()));
+    }
+
+    #[test]
+    fn test_parse_copilot_rejects_usage_without_session_or_trace() {
+        let content = r#"{"type":"span","spanId":"span-session","name":"chat gpt-5.4","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":7}}"#;
+        let file = create_test_file(content);
+
+        let error = super::parse_copilot_file(file.path()).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Copilot usage session");
+        assert_eq!(error.path(), Some(file.path()));
     }
 
     #[test]
@@ -1186,21 +1264,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_copilot_inference_log_negative_time_unix_nano_falls_back() {
-        // Malformed `timeUnixNano` must not produce a negative timestamp; the
-        // parser should fall through to the next available timestamp source
-        // (here, the file modified time, which is non-negative).
+    fn test_parse_copilot_inference_log_rejects_negative_time_unix_nano() {
         let content = r#"{"timeUnixNano":-1,"spanContext":{"traceId":"trace-bad","spanId":"span-bad","traceFlags":1},"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-bad","gen_ai.usage.input_tokens":5,"gen_ai.usage.output_tokens":2},"_body":"GenAI inference: gpt-5.4-mini"}"#;
         let file = create_test_file(content);
 
-        let messages = parse_copilot_file(file.path());
+        let error = super::parse_copilot_file(file.path()).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        assert!(
-            messages[0].timestamp >= 0,
-            "negative timeUnixNano should not leak into output, got {}",
-            messages[0].timestamp,
-        );
+        assert_eq!(error.operation(), "validate Copilot usage timestamp");
+        assert_eq!(error.path(), Some(file.path()));
     }
 
     #[test]

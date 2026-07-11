@@ -3,7 +3,7 @@
 //! Parses Kimi Code `usage.record` entries from
 //! `~/.kimi-code/sessions/<WORKDIR_KEY>/<SESSION_ID>/agents/<AGENT_ID>/wire.jsonl`.
 
-use super::utils::file_modified_timestamp_ms;
+use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -12,7 +12,6 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 const CLIENT_ID: &str = "kimi";
-const UNRESOLVED_PROVIDER: &str = "unresolved";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,28 +39,40 @@ struct ModelAlias {
     model: String,
 }
 
+struct KimiWirePath {
+    home: PathBuf,
+    session_id: String,
+    agent_id: String,
+}
+
+fn invalid_at_path(
+    path: &Path,
+    operation: &'static str,
+    detail: impl Into<String>,
+) -> SessionParseError {
+    SessionParseError::at_path(
+        path,
+        operation,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, detail.into()),
+    )
+}
+
 /// Parse a Kimi Code wire.jsonl file.
-pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
+pub fn parse_kimi_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
-    let aliases = read_model_aliases(path);
-    let session_id = extract_session_id(path);
-    let agent_id = extract_agent_id(path);
-    let agent_instance = agent_id.map(|agent_id| format!("{session_id}:{agent_id}"));
+    let wire_path = parse_wire_path(path)?;
+    let aliases = read_model_aliases(&wire_path.home)?;
+    let session_id = wire_path.session_id;
+    let agent_instance = Some(format!("{session_id}:{}", wire_path.agent_id));
     let mut agent = None;
-    let fallback_timestamp = file_modified_timestamp_ms(path);
-
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        let line =
+            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -69,10 +80,8 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
         }
 
         let mut bytes = trimmed.as_bytes().to_vec();
-        let wire_line = match simd_json::from_slice::<WireLine>(&mut bytes) {
-            Ok(wl) => wl,
-            Err(_) => continue,
-        };
+        let wire_line = simd_json::from_slice::<WireLine>(&mut bytes)
+            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
 
         if wire_line.line_type.as_deref() == Some("config.update") {
             if let Some(profile_name) = wire_line.profile_name.as_deref() {
@@ -84,11 +93,6 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
         if wire_line.line_type.as_deref() != Some("usage.record") {
             continue;
         }
-
-        let raw_model = match wire_line.model.as_deref().map(str::trim) {
-            Some(model) if !model.is_empty() => model,
-            _ => continue,
-        };
 
         let usage = match wire_line.usage {
             Some(usage) => usage,
@@ -104,13 +108,35 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         }
 
-        let (provider_id, model_id) = resolve_model(raw_model, &aliases);
+        let raw_model = wire_line
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .ok_or_else(|| {
+                invalid_at_path(
+                    path,
+                    "validate usage record",
+                    "usage.record is missing a non-empty model",
+                )
+            })?;
+        let timestamp = wire_line
+            .time
+            .filter(|timestamp| *timestamp > 0)
+            .ok_or_else(|| {
+                invalid_at_path(
+                    path,
+                    "validate usage timestamp",
+                    "usage.record is missing a positive time",
+                )
+            })?;
+        let (provider_id, model_id) = resolve_model(path, raw_model, &aliases)?;
         let mut message = UnifiedMessage::new_with_agent(
             CLIENT_ID,
             model_id,
             provider_id,
             session_id.clone(),
-            wire_line.time.unwrap_or(fallback_timestamp),
+            timestamp,
             TokenBreakdown {
                 input,
                 output,
@@ -127,7 +153,7 @@ pub fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
         messages.push(message);
     }
 
-    messages
+    Ok(messages)
 }
 
 fn normalize_kimi_agent_label(profile_name: &str) -> Option<String> {
@@ -141,89 +167,170 @@ fn normalize_kimi_agent_label(profile_name: &str) -> Option<String> {
     Some(label.to_string())
 }
 
-fn resolve_model(raw_model: &str, aliases: &HashMap<String, ModelAlias>) -> (String, String) {
+fn resolve_model(
+    path: &Path,
+    raw_model: &str,
+    aliases: &HashMap<String, ModelAlias>,
+) -> SessionParseResult<(String, String)> {
     if let Some(alias) = aliases.get(raw_model) {
-        return (alias.provider.clone(), alias.model.clone());
+        return Ok((alias.provider.clone(), alias.model.clone()));
     }
 
-    (UNRESOLVED_PROVIDER.to_string(), raw_model.to_string())
+    Err(invalid_at_path(
+        path,
+        "resolve usage model",
+        format!("model alias `{raw_model}` is not defined in config.toml [models]"),
+    ))
 }
 
-fn read_model_aliases(wire_path: &Path) -> HashMap<String, ModelAlias> {
-    let Some(home) = kimi_home_from_wire_path(wire_path) else {
-        return HashMap::new();
-    };
-
+fn read_model_aliases(home: &Path) -> SessionParseResult<HashMap<String, ModelAlias>> {
     let config_path = home.join("config.toml");
     let content = match std::fs::read_to_string(&config_path) {
         Ok(content) => content,
-        Err(_) => return HashMap::new(),
-    };
-
-    let value = match content.parse::<toml::Value>() {
-        Ok(value) => value,
-        Err(_) => return HashMap::new(),
-    };
-
-    let Some(models) = value.get("models").and_then(toml::Value::as_table) else {
-        return HashMap::new();
-    };
-
-    models
-        .iter()
-        .filter_map(|(alias, value)| {
-            let table = value.as_table()?;
-            let provider = table.get("provider")?.as_str()?.trim();
-            let model = table.get("model")?.as_str()?.trim();
-            if provider.is_empty() || model.is_empty() {
-                return None;
-            }
-            Some((
-                alias.clone(),
-                ModelAlias {
-                    provider: provider.to_string(),
-                    model: model.to_string(),
-                },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => {
+            return Err(SessionParseError::at_path(
+                &config_path,
+                "read model config",
+                error,
             ))
-        })
-        .collect()
-}
+        }
+    };
 
-fn kimi_home_from_wire_path(path: &Path) -> Option<PathBuf> {
-    let sessions_dir = path.parent()?.parent()?.parent()?.parent()?.parent()?;
+    let value = content
+        .parse::<toml::Value>()
+        .map_err(|error| SessionParseError::at_path(&config_path, "decode model config", error))?;
 
-    if sessions_dir.file_name().and_then(|name| name.to_str()) != Some("sessions") {
-        return None;
+    let Some(models_value) = value.get("models") else {
+        return Ok(HashMap::new());
+    };
+    let models = models_value.as_table().ok_or_else(|| {
+        invalid_at_path(
+            &config_path,
+            "validate model config",
+            "[models] must be a TOML table",
+        )
+    })?;
+
+    let mut aliases = HashMap::with_capacity(models.len());
+    for (alias, value) in models {
+        if alias.trim().is_empty() {
+            return Err(invalid_at_path(
+                &config_path,
+                "validate model config",
+                "model alias must not be empty",
+            ));
+        }
+        let table = value.as_table().ok_or_else(|| {
+            invalid_at_path(
+                &config_path,
+                "validate model config",
+                format!("model alias `{alias}` must be a TOML table"),
+            )
+        })?;
+        let provider = table
+            .get("provider")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .ok_or_else(|| {
+                invalid_at_path(
+                    &config_path,
+                    "validate model config",
+                    format!("model alias `{alias}` is missing a non-empty string provider"),
+                )
+            })?;
+        let model = table
+            .get("model")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .ok_or_else(|| {
+                invalid_at_path(
+                    &config_path,
+                    "validate model config",
+                    format!("model alias `{alias}` is missing a non-empty string model"),
+                )
+            })?;
+        aliases.insert(
+            alias.clone(),
+            ModelAlias {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            },
+        );
     }
 
-    sessions_dir.parent().map(Path::to_path_buf)
+    Ok(aliases)
 }
 
-fn extract_session_id(path: &Path) -> String {
-    path.parent()
-        .and_then(|agent_dir| agent_dir.parent())
-        .and_then(|agents_dir| agents_dir.parent())
-        .and_then(|session_dir| session_dir.file_name())
+fn parse_wire_path(path: &Path) -> SessionParseResult<KimiWirePath> {
+    let invalid_path = || {
+        invalid_at_path(
+            path,
+            "validate Kimi wire path",
+            "expected ~/.kimi-code/sessions/<workdir>/<session>/agents/<agent>/wire.jsonl",
+        )
+    };
+    if path.file_name().and_then(|name| name.to_str()) != Some("wire.jsonl") {
+        return Err(invalid_path());
+    }
+    let agent_dir = path.parent().ok_or_else(&invalid_path)?;
+    let agent_id = agent_dir
+        .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
+        .map(str::trim)
+        .filter(|agent_id| !agent_id.is_empty())
+        .ok_or_else(&invalid_path)?;
+    let agents_dir = agent_dir.parent().ok_or_else(&invalid_path)?;
+    if agents_dir.file_name().and_then(|name| name.to_str()) != Some("agents") {
+        return Err(invalid_path());
+    }
+    let session_dir = agents_dir.parent().ok_or_else(&invalid_path)?;
+    let session_id = session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+        .ok_or_else(&invalid_path)?;
+    let sessions_dir = session_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(&invalid_path)?;
+    if sessions_dir.file_name().and_then(|name| name.to_str()) != Some("sessions") {
+        return Err(invalid_path());
+    }
+    let home = sessions_dir.parent().ok_or_else(&invalid_path)?;
 
-fn extract_agent_id(path: &Path) -> Option<String> {
-    path.parent()
-        .and_then(|agent_dir| agent_dir.file_name())
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(ToString::to_string)
+    Ok(KimiWirePath {
+        home: home.to_path_buf(),
+        session_id: session_id.to_string(),
+        agent_id: agent_id.to_string(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
+        super::parse_kimi_file(path).unwrap()
+    }
     use std::io::Write;
     use tempfile::TempDir;
 
     fn write_wire_for_agent(home: &Path, agent_id: &str, content: &str) -> PathBuf {
+        let config = home.join("config.toml");
+        if !config.exists() {
+            std::fs::write(
+                &config,
+                r#"[models."openai-pro/gpt-5.5"]
+provider = "openai-pro"
+model = "gpt-5.5"
+"#,
+            )
+            .unwrap();
+        }
         let wire = home
             .join("sessions")
             .join("wd_project_abc123")
@@ -376,18 +483,18 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn keeps_raw_model_visible_when_config_mapping_is_missing() {
+    fn rejects_usage_when_config_mapping_is_missing() {
         let dir = TempDir::new().unwrap();
         let wire = write_wire(
             dir.path(),
             r#"{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}"#,
         );
+        std::fs::write(dir.path().join("config.toml"), "[models]\n").unwrap();
 
-        let messages = parse_kimi_file(&wire);
+        let error = super::parse_kimi_file(&wire).unwrap_err();
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id.as_ref(), "unresolved");
-        assert_eq!(messages[0].model_id.as_ref(), "openai-pro/gpt-5.5");
+        assert_eq!(error.operation(), "resolve usage model");
+        assert_eq!(error.path(), Some(wire.as_path()));
     }
 
     #[test]
@@ -395,11 +502,72 @@ model = "gpt-5.5"
         let dir = TempDir::new().unwrap();
         let wire = write_wire(
             dir.path(),
-            r#"{"type":"usage.record","time":1780942009099,"model":"gpt-5.5","usage":{"inputOther":0,"output":0,"inputCacheRead":0,"inputCacheCreation":0}}"#,
+            r#"{"type":"usage.record","usage":null}
+{"type":"usage.record","time":1780942009099,"model":"gpt-5.5","usage":{"inputOther":0,"output":0,"inputCacheRead":0,"inputCacheCreation":0}}"#,
         );
 
         let messages = parse_kimi_file(&wire);
 
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn rejects_usage_record_without_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
+        );
+
+        let error = super::parse_kimi_file(&wire).unwrap_err();
+
+        assert_eq!(error.operation(), "validate usage timestamp");
+        assert_eq!(error.path(), Some(wire.as_path()));
+    }
+
+    #[test]
+    fn rejects_non_table_models_config() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
+        );
+        std::fs::write(dir.path().join("config.toml"), "models = []\n").unwrap();
+
+        let error = super::parse_kimi_file(&wire).unwrap_err();
+
+        assert_eq!(error.operation(), "validate model config");
+        assert_eq!(error.path(), Some(dir.path().join("config.toml").as_path()));
+    }
+
+    #[test]
+    fn rejects_model_config_entry_missing_provider() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
+        );
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[models.\"openai-pro/gpt-5.5\"]\nmodel = \"gpt-5.5\"\n",
+        )
+        .unwrap();
+
+        let error = super::parse_kimi_file(&wire).unwrap_err();
+
+        assert_eq!(error.operation(), "validate model config");
+        assert_eq!(error.path(), Some(dir.path().join("config.toml").as_path()));
+    }
+
+    #[test]
+    fn rejects_non_current_wire_path() {
+        let dir = TempDir::new().unwrap();
+        let wire = dir.path().join("wire.jsonl");
+        std::fs::write(&wire, "").unwrap();
+
+        let error = super::parse_kimi_file(&wire).unwrap_err();
+
+        assert_eq!(error.operation(), "validate Kimi wire path");
+        assert_eq!(error.path(), Some(wire.as_path()));
     }
 }

@@ -22,7 +22,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 26;
+const CACHE_SCHEMA_VERSION: u32 = 27;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,13 +58,13 @@ pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
 
 /// Get the cache directory path
 /// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
-fn cache_dir() -> Option<PathBuf> {
-    Some(crate::paths::get_cache_dir())
+fn cache_dir() -> Result<PathBuf, tokscale_core::paths::ConfigDirUnavailable> {
+    crate::paths::try_get_cache_dir()
 }
 
 /// Get the cache file path
-fn cache_file() -> Option<PathBuf> {
-    cache_dir().map(|d| d.join("tui-data-cache.json"))
+fn cache_file() -> Result<PathBuf, tokscale_core::paths::ConfigDirUnavailable> {
+    cache_dir().map(|directory| directory.join("tui-data-cache.json"))
 }
 
 /// Cached TUI data structure (serializable)
@@ -906,8 +906,12 @@ pub fn load_cache(
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
 ) -> CacheResult {
-    let Some(cache_path) = cache_file() else {
-        return CacheResult::Miss;
+    let cache_path = match cache_file() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("tokscale: TUI cache path unavailable; cache miss: {error}");
+            return CacheResult::Miss;
+        }
     };
     let cached: CachedTUIData = match File::open(&cache_path) {
         Ok(file) => match serde_json::from_reader(BufReader::new(file)) {
@@ -1007,7 +1011,7 @@ pub fn save_cached_data(
     report_scope: &CacheReportScope,
     source_inventory_signature: SourceInventorySignature,
 ) -> anyhow::Result<()> {
-    let cache_path = cache_file().ok_or_else(|| anyhow::anyhow!("TUI cache path unavailable"))?;
+    let cache_path = cache_file()?;
 
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
@@ -1581,6 +1585,63 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn structured_model_map_keys_round_trip_without_coalescing() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        let mut data = complete_usage_data();
+        let daily_models = &mut data.daily[0]
+            .source_breakdown
+            .get_mut("claude")
+            .unwrap()
+            .models;
+        let daily_value = daily_models.values().next().unwrap().clone();
+        daily_models.clear();
+        daily_models.insert("v1|cpm|1:a3:b:c1:d".to_string(), daily_value.clone());
+        daily_models.insert("v1|cpm|1:a1:b3:c:d".to_string(), daily_value);
+
+        let hourly_models = &mut data.hourly[0].models;
+        let hourly_value = hourly_models.values().next().unwrap().clone();
+        hourly_models.clear();
+        hourly_models.insert("v1|pm|3:b:c1:d".to_string(), hourly_value.clone());
+        hourly_models.insert("v1|pm|1:b3:c:d".to_string(), hourly_value);
+
+        let clients = make_filters(&[ClientId::Claude]);
+        let scope = CacheReportScope::default();
+        save_cached_data(
+            &data,
+            &clients,
+            &GroupBy::ClientProviderModel,
+            &scope,
+            test_signature(),
+        )
+        .unwrap();
+
+        let CacheResult::Fresh(loaded, _) =
+            load_cache(&clients, &GroupBy::ClientProviderModel, &scope)
+        else {
+            panic!("current-schema cache should load as fresh");
+        };
+        let loaded_daily = &loaded.daily[0].source_breakdown["claude"].models;
+        assert_eq!(loaded_daily.len(), 2);
+        assert!(loaded_daily.contains_key("v1|cpm|1:a3:b:c1:d"));
+        assert!(loaded_daily.contains_key("v1|cpm|1:a1:b3:c:d"));
+        let loaded_hourly = &loaded.hourly[0].models;
+        assert_eq!(loaded_hourly.len(), 2);
+        assert!(loaded_hourly.contains_key("v1|pm|3:b:c1:d"));
+        assert!(loaded_hourly.contains_key("v1|pm|1:b3:c:d"));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
     fn test_normalize_cached_agents_merges_opencode_display_variants() {
         let agents = normalize_cached_agents(vec![
             cached_agent("Sisyphus", "opencode", 10),
@@ -1775,7 +1836,7 @@ mod tests {
         fs::write(
             &cache_path,
             r#"{
-  "schemaVersion": 26,
+  "schemaVersion": 27,
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
@@ -1897,7 +1958,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn source_inventory_signature_round_trips_in_schema_26() {
+    fn source_inventory_signature_round_trips_in_schema_27() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         unsafe {
@@ -1927,7 +1988,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn schema_25_cache_is_an_explicit_miss() {
+    fn schema_26_cache_is_an_explicit_miss() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         unsafe {
@@ -1946,7 +2007,7 @@ mod tests {
         let path = cache_file().unwrap();
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value["schemaVersion"] = serde_json::json!(25);
+        value["schemaVersion"] = serde_json::json!(26);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
 
         assert!(matches!(
@@ -1962,7 +2023,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn schema_26_without_source_inventory_signature_is_a_miss() {
+    fn schema_27_without_source_inventory_signature_is_a_miss() {
         let temp_dir = TempDir::new().unwrap();
         let previous_home = env::var_os("HOME");
         unsafe {

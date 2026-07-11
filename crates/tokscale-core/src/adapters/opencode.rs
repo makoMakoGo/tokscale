@@ -5,7 +5,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::{
     AdapterScanContext, FoldContext, LocalSourceAdapter, MessageSink, ParseContext,
-    ParsedBatchSource, ParsedUnit, SourceUnit, SourceUnitMeta,
+    ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError, SourcePipelineError,
+    SourceUnit, SourceUnitMeta,
 };
 use crate::clients::ClientId;
 use crate::{scanner, sessions};
@@ -17,15 +18,20 @@ impl LocalSourceAdapter for OpenCodeAdapter {
         ClientId::OpenCode
     }
 
-    fn discover(&self, _ctx: &AdapterScanContext<'_>) -> Vec<SourceUnit> {
-        unreachable!("OpenCode discovery must use the checked adapter path")
-    }
-
-    fn discover_checked(&self, ctx: &AdapterScanContext<'_>) -> Result<Vec<SourceUnit>, String> {
+    fn discover_checked(
+        &self,
+        ctx: &AdapterScanContext<'_>,
+    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
         let data_dir =
             scanner::opencode_data_dir_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
-        let mut db_paths =
-            scanner::discover_opencode_dbs(&data_dir).map_err(|error| error.to_string())?;
+        let mut db_paths = scanner::discover_opencode_dbs(&data_dir).map_err(|source| {
+            SourceDiscoveryError::new(
+                ClientId::OpenCode,
+                &data_dir,
+                "discover OpenCode databases",
+                source,
+            )
+        })?;
         scanner::merge_user_opencode_db_paths(
             &mut db_paths,
             &ctx.scanner_settings.opencode_db_paths,
@@ -41,22 +47,22 @@ impl LocalSourceAdapter for OpenCodeAdapter {
             .collect())
     }
 
-    fn parse(&self, _units: Vec<SourceUnit>, _ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
-        unreachable!("OpenCode parsing must use the checked adapter path")
-    }
-
     fn parse_checked(
         &self,
         units: Vec<SourceUnit>,
         ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, String> {
+    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
                 SourceUnitMeta::OpenCodeSqlite => {
                     adapter_cache::load_or_parse_unit_with_result(unit, ctx, |path| {
-                        sessions::opencode::parse_opencode_sqlite(path)
-                            .map_err(|error| error.to_string())
+                        sessions::opencode::parse_opencode_sqlite(path).map_err(|error| {
+                            crate::sessions::error::SessionParseError::new(
+                                "parse OpenCode SQLite",
+                                error,
+                            )
+                        })
                     })
                 }
                 SourceUnitMeta::None
@@ -78,16 +84,21 @@ impl LocalSourceAdapter for OpenCodeAdapter {
         &self,
         unit: SourceUnit,
         source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<ParsedUnit, SourceUnit> {
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
         adapter_cache::plan_cache_hit(unit, source_cache)
     }
 
-    fn fold(&self, parsed: Vec<ParsedUnit>, ctx: &mut FoldContext<'_>, sink: &mut dyn MessageSink) {
+    fn fold(
+        &self,
+        parsed: Vec<ParsedUnit>,
+        ctx: &mut FoldContext<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<(), SourcePipelineError> {
         let mut seen = HashSet::new();
         for unit in parsed {
-            fold_opencode_unit(unit, ctx, sink, &mut seen)
-                .expect("direct OpenCode fold must resolve its prepared sources");
+            fold_opencode_unit(unit, ctx, sink, &mut seen)?;
         }
+        Ok(())
     }
 
     fn fold_batches(
@@ -95,7 +106,7 @@ impl LocalSourceAdapter for OpenCodeAdapter {
         batches: &mut ParsedBatchSource<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), String> {
+    ) -> Result<(), SourcePipelineError> {
         let mut seen = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
             for unit in parsed {
@@ -111,7 +122,7 @@ fn fold_opencode_unit(
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
     seen: &mut HashSet<u64>,
-) -> Result<(), String> {
+) -> Result<(), SourcePipelineError> {
     let adapter_cache::ResolvedUnit {
         unit,
         messages,
@@ -119,7 +130,11 @@ fn fold_opencode_unit(
         invalidate_cache,
     } = adapter_cache::resolve_unit(parsed, ctx)?;
     let path = unit.path.clone();
-    let cache_write_succeeded = adapter_cache::write_cache(cache_write, ctx, &messages);
+    let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
+    if cache_write_outcome.is_err() && invalidate_cache {
+        ctx.source_cache.remove(&path, unit.parser_version);
+    }
+    let cache_write_outcome = cache_write_outcome?;
     sink.extend_messages(
         messages
             .into_iter()
@@ -127,7 +142,7 @@ fn fold_opencode_unit(
             .collect(),
     );
 
-    if !cache_write_succeeded && invalidate_cache {
+    if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
         ctx.source_cache.remove(&path, unit.parser_version);
     }
     Ok(())
@@ -240,14 +255,16 @@ mod tests {
         let mut cache = message_cache::SourceMessageCache::default();
         let mut sink = Vec::new();
 
-        OPENCODE_ADAPTER.fold(
-            parsed,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-            &mut sink,
-        );
+        OPENCODE_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext {
+                    source_cache: &mut cache,
+                    pricing: None,
+                },
+                &mut sink,
+            )
+            .unwrap();
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].session_id.as_ref(), "session-0");
     }
@@ -265,6 +282,7 @@ mod tests {
                 SourceUnit::sqlite_with_wal(ClientId::OpenCode, path)
                     .with_meta(SourceUnitMeta::OpenCodeSqlite)
                     .prepare_snapshot()
+                    .unwrap()
             })
             .collect();
 
@@ -301,7 +319,8 @@ mod tests {
         drop(conn);
         let unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
             .with_meta(SourceUnitMeta::OpenCodeSqlite)
-            .prepare_snapshot();
+            .prepare_snapshot()
+            .unwrap();
         let parser_version = unit.parser_version;
         let fingerprint = unit.source_input_policy().fingerprint().unwrap();
         let mut cache = message_cache::SourceMessageCache::default();
@@ -324,21 +343,19 @@ mod tests {
                 },
                 0.0,
             )],
-            Vec::new(),
             None,
         ));
 
         let error = OPENCODE_ADAPTER
-            .parse_checked(
-                vec![unit],
-                &ParseContext {
-                    source_cache: &cache,
-                    pricing: None,
-                },
-            )
+            .parse_checked(vec![unit], &ParseContext { pricing: None })
             .unwrap_err();
-        assert!(error.contains("current session schema"));
-        assert!(cache.get_meta(&path, parser_version).is_none());
+        assert_eq!(error.operation, "parse OpenCode SQLite");
+        assert_eq!(error.path, path);
+        assert!(std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("current session schema"));
+        assert!(cache.get_meta(&path, parser_version).unwrap().is_none());
     }
 
     #[test]
@@ -369,21 +386,20 @@ mod tests {
 
         let unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
             .with_meta(SourceUnitMeta::OpenCodeSqlite)
-            .prepare_snapshot();
+            .prepare_snapshot()
+            .unwrap();
         let parser_version = unit.parser_version;
         let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
 
         let error = OPENCODE_ADAPTER
-            .parse_checked(
-                vec![unit],
-                &ParseContext {
-                    source_cache: &cache,
-                    pricing: None,
-                },
-            )
+            .parse_checked(vec![unit], &ParseContext { pricing: None })
             .unwrap_err();
-        assert!(error.contains(path.to_str().unwrap()));
-        assert!(error.contains("bad-payload-row"));
-        assert!(cache.get_meta(&path, parser_version).is_none());
+        assert_eq!(error.path, path);
+        assert_eq!(error.operation, "parse OpenCode SQLite");
+        assert!(std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("bad-payload-row"));
+        assert!(cache.get_meta(&path, parser_version).unwrap().is_none());
     }
 }
