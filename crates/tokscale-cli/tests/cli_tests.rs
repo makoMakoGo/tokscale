@@ -1863,6 +1863,11 @@ fn test_models_json_output() {
         json.get("totalCacheWrite").is_some(),
         "Missing totalCacheWrite"
     );
+    assert!(
+        json.get("totalReasoning").is_some(),
+        "Missing totalReasoning"
+    );
+    assert!(json.get("totalTokens").is_some(), "Missing totalTokens");
     assert!(json.get("totalMessages").is_some(), "Missing totalMessages");
     assert!(json.get("totalCost").is_some(), "Missing totalCost");
     assert!(
@@ -2360,6 +2365,53 @@ fn test_models_group_by_default() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["groupBy"].as_str().unwrap(), "client,model");
+}
+
+#[test]
+fn test_models_total_includes_split_reasoning_tokens() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+    let sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("reasoning.jsonl"),
+        concat!(
+            r#"{"type":"session","id":"reasoning-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"reasoning-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let json_output = cmd_with_home(base)
+        .args(["models", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        json_output.status.success(),
+        "command failed: {json_output:?}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(json["entries"][0]["output"], 25);
+    assert_eq!(json["entries"][0]["reasoning"], 25);
+    assert_eq!(json["totalReasoning"], 25);
+    assert_eq!(json["totalTokens"], 165);
+
+    let table_output = cmd_with_home(base)
+        .args(["models", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        table_output.status.success(),
+        "command failed: {table_output:?}"
+    );
+    let stdout = String::from_utf8(table_output.stdout).unwrap();
+    assert!(
+        stdout.contains("Total: 1 messages, 165 tokens"),
+        "unexpected output: {stdout}"
+    );
 }
 
 #[test]

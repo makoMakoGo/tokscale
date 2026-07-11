@@ -18,16 +18,21 @@ use crate::tui::{
 use anyhow::Result;
 use std::io::{self, IsTerminal, Write};
 
+fn checked_token_total(tokens: impl IntoIterator<Item = i64>) -> i64 {
+    tokens
+        .into_iter()
+        .try_fold(0_i64, i64::checked_add)
+        .expect("displayed model token total exceeds i64::MAX")
+}
+
 fn displayed_token_total(entry: &tokscale_core::ModelUsage) -> i64 {
-    [
+    checked_token_total([
         entry.input,
         entry.output,
         entry.cache_read,
         entry.cache_write,
-    ]
-    .into_iter()
-    .try_fold(0_i64, i64::checked_add)
-    .expect("displayed model token total exceeds i64::MAX")
+        entry.reasoning,
+    ])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -123,6 +128,14 @@ pub(crate) fn run_models_report(
             )
         })
         .unwrap_or_default();
+    let total_reasoning = checked_token_total(report.entries.iter().map(|entry| entry.reasoning));
+    let report_token_total = checked_token_total([
+        report.total_input,
+        report.total_output,
+        report.total_cache_read,
+        report.total_cache_write,
+        total_reasoning,
+    ]);
 
     if json {
         #[derive(serde::Serialize)]
@@ -157,6 +170,8 @@ pub(crate) fn run_models_report(
             total_output: i64,
             total_cache_read: i64,
             total_cache_write: i64,
+            total_reasoning: i64,
+            total_tokens: i64,
             total_messages: i32,
             total_cost: f64,
             processing_time_ms: u32,
@@ -209,6 +224,8 @@ pub(crate) fn run_models_report(
             total_output: report.total_output,
             total_cache_read: report.total_cache_read,
             total_cache_write: report.total_cache_write,
+            total_reasoning,
+            total_tokens: report_token_total,
             total_messages: report.total_messages,
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
@@ -374,10 +391,6 @@ pub(crate) fn run_models_report(
                         table.add_row(row);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_read
-                        + report.total_cache_write;
                     let mut total_row = Vec::with_capacity(6);
                     if show_client {
                         total_row.push(
@@ -395,7 +408,7 @@ pub(crate) fn run_models_report(
                     }
                     total_row.push(Cell::new(""));
                     total_row.push(
-                        Cell::new(format_tokens_with_commas(total_all))
+                        Cell::new(format_tokens_with_commas(report_token_total))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                     );
@@ -482,10 +495,6 @@ pub(crate) fn run_models_report(
                         ]);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_write
-                        + report.total_cache_read;
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -504,7 +513,7 @@ pub(crate) fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_cache_read))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(total_all))
+                        Cell::new(format_tokens_with_commas(report_token_total))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
@@ -559,10 +568,6 @@ pub(crate) fn run_models_report(
                         table.add_row(row);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_write
-                        + report.total_cache_read;
                     let mut total_row: Vec<Cell> = Vec::with_capacity(8);
                     total_row.push(
                         Cell::new("Total")
@@ -584,7 +589,7 @@ pub(crate) fn run_models_report(
                             .set_alignment(CellAlignment::Right),
                     );
                     total_row.push(
-                        Cell::new(format_tokens_with_commas(total_all))
+                        Cell::new(format_tokens_with_commas(report_token_total))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                     );
@@ -638,10 +643,6 @@ pub(crate) fn run_models_report(
                         ]);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_write
-                        + report.total_cache_read;
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -661,7 +662,7 @@ pub(crate) fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_cache_read))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(total_all))
+                        Cell::new(format_tokens_with_commas(report_token_total))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
@@ -715,10 +716,6 @@ pub(crate) fn run_models_report(
                         ]);
                     }
 
-                    let total_all = report.total_input
-                        + report.total_output
-                        + report.total_cache_write
-                        + report.total_cache_read;
                     table.add_row(vec![
                         Cell::new("Total")
                             .fg(Color::Yellow)
@@ -738,7 +735,7 @@ pub(crate) fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_cache_read))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(total_all))
+                        Cell::new(format_tokens_with_commas(report_token_total))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
@@ -759,14 +756,10 @@ pub(crate) fn run_models_report(
         println!("\n  \x1b[36m{}\x1b[0m\n", title);
         println!("{}", dim_borders(&table.to_string()));
 
-        let total_tokens = report.total_input
-            + report.total_output
-            + report.total_cache_write
-            + report.total_cache_read;
         println!(
             "\x1b[90m\n  Total: {} messages, {} tokens, \x1b[32m{}\x1b[90m\x1b[0m",
             format_tokens_with_commas(report.total_messages as i64),
-            format_tokens_with_commas(total_tokens),
+            format_tokens_with_commas(report_token_total),
             format_currency(report.total_cost)
         );
 

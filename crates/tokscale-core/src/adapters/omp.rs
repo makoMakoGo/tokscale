@@ -17,7 +17,9 @@ pub(crate) struct OmpAdapter;
 
 pub(crate) static OMP_ADAPTER: OmpAdapter = OmpAdapter;
 
-const OMP_TITLE_SLOT_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
+// The immediately following OMP revision was already emitted by builds
+// containing only model-ID canonicalization and title-slot parsing.
+const OMP_USAGE_AND_SWARM_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 3;
 
 impl LocalSourceAdapter for OmpAdapter {
     fn client(&self) -> ClientId {
@@ -35,7 +37,10 @@ impl LocalSourceAdapter for OmpAdapter {
         )?
         .into_iter()
         .map(|unit| {
-            unit.with_parser_version(ParserVersion::new(ParserId::Omp, OMP_TITLE_SLOT_REVISION))
+            unit.with_parser_version(ParserVersion::new(
+                ParserId::Omp,
+                OMP_USAGE_AND_SWARM_REVISION,
+            ))
         })
         .collect();
         Ok(units)
@@ -383,8 +388,44 @@ mod tests {
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::PlainFile));
         assert!(units.iter().all(|unit| {
-            unit.parser_version == ParserVersion::new(ParserId::Omp, OMP_TITLE_SLOT_REVISION)
+            unit.parser_version == ParserVersion::new(ParserId::Omp, OMP_USAGE_AND_SWARM_REVISION)
         }));
+    }
+
+    #[test]
+    fn omp_adapter_recovers_swarm_agent_from_canonical_extra_path() {
+        let home = tempfile::TempDir::new().unwrap();
+        let extra_root = home.path().join("omp-archive");
+        let artifact_path = extra_root.join(
+            ".swarm_docs-factcheck/context/\
+             swarm-docs-factcheck-architecture-reviewer-12.jsonl",
+        );
+        write_file(&artifact_path, OMP_CHILD_CONTENT);
+
+        let mut extra_scan_paths = BTreeMap::new();
+        extra_scan_paths.insert("omp".to_string(), vec![extra_root]);
+        let settings = crate::scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        };
+        let ctx = scan_context(home.path(), &settings);
+
+        let units = OMP_ADAPTER.discover_checked(&ctx).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].path, artifact_path);
+
+        let mut cache = message_cache::SourceMessageCache::default();
+        let messages = fold_with_omp_adapter(units, &mut cache);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent.as_deref(),
+            Some("OMP Swarm architecture-reviewer")
+        );
+        assert_eq!(
+            messages[0].agent_instance.as_deref(),
+            Some("swarm-docs-factcheck-architecture-reviewer-12")
+        );
     }
 
     #[test]
@@ -422,7 +463,7 @@ mod tests {
         write_file(&child_path, OMP_CHILD_CONTENT);
         write_file(&cached_path, OMP_CHILD_CONTENT);
 
-        let parser_version = ParserVersion::new(ParserId::Omp, OMP_TITLE_SLOT_REVISION);
+        let parser_version = ParserVersion::new(ParserId::Omp, OMP_USAGE_AND_SWARM_REVISION);
         let child_unit =
             SourceUnit::plain_file(ClientId::Omp, child_path).with_parser_version(parser_version);
         let cached_unit = SourceUnit::plain_file(ClientId::Omp, cached_path.clone())
@@ -510,8 +551,10 @@ mod tests {
         write_file(&ordinary_b, &omp_content("ordinary-b"));
 
         let make_unit = |path: PathBuf| {
-            SourceUnit::plain_file(ClientId::Omp, path)
-                .with_parser_version(ParserVersion::new(ParserId::Omp, OMP_TITLE_SLOT_REVISION))
+            SourceUnit::plain_file(ClientId::Omp, path).with_parser_version(ParserVersion::new(
+                ParserId::Omp,
+                OMP_USAGE_AND_SWARM_REVISION,
+            ))
         };
         let first_child_unit = make_unit(first_child.clone());
         let second_child_unit = make_unit(second_child.clone());
