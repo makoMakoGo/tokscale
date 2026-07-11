@@ -1078,6 +1078,23 @@ fn test_normalize_model_for_grouping() {
 }
 
 #[test]
+fn test_normalize_model_for_grouping_canonicalizes_gpt_5_6_family_efforts() {
+    let cases = [
+        ("custom:gpt-5.6-sol-high", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-sol-xhigh", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-sol-max", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-terra-xhigh", "gpt-5.6-terra"),
+        ("custom:gpt-5.6-terra-max", "gpt-5.6-terra"),
+        ("custom:gpt-5.6-luna-medium", "gpt-5.6-luna"),
+        ("custom:gpt-5.6-luna-max", "gpt-5.6-luna"),
+    ];
+
+    for (raw, expected) in cases {
+        assert_eq!(normalize_model_for_grouping(raw), expected);
+    }
+}
+
+#[test]
 fn test_group_by_from_str_valid_values() {
     assert_eq!(GroupBy::from_str("model").unwrap(), GroupBy::Model);
     assert_eq!(
@@ -3964,6 +3981,40 @@ fn test_apply_token_pricing_clears_existing_cost_without_pricing() {
     apply_token_pricing(&mut msg, None);
 
     assert_eq!(msg.cost, 0.0);
+}
+
+#[test]
+fn test_finalize_token_priced_messages_prices_canonical_gpt_5_6_factory_model() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-5.6-sol".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+    let mut messages = vec![UnifiedMessage::new(
+        "droid",
+        "gpt-5.6-sol-xhigh",
+        "openai",
+        "factory-session",
+        1_783_753_083_820,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 2,
+        },
+        0.0,
+    )];
+
+    finalize_token_priced_messages(&mut messages, Some(&pricing));
+
+    assert_eq!(messages[0].model_id.as_ref(), "gpt-5.6-sol");
+    assert_eq!(messages[0].cost, 0.024);
 }
 
 #[test]

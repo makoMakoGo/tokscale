@@ -4,6 +4,7 @@ pub(crate) const DEEPSEEK_V4_PRO_BETA_ALIAS: &str = "model1";
 pub(crate) const DEEPSEEK_V4_FLASH_BETA_ALIAS: &str = "model2";
 
 const CLAUDE_FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable"];
+const OPENAI_GPT_5_6_FAMILY: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const OPENAI_REASONING_TIERS: &[&str] =
     &["minimal", "low", "medium", "high", "xhigh", "auto", "none"];
 
@@ -247,7 +248,7 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
         } else {
             base
         };
-        if (tier == "fast" || OPENAI_REASONING_TIERS.contains(&tier))
+        if (tier == "fast" || is_openai_reasoning_effort_for_model(base, tier))
             && is_openai_gpt_source_base_model(base)
         {
             return Some(base.to_string());
@@ -262,11 +263,16 @@ fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
     let tier = tier.strip_suffix(')')?;
     let base =
         base.trim_end_matches(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '-' | '_'));
-    if OPENAI_REASONING_TIERS.contains(&tier) && is_openai_gpt_source_base_model(base) {
+    if is_openai_reasoning_effort_for_model(base, tier) && is_openai_gpt_source_base_model(base) {
         Some(base)
     } else {
         None
     }
+}
+
+fn is_openai_reasoning_effort_for_model(model: &str, effort: &str) -> bool {
+    OPENAI_REASONING_TIERS.contains(&effort)
+        || (effort == "max" && OPENAI_GPT_5_6_FAMILY.contains(&model))
 }
 
 fn is_openai_gpt_4o_source_base_model(model: &str) -> bool {
@@ -274,6 +280,10 @@ fn is_openai_gpt_4o_source_base_model(model: &str) -> bool {
 }
 
 fn is_openai_gpt_source_base_model(model: &str) -> bool {
+    if OPENAI_GPT_5_6_FAMILY.contains(&model) {
+        return true;
+    }
+
     let rest = match model.strip_prefix("gpt-") {
         Some(rest) => rest,
         None => return false,
