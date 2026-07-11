@@ -508,13 +508,6 @@ impl ClientId {
     pub fn parse_local(self) -> bool {
         self.local_def().is_some_and(|def| def.parse_local)
     }
-
-    /// Whether the client has an adapter that can parse an explicitly
-    /// selected local source. This differs from [`Self::parse_local`]: Cursor
-    /// is opt-in for normal reports but remains a valid TUI source.
-    pub fn supports_local_parsing(self) -> bool {
-        crate::adapters::adapter_for(self).is_some()
-    }
 }
 
 #[cfg(test)]
@@ -552,7 +545,7 @@ mod tests {
         assert_eq!(def.relative_path, ".config/tokscale/cursor-cache");
         assert_eq!(def.pattern, "usage*.csv");
         assert!(!ClientId::Cursor.parse_local());
-        assert!(ClientId::Cursor.supports_local_parsing());
+        assert!(crate::adapters::adapter_for(ClientId::Cursor).is_some());
     }
 
     #[test]

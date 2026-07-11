@@ -10,7 +10,7 @@ use tokscale_core::ClientId;
 ///
 /// 1. If `defaultClients` from `~/.config/tokscale/settings.json` is
 ///    set, use it after validating every id.
-/// 2. Otherwise use every catalog client with a local parser.
+/// 2. Otherwise use every catalog client.
 ///
 /// This **must** stay in lockstep with the resolution that
 /// `tui::run(.., clients = None, ..)` would compute. If it drifts, the
@@ -30,7 +30,7 @@ pub(crate) fn resolve_default_tui_filter_set_with(
 ) -> Result<std::collections::HashSet<ClientId>> {
     let parsed = parse_default_client_filters(configured)?;
     if parsed.is_empty() {
-        Ok(tui::local_parser_clients().collect())
+        Ok(ClientId::iter().collect())
     } else {
         Ok(parsed.into_iter().collect())
     }
@@ -56,7 +56,7 @@ pub(crate) fn resolve_light_cache_filter_set(
     if let Some(clients) = clients {
         parse_client_id_set(clients)
     } else {
-        tui::local_parser_clients().collect()
+        ClientId::iter().collect()
     }
 }
 

@@ -48,10 +48,6 @@ use tokscale_core::{
     ClientId,
 };
 
-pub(crate) fn local_parser_clients() -> impl Iterator<Item = ClientId> {
-    ClientId::iter().filter(|client| client.supports_local_parsing())
-}
-
 fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool, Option<u64>) {
     match load_result {
         CacheResult::Fresh(data, signature) => {
@@ -258,7 +254,7 @@ pub fn run(
             .filter_map(|s| ClientId::from_str(&s.to_lowercase()))
             .collect()
     } else {
-        local_parser_clients().collect()
+        ClientId::iter().collect()
     };
 
     // Single file read: load cache and check freshness in one pass.

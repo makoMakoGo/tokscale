@@ -35,10 +35,6 @@ fn local_def(client_id: ClientId) -> &'static LocalClientDef {
         .expect("scanner client must have local scan policy")
 }
 
-fn scanner_enabled_client(client: ClientId) -> bool {
-    client.supports_local_parsing()
-}
-
 /// User-controlled scanner settings loaded from a config file.
 ///
 /// This is the persistent, declarative counterpart to environment variables
@@ -581,8 +577,6 @@ pub enum ScannerError {
     },
     #[error("unknown scanner client `{client}`")]
     UnknownClient { client: String },
-    #[error("client `{client}` does not support directory scanning")]
-    UnsupportedClient { client: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -837,9 +831,7 @@ fn scan_all_clients_with_env_strategy_inner(
 
     let include_all = clients.is_empty();
     let enabled: HashSet<ClientId> = if include_all {
-        ClientId::iter()
-            .filter(|client| scanner_enabled_client(*client))
-            .collect()
+        ClientId::iter().collect()
     } else {
         let mut enabled = HashSet::new();
         for client in clients {
@@ -847,11 +839,6 @@ fn scan_all_clients_with_env_strategy_inner(
                 ClientId::from_str(client).ok_or_else(|| ScannerError::UnknownClient {
                     client: client.clone(),
                 })?;
-            if !scanner_enabled_client(client_id) {
-                return Err(ScannerError::UnsupportedClient {
-                    client: client.clone(),
-                });
-            }
             enabled.insert(client_id);
         }
         enabled

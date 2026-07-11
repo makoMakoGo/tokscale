@@ -442,10 +442,9 @@ impl App {
                 .filter_map(|s| ClientId::from_str(&s.to_lowercase()))
                 .collect()
         } else {
-            // No filter → use the canonical local-parser set. This remains in
-            // lockstep with `tui::run` and `run_warm_tui_cache` so cache keys
-            // match without selecting catalog entries that lack an adapter.
-            super::local_parser_clients().collect()
+            // No filter → use the complete accepted client catalog. ADR 0007
+            // requires every catalog client to have one local adapter.
+            ClientId::iter().collect()
         };
 
         let auto_refresh_interval = if config.refresh > 0 {
@@ -1525,16 +1524,11 @@ impl App {
     }
 
     fn open_client_picker(&mut self) {
-        match ClientPickerDialog::new(
+        let dialog = ClientPickerDialog::new(
             self.enabled_clients.clone(),
             self.dialog_needs_reload.clone(),
-        ) {
-            Ok(dialog) => self.dialog_stack.show(Box::new(dialog)),
-            Err(client) => self.set_status(&format!(
-                "Client picker state contains non-local client `{}`",
-                client.as_str()
-            )),
-        }
+        );
+        self.dialog_stack.show(Box::new(dialog));
     }
 
     pub fn scan_clients(&self) -> Vec<ClientId> {
@@ -2494,15 +2488,13 @@ mod tests {
     }
 
     #[test]
-    fn test_app_no_filter_default_uses_local_parse_policy() {
+    fn test_app_no_filter_default_uses_catalog() {
         let app = make_app();
         let actual = app.enabled_clients.borrow().clone();
-        let expected: HashSet<ClientId> = ClientId::iter()
-            .filter(|client| client.supports_local_parsing())
-            .collect();
+        let expected: HashSet<ClientId> = ClientId::iter().collect();
         assert_eq!(
             actual, expected,
-            "no-filter TUI must select exactly the clients accepted by local parsing"
+            "no-filter TUI must select exactly the accepted client catalog"
         );
         assert!(actual.contains(&ClientId::Cursor));
     }

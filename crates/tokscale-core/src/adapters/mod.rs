@@ -565,6 +565,17 @@ pub(crate) fn selected_adapters(
 ) -> Result<Vec<&'static dyn LocalSourceAdapter>, String> {
     let include_all = clients.is_empty();
     let requested = requested_client_ids(clients)?;
+
+    let missing = ClientId::iter().find(|client| {
+        (include_all || requested.contains(client)) && adapter_for(*client).is_none()
+    });
+    if let Some(client) = missing {
+        return Err(format!(
+            "catalog client `{}` is missing a local source adapter",
+            client.as_str()
+        ));
+    }
+
     Ok(local_source_adapters()
         .iter()
         .copied()
@@ -767,6 +778,7 @@ fn requested_client_ids(clients: &[String]) -> Result<HashSet<ClientId>, String>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, Weak};
 
@@ -783,6 +795,26 @@ mod tests {
     struct PlannedWeaveAdapter {
         parse_batch_sizes: Mutex<Vec<usize>>,
         planner_calls: AtomicUsize,
+    }
+
+    #[test]
+    fn local_adapter_registry_is_unique_and_covers_catalog() {
+        let adapters: Vec<ClientId> = local_source_adapters()
+            .iter()
+            .map(|adapter| adapter.client())
+            .collect();
+        let unique: HashSet<ClientId> = adapters.iter().copied().collect();
+        let catalog: HashSet<ClientId> = ClientId::iter().collect();
+
+        assert_eq!(
+            adapters.len(),
+            unique.len(),
+            "each catalog client must have exactly one local source adapter"
+        );
+        assert_eq!(
+            unique, catalog,
+            "catalog and local source adapter registry must cover the same clients"
+        );
     }
 
     impl LocalSourceAdapter for RecordingAdapter {

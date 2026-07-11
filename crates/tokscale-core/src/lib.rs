@@ -1356,11 +1356,7 @@ fn resolve_local_parse_request(
             .collect()
     });
     for client in &clients {
-        let client_id =
-            ClientId::from_str(client).ok_or_else(|| format!("unknown local client `{client}`"))?;
-        if !client_id.supports_local_parsing() {
-            return Err(format!("client `{client}` does not support local parsing"));
-        }
+        ClientId::from_str(client).ok_or_else(|| format!("unknown local client `{client}`"))?;
     }
     Ok((home_dir, clients))
 }

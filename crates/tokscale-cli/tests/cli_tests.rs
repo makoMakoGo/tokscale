@@ -2810,6 +2810,25 @@ fn test_clients_command_reports_malformed_settings() {
 }
 
 #[test]
+fn excluded_crush_default_client_fails_before_report_output() {
+    let tmp = create_empty_fixture_dir();
+    write_settings_json(tmp.path(), r#"{"defaultClients":["crush"]}"#);
+
+    cmd_with_home(tmp.path())
+        .env("RUST_BACKTRACE", "1")
+        .args(["--light", "--no-spinner"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("invalid client id(s) in settings.json defaultClients: crush")
+                .and(predicate::str::contains("does not support local parsing").not())
+                .and(predicate::str::contains("panicked at").not())
+                .and(predicate::str::contains("stack backtrace").not()),
+        );
+}
+
+#[test]
 fn test_clients_json() {
     let tmp = create_empty_fixture_dir();
     let output = cmd_with_home(tmp.path())

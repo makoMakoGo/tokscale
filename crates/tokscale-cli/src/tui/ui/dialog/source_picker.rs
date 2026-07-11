@@ -23,8 +23,7 @@ use super::{DialogContent, DialogResult};
 /// toggles propagate without a separate sync step.
 pub struct ClientPickerDialog {
     /// Every selectable filter in the same order they appear on screen.
-    /// Retains the catalog's canonical order after excluding clients that do
-    /// not have a local parser.
+    /// Retains the accepted catalog's canonical order.
     sources: Vec<ClientId>,
     enabled: Rc<RefCell<HashSet<ClientId>>>,
     needs_reload: Rc<RefCell<bool>>,
@@ -45,30 +44,10 @@ struct SourcePickerAreas {
 }
 
 impl ClientPickerDialog {
-    pub fn new(
-        enabled: Rc<RefCell<HashSet<ClientId>>>,
-        needs_reload: Rc<RefCell<bool>>,
-    ) -> Result<Self, ClientId> {
-        let sources: Vec<ClientId> = crate::tui::local_parser_clients().collect();
-        Self::with_sources(sources, enabled, needs_reload)
-    }
-
-    fn with_sources(
-        sources: Vec<ClientId>,
-        enabled: Rc<RefCell<HashSet<ClientId>>>,
-        needs_reload: Rc<RefCell<bool>>,
-    ) -> Result<Self, ClientId> {
-        let unsupported = enabled
-            .borrow()
-            .iter()
-            .copied()
-            .find(|client| !sources.contains(client));
-        if let Some(client) = unsupported {
-            return Err(client);
-        }
-
+    pub fn new(enabled: Rc<RefCell<HashSet<ClientId>>>, needs_reload: Rc<RefCell<bool>>) -> Self {
+        let sources: Vec<ClientId> = ClientId::iter().collect();
         let filtered_indices: Vec<usize> = (0..sources.len()).collect();
-        Ok(Self {
+        Self {
             sources,
             enabled,
             needs_reload,
@@ -76,7 +55,7 @@ impl ClientPickerDialog {
             filter: String::new(),
             filtered_indices,
             last_error: None,
-        })
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -106,11 +85,6 @@ impl ClientPickerDialog {
     }
 
     fn toggle(&mut self, client: ClientId) -> InteractionOutcome {
-        if !self.sources.contains(&client) {
-            self.last_error = Some("Client is not selectable");
-            return InteractionOutcome::Ignored("client is not selectable");
-        }
-
         let mut enabled = self.enabled.borrow_mut();
         let total = enabled.len();
         let is_enabled = enabled.contains(&client);
@@ -391,27 +365,22 @@ mod tests {
     }
 
     fn make_dialog() -> ClientPickerDialog {
-        let enabled = Rc::new(RefCell::new(
-            crate::tui::local_parser_clients().collect::<HashSet<_>>(),
-        ));
+        let enabled = Rc::new(RefCell::new(ClientId::iter().collect::<HashSet<_>>()));
         let needs_reload = Rc::new(RefCell::new(false));
         ClientPickerDialog::new(enabled, needs_reload)
-            .expect("local parser clients must be valid picker sources")
     }
 
     fn first_hotkey_client() -> (ClientId, char) {
-        let client = crate::tui::local_parser_clients()
+        let client = ClientId::iter()
             .find(|client| client.hotkey().is_some())
             .expect("catalog should expose at least one picker hotkey");
         (client, hotkey(client))
     }
 
     #[test]
-    fn source_picker_lists_only_clients_with_local_parsers() {
+    fn source_picker_lists_the_complete_catalog() {
         let dialog = make_dialog();
-        let expected = ClientId::iter()
-            .filter(|client| client.supports_local_parsing())
-            .collect::<Vec<_>>();
+        let expected = ClientId::iter().collect::<Vec<_>>();
 
         assert_eq!(dialog.sources, expected);
         assert!(dialog.sources.contains(&ClientId::Cursor));
@@ -439,41 +408,6 @@ mod tests {
         assert!(matches!(result, DialogResult::NeedsReload));
         assert!(!dialog.enabled.borrow().contains(&client));
         assert!(*dialog.needs_reload.borrow());
-    }
-
-    #[test]
-    fn source_picker_alt_hotkey_rejects_client_missing_from_sources() {
-        let (client, key_char) = first_hotkey_client();
-        let mut dialog = make_dialog();
-        dialog.sources.retain(|source| *source != client);
-        dialog.filtered_indices = (0..dialog.sources.len()).collect();
-        dialog.enabled.borrow_mut().remove(&client);
-
-        let result = dialog.handle_key(alt_key(key_char));
-
-        assert!(matches!(
-            result,
-            DialogResult::Ignored("client is not selectable")
-        ));
-        assert!(!dialog.enabled.borrow().contains(&client));
-        assert!(!*dialog.needs_reload.borrow());
-    }
-
-    #[test]
-    fn source_picker_rejects_hidden_enabled_client_during_initialization() {
-        let (hidden, _) = first_hotkey_client();
-        let sources = crate::tui::local_parser_clients()
-            .filter(|client| *client != hidden)
-            .collect::<Vec<_>>();
-        let enabled = Rc::new(RefCell::new(HashSet::from([hidden])));
-        let needs_reload = Rc::new(RefCell::new(false));
-
-        let result = ClientPickerDialog::with_sources(sources, enabled, needs_reload);
-
-        match result {
-            Err(client) => assert_eq!(client, hidden),
-            Ok(_) => panic!("hidden enabled clients must be rejected"),
-        }
     }
 
     #[test]

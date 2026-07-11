@@ -113,22 +113,18 @@ fn test_resolve_default_tui_filter_set_uses_configured_defaults() {
 }
 
 #[test]
-fn test_resolve_default_tui_filter_set_falls_back_when_empty() {
-    // No defaultClients configured → use the canonical local-parse set.
+fn test_resolve_default_tui_filter_set_uses_catalog_when_empty() {
+    // No defaultClients configured → use the complete accepted catalog.
     let set = resolve_default_tui_filter_set_with(&[]).unwrap();
-    let expected = ClientId::iter()
-        .filter(|client| client.supports_local_parsing())
-        .collect();
+    let expected = ClientId::iter().collect();
     assert_eq!(set, expected);
     assert!(set.contains(&ClientId::Cursor));
 }
 
 #[test]
-fn test_light_cache_no_filter_uses_local_parse_policy() {
+fn test_light_cache_no_filter_uses_catalog() {
     let set = resolve_light_cache_filter_set(&None);
-    let expected = ClientId::iter()
-        .filter(|client| client.supports_local_parsing())
-        .collect();
+    let expected = ClientId::iter().collect();
     assert_eq!(set, expected);
     assert!(set.contains(&ClientId::Cursor));
 }
