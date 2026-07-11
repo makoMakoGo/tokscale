@@ -182,14 +182,18 @@ fn push_unique_root(
     seen: &mut HashSet<PathBuf>,
     root: PathBuf,
 ) -> Result<(), SourceDiscoveryError> {
-    let key = std::fs::canonicalize(&root).map_err(|source| {
-        SourceDiscoveryError::new(
-            ClientId::Antigravity,
-            &root,
-            "canonicalize configured scan root",
-            source,
-        )
-    })?;
+    let key = match std::fs::canonicalize(&root) {
+        Ok(key) => key,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(SourceDiscoveryError::new(
+                ClientId::Antigravity,
+                &root,
+                "canonicalize configured scan root",
+                source,
+            ));
+        }
+    };
     if seen.insert(key) {
         roots.push(root);
     }
@@ -279,6 +283,24 @@ mod tests {
                 && unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal
                 && matches!(unit.meta, SourceUnitMeta::AntigravityCliSqlite)
         }));
+    }
+
+    #[test]
+    fn missing_extra_root_is_an_absent_source() {
+        let home = tempfile::TempDir::new().unwrap();
+        let missing_root = home.path().join("not-created");
+        let mut extra_scan_paths = BTreeMap::new();
+        extra_scan_paths.insert("antigravity".to_string(), vec![missing_root]);
+        let settings = ScannerSettings {
+            extra_scan_paths,
+            ..ScannerSettings::default()
+        };
+
+        let units = ANTIGRAVITY_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .unwrap();
+
+        assert!(units.is_empty());
     }
 
     fn parsed_unit(path: &Path, meta: SourceUnitMeta, message: UnifiedMessage) -> ParsedUnit {
