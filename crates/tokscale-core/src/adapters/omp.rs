@@ -17,9 +17,9 @@ pub(crate) struct OmpAdapter;
 
 pub(crate) static OMP_ADAPTER: OmpAdapter = OmpAdapter;
 
-// Earlier OMP revisions were emitted before malformed inclusive-reasoning
-// breakdowns were clamped to their authoritative output bucket.
-const OMP_USAGE_AND_SWARM_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 4;
+// Earlier OMP revisions emitted per-agent swarm labels instead of the shared
+// reporting identity used by the Agents tab.
+const OMP_USAGE_AND_SWARM_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 5;
 
 impl LocalSourceAdapter for OmpAdapter {
     fn client(&self) -> ClientId {
@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn omp_adapter_recovers_swarm_agent_from_canonical_extra_path() {
+    fn omp_adapter_groups_canonical_swarm_agents_under_shared_identity() {
         let home = tempfile::TempDir::new().unwrap();
         let extra_root = home.path().join("omp-archive");
         let artifact_path = extra_root.join(
@@ -418,10 +418,7 @@ mod tests {
         let messages = fold_with_omp_adapter(units, &mut cache);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0].agent.as_deref(),
-            Some("OMP Swarm architecture-reviewer")
-        );
+        assert_eq!(messages[0].agent.as_deref(), Some("OMP Swarm"));
         assert_eq!(
             messages[0].agent_instance.as_deref(),
             Some("swarm-docs-factcheck-architecture-reviewer-12")
