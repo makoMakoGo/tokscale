@@ -475,6 +475,7 @@ pub struct MonthlyUsage {
     pub output: i64,
     pub cache_read: i64,
     pub cache_write: i64,
+    pub reasoning: i64,
     pub message_count: i32,
     pub cost: f64,
 }

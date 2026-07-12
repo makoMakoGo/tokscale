@@ -1192,3 +1192,32 @@ fn contract_monthly_models_sorted() {
     let report = crate::monthly_report_from_messages_pub(msgs);
     assert_eq!(report.entries[0].models, vec!["aaa-model", "zzz-model"]);
 }
+
+#[test]
+#[serial]
+fn contract_monthly_preserves_reasoning_bucket() {
+    let _tz = pin_tz();
+    let report = crate::monthly_report_from_messages_pub(vec![UnifiedMessage::new(
+        "omp",
+        "gpt-5.5",
+        "openai",
+        "reasoning-session",
+        ts("2026-01-01"),
+        TokenBreakdown {
+            input: 100,
+            output: 25,
+            cache_read: 10,
+            cache_write: 5,
+            reasoning: 25,
+        },
+        1.0,
+    )]);
+
+    assert_eq!(report.entries.len(), 1);
+    let entry = &report.entries[0];
+    assert_eq!(entry.reasoning, 25);
+    assert_eq!(
+        entry.input + entry.output + entry.cache_read + entry.cache_write + entry.reasoning,
+        165
+    );
+}

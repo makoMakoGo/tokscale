@@ -88,6 +88,7 @@ pub(crate) fn run_monthly_report(
             output: i64,
             cache_read: i64,
             cache_write: i64,
+            reasoning: i64,
             message_count: i32,
             cost: f64,
         }
@@ -113,6 +114,7 @@ pub(crate) fn run_monthly_report(
                     output: e.output,
                     cache_read: e.cache_read,
                     cache_write: e.cache_write,
+                    reasoning: e.reasoning,
                     message_count: e.message_count,
                     cost: e.cost,
                 })
@@ -147,56 +149,7 @@ pub(crate) fn run_monthly_report(
                 Cell::new("Models").fg(Color::Cyan),
                 Cell::new("Input").fg(Color::Cyan),
                 Cell::new("Output").fg(Color::Cyan),
-                Cell::new("Cost").fg(Color::Cyan),
-            ]);
-
-            for entry in &report.entries {
-                let models_col = if entry.models.is_empty() {
-                    "-".to_string()
-                } else {
-                    let unique_models = formatted_unique_model_names(&entry.models);
-                    unique_models
-                        .iter()
-                        .map(|m| format!("- {}", m))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-                table.add_row(vec![
-                    Cell::new(entry.month.clone()),
-                    Cell::new(models_col),
-                    Cell::new(format_tokens_with_commas(entry.input))
-                        .set_alignment(CellAlignment::Right),
-                    Cell::new(format_tokens_with_commas(entry.output))
-                        .set_alignment(CellAlignment::Right),
-                    Cell::new(format_currency(entry.cost)).set_alignment(CellAlignment::Right),
-                ]);
-            }
-
-            let total_input = checked_token_sum(report.entries.iter().map(|entry| entry.input));
-            let total_output = checked_token_sum(report.entries.iter().map(|entry| entry.output));
-            table.add_row(vec![
-                Cell::new("Total")
-                    .fg(Color::Yellow)
-                    .add_attribute(Attribute::Bold),
-                Cell::new(""),
-                Cell::new(format_tokens_with_commas(total_input))
-                    .fg(Color::Yellow)
-                    .set_alignment(CellAlignment::Right),
-                Cell::new(format_tokens_with_commas(total_output))
-                    .fg(Color::Yellow)
-                    .set_alignment(CellAlignment::Right),
-                Cell::new(format_currency(report.total_cost))
-                    .fg(Color::Yellow)
-                    .set_alignment(CellAlignment::Right),
-            ]);
-        } else {
-            table.set_header(vec![
-                Cell::new("Month").fg(Color::Cyan),
-                Cell::new("Models").fg(Color::Cyan),
-                Cell::new("Input").fg(Color::Cyan),
-                Cell::new("Output").fg(Color::Cyan),
-                Cell::new("Cache Write").fg(Color::Cyan),
-                Cell::new("Cache Read").fg(Color::Cyan),
+                Cell::new("Reasoning").fg(Color::Cyan),
                 Cell::new("Total").fg(Color::Cyan),
                 Cell::new("Cost").fg(Color::Cyan),
             ]);
@@ -217,6 +170,88 @@ pub(crate) fn run_monthly_report(
                     entry.output,
                     entry.cache_write,
                     entry.cache_read,
+                    entry.reasoning,
+                ]);
+                table.add_row(vec![
+                    Cell::new(entry.month.clone()),
+                    Cell::new(models_col),
+                    Cell::new(format_tokens_with_commas(entry.input))
+                        .set_alignment(CellAlignment::Right),
+                    Cell::new(format_tokens_with_commas(entry.output))
+                        .set_alignment(CellAlignment::Right),
+                    Cell::new(format_tokens_with_commas(entry.reasoning))
+                        .set_alignment(CellAlignment::Right),
+                    Cell::new(format_tokens_with_commas(total)).set_alignment(CellAlignment::Right),
+                    Cell::new(format_currency(entry.cost)).set_alignment(CellAlignment::Right),
+                ]);
+            }
+
+            let total_input = checked_token_sum(report.entries.iter().map(|entry| entry.input));
+            let total_output = checked_token_sum(report.entries.iter().map(|entry| entry.output));
+            let total_reasoning =
+                checked_token_sum(report.entries.iter().map(|entry| entry.reasoning));
+            let total_cache_write =
+                checked_token_sum(report.entries.iter().map(|entry| entry.cache_write));
+            let total_cache_read =
+                checked_token_sum(report.entries.iter().map(|entry| entry.cache_read));
+            let total_all = checked_token_sum([
+                total_input,
+                total_output,
+                total_cache_write,
+                total_cache_read,
+                total_reasoning,
+            ]);
+            table.add_row(vec![
+                Cell::new("Total")
+                    .fg(Color::Yellow)
+                    .add_attribute(Attribute::Bold),
+                Cell::new(""),
+                Cell::new(format_tokens_with_commas(total_input))
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
+                Cell::new(format_tokens_with_commas(total_output))
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
+                Cell::new(format_tokens_with_commas(total_reasoning))
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
+                Cell::new(format_tokens_with_commas(total_all))
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
+                Cell::new(format_currency(report.total_cost))
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
+            ]);
+        } else {
+            table.set_header(vec![
+                Cell::new("Month").fg(Color::Cyan),
+                Cell::new("Models").fg(Color::Cyan),
+                Cell::new("Input").fg(Color::Cyan),
+                Cell::new("Output").fg(Color::Cyan),
+                Cell::new("Reasoning").fg(Color::Cyan),
+                Cell::new("Cache Write").fg(Color::Cyan),
+                Cell::new("Cache Read").fg(Color::Cyan),
+                Cell::new("Total").fg(Color::Cyan),
+                Cell::new("Cost").fg(Color::Cyan),
+            ]);
+
+            for entry in &report.entries {
+                let models_col = if entry.models.is_empty() {
+                    "-".to_string()
+                } else {
+                    let unique_models = formatted_unique_model_names(&entry.models);
+                    unique_models
+                        .iter()
+                        .map(|m| format!("- {}", m))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                let total = checked_token_sum([
+                    entry.input,
+                    entry.output,
+                    entry.reasoning,
+                    entry.cache_write,
+                    entry.cache_read,
                 ]);
 
                 table.add_row(vec![
@@ -225,6 +260,8 @@ pub(crate) fn run_monthly_report(
                     Cell::new(format_tokens_with_commas(entry.input))
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(entry.output))
+                        .set_alignment(CellAlignment::Right),
+                    Cell::new(format_tokens_with_commas(entry.reasoning))
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(entry.cache_write))
                         .set_alignment(CellAlignment::Right),
@@ -237,6 +274,8 @@ pub(crate) fn run_monthly_report(
 
             let total_input = checked_token_sum(report.entries.iter().map(|entry| entry.input));
             let total_output = checked_token_sum(report.entries.iter().map(|entry| entry.output));
+            let total_reasoning =
+                checked_token_sum(report.entries.iter().map(|entry| entry.reasoning));
             let total_cache_write =
                 checked_token_sum(report.entries.iter().map(|entry| entry.cache_write));
             let total_cache_read =
@@ -244,6 +283,7 @@ pub(crate) fn run_monthly_report(
             let total_all = checked_token_sum([
                 total_input,
                 total_output,
+                total_reasoning,
                 total_cache_write,
                 total_cache_read,
             ]);
@@ -257,6 +297,9 @@ pub(crate) fn run_monthly_report(
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
                 Cell::new(format_tokens_with_commas(total_output))
+                    .fg(Color::Yellow)
+                    .set_alignment(CellAlignment::Right),
+                Cell::new(format_tokens_with_commas(total_reasoning))
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
                 Cell::new(format_tokens_with_commas(total_cache_write))

@@ -2206,6 +2206,7 @@ fn test_monthly_json_output() {
     assert!(first.get("output").is_some());
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
+    assert!(first.get("reasoning").is_some());
     assert!(first.get("messageCount").is_some());
     assert!(first.get("cost").is_some());
 }
@@ -2412,6 +2413,49 @@ fn test_models_total_includes_split_reasoning_tokens() {
         stdout.contains("Total: 1 messages, 165 tokens"),
         "unexpected output: {stdout}"
     );
+}
+
+#[test]
+fn test_monthly_report_preserves_split_reasoning_tokens() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+    let sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("monthly-reasoning.jsonl"),
+        concat!(
+            r#"{"type":"session","id":"monthly-reasoning-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"monthly-reasoning-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let json_output = cmd_with_home(base)
+        .args(["monthly", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        json_output.status.success(),
+        "command failed: {json_output:?}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(json["entries"][0]["output"], 25);
+    assert_eq!(json["entries"][0]["reasoning"], 25);
+
+    let table_output = cmd_with_home(base)
+        .args(["monthly", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        table_output.status.success(),
+        "command failed: {table_output:?}"
+    );
+    let stdout = String::from_utf8(table_output.stdout).unwrap();
+    assert!(stdout.contains("Reasoning"), "unexpected output: {stdout}");
+    assert!(stdout.contains("165"), "unexpected output: {stdout}");
 }
 
 #[test]

@@ -226,6 +226,7 @@ pub(super) struct MonthAcc {
     output: i64,
     cache_read: i64,
     cache_write: i64,
+    reasoning: i64,
     message_count: i32,
     cost: f64,
 }
@@ -247,6 +248,7 @@ impl MonthAcc {
         self.output = checked_token_add(self.output, msg.tokens.output);
         self.cache_read = checked_token_add(self.cache_read, msg.tokens.cache_read);
         self.cache_write = checked_token_add(self.cache_write, msg.tokens.cache_write);
+        self.reasoning = checked_token_add(self.reasoning, msg.tokens.reasoning);
         self.message_count += msg.message_count.max(0);
         self.cost += msg.cost;
     }
@@ -274,6 +276,7 @@ pub(super) fn finish_month_map(month_map: HashMap<String, MonthAcc>) -> Vec<Mont
             output: agg.output,
             cache_read: agg.cache_read,
             cache_write: agg.cache_write,
+            reasoning: agg.reasoning,
             message_count: agg.message_count,
             cost: agg.cost,
         })
