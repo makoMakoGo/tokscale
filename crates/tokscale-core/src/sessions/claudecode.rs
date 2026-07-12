@@ -172,7 +172,7 @@ fn resolve_subagent_name(
             ));
         }
         return Ok(normalize_claude_agent_label(agent_type)
-            .unwrap_or_else(|| super::normalize_agent_name(agent_type)));
+            .unwrap_or_else(|| "Claude Subagent".to_string()));
     }
 
     // Tier 2: parent session tool_use inference
@@ -194,7 +194,7 @@ fn resolve_subagent_name(
                     ));
                 }
                 return Ok(normalize_claude_agent_label(subagent_type)
-                    .unwrap_or_else(|| super::normalize_agent_name(subagent_type)));
+                    .unwrap_or_else(|| "Claude Subagent".to_string()));
             }
         }
     }
@@ -3164,7 +3164,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sidechain_temporary_meta_agent_type_preserves_custom_identity() {
+    fn test_sidechain_temporary_meta_agent_type_uses_generic_identity() {
         let jsonl = r#"{"type":"user","isSidechain":true,"sessionId":"parent-temp-001","agentId":"temp1","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Scan auth"}}
 {"type":"assistant","isSidechain":true,"sessionId":"parent-temp-001","agentId":"temp1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_temp","message":{"id":"msg_temp","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
         let meta = r#"{"agentType":"auth-scanner"}"#;
@@ -3179,7 +3179,7 @@ mod tests {
         let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent.as_deref(), Some("Auth Scanner"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Claude Subagent"));
     }
 
     #[test]
@@ -3298,8 +3298,8 @@ mod tests {
         assert_eq!(total_cache_write, 150, "cache_write: 100 + 50");
 
         // Both messages should have the same agent
-        assert_eq!(messages[0].agent.as_deref(), Some("Code Reviewer"));
-        assert_eq!(messages[1].agent.as_deref(), Some("Code Reviewer"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Claude Subagent"));
+        assert_eq!(messages[1].agent.as_deref(), Some("Claude Subagent"));
     }
 
     #[test]
@@ -3362,8 +3362,8 @@ mod tests {
         );
         assert_eq!(
             messages[0].agent,
-            Some("Architect".into()),
-            "Deduped message should retain the custom agent identity"
+            Some("Claude Subagent".into()),
+            "Deduped message should retain the generic agent identity"
         );
         assert_eq!(messages[0].session_id.as_ref(), "parent-dedup");
     }
@@ -3437,8 +3437,8 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Document Specialist".into()),
-            "Tier 2 should retain custom parent subagent identity"
+            Some("Claude Subagent".into()),
+            "Tier 2 should collapse custom parent subagent identities"
         );
         assert_eq!(messages[0].session_id.as_ref(), parent_session_id);
     }
