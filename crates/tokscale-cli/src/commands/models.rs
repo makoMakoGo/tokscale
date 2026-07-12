@@ -25,13 +25,16 @@ fn checked_token_total(tokens: impl IntoIterator<Item = i64>) -> i64 {
         .expect("displayed model token total exceeds i64::MAX")
 }
 
+fn displayed_output(entry: &tokscale_core::ModelUsage) -> i64 {
+    checked_token_total([entry.output, entry.reasoning])
+}
+
 fn displayed_token_total(entry: &tokscale_core::ModelUsage) -> i64 {
     checked_token_total([
         entry.input,
-        entry.output,
+        displayed_output(entry),
         entry.cache_read,
         entry.cache_write,
-        entry.reasoning,
     ])
 }
 
@@ -129,12 +132,12 @@ pub(crate) fn run_models_report(
         })
         .unwrap_or_default();
     let total_reasoning = checked_token_total(report.entries.iter().map(|entry| entry.reasoning));
+    let displayed_total_output = checked_token_total([report.total_output, total_reasoning]);
     let report_token_total = checked_token_total([
         report.total_input,
-        report.total_output,
+        displayed_total_output,
         report.total_cache_read,
         report.total_cache_write,
-        total_reasoning,
     ]);
 
     if json {
@@ -155,7 +158,6 @@ pub(crate) fn run_models_report(
             output: i64,
             cache_read: i64,
             cache_write: i64,
-            reasoning: i64,
             message_count: i32,
             cost: f64,
             performance: tokscale_core::ModelPerformance,
@@ -170,7 +172,6 @@ pub(crate) fn run_models_report(
             total_output: i64,
             total_cache_read: i64,
             total_cache_write: i64,
-            total_reasoning: i64,
             total_tokens: i64,
             total_messages: i32,
             total_cost: f64,
@@ -186,45 +187,47 @@ pub(crate) fn run_models_report(
             entries: report
                 .entries
                 .into_iter()
-                .map(|e| ModelUsageJson {
-                    workspace_key: if group_by == GroupBy::WorkspaceModel {
-                        Some(
-                            e.workspace_key
-                                .map(serde_json::Value::String)
-                                .unwrap_or(serde_json::Value::Null),
-                        )
-                    } else {
-                        None
-                    },
-                    workspace_label: if group_by == GroupBy::WorkspaceModel {
-                        e.workspace_label
-                    } else {
-                        None
-                    },
-                    session_id: if matches!(group_by, GroupBy::Session | GroupBy::ClientSession) {
-                        e.session_id
-                    } else {
-                        None
-                    },
-                    client: e.client,
-                    merged_clients: e.merged_clients,
-                    model: e.model,
-                    provider: e.provider,
-                    input: e.input,
-                    output: e.output,
-                    cache_read: e.cache_read,
-                    cache_write: e.cache_write,
-                    reasoning: e.reasoning,
-                    message_count: e.message_count,
-                    cost: e.cost,
-                    performance: e.performance,
+                .map(|e| {
+                    let output = displayed_output(&e);
+                    ModelUsageJson {
+                        workspace_key: if group_by == GroupBy::WorkspaceModel {
+                            Some(
+                                e.workspace_key
+                                    .map(serde_json::Value::String)
+                                    .unwrap_or(serde_json::Value::Null),
+                            )
+                        } else {
+                            None
+                        },
+                        workspace_label: if group_by == GroupBy::WorkspaceModel {
+                            e.workspace_label
+                        } else {
+                            None
+                        },
+                        session_id: if matches!(group_by, GroupBy::Session | GroupBy::ClientSession)
+                        {
+                            e.session_id
+                        } else {
+                            None
+                        },
+                        client: e.client,
+                        merged_clients: e.merged_clients,
+                        model: e.model,
+                        provider: e.provider,
+                        input: e.input,
+                        output,
+                        cache_read: e.cache_read,
+                        cache_write: e.cache_write,
+                        message_count: e.message_count,
+                        cost: e.cost,
+                        performance: e.performance,
+                    }
                 })
                 .collect(),
             total_input: report.total_input,
-            total_output: report.total_output,
+            total_output: displayed_total_output,
             total_cache_read: report.total_cache_read,
             total_cache_write: report.total_cache_write,
-            total_reasoning,
             total_tokens: report_token_total,
             total_messages: report.total_messages,
             total_cost: report.total_cost,
@@ -279,7 +282,7 @@ pub(crate) fn run_models_report(
                             Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.output))
+                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
@@ -297,7 +300,7 @@ pub(crate) fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_input))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_output))
+                        Cell::new(format_tokens_with_commas(displayed_total_output))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
@@ -327,7 +330,7 @@ pub(crate) fn run_models_report(
                             Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.output))
+                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
                                 .set_alignment(CellAlignment::Right),
@@ -345,7 +348,7 @@ pub(crate) fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_input))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_output))
+                        Cell::new(format_tokens_with_commas(displayed_total_output))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
@@ -480,7 +483,7 @@ pub(crate) fn run_models_report(
                             Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.output))
+                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.cache_write))
                                 .set_alignment(CellAlignment::Right),
@@ -504,7 +507,7 @@ pub(crate) fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_input))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_output))
+                        Cell::new(format_tokens_with_commas(displayed_total_output))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_tokens_with_commas(report.total_cache_write))
@@ -558,7 +561,7 @@ pub(crate) fn run_models_report(
                             Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.output))
+                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(total))
                                 .set_alignment(CellAlignment::Right),
@@ -584,7 +587,7 @@ pub(crate) fn run_models_report(
                             .set_alignment(CellAlignment::Right),
                     );
                     total_row.push(
-                        Cell::new(format_tokens_with_commas(report.total_output))
+                        Cell::new(format_tokens_with_commas(displayed_total_output))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                     );
@@ -628,7 +631,7 @@ pub(crate) fn run_models_report(
                             ))),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.output))
+                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.cache_write))
                                 .set_alignment(CellAlignment::Right),
@@ -653,7 +656,7 @@ pub(crate) fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_input))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_output))
+                        Cell::new(format_tokens_with_commas(displayed_total_output))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_tokens_with_commas(report.total_cache_write))
@@ -701,7 +704,7 @@ pub(crate) fn run_models_report(
                             Cell::new(truncate_model_display_name(&entry.model)),
                             Cell::new(format_tokens_with_commas(entry.input))
                                 .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.output))
+                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
                                 .set_alignment(CellAlignment::Right),
                             Cell::new(format_tokens_with_commas(entry.cache_write))
                                 .set_alignment(CellAlignment::Right),
@@ -726,7 +729,7 @@ pub(crate) fn run_models_report(
                         Cell::new(format_tokens_with_commas(report.total_input))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_output))
+                        Cell::new(format_tokens_with_commas(displayed_total_output))
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                         Cell::new(format_tokens_with_commas(report.total_cache_write))

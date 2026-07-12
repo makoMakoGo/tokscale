@@ -1864,8 +1864,8 @@ fn test_models_json_output() {
         "Missing totalCacheWrite"
     );
     assert!(
-        json.get("totalReasoning").is_some(),
-        "Missing totalReasoning"
+        json.get("totalReasoning").is_none(),
+        "JSON report must fold reasoning into totalOutput"
     );
     assert!(json.get("totalTokens").is_some(), "Missing totalTokens");
     assert!(json.get("totalMessages").is_some(), "Missing totalMessages");
@@ -1885,6 +1885,10 @@ fn test_models_json_output() {
     assert!(first.get("output").is_some());
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
+    assert!(
+        first.get("reasoning").is_none(),
+        "JSON report must fold reasoning into output"
+    );
     assert!(first.get("cost").is_some());
     let performance = first
         .get("performance")
@@ -2206,7 +2210,10 @@ fn test_monthly_json_output() {
     assert!(first.get("output").is_some());
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
-    assert!(first.get("reasoning").is_some());
+    assert!(
+        first.get("reasoning").is_none(),
+        "JSON report must fold reasoning into output"
+    );
     assert!(first.get("messageCount").is_some());
     assert!(first.get("cost").is_some());
 }
@@ -2369,7 +2376,7 @@ fn test_models_group_by_default() {
 }
 
 #[test]
-fn test_models_total_includes_split_reasoning_tokens() {
+fn test_models_reports_project_reasoning_into_output() {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
     prime_pricing_cache(base);
@@ -2395,9 +2402,10 @@ fn test_models_total_includes_split_reasoning_tokens() {
         "command failed: {json_output:?}"
     );
     let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(json["entries"][0]["output"], 25);
-    assert_eq!(json["entries"][0]["reasoning"], 25);
-    assert_eq!(json["totalReasoning"], 25);
+    assert_eq!(json["entries"][0]["output"], 50);
+    assert!(json["entries"][0].get("reasoning").is_none());
+    assert_eq!(json["totalOutput"], 50);
+    assert!(json.get("totalReasoning").is_none());
     assert_eq!(json["totalTokens"], 165);
 
     let table_output = cmd_with_home(base)
@@ -2409,6 +2417,12 @@ fn test_models_total_includes_split_reasoning_tokens() {
         "command failed: {table_output:?}"
     );
     let stdout = String::from_utf8(table_output.stdout).unwrap();
+    assert!(!stdout.contains("Reasoning"), "unexpected output: {stdout}");
+    let model_row = stdout
+        .lines()
+        .find(|line| line.contains("gpt-5.5"))
+        .expect("model row");
+    assert!(model_row.contains(" 50 "), "unexpected row: {model_row}");
     assert!(
         stdout.contains("Total: 1 messages, 165 tokens"),
         "unexpected output: {stdout}"
@@ -2416,7 +2430,7 @@ fn test_models_total_includes_split_reasoning_tokens() {
 }
 
 #[test]
-fn test_monthly_report_preserves_split_reasoning_tokens() {
+fn test_monthly_reports_project_reasoning_into_output() {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
     prime_pricing_cache(base);
@@ -2442,8 +2456,8 @@ fn test_monthly_report_preserves_split_reasoning_tokens() {
         "command failed: {json_output:?}"
     );
     let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(json["entries"][0]["output"], 25);
-    assert_eq!(json["entries"][0]["reasoning"], 25);
+    assert_eq!(json["entries"][0]["output"], 50);
+    assert!(json["entries"][0].get("reasoning").is_none());
 
     let table_output = cmd_with_home(base)
         .args(["monthly", "--client", "omp", "--no-spinner"])
@@ -2454,7 +2468,12 @@ fn test_monthly_report_preserves_split_reasoning_tokens() {
         "command failed: {table_output:?}"
     );
     let stdout = String::from_utf8(table_output.stdout).unwrap();
-    assert!(stdout.contains("Reasoning"), "unexpected output: {stdout}");
+    assert!(!stdout.contains("Reasoning"), "unexpected output: {stdout}");
+    let month_row = stdout
+        .lines()
+        .find(|line| line.contains("2026-01"))
+        .expect("monthly row");
+    assert!(month_row.contains(" 50 "), "unexpected row: {month_row}");
     assert!(stdout.contains("165"), "unexpected output: {stdout}");
 }
 
@@ -2483,9 +2502,10 @@ fn test_models_report_clamps_reasoning_above_output() {
     assert!(output.status.success(), "command failed: {output:?}");
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["entries"][0]["output"], 0);
-    assert_eq!(json["entries"][0]["reasoning"], 50);
-    assert_eq!(json["totalReasoning"], 50);
+    assert_eq!(json["entries"][0]["output"], 50);
+    assert!(json["entries"][0].get("reasoning").is_none());
+    assert_eq!(json["totalOutput"], 50);
+    assert!(json.get("totalReasoning").is_none());
     assert_eq!(json["totalTokens"], 165);
     assert!(json.get("warnings").is_none());
 }

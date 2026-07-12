@@ -18,13 +18,16 @@ fn checked_token_sum(values: impl IntoIterator<Item = i64>) -> i64 {
         .expect("monthly token total exceeds i64::MAX")
 }
 
+fn displayed_output(entry: &tokscale_core::MonthlyUsage) -> i64 {
+    checked_token_sum([entry.output, entry.reasoning])
+}
+
 fn monthly_token_total(entry: &tokscale_core::MonthlyUsage) -> i64 {
     checked_token_sum([
         entry.input,
-        entry.output,
+        displayed_output(entry),
         entry.cache_read,
         entry.cache_write,
-        entry.reasoning,
     ])
 }
 
@@ -98,7 +101,6 @@ pub(crate) fn run_monthly_report(
             output: i64,
             cache_read: i64,
             cache_write: i64,
-            reasoning: i64,
             message_count: i32,
             cost: f64,
         }
@@ -117,16 +119,18 @@ pub(crate) fn run_monthly_report(
             entries: report
                 .entries
                 .into_iter()
-                .map(|e| MonthlyUsageJson {
-                    month: e.month,
-                    models: e.models,
-                    input: e.input,
-                    output: e.output,
-                    cache_read: e.cache_read,
-                    cache_write: e.cache_write,
-                    reasoning: e.reasoning,
-                    message_count: e.message_count,
-                    cost: e.cost,
+                .map(|e| {
+                    let output = displayed_output(&e);
+                    MonthlyUsageJson {
+                        month: e.month,
+                        models: e.models,
+                        input: e.input,
+                        output,
+                        cache_read: e.cache_read,
+                        cache_write: e.cache_write,
+                        message_count: e.message_count,
+                        cost: e.cost,
+                    }
                 })
                 .collect(),
             total_cost: report.total_cost,
@@ -144,18 +148,16 @@ pub(crate) fn run_monthly_report(
             .unwrap_or(120);
         let compact = term_width < 100;
         let total_input = checked_token_sum(report.entries.iter().map(|entry| entry.input));
-        let total_output = checked_token_sum(report.entries.iter().map(|entry| entry.output));
+        let total_output = checked_token_sum(report.entries.iter().map(displayed_output));
         let total_cache_read =
             checked_token_sum(report.entries.iter().map(|entry| entry.cache_read));
         let total_cache_write =
             checked_token_sum(report.entries.iter().map(|entry| entry.cache_write));
-        let total_reasoning = checked_token_sum(report.entries.iter().map(|entry| entry.reasoning));
         let total_all = checked_token_sum([
             total_input,
             total_output,
             total_cache_read,
             total_cache_write,
-            total_reasoning,
         ]);
 
         let mut table = Table::new();
@@ -173,7 +175,6 @@ pub(crate) fn run_monthly_report(
                 Cell::new("Models").fg(Color::Cyan),
                 Cell::new("Input").fg(Color::Cyan),
                 Cell::new("Output").fg(Color::Cyan),
-                Cell::new("Reasoning").fg(Color::Cyan),
                 Cell::new("Total").fg(Color::Cyan),
                 Cell::new("Cost").fg(Color::Cyan),
             ]);
@@ -195,9 +196,7 @@ pub(crate) fn run_monthly_report(
                     Cell::new(models_col),
                     Cell::new(format_tokens_with_commas(entry.input))
                         .set_alignment(CellAlignment::Right),
-                    Cell::new(format_tokens_with_commas(entry.output))
-                        .set_alignment(CellAlignment::Right),
-                    Cell::new(format_tokens_with_commas(entry.reasoning))
+                    Cell::new(format_tokens_with_commas(displayed_output(entry)))
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(total)).set_alignment(CellAlignment::Right),
                     Cell::new(format_currency(entry.cost)).set_alignment(CellAlignment::Right),
@@ -215,9 +214,6 @@ pub(crate) fn run_monthly_report(
                 Cell::new(format_tokens_with_commas(total_output))
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
-                Cell::new(format_tokens_with_commas(total_reasoning))
-                    .fg(Color::Yellow)
-                    .set_alignment(CellAlignment::Right),
                 Cell::new(format_tokens_with_commas(total_all))
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
@@ -231,7 +227,6 @@ pub(crate) fn run_monthly_report(
                 Cell::new("Models").fg(Color::Cyan),
                 Cell::new("Input").fg(Color::Cyan),
                 Cell::new("Output").fg(Color::Cyan),
-                Cell::new("Reasoning").fg(Color::Cyan),
                 Cell::new("Cache Write").fg(Color::Cyan),
                 Cell::new("Cache Read").fg(Color::Cyan),
                 Cell::new("Total").fg(Color::Cyan),
@@ -256,9 +251,7 @@ pub(crate) fn run_monthly_report(
                     Cell::new(models_col),
                     Cell::new(format_tokens_with_commas(entry.input))
                         .set_alignment(CellAlignment::Right),
-                    Cell::new(format_tokens_with_commas(entry.output))
-                        .set_alignment(CellAlignment::Right),
-                    Cell::new(format_tokens_with_commas(entry.reasoning))
+                    Cell::new(format_tokens_with_commas(displayed_output(entry)))
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(entry.cache_write))
                         .set_alignment(CellAlignment::Right),
@@ -278,9 +271,6 @@ pub(crate) fn run_monthly_report(
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
                 Cell::new(format_tokens_with_commas(total_output))
-                    .fg(Color::Yellow)
-                    .set_alignment(CellAlignment::Right),
-                Cell::new(format_tokens_with_commas(total_reasoning))
                     .fg(Color::Yellow)
                     .set_alignment(CellAlignment::Right),
                 Cell::new(format_tokens_with_commas(total_cache_write))
