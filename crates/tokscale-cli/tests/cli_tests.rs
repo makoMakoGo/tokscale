@@ -2478,6 +2478,52 @@ fn test_monthly_reports_project_reasoning_into_output() {
 }
 
 #[test]
+fn test_hourly_reports_project_reasoning_into_output() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+    let sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("hourly-reasoning.jsonl"),
+        concat!(
+            r#"{"type":"session","id":"hourly-reasoning-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"hourly-reasoning-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let json_output = cmd_with_home(base)
+        .args(["hourly", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        json_output.status.success(),
+        "command failed: {json_output:?}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(json["entries"][0]["output"], 50);
+    assert!(json["entries"][0].get("reasoning").is_none());
+
+    let table_output = cmd_with_home(base)
+        .args(["hourly", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        table_output.status.success(),
+        "command failed: {table_output:?}"
+    );
+    let stdout = String::from_utf8(table_output.stdout).unwrap();
+    let hour_row = stdout
+        .lines()
+        .find(|line| line.contains("OMP"))
+        .expect("hourly row");
+    assert!(hour_row.contains(" 50 "), "unexpected row: {hour_row}");
+}
+
+#[test]
 fn test_models_report_clamps_reasoning_above_output() {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();

@@ -606,7 +606,8 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         Cell::from(format_tokens(row.tokens.input)).style(metric_input_style)
                     }
                     PeriodDetailColumn::Output => {
-                        Cell::from(format_tokens(row.tokens.output)).style(metric_output_style)
+                        Cell::from(format_tokens(row.tokens.displayed_output()))
+                            .style(metric_output_style)
                     }
                     PeriodDetailColumn::CacheRead => {
                         Cell::from(format_tokens(row.tokens.cache_read))
@@ -864,9 +865,8 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
                 PeriodColumn::Input => {
                     Cell::from(format_tokens(period.tokens.input)).style(metric_input_style)
                 }
-                PeriodColumn::Output => {
-                    Cell::from(format_tokens(period.tokens.output)).style(metric_output_style)
-                }
+                PeriodColumn::Output => Cell::from(format_tokens(period.tokens.displayed_output()))
+                    .style(metric_output_style),
                 PeriodColumn::CacheRead => Cell::from(format_tokens(period.tokens.cache_read))
                     .style(metric_cache_read_style),
                 PeriodColumn::CacheWrite => Cell::from(format_tokens(period.tokens.cache_write))

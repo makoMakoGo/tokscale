@@ -346,9 +346,8 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 HourlyColumn::Input => {
                     Cell::from(format_tokens(hour.tokens.input)).style(metric_input_style)
                 }
-                HourlyColumn::Output => {
-                    Cell::from(format_tokens(hour.tokens.output)).style(metric_output_style)
-                }
+                HourlyColumn::Output => Cell::from(format_tokens(hour.tokens.displayed_output()))
+                    .style(metric_output_style),
                 HourlyColumn::CacheRead => {
                     Cell::from(format_tokens(hour.tokens.cache_read)).style(metric_cache_read_style)
                 }
@@ -604,6 +603,30 @@ mod tests {
         );
         assert!(body.contains("05/29"), "expected 05/29 separator\n{body}");
         assert!(body.contains("05/28"), "expected 05/28 separator\n{body}");
+    }
+
+    #[test]
+    fn rendered_output_includes_reasoning_once() {
+        let mut app = make_hourly_app(180);
+        app.data.hourly.truncate(1);
+        app.data.hourly[0].tokens = TokenBreakdown {
+            input: 100,
+            output: 25,
+            cache_read: 10,
+            cache_write: 5,
+            reasoning: 25,
+        };
+
+        let body = render_lines(&mut app, 180, 8).join("\n");
+
+        assert!(
+            body.contains("50"),
+            "Output should include reasoning\n{body}"
+        );
+        assert!(
+            body.contains("165"),
+            "Total should count every bucket once\n{body}"
+        );
     }
 
     #[test]

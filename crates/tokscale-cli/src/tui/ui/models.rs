@@ -236,7 +236,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         Cell::from(format_tokens(model.tokens.input)).style(metric_input_style)
                     }
                     ModelsColumn::Output => {
-                        Cell::from(format_tokens(model.tokens.output)).style(metric_output_style)
+                        Cell::from(format_tokens(model.tokens.displayed_output()))
+                            .style(metric_output_style)
                     }
                     ModelsColumn::CacheRead => Cell::from(format_tokens(model.tokens.cache_read))
                         .style(metric_cache_read_style),
