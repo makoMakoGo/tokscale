@@ -995,7 +995,7 @@ fn test_normalize_model_for_grouping() {
     );
     assert_eq!(
         normalize_model_for_grouping("claude-sonnet-4-free-thinking"),
-        "claude-sonnet-4-thinking"
+        "claude-sonnet-4"
     );
     assert_eq!(
         normalize_model_for_grouping("deepseek-v4 (free)"),
@@ -1075,6 +1075,50 @@ fn test_normalize_model_for_grouping() {
         normalize_model_for_grouping("gpt-5.1-codex-max-xhigh"),
         "gpt-5.1-codex-max"
     );
+}
+
+#[test]
+fn test_normalize_model_for_grouping_canonicalizes_gpt_5_6_family_efforts() {
+    let cases = [
+        ("custom:gpt-5.6-sol-high", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-sol-xhigh", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-sol-max", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-terra-xhigh", "gpt-5.6-terra"),
+        ("custom:gpt-5.6-terra-max", "gpt-5.6-terra"),
+        ("custom:gpt-5.6-luna-medium", "gpt-5.6-luna"),
+        ("custom:gpt-5.6-luna-max", "gpt-5.6-luna"),
+    ];
+
+    for (raw, expected) in cases {
+        assert_eq!(normalize_model_for_grouping(raw), expected);
+    }
+}
+
+#[test]
+fn test_normalize_model_for_grouping_canonicalizes_gpt_5_6_sol_alias() {
+    let cases = [
+        "gpt-5.6",
+        "gpt-5.6-high",
+        "gpt-5.6-max",
+        "gpt-5.6(max)",
+        "custom:gpt-5.6-max",
+        "gpt-5.6-sol-max",
+        "gpt-5.6-free",
+        "gpt-5.6:free",
+        "gpt-5.6 (free)",
+        "gpt-5.6-2607",
+        "gpt-5.6-high-free",
+    ];
+
+    for raw in cases {
+        let canonical = normalize_model_for_grouping(raw);
+        assert_eq!(canonical, "gpt-5.6-sol", "raw model: {raw}");
+        assert_eq!(
+            normalize_model_for_grouping(&canonical),
+            canonical,
+            "raw model: {raw}"
+        );
+    }
 }
 
 #[test]
@@ -3964,6 +4008,82 @@ fn test_apply_token_pricing_clears_existing_cost_without_pricing() {
     apply_token_pricing(&mut msg, None);
 
     assert_eq!(msg.cost, 0.0);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_prices_canonical_gpt_5_6_factory_model() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let source_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+    let session_dir = source_home.path().join(".factory/sessions/workspace");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(
+        session_dir.join("factory-session.settings.json"),
+        r#"{
+            "model": "custom:gpt-5.6-max",
+            "reasoningEffort": "max",
+            "providerLock": "openai",
+            "providerLockTimestamp": "2026-07-11T13:38:03.820Z",
+            "tokenUsage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "thinkingTokens": 2
+            }
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        session_dir.join("factory-sol.settings.json"),
+        r#"{
+            "model": "custom:gpt-5.6-sol-xhigh",
+            "reasoningEffort": "xhigh",
+            "providerLock": "openai",
+            "providerLockTimestamp": "2026-07-11T13:39:03.820Z",
+            "tokenUsage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "thinkingTokens": 2
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-5.6-sol".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+    let cold_messages = parse_all_messages_with_pricing(
+        source_home.path().to_str().unwrap(),
+        &["droid".to_string()],
+        Some(&pricing),
+    )
+    .unwrap();
+    let warm_messages = parse_all_messages_with_pricing(
+        source_home.path().to_str().unwrap(),
+        &["droid".to_string()],
+        Some(&pricing),
+    )
+    .unwrap();
+
+    assert_eq!(cold_messages, warm_messages);
+    assert_eq!(warm_messages.len(), 2);
+    assert!(warm_messages
+        .iter()
+        .all(|message| message.model_id.as_ref() == "gpt-5.6-sol"));
+    assert!(warm_messages
+        .iter()
+        .all(|message| message.provider_id.as_ref() == "openai"));
+    assert!(warm_messages
+        .iter()
+        .all(|message| message.tokens.reasoning == 2));
+    assert!(warm_messages.iter().all(|message| message.cost == 0.024));
 }
 
 #[test]

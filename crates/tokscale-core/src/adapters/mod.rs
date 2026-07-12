@@ -35,7 +35,7 @@ pub(crate) use error::{
     SourceDiscoveryError, SourceParseError, SourcePipelineError, SourcePlanningError,
 };
 
-pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 2;
+pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 3;
 pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
 pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =

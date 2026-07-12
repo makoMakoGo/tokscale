@@ -286,32 +286,18 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         total_messages += day.totals.messages;
 
         for client_contrib in &day.clients {
-            let model_name = format_model_name(&client_contrib.model_id);
-            let provider = get_provider_from_model(&client_contrib.model_id);
-            let model_entry =
-                model_map
-                    .entry(model_name.clone())
-                    .or_insert_with(|| WrappedRankedEntry {
-                        name: model_name,
-                        client_id: None,
-                        provider,
-                        cost: 0.0,
-                        tokens: 0,
-                    });
-            if model_entry.provider.is_none() {
-                model_entry.provider = provider;
-            }
-            model_entry.cost += client_contrib.cost;
             let contribution_tokens = checked_token_sum([
                 client_contrib.tokens.input,
                 client_contrib.tokens.output,
                 client_contrib.tokens.cache_read,
                 client_contrib.tokens.cache_write,
             ]);
-            model_entry.tokens = model_entry
-                .tokens
-                .checked_add(contribution_tokens)
-                .expect("wrapped model token total exceeds i64::MAX");
+            accumulate_wrapped_model(
+                &mut model_map,
+                &client_contrib.model_id,
+                client_contrib.cost,
+                contribution_tokens,
+            );
 
             let client_name = client_display_name(&client_contrib.client)
                 .unwrap_or(client_contrib.client.as_str())
@@ -390,6 +376,28 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         contributions,
         total_messages,
     })
+}
+
+fn accumulate_wrapped_model(
+    model_map: &mut HashMap<String, WrappedRankedEntry>,
+    model_id: &str,
+    cost: f64,
+    tokens: i64,
+) {
+    let model_entry = model_map
+        .entry(model_id.to_string())
+        .or_insert_with(|| WrappedRankedEntry {
+            name: format_model_name(model_id),
+            client_id: None,
+            provider: get_provider_from_model(model_id),
+            cost: 0.0,
+            tokens: 0,
+        });
+    model_entry.cost += cost;
+    model_entry.tokens = model_entry
+        .tokens
+        .checked_add(tokens)
+        .expect("wrapped model token total exceeds i64::MAX");
 }
 
 fn build_top_agents(agent_usage: &[tokscale_core::AgentUsage]) -> Vec<WrappedAgentEntry> {
@@ -1593,6 +1601,9 @@ fn format_gpt_5_series_model_name(model: &str, suffix: &str) -> Option<String> {
             "codex" => display.push_str(" Codex"),
             "max" => display.push_str(" Max"),
             "spark" => display.push_str(" Spark"),
+            "sol" => display.push_str(" Sol"),
+            "terra" => display.push_str(" Terra"),
+            "luna" => display.push_str(" Luna"),
             "chat" => display.push_str(" Chat"),
             "preview" => display.push_str(" Preview"),
             "latest" => display.push_str(" Latest"),
@@ -1992,6 +2003,37 @@ mod tests {
     }
 
     // ========== format_model_name tests ==========
+
+    #[test]
+    fn test_wrapped_keeps_gpt_5_6_family_models_distinct() {
+        let mut model_map = HashMap::new();
+        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            accumulate_wrapped_model(&mut model_map, model_id, 1.0, 1);
+        }
+
+        assert_eq!(model_map.len(), 3);
+        let mut names = model_map
+            .values()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, ["GPT-5.6 Luna", "GPT-5.6 Sol", "GPT-5.6 Terra"]);
+    }
+
+    #[test]
+    fn test_wrapped_merges_gpt_5_6_alias_with_sol() {
+        let mut model_map = HashMap::new();
+        for raw_model_id in ["gpt-5.6", "gpt-5.6-sol"] {
+            let model_id = tokscale_core::normalize_model_for_grouping(raw_model_id);
+            accumulate_wrapped_model(&mut model_map, &model_id, 1.0, 1);
+        }
+
+        assert_eq!(model_map.len(), 1);
+        let model = model_map.values().next().unwrap();
+        assert_eq!(model.name, "GPT-5.6 Sol");
+        assert_eq!(model.cost, 2.0);
+        assert_eq!(model.tokens, 2);
+    }
 
     #[test]
     fn test_format_model_name_claude() {

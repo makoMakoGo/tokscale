@@ -29,10 +29,8 @@ pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
         return normalized.into_owned();
     }
 
-    let source_canonical = canonicalize_source_specific_model_id(normalized_id)
-        .unwrap_or_else(|| normalized.into_owned());
-
-    strip_global_suffixes_to_stable(source_canonical)
+    let lexically_normalized = strip_global_suffixes_to_stable(normalized.into_owned());
+    canonicalize_source_specific_model_id(&lexically_normalized).unwrap_or(lexically_normalized)
 }
 
 /// Parser convenience shim; not the authoritative model identity boundary.
@@ -227,11 +225,12 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
 
     if let Some(base) = strip_full_release_date_suffix(model) {
-        if base == "gpt-4.1"
-            || is_openai_gpt_4o_source_base_model(base)
-            || is_openai_gpt_source_base_model(base)
+        let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
+        if canonical_base == "gpt-4.1"
+            || is_openai_gpt_4o_source_base_model(canonical_base)
+            || is_openai_gpt_source_base_model(canonical_base)
         {
-            return Some(base.to_string());
+            return Some(canonical_base.to_string());
         }
     }
 
@@ -247,14 +246,17 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
         } else {
             base
         };
-        if (tier == "fast" || OPENAI_REASONING_TIERS.contains(&tier))
-            && is_openai_gpt_source_base_model(base)
+        let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
+        if (tier == "fast" || is_openai_reasoning_effort_for_model(canonical_base, tier))
+            && is_openai_gpt_source_base_model(canonical_base)
         {
-            return Some(base.to_string());
+            return Some(canonical_base.to_string());
         }
     }
 
-    None
+    canonical_gpt_5_6_base(model)
+        .filter(|canonical| *canonical != model)
+        .map(str::to_string)
 }
 
 fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
@@ -262,10 +264,27 @@ fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
     let tier = tier.strip_suffix(')')?;
     let base =
         base.trim_end_matches(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '-' | '_'));
-    if OPENAI_REASONING_TIERS.contains(&tier) && is_openai_gpt_source_base_model(base) {
-        Some(base)
+    let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
+    if is_openai_reasoning_effort_for_model(canonical_base, tier)
+        && is_openai_gpt_source_base_model(canonical_base)
+    {
+        Some(canonical_base)
     } else {
         None
+    }
+}
+
+fn is_openai_reasoning_effort_for_model(model: &str, effort: &str) -> bool {
+    OPENAI_REASONING_TIERS.contains(&effort)
+        || (effort == "max" && canonical_gpt_5_6_base(model).is_some())
+}
+
+fn canonical_gpt_5_6_base(model: &str) -> Option<&'static str> {
+    match model {
+        "gpt-5.6" | "gpt-5.6-sol" => Some("gpt-5.6-sol"),
+        "gpt-5.6-terra" => Some("gpt-5.6-terra"),
+        "gpt-5.6-luna" => Some("gpt-5.6-luna"),
+        _ => None,
     }
 }
 
@@ -274,6 +293,10 @@ fn is_openai_gpt_4o_source_base_model(model: &str) -> bool {
 }
 
 fn is_openai_gpt_source_base_model(model: &str) -> bool {
+    if canonical_gpt_5_6_base(model).is_some() {
+        return true;
+    }
+
     let rest = match model.strip_prefix("gpt-") {
         Some(rest) => rest,
         None => return false,
@@ -321,7 +344,12 @@ fn canonicalize_glm_source_model(model: &str) -> Option<&'static str> {
         .or_else(|| model.strip_suffix("-sub2api-pro"))
         .unwrap_or(model);
 
-    if matches!(base, "glm-4.7-free" | "glm-4.7:free" | "glm-4.7 (free)") {
+    if base != model
+        && matches!(
+            base,
+            "glm-4.7" | "glm-4.7-free" | "glm-4.7:free" | "glm-4.7 (free)"
+        )
+    {
         Some("glm-4.7")
     } else {
         None

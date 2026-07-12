@@ -418,6 +418,34 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_droid_file_canonicalizes_gpt_5_6_family_reasoning_effort() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "custom:gpt-5.6-sol-xhigh",
+                "reasoningEffort": "xhigh",
+                "providerLock": "openai",
+                "providerLockTimestamp": "2026-07-11T13:38:03.820Z",
+                "tokenUsage": {
+                    "inputTokens": 10,
+                    "outputTokens": 5,
+                    "thinkingTokens": 2
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_droid_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.6-sol");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(messages[0].tokens.reasoning, 2);
+    }
+
+    #[test]
     fn test_parse_droid_file_canonicalizes_space_before_parenthesized_tier() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("session.settings.json");
