@@ -18,6 +18,16 @@ fn checked_token_sum(values: impl IntoIterator<Item = i64>) -> i64 {
         .expect("monthly token total exceeds i64::MAX")
 }
 
+fn monthly_token_total(entry: &tokscale_core::MonthlyUsage) -> i64 {
+    checked_token_sum([
+        entry.input,
+        entry.output,
+        entry.cache_read,
+        entry.cache_write,
+        entry.reasoning,
+    ])
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_monthly_report(
     json: bool,
@@ -133,6 +143,20 @@ pub(crate) fn run_monthly_report(
             .map(|(w, _)| w as usize)
             .unwrap_or(120);
         let compact = term_width < 100;
+        let total_input = checked_token_sum(report.entries.iter().map(|entry| entry.input));
+        let total_output = checked_token_sum(report.entries.iter().map(|entry| entry.output));
+        let total_cache_read =
+            checked_token_sum(report.entries.iter().map(|entry| entry.cache_read));
+        let total_cache_write =
+            checked_token_sum(report.entries.iter().map(|entry| entry.cache_write));
+        let total_reasoning = checked_token_sum(report.entries.iter().map(|entry| entry.reasoning));
+        let total_all = checked_token_sum([
+            total_input,
+            total_output,
+            total_cache_read,
+            total_cache_write,
+            total_reasoning,
+        ]);
 
         let mut table = Table::new();
         table.load_preset(TABLE_PRESET);
@@ -165,13 +189,7 @@ pub(crate) fn run_monthly_report(
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                let total = checked_token_sum([
-                    entry.input,
-                    entry.output,
-                    entry.cache_write,
-                    entry.cache_read,
-                    entry.reasoning,
-                ]);
+                let total = monthly_token_total(entry);
                 table.add_row(vec![
                     Cell::new(entry.month.clone()),
                     Cell::new(models_col),
@@ -186,21 +204,6 @@ pub(crate) fn run_monthly_report(
                 ]);
             }
 
-            let total_input = checked_token_sum(report.entries.iter().map(|entry| entry.input));
-            let total_output = checked_token_sum(report.entries.iter().map(|entry| entry.output));
-            let total_reasoning =
-                checked_token_sum(report.entries.iter().map(|entry| entry.reasoning));
-            let total_cache_write =
-                checked_token_sum(report.entries.iter().map(|entry| entry.cache_write));
-            let total_cache_read =
-                checked_token_sum(report.entries.iter().map(|entry| entry.cache_read));
-            let total_all = checked_token_sum([
-                total_input,
-                total_output,
-                total_cache_write,
-                total_cache_read,
-                total_reasoning,
-            ]);
             table.add_row(vec![
                 Cell::new("Total")
                     .fg(Color::Yellow)
@@ -246,13 +249,7 @@ pub(crate) fn run_monthly_report(
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                let total = checked_token_sum([
-                    entry.input,
-                    entry.output,
-                    entry.reasoning,
-                    entry.cache_write,
-                    entry.cache_read,
-                ]);
+                let total = monthly_token_total(entry);
 
                 table.add_row(vec![
                     Cell::new(entry.month.clone()),
@@ -271,22 +268,6 @@ pub(crate) fn run_monthly_report(
                     Cell::new(format_currency(entry.cost)).set_alignment(CellAlignment::Right),
                 ]);
             }
-
-            let total_input = checked_token_sum(report.entries.iter().map(|entry| entry.input));
-            let total_output = checked_token_sum(report.entries.iter().map(|entry| entry.output));
-            let total_reasoning =
-                checked_token_sum(report.entries.iter().map(|entry| entry.reasoning));
-            let total_cache_write =
-                checked_token_sum(report.entries.iter().map(|entry| entry.cache_write));
-            let total_cache_read =
-                checked_token_sum(report.entries.iter().map(|entry| entry.cache_read));
-            let total_all = checked_token_sum([
-                total_input,
-                total_output,
-                total_reasoning,
-                total_cache_write,
-                total_cache_read,
-            ]);
 
             table.add_row(vec![
                 Cell::new("Total")
