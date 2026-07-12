@@ -29,8 +29,9 @@ pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
         return normalized.into_owned();
     }
 
-    let lexically_normalized = strip_global_suffixes_to_stable(normalized.into_owned());
-    canonicalize_source_specific_model_id(&lexically_normalized).unwrap_or(lexically_normalized)
+    let lexically_normalized = strip_global_suffixes_to_stable(normalized);
+    canonicalize_source_specific_model_id(&lexically_normalized)
+        .unwrap_or_else(|| lexically_normalized.into_owned())
 }
 
 /// Parser convenience shim; not the authoritative model identity boundary.
@@ -81,9 +82,7 @@ fn canonicalize_source_specific_model_id(model: &str) -> Option<String> {
         }
     }
     if model.starts_with("gpt-") {
-        if let Some(canonical) = canonicalize_openai_source_model(model) {
-            return Some(canonical);
-        }
+        return canonicalize_openai_source_model(model);
     }
     if model.starts_with("glm-") {
         if let Some(canonical) = canonicalize_glm_source_model(model) {
@@ -158,54 +157,62 @@ fn normalized_human_display_model_slug(model: &str) -> Option<String> {
     }
 }
 
-fn strip_global_suffixes_to_stable(mut model: String) -> String {
+fn strip_global_suffixes_to_stable(mut model: Cow<'_, str>) -> Cow<'_, str> {
     loop {
-        if let Some(base) = strip_release_suffix(&model) {
-            model.truncate(base.len());
-            continue;
-        }
-        if let Some(strip) = strip_free_channel_tag(&model) {
-            match strip {
-                FreeChannelTagStrip::Truncate(len) => model.truncate(len),
-                FreeChannelTagStrip::Replace(stripped) => model = stripped,
-            }
-            continue;
-        }
-        return model;
+        let strip = strip_release_suffix(&model)
+            .map(|base| GlobalSuffixStrip::Truncate(base.len()))
+            .or_else(|| strip_free_channel_tag(&model));
+        let Some(strip) = strip else {
+            return model;
+        };
+        model = apply_global_suffix_strip(model, strip);
     }
 }
 
-enum FreeChannelTagStrip {
+enum GlobalSuffixStrip {
     Truncate(usize),
     Replace(String),
 }
 
-fn strip_free_channel_tag(model: &str) -> Option<FreeChannelTagStrip> {
+fn apply_global_suffix_strip<'a>(model: Cow<'a, str>, strip: GlobalSuffixStrip) -> Cow<'a, str> {
+    match strip {
+        GlobalSuffixStrip::Truncate(len) => match model {
+            Cow::Borrowed(model) => Cow::Borrowed(&model[..len]),
+            Cow::Owned(mut model) => {
+                model.truncate(len);
+                Cow::Owned(model)
+            }
+        },
+        GlobalSuffixStrip::Replace(stripped) => Cow::Owned(stripped),
+    }
+}
+
+fn strip_free_channel_tag(model: &str) -> Option<GlobalSuffixStrip> {
     if let Some(base) = model.strip_suffix("-free") {
-        return Some(FreeChannelTagStrip::Truncate(base.len()));
+        return Some(GlobalSuffixStrip::Truncate(base.len()));
     }
     if let Some(base) = model.strip_suffix(":free") {
-        return Some(FreeChannelTagStrip::Truncate(base.len()));
+        return Some(GlobalSuffixStrip::Truncate(base.len()));
     }
     if let Some(base) = model.strip_suffix(" (free)") {
-        return Some(FreeChannelTagStrip::Truncate(base.len()));
+        return Some(GlobalSuffixStrip::Truncate(base.len()));
     }
     if let Some((head, tail)) = model.split_once("-free-") {
-        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
+        return Some(GlobalSuffixStrip::Replace(format!("{head}-{tail}")));
     }
     if let Some((head, tail)) = model.split_once(":free-") {
-        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
+        return Some(GlobalSuffixStrip::Replace(format!("{head}-{tail}")));
     }
     if let Some((head, tail)) = model.split_once(" (free)-") {
-        return Some(FreeChannelTagStrip::Replace(format!("{head}-{tail}")));
+        return Some(GlobalSuffixStrip::Replace(format!("{head}-{tail}")));
     }
     None
 }
 
-fn stripped_free_channel_tag(model: &str, strip: FreeChannelTagStrip) -> String {
+fn stripped_free_channel_tag(model: &str, strip: GlobalSuffixStrip) -> String {
     match strip {
-        FreeChannelTagStrip::Truncate(len) => model[..len].to_string(),
-        FreeChannelTagStrip::Replace(stripped) => stripped,
+        GlobalSuffixStrip::Truncate(len) => model[..len].to_string(),
+        GlobalSuffixStrip::Replace(stripped) => stripped,
     }
 }
 
@@ -223,6 +230,16 @@ fn canonical_model_segment(model: &str) -> &str {
 
 fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
+
+    if let Some(canonical) = canonical_gpt_5_6_base(model) {
+        return (canonical != model).then(|| canonical.to_string());
+    }
+    if model == "gpt-4.1"
+        || is_openai_gpt_4o_source_base_model(model)
+        || is_openai_gpt_source_base_model(model)
+    {
+        return None;
+    }
 
     if let Some(base) = strip_full_release_date_suffix(model) {
         let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
