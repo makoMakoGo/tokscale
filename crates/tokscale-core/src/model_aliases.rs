@@ -271,9 +271,7 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
         }
     }
 
-    canonical_gpt_5_6_base(model)
-        .filter(|canonical| *canonical != model)
-        .map(str::to_string)
+    None
 }
 
 fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
