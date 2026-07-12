@@ -29,10 +29,8 @@ pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
         return normalized.into_owned();
     }
 
-    let source_canonical = canonicalize_source_specific_model_id(normalized_id)
-        .unwrap_or_else(|| normalized.into_owned());
-
-    strip_global_suffixes_to_stable(source_canonical)
+    let lexically_normalized = strip_global_suffixes_to_stable(normalized.into_owned());
+    canonicalize_source_specific_model_id(&lexically_normalized).unwrap_or(lexically_normalized)
 }
 
 /// Parser convenience shim; not the authoritative model identity boundary.
@@ -346,7 +344,12 @@ fn canonicalize_glm_source_model(model: &str) -> Option<&'static str> {
         .or_else(|| model.strip_suffix("-sub2api-pro"))
         .unwrap_or(model);
 
-    if matches!(base, "glm-4.7-free" | "glm-4.7:free" | "glm-4.7 (free)") {
+    if base != model
+        && matches!(
+            base,
+            "glm-4.7" | "glm-4.7-free" | "glm-4.7:free" | "glm-4.7 (free)"
+        )
+    {
         Some("glm-4.7")
     } else {
         None

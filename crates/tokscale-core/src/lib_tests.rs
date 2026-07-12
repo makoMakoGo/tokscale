@@ -995,7 +995,7 @@ fn test_normalize_model_for_grouping() {
     );
     assert_eq!(
         normalize_model_for_grouping("claude-sonnet-4-free-thinking"),
-        "claude-sonnet-4-thinking"
+        "claude-sonnet-4"
     );
     assert_eq!(
         normalize_model_for_grouping("deepseek-v4 (free)"),
@@ -1103,10 +1103,21 @@ fn test_normalize_model_for_grouping_canonicalizes_gpt_5_6_sol_alias() {
         "gpt-5.6(max)",
         "custom:gpt-5.6-max",
         "gpt-5.6-sol-max",
+        "gpt-5.6-free",
+        "gpt-5.6:free",
+        "gpt-5.6 (free)",
+        "gpt-5.6-2607",
+        "gpt-5.6-high-free",
     ];
 
     for raw in cases {
-        assert_eq!(normalize_model_for_grouping(raw), "gpt-5.6-sol");
+        let canonical = normalize_model_for_grouping(raw);
+        assert_eq!(canonical, "gpt-5.6-sol", "raw model: {raw}");
+        assert_eq!(
+            normalize_model_for_grouping(&canonical),
+            canonical,
+            "raw model: {raw}"
+        );
     }
 }
 
