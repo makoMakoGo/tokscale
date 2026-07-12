@@ -11,6 +11,13 @@ use crate::tui::{self, get_client_display_name};
 use anyhow::Result;
 use std::io::IsTerminal;
 
+fn displayed_output(entry: &tokscale_core::HourlyUsage) -> i64 {
+    entry
+        .output
+        .checked_add(entry.reasoning)
+        .expect("hourly displayed output exceeds i64::MAX")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_hourly_report(
     json: bool,
@@ -105,17 +112,17 @@ pub(crate) fn run_hourly_report(
             entries: report
                 .entries
                 .into_iter()
-                .map(|e| HourlyUsageJson {
-                    hour: e.hour,
-                    clients: e.clients,
-                    models: e.models,
-                    input: e.input,
-                    output: e.output,
-                    cache_read: e.cache_read,
-                    cache_write: e.cache_write,
-                    message_count: e.message_count,
-                    turn_count: e.turn_count,
-                    cost: e.cost,
+                .map(|entry| HourlyUsageJson {
+                    output: displayed_output(&entry),
+                    hour: entry.hour,
+                    clients: entry.clients,
+                    models: entry.models,
+                    input: entry.input,
+                    cache_read: entry.cache_read,
+                    cache_write: entry.cache_write,
+                    message_count: entry.message_count,
+                    turn_count: entry.turn_count,
+                    cost: entry.cost,
                 })
                 .collect(),
             total_cost: report.total_cost,
@@ -176,7 +183,7 @@ pub(crate) fn run_hourly_report(
                     Cell::new(entry.message_count).set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(entry.input))
                         .set_alignment(CellAlignment::Right),
-                    Cell::new(format_tokens_with_commas(entry.output))
+                    Cell::new(format_tokens_with_commas(displayed_output(entry)))
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_currency(entry.cost))
                         .fg(Color::Green)
@@ -246,7 +253,7 @@ pub(crate) fn run_hourly_report(
                     Cell::new(entry.message_count).set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(entry.input))
                         .set_alignment(CellAlignment::Right),
-                    Cell::new(format_tokens_with_commas(entry.output))
+                    Cell::new(format_tokens_with_commas(displayed_output(entry)))
                         .set_alignment(CellAlignment::Right),
                     Cell::new(format_tokens_with_commas(entry.cache_read))
                         .set_alignment(CellAlignment::Right),

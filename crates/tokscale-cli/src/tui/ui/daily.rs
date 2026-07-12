@@ -607,9 +607,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 DailyColumn::Input => {
                     Cell::from(format_tokens(day.tokens.input)).style(metric_input_style)
                 }
-                DailyColumn::Output => {
-                    Cell::from(format_tokens(day.tokens.output)).style(metric_output_style)
-                }
+                DailyColumn::Output => Cell::from(format_tokens(day.tokens.displayed_output()))
+                    .style(metric_output_style),
                 DailyColumn::CacheRead => {
                     Cell::from(format_tokens(day.tokens.cache_read)).style(metric_cache_read_style)
                 }
@@ -826,7 +825,8 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         Cell::from(format_tokens(row.tokens.input)).style(metric_input_style)
                     }
                     DailyDetailColumn::Output => {
-                        Cell::from(format_tokens(row.tokens.output)).style(metric_output_style)
+                        Cell::from(format_tokens(row.tokens.displayed_output()))
+                            .style(metric_output_style)
                     }
                     DailyDetailColumn::CacheRead => {
                         Cell::from(format_tokens(row.tokens.cache_read))

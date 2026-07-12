@@ -597,7 +597,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                             ),
                             Span::styled("/", subtle_text_style),
                             Span::styled(
-                                format_tokens(model_info.tokens.output),
+                                format_tokens(model_info.tokens.displayed_output()),
                                 secondary_text_style,
                             ),
                             Span::styled("/", subtle_text_style),
@@ -622,7 +622,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                             ),
                             Span::styled(" · Out: ", subtle_text_style),
                             Span::styled(
-                                format_tokens(model_info.tokens.output),
+                                format_tokens(model_info.tokens.displayed_output()),
                                 secondary_text_style,
                             ),
                             Span::styled(" · CR: ", subtle_text_style),

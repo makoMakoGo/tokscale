@@ -49,6 +49,12 @@ impl UsageTokenBreakdown {
         .try_fold(0_u64, u64::checked_add)
     }
 
+    pub fn displayed_output(&self) -> u64 {
+        self.output
+            .checked_add(self.reasoning)
+            .expect("TUI displayed output exceeds u64::MAX")
+    }
+
     pub fn total(&self) -> u64 {
         self.checked_total()
             .expect("TUI token total exceeds u64::MAX")
@@ -180,4 +186,23 @@ pub struct UsageData {
     pub error: Option<String>,
     pub current_streak: u32,
     pub longest_streak: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UsageTokenBreakdown;
+
+    #[test]
+    fn displayed_output_includes_reasoning_once() {
+        let tokens = UsageTokenBreakdown {
+            input: 100,
+            output: 25,
+            cache_read: 10,
+            cache_write: 5,
+            reasoning: 25,
+        };
+
+        assert_eq!(tokens.displayed_output(), 50);
+        assert_eq!(tokens.total(), 165);
+    }
 }

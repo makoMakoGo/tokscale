@@ -70,9 +70,18 @@ pub struct PiUsage {
     pub output: Option<i64>,
     pub cache_read: Option<i64>,
     pub cache_write: Option<i64>,
+    pub reasoning: Option<i64>,
     pub reasoning_tokens: Option<i64>,
-    #[allow(dead_code)]
     pub total_tokens: Option<i64>,
+    pub orchestration: Option<PiOrchestrationUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiOrchestrationUsage {
+    pub input: Option<i64>,
+    pub output: Option<i64>,
+    pub cache_read: Option<i64>,
 }
 
 /// Parse a Pi JSONL session file
@@ -90,6 +99,169 @@ pub fn parse_omp_file_with_parent_task_agent_index(
     parent_task_agent_index: &OmpParentTaskAgentIndex,
 ) -> SessionParseResult<Vec<UnifiedMessage>> {
     parse_pi_format_file(path, "omp", Some(parent_task_agent_index))
+}
+
+fn usage_validation_operation(client: &str) -> &'static str {
+    match client {
+        "pi" => "validate Pi assistant message",
+        "omp" => "validate OMP assistant message",
+        _ => unreachable!("Pi-format parser only supports Pi and OMP"),
+    }
+}
+
+fn required_usage_value(value: Option<i64>, field: &str, client: &str) -> SessionParseResult<i64> {
+    value.ok_or_else(|| {
+        SessionParseError::invalid(
+            usage_validation_operation(client),
+            format!("current usage is missing `{field}`"),
+        )
+    })
+}
+
+fn validate_nonnegative_usage_value(
+    field: &str,
+    value: i64,
+    client: &str,
+) -> SessionParseResult<()> {
+    if value < 0 {
+        return Err(SessionParseError::invalid(
+            usage_validation_operation(client),
+            format!("token counts must not be negative: `{field}`"),
+        ));
+    }
+    Ok(())
+}
+
+fn checked_usage_sum(
+    values: impl IntoIterator<Item = i64>,
+    description: &str,
+    client: &str,
+) -> SessionParseResult<i64> {
+    values.into_iter().try_fold(0_i64, |total, value| {
+        total.checked_add(value).ok_or_else(|| {
+            SessionParseError::invalid(
+                usage_validation_operation(client),
+                format!("{description} exceeds i64::MAX"),
+            )
+        })
+    })
+}
+
+fn token_breakdown_from_pi_usage(
+    usage: &PiUsage,
+    client: &str,
+) -> SessionParseResult<TokenBreakdown> {
+    let input = required_usage_value(usage.input, "input", client)?;
+    let raw_output = required_usage_value(usage.output, "output", client)?;
+    let cache_read = required_usage_value(usage.cache_read, "cacheRead", client)?;
+    let cache_write = required_usage_value(usage.cache_write, "cacheWrite", client)?;
+    let source_total = required_usage_value(usage.total_tokens, "totalTokens", client)?;
+
+    let (
+        reasoning_field,
+        reasoning,
+        orchestration_input,
+        orchestration_output,
+        orchestration_cache_read,
+    ) = match client {
+        "pi" => {
+            if usage.reasoning_tokens.is_some() {
+                return Err(SessionParseError::invalid(
+                    usage_validation_operation(client),
+                    "Pi usage must use `reasoning`, not OMP `reasoningTokens`",
+                ));
+            }
+            if usage.orchestration.is_some() {
+                return Err(SessionParseError::invalid(
+                    usage_validation_operation(client),
+                    "Pi usage must not contain OMP `orchestration` tokens",
+                ));
+            }
+            ("reasoning", usage.reasoning.unwrap_or(0), 0, 0, 0)
+        }
+        "omp" => {
+            if usage.reasoning.is_some() {
+                return Err(SessionParseError::invalid(
+                    usage_validation_operation(client),
+                    "OMP usage must use `reasoningTokens`, not Pi `reasoning`",
+                ));
+            }
+            let orchestration = usage.orchestration.as_ref();
+            (
+                "reasoningTokens",
+                usage.reasoning_tokens.unwrap_or(0),
+                orchestration.and_then(|value| value.input).unwrap_or(0),
+                orchestration.and_then(|value| value.output).unwrap_or(0),
+                orchestration
+                    .and_then(|value| value.cache_read)
+                    .unwrap_or(0),
+            )
+        }
+        _ => unreachable!("Pi-format parser only supports Pi and OMP"),
+    };
+
+    for (field, value) in [
+        ("input", input),
+        ("output", raw_output),
+        ("cacheRead", cache_read),
+        ("cacheWrite", cache_write),
+        (reasoning_field, reasoning),
+        ("totalTokens", source_total),
+        ("orchestration.input", orchestration_input),
+        ("orchestration.output", orchestration_output),
+        ("orchestration.cacheRead", orchestration_cache_read),
+    ] {
+        validate_nonnegative_usage_value(field, value, client)?;
+    }
+
+    // Xiaomi MiMo token-plan has emitted a length-stopped response with
+    // output=32_000 and reasoningTokens=32_123 even though totalTokens and
+    // cost both accounted for only 32_000 output tokens. Reasoning is merely a
+    // breakdown of inclusive output, so keep output authoritative and clamp
+    // only the malformed breakdown instead of invalidating the entire JSONL.
+    let reasoning = reasoning.min(raw_output);
+
+    let expected_source_total = checked_usage_sum(
+        [
+            input,
+            raw_output,
+            cache_read,
+            cache_write,
+            orchestration_input,
+            orchestration_output,
+            orchestration_cache_read,
+        ],
+        "source totalTokens",
+        client,
+    )?;
+    if source_total != expected_source_total {
+        return Err(SessionParseError::invalid(
+            usage_validation_operation(client),
+            format!(
+                "source totalTokens is {source_total}, expected {expected_source_total} from usage buckets"
+            ),
+        ));
+    }
+
+    Ok(TokenBreakdown {
+        input: checked_usage_sum(
+            [input, orchestration_input],
+            "normalized input token count",
+            client,
+        )?,
+        output: checked_usage_sum(
+            [raw_output - reasoning, orchestration_output],
+            "normalized output token count",
+            client,
+        )?,
+        cache_read: checked_usage_sum(
+            [cache_read, orchestration_cache_read],
+            "normalized cache-read token count",
+            client,
+        )?,
+        cache_write,
+        reasoning,
+    })
 }
 
 fn normalize_omp_agent_label(agent: &str) -> Option<String> {
@@ -118,6 +290,70 @@ fn normalize_omp_advisor_label(child_stem: &str) -> Option<String> {
     }
 
     None
+}
+
+fn invalid_omp_swarm_artifact(message: impl Into<String>) -> SessionParseError {
+    SessionParseError::invalid("validate OMP swarm artifact", message)
+}
+
+fn is_canonical_iteration(value: &str) -> bool {
+    value == "0"
+        || value.as_bytes().split_first().is_some_and(|(first, rest)| {
+            first.is_ascii_digit() && *first != b'0' && rest.iter().all(u8::is_ascii_digit)
+        })
+}
+
+fn omp_swarm_agent_label_from_path(path: &Path) -> SessionParseResult<Option<String>> {
+    let Some(context_dir) = path.parent() else {
+        return Ok(None);
+    };
+    if context_dir.file_name().and_then(|name| name.to_str()) != Some("context") {
+        return Ok(None);
+    }
+
+    let Some(swarm_dir_name) = context_dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+    else {
+        return Ok(None);
+    };
+    let Some(swarm_name) = swarm_dir_name.strip_prefix(".swarm_") else {
+        return Ok(None);
+    };
+    if swarm_name.is_empty() {
+        return Err(invalid_omp_swarm_artifact(
+            "swarm directory name must include a non-empty swarm name",
+        ));
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| invalid_omp_swarm_artifact("JSONL filename must be valid UTF-8"))?;
+    let expected_prefix = format!("swarm-{swarm_name}-");
+    let remainder = stem.strip_prefix(&expected_prefix).ok_or_else(|| {
+        invalid_omp_swarm_artifact(format!(
+            "filename must start with `{expected_prefix}` to match its swarm directory"
+        ))
+    })?;
+    let (agent_name, iteration) = remainder.rsplit_once('-').ok_or_else(|| {
+        invalid_omp_swarm_artifact(
+            "filename must end with `-<iteration>` after a non-empty agent name",
+        )
+    })?;
+    if agent_name.is_empty() {
+        return Err(invalid_omp_swarm_artifact(
+            "filename must include a non-empty agent name",
+        ));
+    }
+    if !is_canonical_iteration(iteration) {
+        return Err(invalid_omp_swarm_artifact(
+            "iteration must be a canonical non-negative decimal integer",
+        ));
+    }
+
+    Ok(Some(format!("OMP Swarm {agent_name}")))
 }
 
 fn omp_parent_session_path(path: &Path) -> SessionParseResult<Option<PathBuf>> {
@@ -353,6 +589,8 @@ fn parse_pi_format_file(
             Some(stem) => {
                 if let Some(label) = normalize_omp_advisor_label(stem) {
                     Some(label)
+                } else if let Some(label) = omp_swarm_agent_label_from_path(path)? {
+                    Some(label)
                 } else if let Some(parent) = omp_parent_session_path(path)? {
                     match omp_parent_task_agent_index {
                         Some(index) => index
@@ -424,26 +662,7 @@ fn parse_pi_format_file(
             None => continue,
         };
 
-        let usage_values = [
-            usage.input,
-            usage.output,
-            usage.cache_read,
-            usage.cache_write,
-            usage.reasoning_tokens,
-        ];
-        if usage_values.into_iter().flatten().any(|value| value < 0) {
-            return Err(SessionParseError::invalid(
-                "validate Pi assistant message",
-                "token counts must not be negative",
-            ));
-        }
-        let tokens = TokenBreakdown {
-            input: usage.input.unwrap_or(0),
-            output: usage.output.unwrap_or(0),
-            cache_read: usage.cache_read.unwrap_or(0),
-            cache_write: usage.cache_write.unwrap_or(0),
-            reasoning: usage.reasoning_tokens.unwrap_or(0),
-        };
+        let tokens = token_breakdown_from_pi_usage(&usage, client)?;
         if crate::positive_token_total(&tokens) == 0 {
             continue;
         }
@@ -573,7 +792,7 @@ mod tests {
     #[test]
     fn test_parse_pi_keeps_missing_provider_with_model_inference() {
         let content = r#"{"type":"session","id":"pi_ses_missing_provider","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","usage":{"input":10,"output":5}}}"#;
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
         let file = create_test_file(content);
 
         let messages = parse_pi_file(file.path()).unwrap();
@@ -585,7 +804,7 @@ mod tests {
     #[test]
     fn test_parse_pi_rejects_positive_usage_without_model() {
         let content = r#"{"type":"session","id":"pi_ses_missing_model","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","provider":"openai","usage":{"input":10,"output":5}}}"#;
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
         let file = create_test_file(content);
 
         let error = parse_pi_file(file.path()).unwrap_err();
@@ -596,7 +815,7 @@ mod tests {
     #[test]
     fn test_parse_pi_filters_zero_usage_before_requiring_usage_identity() {
         let content = r#"{"type":"session","id":"pi_ses_zero","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","message":{"role":"assistant","usage":{"input":0,"output":0}}}"#;
+{"type":"message","message":{"role":"assistant","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0}}}"#;
         let file = create_test_file(content);
 
         assert!(parse_pi_file(file.path()).unwrap().is_empty());
@@ -605,7 +824,7 @@ mod tests {
     #[test]
     fn test_parse_pi_rejects_negative_token_counts() {
         let content = r#"{"type":"session","id":"pi_ses_negative","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":-1,"output":5}}}"#;
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":-1,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":4}}}"#;
         let file = create_test_file(content);
 
         let error = parse_pi_file(file.path()).unwrap_err();
@@ -636,7 +855,7 @@ mod tests {
     fn test_parse_omp_jsonl_skips_title_slot() {
         let content = r#"{"type":"title","v":1,"title":"Test title","source":"auto","updatedAt":"2026-01-01T00:00:00.000Z","pad":" "}
 {"type":"session","id":"omp_ses_title","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":5,"cacheWrite":0,"reasoningTokens":2,"totalTokens":37}}}"#;
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":5,"cacheWrite":0,"reasoningTokens":2,"totalTokens":35}}}"#;
         let file = create_test_file(content);
 
         let messages = parse_omp_file(file.path()).unwrap();
@@ -644,7 +863,9 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "omp");
         assert_eq!(messages[0].session_id.as_ref(), "omp_ses_title");
-        assert_eq!(messages[0].tokens.total(), 37);
+        assert_eq!(messages[0].tokens.output, 8);
+        assert_eq!(messages[0].tokens.reasoning, 2);
+        assert_eq!(messages[0].tokens.total(), 35);
     }
 
     #[test]
@@ -765,10 +986,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pi_jsonl_preserves_reasoning_tokens() {
+    fn test_parse_pi_jsonl_splits_inclusive_reasoning() {
         // given
         let content = r#"{"type":"session","id":"pi_ses_reasoning","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":190}}}"#;
+{"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":25,"totalTokens":165}}}"#;
         let file = create_test_file(content);
 
         // when
@@ -777,11 +998,179 @@ mod tests {
         // then
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 100);
-        assert_eq!(messages[0].tokens.output, 50);
+        assert_eq!(messages[0].tokens.output, 25);
         assert_eq!(messages[0].tokens.cache_read, 10);
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].tokens.reasoning, 25);
-        assert_eq!(messages[0].tokens.total(), 190);
+        assert_eq!(messages[0].tokens.total(), 165);
+    }
+
+    #[test]
+    fn test_parse_pi_clamps_reasoning_above_output() {
+        let content = r#"{"type":"session","id":"pi_ses_reasoning_overflow","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":20,"cacheRead":10,"cacheWrite":5,"reasoning":21,"totalTokens":135}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_pi_file(file.path()).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].tokens.reasoning, 20);
+        assert_eq!(messages[0].tokens.total(), 135);
+    }
+
+    #[test]
+    fn test_parse_omp_clamps_reasoning_tokens_above_output() {
+        let content = r#"{"type":"session","id":"omp_ses_reasoning_overflow","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":20,"cacheRead":10,"cacheWrite":5,"reasoningTokens":21,"totalTokens":135}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_omp_file(file.path()).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].tokens.reasoning, 20);
+        assert_eq!(messages[0].tokens.total(), 135);
+    }
+
+    #[test]
+    fn test_parse_pi_rejects_mismatched_total_tokens() {
+        let content = r#"{"type":"session","id":"pi_ses_bad_total","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_bad_total","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":25,"totalTokens":166}}}"#;
+        let file = create_test_file(content);
+
+        let error = parse_pi_file(file.path()).unwrap_err();
+
+        assert!(error.to_string().contains("totalTokens"));
+        assert!(error.to_string().contains("165"));
+        assert!(error.to_string().contains("166"));
+    }
+
+    #[test]
+    fn test_parse_pi_rejects_positive_usage_without_total_tokens() {
+        let content = r#"{"type":"session","id":"pi_ses_missing_total","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_missing_total","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":25}}}"#;
+        let file = create_test_file(content);
+
+        let error = parse_pi_file(file.path()).unwrap_err();
+
+        assert!(error.to_string().contains("totalTokens"));
+    }
+
+    #[test]
+    fn test_parse_omp_includes_orchestration_in_matching_buckets() {
+        let content = r#"{"type":"session","id":"omp_ses_orchestration","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_orchestration","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"orchestration":{"input":7,"cacheRead":3,"output":2},"totalTokens":177}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_omp_file(file.path()).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 107);
+        assert_eq!(messages[0].tokens.output, 27);
+        assert_eq!(messages[0].tokens.cache_read, 13);
+        assert_eq!(messages[0].tokens.cache_write, 5);
+        assert_eq!(messages[0].tokens.reasoning, 25);
+        assert_eq!(messages[0].tokens.total(), 177);
+    }
+
+    #[test]
+    fn test_parse_pi_rejects_omp_reasoning_field() {
+        let content = r#"{"type":"session","id":"pi_ses_omp_reasoning","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#;
+        let file = create_test_file(content);
+
+        let error = parse_pi_file(file.path()).unwrap_err();
+
+        assert!(error.to_string().contains("reasoningTokens"));
+        assert!(error.to_string().contains("Pi"));
+    }
+
+    #[test]
+    fn test_parse_omp_rejects_pi_reasoning_field() {
+        let content = r#"{"type":"session","id":"omp_ses_pi_reasoning","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":25,"totalTokens":165}}}"#;
+        let file = create_test_file(content);
+
+        let error = parse_omp_file(file.path()).unwrap_err();
+
+        assert!(error.to_string().contains("reasoning"));
+        assert!(error.to_string().contains("OMP"));
+    }
+
+    #[test]
+    fn test_parse_omp_rejects_negative_orchestration_tokens() {
+        let content = r#"{"type":"session","id":"omp_ses_bad_orchestration","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_bad_orchestration","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"orchestration":{"input":-1},"totalTokens":164}}}"#;
+        let file = create_test_file(content);
+
+        let error = parse_omp_file(file.path()).unwrap_err();
+
+        assert!(error.to_string().contains("must not be negative"));
+        assert!(error.to_string().contains("orchestration"));
+    }
+
+    #[test]
+    fn test_parse_omp_swarm_artifact_recovers_agent_identity() {
+        let dir = TempDir::new().unwrap();
+        let context = dir.path().join(".swarm_docs-factcheck").join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        let path = context.join("swarm-docs-factcheck-architecture-reviewer-2.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session","id":"swarm-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_omp_file(&path).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].agent.as_deref(),
+            Some("OMP Swarm architecture-reviewer")
+        );
+        assert_eq!(
+            messages[0].agent_instance.as_deref(),
+            Some("swarm-docs-factcheck-architecture-reviewer-2")
+        );
+    }
+
+    #[test]
+    fn test_parse_omp_rejects_invalid_swarm_artifact_name() {
+        let dir = TempDir::new().unwrap();
+        let context = dir.path().join(".swarm_docs").join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        let path = context.join("swarm-other-reviewer-latest.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session","id":"swarm-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
+        )
+        .unwrap();
+
+        let error = parse_omp_file(&path).unwrap_err();
+
+        assert!(error.to_string().contains("OMP swarm artifact"));
+    }
+
+    #[test]
+    fn test_parse_pi_does_not_apply_omp_swarm_identity() {
+        let dir = TempDir::new().unwrap();
+        let context = dir.path().join(".swarm_docs").join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        let path = context.join("swarm-docs-reviewer-0.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session","id":"pi-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_pi_file(&path).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent, None);
     }
 
     #[test]

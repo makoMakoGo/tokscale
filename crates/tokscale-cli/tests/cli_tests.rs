@@ -1863,6 +1863,11 @@ fn test_models_json_output() {
         json.get("totalCacheWrite").is_some(),
         "Missing totalCacheWrite"
     );
+    assert!(
+        json.get("totalReasoning").is_none(),
+        "JSON report must fold reasoning into totalOutput"
+    );
+    assert!(json.get("totalTokens").is_some(), "Missing totalTokens");
     assert!(json.get("totalMessages").is_some(), "Missing totalMessages");
     assert!(json.get("totalCost").is_some(), "Missing totalCost");
     assert!(
@@ -1880,6 +1885,10 @@ fn test_models_json_output() {
     assert!(first.get("output").is_some());
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
+    assert!(
+        first.get("reasoning").is_none(),
+        "JSON report must fold reasoning into output"
+    );
     assert!(first.get("cost").is_some());
     let performance = first
         .get("performance")
@@ -2201,6 +2210,10 @@ fn test_monthly_json_output() {
     assert!(first.get("output").is_some());
     assert!(first.get("cacheRead").is_some());
     assert!(first.get("cacheWrite").is_some());
+    assert!(
+        first.get("reasoning").is_none(),
+        "JSON report must fold reasoning into output"
+    );
     assert!(first.get("messageCount").is_some());
     assert!(first.get("cost").is_some());
 }
@@ -2360,6 +2373,187 @@ fn test_models_group_by_default() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["groupBy"].as_str().unwrap(), "client,model");
+}
+
+#[test]
+fn test_models_reports_project_reasoning_into_output() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+    let sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("reasoning.jsonl"),
+        concat!(
+            r#"{"type":"session","id":"reasoning-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"reasoning-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let json_output = cmd_with_home(base)
+        .args(["models", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        json_output.status.success(),
+        "command failed: {json_output:?}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(json["entries"][0]["output"], 50);
+    assert!(json["entries"][0].get("reasoning").is_none());
+    assert_eq!(json["totalOutput"], 50);
+    assert!(json.get("totalReasoning").is_none());
+    assert_eq!(json["totalTokens"], 165);
+
+    let table_output = cmd_with_home(base)
+        .args(["models", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        table_output.status.success(),
+        "command failed: {table_output:?}"
+    );
+    let stdout = String::from_utf8(table_output.stdout).unwrap();
+    assert!(!stdout.contains("Reasoning"), "unexpected output: {stdout}");
+    let model_row = stdout
+        .lines()
+        .find(|line| line.contains("gpt-5.5"))
+        .expect("model row");
+    assert!(model_row.contains(" 50 "), "unexpected row: {model_row}");
+    assert!(
+        stdout.contains("Total: 1 messages, 165 tokens"),
+        "unexpected output: {stdout}"
+    );
+}
+
+#[test]
+fn test_monthly_reports_project_reasoning_into_output() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+    let sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("monthly-reasoning.jsonl"),
+        concat!(
+            r#"{"type":"session","id":"monthly-reasoning-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"monthly-reasoning-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let json_output = cmd_with_home(base)
+        .args(["monthly", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        json_output.status.success(),
+        "command failed: {json_output:?}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(json["entries"][0]["output"], 50);
+    assert!(json["entries"][0].get("reasoning").is_none());
+
+    let table_output = cmd_with_home(base)
+        .args(["monthly", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        table_output.status.success(),
+        "command failed: {table_output:?}"
+    );
+    let stdout = String::from_utf8(table_output.stdout).unwrap();
+    assert!(!stdout.contains("Reasoning"), "unexpected output: {stdout}");
+    let month_row = stdout
+        .lines()
+        .find(|line| line.contains("2026-01"))
+        .expect("monthly row");
+    assert!(month_row.contains(" 50 "), "unexpected row: {month_row}");
+    assert!(stdout.contains("165"), "unexpected output: {stdout}");
+}
+
+#[test]
+fn test_hourly_reports_project_reasoning_into_output() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+    let sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("hourly-reasoning.jsonl"),
+        concat!(
+            r#"{"type":"session","id":"hourly-reasoning-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"hourly-reasoning-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let json_output = cmd_with_home(base)
+        .args(["hourly", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        json_output.status.success(),
+        "command failed: {json_output:?}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(json["entries"][0]["output"], 50);
+    assert!(json["entries"][0].get("reasoning").is_none());
+
+    let table_output = cmd_with_home(base)
+        .args(["hourly", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        table_output.status.success(),
+        "command failed: {table_output:?}"
+    );
+    let stdout = String::from_utf8(table_output.stdout).unwrap();
+    let hour_row = stdout
+        .lines()
+        .find(|line| line.contains("OMP"))
+        .expect("hourly row");
+    assert!(hour_row.contains(" 50 "), "unexpected row: {hour_row}");
+}
+
+#[test]
+fn test_models_report_clamps_reasoning_above_output() {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let base = tmp.path();
+    prime_pricing_cache(base);
+    let sessions = base.join(".omp/agent/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("invalid-reasoning-breakdown.jsonl"),
+        concat!(
+            r#"{"type":"session","id":"reasoning-overflow-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"reasoning-overflow-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":51,"totalTokens":165}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let output = cmd_with_home(base)
+        .args(["models", "--json", "--client", "omp", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "command failed: {output:?}");
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["entries"][0]["output"], 50);
+    assert!(json["entries"][0].get("reasoning").is_none());
+    assert_eq!(json["totalOutput"], 50);
+    assert!(json.get("totalReasoning").is_none());
+    assert_eq!(json["totalTokens"], 165);
+    assert!(json.get("warnings").is_none());
 }
 
 #[test]

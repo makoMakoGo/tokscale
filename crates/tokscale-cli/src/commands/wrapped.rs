@@ -15,13 +15,6 @@ use tokscale_core::{
     ReportOptions, ViewSet,
 };
 
-fn checked_token_sum(values: impl IntoIterator<Item = i64>) -> i64 {
-    values
-        .into_iter()
-        .try_fold(0_i64, i64::checked_add)
-        .expect("wrapped token total exceeds i64::MAX")
-}
-
 const SCALE: i32 = 2;
 const IMAGE_WIDTH: i32 = 1200 * SCALE;
 const IMAGE_HEIGHT: i32 = 1200 * SCALE;
@@ -286,36 +279,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         total_messages += day.totals.messages;
 
         for client_contrib in &day.clients {
-            let contribution_tokens = checked_token_sum([
-                client_contrib.tokens.input,
-                client_contrib.tokens.output,
-                client_contrib.tokens.cache_read,
-                client_contrib.tokens.cache_write,
-            ]);
-            accumulate_wrapped_model(
-                &mut model_map,
-                &client_contrib.model_id,
-                client_contrib.cost,
-                contribution_tokens,
-            );
-
-            let client_name = client_display_name(&client_contrib.client)
-                .unwrap_or(client_contrib.client.as_str())
-                .to_string();
-            let client_entry = client_map
-                .entry(client_contrib.client.clone())
-                .or_insert_with(|| WrappedRankedEntry {
-                    name: client_name,
-                    client_id: Some(client_contrib.client.clone()),
-                    provider: None,
-                    cost: 0.0,
-                    tokens: 0,
-                });
-            client_entry.cost += client_contrib.cost;
-            client_entry.tokens = client_entry
-                .tokens
-                .checked_add(contribution_tokens)
-                .expect("wrapped client token total exceeds i64::MAX");
+            accumulate_wrapped_contribution(&mut model_map, &mut client_map, client_contrib);
         }
     }
 
@@ -376,6 +340,38 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         contributions,
         total_messages,
     })
+}
+
+fn accumulate_wrapped_contribution(
+    model_map: &mut HashMap<String, WrappedRankedEntry>,
+    client_map: &mut HashMap<String, WrappedRankedEntry>,
+    contribution: &tokscale_core::ClientContribution,
+) {
+    let contribution_tokens = contribution.tokens.total();
+    accumulate_wrapped_model(
+        model_map,
+        &contribution.model_id,
+        contribution.cost,
+        contribution_tokens,
+    );
+
+    let client_name = client_display_name(&contribution.client)
+        .unwrap_or(contribution.client.as_str())
+        .to_string();
+    let client_entry = client_map
+        .entry(contribution.client.clone())
+        .or_insert_with(|| WrappedRankedEntry {
+            name: client_name,
+            client_id: Some(contribution.client.clone()),
+            provider: None,
+            cost: 0.0,
+            tokens: 0,
+        });
+    client_entry.cost += contribution.cost;
+    client_entry.tokens = client_entry
+        .tokens
+        .checked_add(contribution_tokens)
+        .expect("wrapped client token total exceeds i64::MAX");
 }
 
 fn accumulate_wrapped_model(
@@ -2033,6 +2029,31 @@ mod tests {
         assert_eq!(model.name, "GPT-5.6 Sol");
         assert_eq!(model.cost, 2.0);
         assert_eq!(model.tokens, 2);
+    }
+
+    #[test]
+    fn wrapped_rankings_include_reasoning_tokens() {
+        let contribution = tokscale_core::ClientContribution {
+            client: "omp".to_string(),
+            model_id: "gpt-5.5".to_string(),
+            provider_id: "openai".to_string(),
+            tokens: tokscale_core::TokenBreakdown {
+                input: 100,
+                output: 25,
+                cache_read: 10,
+                cache_write: 5,
+                reasoning: 25,
+            },
+            cost: 1.0,
+            messages: 1,
+        };
+        let mut model_map = HashMap::new();
+        let mut client_map = HashMap::new();
+
+        accumulate_wrapped_contribution(&mut model_map, &mut client_map, &contribution);
+
+        assert_eq!(model_map["gpt-5.5"].tokens, 165);
+        assert_eq!(client_map["omp"].tokens, 165);
     }
 
     #[test]

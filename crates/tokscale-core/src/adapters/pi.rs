@@ -7,11 +7,16 @@ use crate::adapters::{
     ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
 pub(crate) struct PiAdapter;
 
 pub(crate) static PI_ADAPTER: PiAdapter = PiAdapter;
+
+// Earlier revisions were emitted before malformed inclusive-reasoning
+// breakdowns were clamped to their authoritative output bucket.
+const PI_USAGE_BUCKET_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 3;
 
 impl LocalSourceAdapter for PiAdapter {
     fn client(&self) -> ClientId {
@@ -22,11 +27,17 @@ impl LocalSourceAdapter for PiAdapter {
         &self,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
-        adapter_discover::discover_default_scanned_units(
+        let units = adapter_discover::discover_default_scanned_units(
             ClientId::Pi,
             ctx,
             FingerprintPolicy::PlainFile,
-        )
+        )?
+        .into_iter()
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(ParserId::Pi, PI_USAGE_BUCKET_REVISION))
+        })
+        .collect();
+        Ok(units)
     }
 
     fn parse_checked(
@@ -155,6 +166,9 @@ mod tests {
         assert!(units
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::PlainFile));
+        assert!(units.iter().all(|unit| {
+            unit.parser_version == ParserVersion::new(ParserId::Pi, PI_USAGE_BUCKET_REVISION)
+        }));
     }
 
     #[test]
