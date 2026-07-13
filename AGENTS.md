@@ -38,6 +38,19 @@ Keep `README.md` as the fork entry page. Put longer user-facing command,
 client, pricing, configuration, and development material under `docs/`,
 matching the split documented in `docs/development.md`.
 
+## No-Silent-Fallback Review Discipline
+
+- Read `docs/adr/0001-no-silent-fallback.md` before classifying behavior as a
+  fallback. The policy prohibits hidden failure and invented success; it does
+  not prohibit documented normalization, reconciliation, migrations, report
+  projections, or explicit source-priority rules.
+- Do not remove existing behavior merely because an identifier or comment uses
+  the word `fallback`. Identify the authoritative contract and a concrete
+  masked failure first.
+- A behavior change justified by ADR 0001 must include a focused regression
+  case. If an established domain rule is changing, update its ADR and tests
+  deliberately rather than treating the change as generic cleanup.
+
 ## Git Identity & Merge Discipline
 
 - Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
