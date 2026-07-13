@@ -12,6 +12,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{open_readonly_sqlite, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde_json::Value;
 use std::io::Read;
@@ -31,7 +32,15 @@ struct ZedThreadRow {
     data: Vec<u8>,
 }
 
-pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+/// What one thread row contributed to the scan.
+enum ThreadOutcome {
+    Message(Box<UnifiedMessage>),
+    /// Skipped by the source contract (imported, non-hosted, zero usage).
+    Filtered,
+    Rejected(RecordRejectionReason, String),
+}
+
+pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
     let conn = open_readonly_sqlite(db_path)?;
 
     let query = "SELECT id, updated_at, created_at, folder_paths, folder_paths_order, data_type, data FROM threads";
@@ -53,65 +62,106 @@ pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage
         })
         .map_err(|error| SessionParseError::new("execute Zed thread query", error))?;
 
-    rows.map(|row| {
-        let row = row.map_err(|error| SessionParseError::new("decode Zed thread row", error))?;
-        parse_thread_row(row)
-    })
-    .filter_map(|result| result.transpose())
-    .collect()
+    let mut scanned = ScannedSource::default();
+    for row in rows {
+        let row = match row {
+            Ok(row) => row,
+            // A failed row step means the database is damaged mid-scan: how
+            // many further rows are affected is unknown, so the confirmed
+            // records are kept and the scan is declared interrupted.
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "decode Zed thread row",
+                    error.to_string(),
+                ));
+                break;
+            }
+        };
+        match parse_thread_row(row) {
+            ThreadOutcome::Message(message) => scanned.messages.push(*message),
+            ThreadOutcome::Filtered => {}
+            ThreadOutcome::Rejected(reason, sample) => {
+                scanned.rejections.record(reason, || sample);
+            }
+        }
+    }
+    Ok(scanned)
 }
 
-fn parse_thread_row(row: ZedThreadRow) -> SessionParseResult<Option<UnifiedMessage>> {
-    let json = decode_thread_json(&row.data_type, &row.data).map_err(|detail| {
-        SessionParseError::invalid(
-            "decode Zed thread payload",
-            format!("thread `{}`: {detail}", row.id),
-        )
-    })?;
+fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
+    let json = match decode_thread_json(&row.data_type, &row.data) {
+        Ok(json) => json,
+        Err(detail) => {
+            return ThreadOutcome::Rejected(
+                RecordRejectionReason::MalformedRecord,
+                format!("thread `{}`: {detail}", row.id),
+            );
+        }
+    };
 
-    let thread: Value = serde_json::from_slice(&json)
-        .map_err(|error| SessionParseError::new("decode Zed thread JSON", error))?;
+    let thread: Value = match serde_json::from_slice(&json) {
+        Ok(thread) => thread,
+        Err(error) => {
+            return ThreadOutcome::Rejected(
+                RecordRejectionReason::MalformedRecord,
+                format!("thread `{}`: {error}", row.id),
+            );
+        }
+    };
 
     if thread
         .get("imported")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Ok(None);
+        return ThreadOutcome::Filtered;
     }
 
-    let model = thread.get("model").ok_or_else(|| {
-        SessionParseError::invalid("validate Zed thread", "thread is missing model")
-    })?;
-    let provider = model
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            SessionParseError::invalid("validate Zed thread", "model is missing provider")
-        })?
-        .trim();
-    if !provider.eq_ignore_ascii_case(ZED_HOSTED_PROVIDER) {
-        return Ok(None);
+    let Some(model) = thread.get("model").filter(|model| !model.is_null()) else {
+        return ThreadOutcome::Rejected(
+            RecordRejectionReason::MissingModel,
+            format!("thread `{}`: thread is missing model", row.id),
+        );
+    };
+    let Some(provider) = model.get("provider").and_then(Value::as_str) else {
+        return ThreadOutcome::Rejected(
+            RecordRejectionReason::MissingProvider,
+            format!("thread `{}`: model is missing provider", row.id),
+        );
+    };
+    if !provider.trim().eq_ignore_ascii_case(ZED_HOSTED_PROVIDER) {
+        return ThreadOutcome::Filtered;
     }
 
     let model_id = model
         .get("model")
         .and_then(Value::as_str)
-        .ok_or_else(|| SessionParseError::invalid("validate Zed thread", "model is missing id"))?
-        .trim();
+        .map(str::trim)
+        .unwrap_or_default();
     if model_id.is_empty() {
-        return Err(SessionParseError::invalid(
-            "validate Zed thread",
-            "model id is empty",
-        ));
+        return ThreadOutcome::Rejected(
+            RecordRejectionReason::MissingModel,
+            format!("thread `{}`: model id is missing or empty", row.id),
+        );
     }
 
-    let Some((tokens, message_count)) = thread_usage(&thread)? else {
-        return Ok(None);
+    let usage = match thread_usage(&thread) {
+        Ok(Some(usage)) => usage,
+        Ok(None) => return ThreadOutcome::Filtered,
+        Err(error) => {
+            return ThreadOutcome::Rejected(
+                RecordRejectionReason::MalformedRecord,
+                format!("thread `{}`: {error}", row.id),
+            );
+        }
     };
-    let timestamp = timestamp_ms(&row, &thread).ok_or_else(|| {
-        SessionParseError::invalid("validate Zed thread", "thread has no valid timestamp")
-    })?;
+    let (tokens, message_count) = usage;
+    let Some(timestamp) = timestamp_ms(&row, &thread) else {
+        return ThreadOutcome::Rejected(
+            RecordRejectionReason::MissingTimestamp,
+            format!("thread `{}`: thread has no valid timestamp", row.id),
+        );
+    };
 
     let mut message = UnifiedMessage::new_with_dedup(
         "zed",
@@ -125,15 +175,24 @@ fn parse_thread_row(row: ZedThreadRow) -> SessionParseResult<Option<UnifiedMessa
     );
     message.message_count = message_count;
 
-    if let Some(workspace_key) = workspace_key_from_folders(
+    match workspace_key_from_folders(
         row.folder_paths.as_deref(),
         row.folder_paths_order.as_deref(),
-    )? {
-        let workspace_label = workspace_label_from_key(&workspace_key);
-        message.set_workspace(Some(workspace_key), workspace_label);
+    ) {
+        Ok(Some(workspace_key)) => {
+            let workspace_label = workspace_label_from_key(&workspace_key);
+            message.set_workspace(Some(workspace_key), workspace_label);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return ThreadOutcome::Rejected(
+                RecordRejectionReason::MalformedRecord,
+                format!("thread `{}`: {error}", row.id),
+            );
+        }
     }
 
-    Ok(Some(message))
+    ThreadOutcome::Message(Box::new(message))
 }
 
 fn decode_thread_json(data_type: &str, data: &[u8]) -> Result<Vec<u8>, String> {
@@ -330,7 +389,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn parse_zed_sqlite(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_zed_sqlite(path).unwrap()
+        let scanned = super::parse_zed_sqlite(path).unwrap();
+        assert!(scanned.interrupted.is_none());
+        assert!(scanned.rejections.is_empty());
+        scanned.messages
     }
 
     #[test]
@@ -578,6 +640,126 @@ mod tests {
     fn decode_thread_json_rejects_unknown_data_type() {
         let err = decode_thread_json("brotli", b"{}").unwrap_err();
         assert!(err.contains("unsupported data_type"));
+    }
+
+    #[test]
+    fn bad_records_are_rejected_and_counted_while_good_records_are_kept() {
+        let dir = TempDir::new().unwrap();
+        let (db_path, conn) = create_threads_db(&dir);
+        let good = thread_json(
+            ZED_HOSTED_PROVIDER,
+            "claude-sonnet-4-5",
+            json!({"user-1": {"input_tokens": 100, "output_tokens": 20}}),
+        );
+        insert_thread(
+            &conn,
+            "thread-good",
+            &good,
+            "json",
+            "2026-05-01T12:30:00Z",
+            None,
+            None,
+            None,
+        );
+        let bad = r#"{"version":"0.3.0","updated_at":"2026-05-01T12:30:00Z","model":null,"request_token_usage":{"user-1":{"input_tokens":5,"output_tokens":1}},"imported":false}"#;
+        insert_thread(
+            &conn,
+            "thread-bad",
+            bad,
+            "json",
+            "2026-05-01T12:30:00Z",
+            None,
+            None,
+            None,
+        );
+        drop(conn);
+
+        let scanned = super::parse_zed_sqlite(&db_path).unwrap();
+
+        assert!(scanned.interrupted.is_none());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "thread-good");
+        assert_eq!(scanned.rejections.total(), 1);
+        let entries: Vec<_> = scanned.rejections.entries().collect();
+        assert_eq!(entries[0].key, "missing-model");
+        assert!(entries[0].sample.unwrap().contains("thread-bad"));
+    }
+
+    #[test]
+    fn all_bad_records_still_scan_to_a_complete_empty_source() {
+        let dir = TempDir::new().unwrap();
+        let (db_path, conn) = create_threads_db(&dir);
+        insert_thread(
+            &conn,
+            "thread-broken-json",
+            "{not json",
+            "json",
+            "2026-05-01T12:30:00Z",
+            None,
+            None,
+            None,
+        );
+        let no_provider = r#"{"version":"0.3.0","updated_at":"2026-05-01T12:30:00Z","model":{"model":"claude-sonnet-4-5"},"request_token_usage":{"user-1":{"input_tokens":5,"output_tokens":1}},"imported":false}"#;
+        insert_thread(
+            &conn,
+            "thread-no-provider",
+            no_provider,
+            "json",
+            "2026-05-01T12:30:00Z",
+            None,
+            None,
+            None,
+        );
+        drop(conn);
+
+        let scanned = super::parse_zed_sqlite(&db_path).unwrap();
+
+        assert!(scanned.interrupted.is_none());
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 2);
+        let keys: Vec<_> = scanned
+            .rejections
+            .entries()
+            .map(|entry| entry.key.to_string())
+            .collect();
+        assert!(keys.contains(&"malformed-record".to_string()));
+        assert!(keys.contains(&"missing-provider".to_string()));
+    }
+
+    #[test]
+    fn undecodable_row_interrupts_the_scan_but_keeps_confirmed_records() {
+        let dir = TempDir::new().unwrap();
+        let (db_path, conn) = create_threads_db(&dir);
+        let good = thread_json(
+            ZED_HOSTED_PROVIDER,
+            "claude-sonnet-4-5",
+            json!({"user-1": {"input_tokens": 100, "output_tokens": 20}}),
+        );
+        insert_thread(
+            &conn,
+            "thread-good",
+            &good,
+            "json",
+            "2026-05-01T12:30:00Z",
+            None,
+            None,
+            None,
+        );
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data) VALUES (NULL, 'x', '2026-05-01T12:30:00Z', 'json', X'7B7D')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = super::parse_zed_sqlite(&db_path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "thread-good");
+        let interrupted = scanned
+            .interrupted
+            .expect("row decode failure must interrupt");
+        assert_eq!(interrupted.operation, "decode Zed thread row");
     }
 
     #[test]

@@ -86,7 +86,7 @@ impl LocalSourceAdapter for ZedAdapter {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
+                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                     sessions::zed::parse_zed_sqlite(path)
                 })
             })
@@ -221,6 +221,45 @@ mod tests {
     }
 
     #[test]
+    fn zed_adapter_surfaces_record_rejections_as_source_health() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("threads.db");
+        let conn = create_threads_db(&db_path);
+        insert_thread(&conn, "zed-thread-good", "claude-sonnet-4-5");
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "zed-thread-bad",
+                "Bad thread",
+                "2026-05-01T12:30:00Z",
+                "json",
+                br#"{"version":"0.3.0","updated_at":"2026-05-01T12:30:00Z","model":null,"request_token_usage":{"u":{"input_tokens":5,"output_tokens":1}},"imported":false}"#.as_slice(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let units = vec![SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())];
+        let mut cache = message_cache::SourceMessageCache::default();
+        let parsed = ZED_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
+        let mut sink = Vec::new();
+        let mut fold_ctx = FoldContext::new(&mut cache, None);
+        ZED_ADAPTER.fold(parsed, &mut fold_ctx, &mut sink).unwrap();
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].session_id.as_ref(), "zed-thread-good");
+        assert_eq!(fold_ctx.health.rejected_records(), 1);
+        assert_eq!(fold_ctx.health.failed_sources(), 0);
+        assert_eq!(fold_ctx.health.partial_sources(), 0);
+        let source = &fold_ctx.health.sources()[0];
+        assert_eq!(source.client, ClientId::Zed);
+        assert_eq!(source.path, db_path);
+        let entries: Vec<_> = source.rejections.entries().collect();
+        assert_eq!(entries[0].key, "missing-model");
+        assert!(entries[0].sample.unwrap().contains("zed-thread-bad"));
+    }
+
+    #[test]
     fn zed_adapter_output_matches_parser() {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("threads.db");
@@ -236,7 +275,7 @@ mod tests {
             .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut actual)
             .unwrap();
 
-        let expected = finalized(sessions::zed::parse_zed_sqlite(&db_path).unwrap());
+        let expected = finalized(sessions::zed::parse_zed_sqlite(&db_path).unwrap().messages);
         assert_eq!(actual, expected);
     }
 }
