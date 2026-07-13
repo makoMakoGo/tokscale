@@ -153,6 +153,10 @@ Before publishing, verify the release identity and recovery plan:
 - whether upstream package names are intentionally reused or replaced;
 - validation commands and rollback/recovery steps.
 
+Generated release notes must follow ADR 0016: enumerate only first-parent fork
+changes, link a pull request only when its base repository is this fork, and do
+not synthesize contributor mentions or fork PR URLs from upstream ancestry.
+
 For ordinary validation, prefer source-build checks:
 
 ```bash

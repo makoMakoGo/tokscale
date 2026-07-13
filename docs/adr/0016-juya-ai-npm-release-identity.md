@@ -43,6 +43,22 @@ the existing publish helper.
 
 Release notes and changelog links target `makoMakoGo/tokscale`.
 
+Release notes are fork-maintained artifacts rather than a rendering of the full
+Git DAG:
+
+- select the previous tag and release commits from the first-parent history so
+  ADR 0009 ancestry-only merges do not import upstream entries;
+- link a pull request only when GitHub reports `makoMakoGo/tokscale` as its base
+  repository, and otherwise link the exact fork commit;
+- do not generate author mentions or contributor sections from commit history;
+- do not reuse upstream hero images or marketing copy; and
+- show the fork package identity, the previous fork release boundary, and the
+  exact-version install command.
+
+The generator fails when GitHub metadata cannot be read or a non-initial
+release contains no fork changes. It must not silently publish incomplete or
+fabricated notes.
+
 Release versions are committed before publication. The normal path is a
 version-only pull request, while the repository owner may use the same commit
 shape with a direct default-branch push. In both cases, publication is triggered
