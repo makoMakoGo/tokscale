@@ -976,6 +976,14 @@ pub fn load_cache(
         }
     };
 
+    // Preserve the degraded report for immediate rendering, but force the
+    // caller to rescan. A locked database or interrupted read can recover
+    // without changing the source inventory fingerprint. Completed scans
+    // with record rejections remain fresh because their result is stable.
+    if data.health.requires_source_retry() {
+        return CacheResult::Stale(data);
+    }
+
     let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_millis() as u64,
         Err(err) => {
@@ -1451,6 +1459,7 @@ mod tests {
             value["data"]["graph"]["weeks"][0][0],
             serde_json::Value::Null
         );
+        assert_eq!(value["data"]["health"]["complete"], true);
         assert_eq!(
             tuple_array_keys(&value["data"]["daily"][0]["sourceBreakdown"]),
             vec!["claude", "cursor"]
@@ -1495,6 +1504,7 @@ mod tests {
                 "totalCost",
                 "currentStreak",
                 "longestStreak",
+                "health",
             ]
         );
         let ordered_model = ordered_data.field("models").element(0);
@@ -1981,6 +1991,80 @@ mod tests {
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn complete_rejections_remain_a_fresh_tui_cache_hit() {
+        let temp_dir = TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
+        let clients = make_filters(&[ClientId::Zed]);
+        let scope = CacheReportScope::default();
+        let mut rejections = tokscale_core::RejectionSummary::default();
+        rejections.record_key("missing-model", || "thread bad".to_string());
+        let data = UsageData {
+            health: tokscale_core::source_health::HealthReport {
+                complete: false,
+                healthy_sources: 0,
+                rejected_records: 1,
+                partial_sources: 0,
+                failed_sources: 0,
+                sources: vec![tokscale_core::source_health::SourceHealthReport {
+                    client: "zed".to_string(),
+                    path: "/tmp/threads.db".to_string(),
+                    status: "complete".to_string(),
+                    failure: None,
+                    rejections,
+                }],
+            },
+            ..Default::default()
+        };
+        save_cached_data(&data, &clients, &GroupBy::Model, &scope, test_signature()).unwrap();
+
+        let result = load_cache(&clients, &GroupBy::Model, &scope);
+
+        assert!(matches!(result, CacheResult::Fresh(_, _)));
+    }
+
+    #[test]
+    #[serial]
+    fn source_failures_make_recent_tui_cache_stale_for_immediate_retry() {
+        let temp_dir = TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
+        let clients = make_filters(&[ClientId::OpenCode]);
+        let scope = CacheReportScope::default();
+
+        for (status, partial_sources, failed_sources) in [("partial", 1, 0), ("unavailable", 0, 1)]
+        {
+            let data = UsageData {
+                health: tokscale_core::source_health::HealthReport {
+                    complete: false,
+                    healthy_sources: 0,
+                    rejected_records: 0,
+                    partial_sources,
+                    failed_sources,
+                    sources: vec![tokscale_core::source_health::SourceHealthReport {
+                        client: "opencode".to_string(),
+                        path: "/tmp/opencode.db".to_string(),
+                        status: status.to_string(),
+                        failure: Some(tokscale_core::SourceFailure::new(
+                            "read SQLite",
+                            "database is locked",
+                        )),
+                        rejections: Default::default(),
+                    }],
+                },
+                ..Default::default()
+            };
+            save_cached_data(&data, &clients, &GroupBy::Model, &scope, test_signature()).unwrap();
+
+            let result = load_cache(&clients, &GroupBy::Model, &scope);
+
+            assert!(
+                matches!(result, CacheResult::Stale(_)),
+                "{status} health must force a retry"
+            );
         }
     }
 

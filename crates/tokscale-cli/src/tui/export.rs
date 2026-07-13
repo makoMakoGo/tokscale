@@ -53,8 +53,29 @@ pub fn build_export_json(data: &UsageData) -> Result<String> {
         "totals": {
             "tokens": data.total_tokens,
             "cost": data.total_cost
-        }
+        },
+        "health": data.health
     });
 
     Ok(serde_json::to_string_pretty(&export_data)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exported_report_keeps_degraded_source_health() {
+        let mut data = UsageData::default();
+        data.health.complete = false;
+        data.health.rejected_records = 2;
+        data.health.failed_sources = 1;
+
+        let json: serde_json::Value =
+            serde_json::from_str(&build_export_json(&data).unwrap()).unwrap();
+
+        assert_eq!(json["health"]["complete"], false);
+        assert_eq!(json["health"]["rejectedRecords"], 2);
+        assert_eq!(json["health"]["failedSources"], 1);
+    }
 }

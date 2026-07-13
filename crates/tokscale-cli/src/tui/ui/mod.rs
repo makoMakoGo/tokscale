@@ -6,6 +6,7 @@ mod footer;
 mod header;
 mod hourly;
 mod hourly_profile;
+mod issues;
 mod model_usage_layout;
 mod models;
 mod overview;
@@ -56,6 +57,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Tab::Weekly => period::render_weekly(frame, app, chunks[1]),
             Tab::Stats => stats::render(frame, app, chunks[1]),
             Tab::Usage => usage::render(frame, app, chunks[1]),
+            Tab::Issues => issues::render(frame, app, chunks[1]),
         }
     }
 

@@ -47,6 +47,7 @@ pub enum Tab {
     Hourly,
     Stats,
     Agents,
+    Issues,
 }
 
 impl Tab {
@@ -61,6 +62,7 @@ impl Tab {
             Tab::Hourly,
             Tab::Stats,
             Tab::Agents,
+            Tab::Issues,
         ]
     }
 
@@ -75,6 +77,7 @@ impl Tab {
             Tab::Hourly => "Hourly",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
+            Tab::Issues => "Issues",
         }
     }
 
@@ -89,6 +92,7 @@ impl Tab {
             Tab::Hourly => "Hr",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
+            Tab::Issues => "Iss",
         }
     }
 
@@ -102,13 +106,14 @@ impl Tab {
             Tab::Daily => Tab::Hourly,
             Tab::Hourly => Tab::Stats,
             Tab::Stats => Tab::Agents,
-            Tab::Agents => Tab::Overview,
+            Tab::Agents => Tab::Issues,
+            Tab::Issues => Tab::Overview,
         }
     }
 
     pub fn prev(self) -> Tab {
         match self {
-            Tab::Overview => Tab::Agents,
+            Tab::Overview => Tab::Issues,
             Tab::Usage => Tab::Overview,
             Tab::Models => Tab::Usage,
             Tab::Monthly => Tab::Models,
@@ -117,6 +122,7 @@ impl Tab {
             Tab::Hourly => Tab::Daily,
             Tab::Stats => Tab::Hourly,
             Tab::Agents => Tab::Stats,
+            Tab::Issues => Tab::Agents,
         }
     }
 }
@@ -352,6 +358,8 @@ pub struct App {
     usage_text_total_lines: usize,
     pub(crate) hourly_profile_viewport: TextViewport,
     hourly_profile_text_total_lines: usize,
+    pub(crate) issues_viewport: TextViewport,
+    issues_text_total_lines: usize,
     pub selected_daily_detail_date: Option<NaiveDate>,
     pub selected_period_detail: Option<PeriodDetailSelection>,
     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
@@ -500,6 +508,8 @@ impl App {
             usage_text_total_lines: 0,
             hourly_profile_viewport: TextViewport::default(),
             hourly_profile_text_total_lines: 0,
+            issues_viewport: TextViewport::default(),
+            issues_text_total_lines: 0,
             selected_daily_detail_date: None,
             selected_period_detail: None,
             detail_sort_contexts: HashMap::new(),
@@ -1052,12 +1062,23 @@ impl App {
             .visible_range(self.hourly_profile_text_total_lines)
     }
 
+    pub(crate) fn set_issues_text_viewport(&mut self, visible: usize, total_lines: usize) {
+        self.issues_text_total_lines = total_lines;
+        self.issues_viewport.set_visible(visible, total_lines);
+    }
+
+    pub(crate) fn issues_text_visible_range(&self) -> std::ops::Range<usize> {
+        self.issues_viewport
+            .visible_range(self.issues_text_total_lines)
+    }
+
     fn active_text_viewport_mut(&mut self) -> Option<&mut TextViewport> {
         match self.current_tab {
             Tab::Usage => Some(&mut self.usage_viewport),
             Tab::Hourly if self.hourly_view_mode == HourlyViewMode::Profile => {
                 Some(&mut self.hourly_profile_viewport)
             }
+            Tab::Issues => Some(&mut self.issues_viewport),
             _ => None,
         }
     }
@@ -1068,6 +1089,7 @@ impl App {
             Tab::Hourly if self.hourly_view_mode == HourlyViewMode::Profile => {
                 Some(self.hourly_profile_text_total_lines)
             }
+            Tab::Issues => Some(self.issues_text_total_lines),
             _ => None,
         }
     }
@@ -1216,7 +1238,7 @@ impl App {
             Tab::Monthly | Tab::Weekly | Tab::Daily | Tab::Hourly => {
                 (SortField::Date, SortDirection::Descending)
             }
-            Tab::Overview | Tab::Usage | Tab::Stats | Tab::Agents => {
+            Tab::Overview | Tab::Usage | Tab::Stats | Tab::Agents | Tab::Issues => {
                 (SortField::Cost, SortDirection::Descending)
             }
         }
@@ -1439,6 +1461,7 @@ impl App {
                 .iter()
                 .map(|u| u.metrics.len())
                 .sum(),
+            Tab::Issues => 0,
         }
     }
 
@@ -1800,7 +1823,7 @@ impl App {
                     h.cost
                 )
             }),
-            Tab::Stats | Tab::Usage => None,
+            Tab::Stats | Tab::Usage | Tab::Issues => None,
         };
 
         if let Some(text) = text {
@@ -2182,7 +2205,7 @@ mod tests {
     #[test]
     fn test_tab_all() {
         let tabs = Tab::all();
-        assert_eq!(tabs.len(), 9);
+        assert_eq!(tabs.len(), 10);
         assert_eq!(tabs[0], Tab::Overview);
         assert_eq!(tabs[1], Tab::Usage);
         assert_eq!(tabs[2], Tab::Models);
@@ -2192,6 +2215,7 @@ mod tests {
         assert_eq!(tabs[6], Tab::Hourly);
         assert_eq!(tabs[7], Tab::Stats);
         assert_eq!(tabs[8], Tab::Agents);
+        assert_eq!(tabs[9], Tab::Issues);
     }
 
     #[test]
@@ -2204,12 +2228,13 @@ mod tests {
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
         assert_eq!(Tab::Hourly.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
-        assert_eq!(Tab::Agents.next(), Tab::Overview);
+        assert_eq!(Tab::Agents.next(), Tab::Issues);
+        assert_eq!(Tab::Issues.next(), Tab::Overview);
     }
 
     #[test]
     fn test_tab_prev() {
-        assert_eq!(Tab::Overview.prev(), Tab::Agents);
+        assert_eq!(Tab::Overview.prev(), Tab::Issues);
         assert_eq!(Tab::Usage.prev(), Tab::Overview);
         assert_eq!(Tab::Models.prev(), Tab::Usage);
         assert_eq!(Tab::Monthly.prev(), Tab::Models);
@@ -2218,6 +2243,7 @@ mod tests {
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
         assert_eq!(Tab::Stats.prev(), Tab::Hourly);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
+        assert_eq!(Tab::Issues.prev(), Tab::Agents);
     }
 
     #[test]
@@ -2230,6 +2256,7 @@ mod tests {
         assert_eq!(Tab::Daily.as_str(), "Daily");
         assert_eq!(Tab::Hourly.as_str(), "Hourly");
         assert_eq!(Tab::Stats.as_str(), "Stats");
+        assert_eq!(Tab::Issues.as_str(), "Issues");
     }
 
     #[test]
@@ -2242,6 +2269,7 @@ mod tests {
         assert_eq!(Tab::Daily.short_name(), "Day");
         assert_eq!(Tab::Hourly.short_name(), "Hr");
         assert_eq!(Tab::Stats.short_name(), "Sta");
+        assert_eq!(Tab::Issues.short_name(), "Iss");
     }
 
     #[test]
@@ -2649,6 +2677,9 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Agents);
 
         app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Issues);
+
+        app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Overview);
     }
 
@@ -2656,6 +2687,9 @@ mod tests {
     fn test_handle_key_backtab_switch() {
         let mut app = make_app();
         assert_eq!(app.current_tab, Tab::Overview);
+
+        app.handle_key_event(key(KeyCode::BackTab));
+        assert_eq!(app.current_tab, Tab::Issues);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Agents);
@@ -2696,6 +2730,7 @@ mod tests {
             Tab::Hourly,
             Tab::Stats,
             Tab::Agents,
+            Tab::Issues,
             Tab::Overview,
         ] {
             app.handle_key_event(key(KeyCode::Tab));
@@ -3594,6 +3629,21 @@ mod tests {
         app.handle_key_event(key(KeyCode::PageDown));
 
         assert_eq!(app.hourly_profile_viewport.scroll, 2);
+        assert_eq!(app.selected_index, 2);
+        assert_eq!(app.scroll_offset, 1);
+    }
+
+    #[test]
+    fn issues_tab_key_scrolls_text_viewport_without_table_selection() {
+        let mut app = make_app();
+        app.current_tab = Tab::Issues;
+        app.selected_index = 2;
+        app.scroll_offset = 1;
+        app.set_issues_text_viewport(4, 10);
+
+        app.handle_key_event(key(KeyCode::PageDown));
+
+        assert_eq!(app.issues_viewport.scroll, 2);
         assert_eq!(app.selected_index, 2);
         assert_eq!(app.scroll_offset, 1);
     }
