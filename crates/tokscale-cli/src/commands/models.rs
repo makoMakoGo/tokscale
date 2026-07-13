@@ -181,9 +181,6 @@ pub(crate) fn run_models_report(
             warnings: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
-            #[serde(
-                skip_serializing_if = "tokscale_core::source_health::HealthReport::is_complete"
-            )]
             health: tokscale_core::source_health::HealthReport,
         }
 

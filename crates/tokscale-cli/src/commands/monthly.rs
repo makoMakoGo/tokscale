@@ -114,9 +114,6 @@ pub(crate) fn run_monthly_report(
             processing_time_ms: u32,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
-            #[serde(
-                skip_serializing_if = "tokscale_core::source_health::HealthReport::is_complete"
-            )]
             health: tokscale_core::source_health::HealthReport,
         }
 

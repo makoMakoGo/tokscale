@@ -56,6 +56,7 @@ pub(crate) fn run_time_metrics_report(
         had_cursor_cache,
         explicit_cursor_filter,
     );
+    super::shared::emit_health_summary(&report.health);
 
     let m = &report.metrics;
 
@@ -67,12 +68,14 @@ pub(crate) fn run_time_metrics_report(
             processing_time_ms: u32,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
+            health: &'a tokscale_core::source_health::HealthReport,
         }
 
         let output = TimeMetricsReportJson {
             metrics: &report.metrics,
             processing_time_ms: report.processing_time_ms,
             warnings: cursor_setup_warnings,
+            health: &report.health,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
