@@ -2768,7 +2768,7 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
 
 #[test]
 #[serial_test::serial]
-fn test_empty_opencode_sqlite_cache_entries_are_reparsed() {
+fn test_empty_opencode_scan_result_is_cached_and_served_warm() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -2777,46 +2777,40 @@ fn test_empty_opencode_sqlite_cache_entries_are_reparsed() {
     {
         let path = source_home.path().join(".local/share/opencode/opencode.db");
         let conn = create_opencode_sqlite_db(&path);
-        insert_opencode_sqlite_message(
-            &conn,
-            "msg-1",
-            "session-1",
-            "",
-            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        );
         drop(conn);
 
         let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
             .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
-        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
-        let mut cache = message_cache::SourceMessageCache::load().unwrap();
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
-            &path,
-            unit.parser_version,
-            fingerprint,
-            Vec::new(),
-            None,
-        ));
-        cache.save_if_dirty().unwrap();
 
-        let messages = parse_all_messages_with_pricing(
+        let first_messages = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
         .unwrap();
-        assert_eq!(messages.len(), 1);
+        assert!(first_messages.is_empty());
 
-        let mut loaded = message_cache::SourceMessageCache::load().unwrap();
-        let repaired_fingerprint = unit.source_input_policy().fingerprint().unwrap();
-        let repaired_messages = loaded
-            .take_messages(&message_cache::CacheReadPlan::new(
-                &path,
-                unit.parser_version,
-                repaired_fingerprint,
-            ))
-            .unwrap();
-        assert_eq!(repaired_messages.len(), 1);
+        let cache = message_cache::SourceMessageCache::load().unwrap();
+        let meta = cache
+            .get_meta(&path, unit.parser_version)
+            .unwrap()
+            .expect("a complete empty scan must be cached");
+        assert!(!meta.has_messages);
+        assert!(meta.rejections.is_empty());
+
+        message_cache::reset_source_read_stats(&path);
+        let second_messages = parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+        assert!(second_messages.is_empty());
+        assert_eq!(
+            message_cache::get_source_read_stats(&path),
+            message_cache::SourceReadStats::default(),
+            "second run must serve the cached empty scan without reading source bytes"
+        );
     }
 
     match original_home {

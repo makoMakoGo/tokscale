@@ -175,6 +175,9 @@ pub struct UsageGraphData {
 
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
+    /// Source health for the load that produced this data. Empty/complete
+    /// when every source was healthy.
+    pub health: crate::source_health::HealthReport,
     pub models: Vec<UsageModelEntry>,
     pub agents: Vec<AgentEntry>,
     pub daily: Vec<DailyUsage>,

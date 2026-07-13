@@ -260,6 +260,58 @@ mod tests {
     }
 
     #[test]
+    fn warm_cache_hit_restores_rejection_summary_without_rescanning() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("threads.db");
+        let conn = create_threads_db(&db_path);
+        insert_thread(&conn, "zed-thread-good", "claude-sonnet-4-5");
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "zed-thread-bad",
+                "Bad thread",
+                "2026-05-01T12:30:00Z",
+                "json",
+                br#"{"version":"0.3.0","updated_at":"2026-05-01T12:30:00Z","model":null,"request_token_usage":{"u":{"input_tokens":5,"output_tokens":1}},"imported":false}"#.as_slice(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let unit = SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())
+            .with_parser_version(ParserVersion::new(
+                ParserId::Zed,
+                EXPLICIT_TOKEN_OVERFLOW_REVISION,
+            ))
+            .prepare_snapshot()
+            .unwrap();
+        let cold = ZED_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
+        let mut sink = Vec::new();
+        let mut fold_ctx = FoldContext::new(&mut cache, None);
+        ZED_ADAPTER.fold(cold, &mut fold_ctx, &mut sink).unwrap();
+        assert_eq!(fold_ctx.health.rejected_records(), 1);
+        cache.save_if_dirty().unwrap();
+
+        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let planned = ZED_ADAPTER
+            .plan_cache_hit(unit, &warm_cache)
+            .expect("warm planning must succeed");
+        let hit = match planned {
+            crate::adapters::CacheHitPlan::Hit(parsed) => parsed,
+            crate::adapters::CacheHitPlan::Miss(_) => {
+                panic!("unchanged source with cached scan must plan a warm hit")
+            }
+        };
+        let health = hit.source_health();
+        assert_eq!(health.rejections.total(), 1);
+        let entries: Vec<_> = health.rejections.entries().collect();
+        assert_eq!(entries[0].key, "missing-model");
+        assert!(entries[0].sample.unwrap().contains("zed-thread-bad"));
+    }
+
+    #[test]
     fn zed_adapter_output_matches_parser() {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("threads.db");

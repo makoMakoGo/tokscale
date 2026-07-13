@@ -19,10 +19,10 @@ compile_error!("source-message cache requires stable Unix or Windows file identi
 // Source-message cache shards split serialization layout from parser/source
 // semantics. Bump this only when the shard bincode layout changes; parser-only
 // fixes should bump the relevant SourceUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 4;
+const CACHE_FORMAT_VERSION: u32 = 5;
 #[cfg(test)]
-const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 3;
-const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 2] = [2, 3];
+const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 4;
+const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 3] = [2, 3, 4];
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const SHARD_KEY_FORMAT_VERSION: u32 = 1;
 const SHARDS_DIRNAME: &str = "shards";
@@ -1153,6 +1153,7 @@ pub(crate) struct CachedSourceEntry {
     pub fingerprint: SourceFingerprint,
     pub messages: Vec<UnifiedMessage>,
     pub codex_incremental: Option<CodexIncrementalCache>,
+    pub rejections: crate::source_health::RejectionSummary,
 }
 
 impl CachedSourceEntry {
@@ -1197,6 +1198,7 @@ impl CachedSourceEntry {
             fingerprint,
             messages,
             codex_incremental,
+            rejections: Default::default(),
         }
     }
 
@@ -1206,6 +1208,7 @@ impl CachedSourceEntry {
             parser_version: self.parser_version,
             fingerprint: self.fingerprint.clone(),
             codex_incremental: self.codex_incremental.clone(),
+            rejections: self.rejections.clone(),
         }
     }
 
@@ -1224,6 +1227,7 @@ pub(crate) struct CacheWritePlan {
     parser_version: ParserVersion,
     fingerprint: SourceFingerprint,
     codex_incremental: Option<CodexIncrementalCache>,
+    rejections: crate::source_health::RejectionSummary,
 }
 
 impl CacheWritePlan {
@@ -1238,7 +1242,18 @@ impl CacheWritePlan {
             parser_version,
             fingerprint,
             codex_incremental,
+            rejections: Default::default(),
         }
+    }
+
+    /// Attach the scan's rejection summary so it persists with the shard and
+    /// is restored on warm hits.
+    pub(crate) fn with_rejections(
+        mut self,
+        rejections: crate::source_health::RejectionSummary,
+    ) -> Self {
+        self.rejections = rejections;
+        self
     }
 
     fn key(&self) -> CachedSourceKey {
@@ -1256,6 +1271,7 @@ struct CachedShardHeader {
     fingerprint: SourceFingerprint,
     codex_incremental: Option<CodexIncrementalCache>,
     message_count: usize,
+    rejections: crate::source_health::RejectionSummary,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1273,6 +1289,7 @@ pub(crate) struct CachedSourceMeta {
     pub fingerprint: SourceFingerprint,
     pub has_messages: bool,
     pub codex_incremental: Option<CodexIncrementalCache>,
+    pub rejections: crate::source_health::RejectionSummary,
 }
 
 pub(crate) struct SourceMessageCache {
@@ -1774,6 +1791,7 @@ fn meta_from_entry(entry: &CachedSourceEntry) -> CachedSourceMeta {
         fingerprint: entry.fingerprint.clone(),
         has_messages: !entry.messages.is_empty(),
         codex_incremental: entry.codex_incremental.clone(),
+        rejections: entry.rejections.clone(),
     }
 }
 
@@ -1782,6 +1800,7 @@ fn meta_from_header(header: CachedShardHeader) -> CachedSourceMeta {
         fingerprint: header.fingerprint,
         has_messages: header.message_count > 0,
         codex_incremental: header.codex_incremental,
+        rejections: header.rejections,
     }
 }
 
@@ -1924,6 +1943,7 @@ fn header_from_plan(plan: &CacheWritePlan, message_count: usize) -> CachedShardH
         fingerprint: plan.fingerprint.clone(),
         codex_incremental: plan.codex_incremental.clone(),
         message_count,
+        rejections: plan.rejections.clone(),
     }
 }
 
@@ -1989,6 +2009,7 @@ fn read_shard_entry_with_plan(
         parser_version: header.parser_version,
         fingerprint: header.fingerprint,
         messages: body.messages,
+        rejections: header.rejections,
         codex_incremental: header.codex_incremental,
     })
 }
@@ -3662,6 +3683,7 @@ mod tests {
             fingerprint: SourceFingerprint::from_path(source.path()).unwrap(),
             codex_incremental: None,
             message_count: 0,
+            rejections: Default::default(),
         };
         let header_bytes = bincode::options().serialize(&header).unwrap();
         let mut file = File::create(&shard).unwrap();

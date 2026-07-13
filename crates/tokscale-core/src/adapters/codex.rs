@@ -127,9 +127,17 @@ fn plan_exact_codex_cache_hit(
         _ => unreachable!("unexpected Codex source unit meta"),
     };
     unit.revalidate_snapshot_for_cache_decision()?;
-    let Some(cached) = source_cache.get_meta(&unit.path, unit.parser_version)? else {
-        unit.mark_cache_lookup_completed_no_hit();
-        return Ok(CacheHitPlan::Miss(unit));
+    let cached = match source_cache.get_meta(&unit.path, unit.parser_version) {
+        Ok(Some(cached)) => cached,
+        Ok(None) => {
+            unit.mark_cache_lookup_completed_no_hit();
+            return Ok(CacheHitPlan::Miss(unit));
+        }
+        Err(failure) => {
+            adapter_cache::report_cache_lookup_failure(&failure);
+            unit.mark_cache_lookup_completed_no_hit();
+            return Ok(CacheHitPlan::Miss(unit));
+        }
     };
     let snapshot = unit.prepared_source_input_snapshot().ok_or_else(|| {
         message_cache::SourceSnapshotError::InvalidSnapshot {

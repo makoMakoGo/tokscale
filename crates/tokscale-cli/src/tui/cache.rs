@@ -23,7 +23,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 30;
+const CACHE_SCHEMA_VERSION: u32 = 31;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +94,8 @@ struct CachedUsageData {
     total_cost: f64,
     current_streak: u32,
     longest_streak: u32,
+    #[serde(default)]
+    health: tokscale_core::source_health::HealthReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +243,7 @@ struct CachedUsageDataRef<'a> {
     total_cost: f64,
     current_streak: u32,
     longest_streak: u32,
+    health: &'a tokscale_core::source_health::HealthReport,
 }
 
 impl<'a> From<&'a UsageData> for CachedUsageDataRef<'a> {
@@ -255,6 +258,7 @@ impl<'a> From<&'a UsageData> for CachedUsageDataRef<'a> {
             total_cost: data.total_cost,
             current_streak: data.current_streak,
             longest_streak: data.longest_streak,
+            health: &data.health,
         }
     }
 }
@@ -811,6 +815,7 @@ impl TryFrom<CachedUsageData> for UsageData {
         let graph: Option<Result<GraphData, _>> = u.graph.map(|g| g.try_into());
 
         Ok(Self {
+            health: u.health,
             models: u.models.into_iter().map(|m| m.into()).collect(),
             agents: normalize_cached_agents(u.agents)?,
             daily: daily?,
@@ -1330,6 +1335,7 @@ mod tests {
             .collect();
 
         UsageData {
+            health: Default::default(),
             models: vec![ModelUsage {
                 model: "claude-sonnet-4".to_string(),
                 provider: "anthropic".to_string(),
@@ -1729,6 +1735,7 @@ mod tests {
             report_scope: CacheReportScope::default(),
             source_inventory_signature: test_signature(),
             data: CachedUsageData {
+                health: Default::default(),
                 models: Vec::new(),
                 agents: vec![
                     cached_agent("Sisyphus", "opencode", u64::MAX),

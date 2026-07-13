@@ -1529,9 +1529,11 @@ pub fn load_prepared_usage_data_with_pricing(
         until: prepared.options.until.clone(),
         year: prepared.options.year.clone(),
     };
-    let (views, _) =
+    let (mut views, _) =
         load_prepared_aggregated_views(prepared, group_by, date_range, ViewSet::TUI, pricing)?;
-    Ok(views.tui_usage.expect("tui view requested"))
+    let mut data = views.tui_usage.take().expect("tui view requested");
+    data.health = views.health.to_report();
+    Ok(data)
 }
 
 #[derive(Debug)]
@@ -1568,7 +1570,8 @@ pub async fn load_prepared_usage_data_with_diagnostics(
         ViewSet::TUI,
         pricing.as_deref(),
     )?;
-    let data = views.tui_usage.take().expect("tui view requested");
+    let mut data = views.tui_usage.take().expect("tui view requested");
+    data.health = views.health.to_report();
     Ok(UsageDataWithDiagnostics {
         data,
         pricing_diagnostics,

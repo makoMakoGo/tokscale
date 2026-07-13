@@ -15,9 +15,20 @@ pub(crate) fn plan_cache_hit(
         return Ok(CacheHitPlan::Miss(unit));
     }
     unit.revalidate_snapshot_for_cache_decision()?;
-    let Some(cached) = source_cache.get_meta(&unit.path, unit.parser_version)? else {
-        unit.mark_cache_lookup_completed_no_hit();
-        return Ok(CacheHitPlan::Miss(unit));
+    let cached = match source_cache.get_meta(&unit.path, unit.parser_version) {
+        Ok(Some(cached)) => cached,
+        Ok(None) => {
+            unit.mark_cache_lookup_completed_no_hit();
+            return Ok(CacheHitPlan::Miss(unit));
+        }
+        // An unreadable or outdated-format shard is a derived-cache fault:
+        // report it and reparse the authoritative source, which rewrites the
+        // shard in the current format.
+        Err(failure) => {
+            report_cache_lookup_failure(&failure);
+            unit.mark_cache_lookup_completed_no_hit();
+            return Ok(CacheHitPlan::Miss(unit));
+        }
     };
     let snapshot = unit.prepared_source_input_snapshot().ok_or_else(|| {
         message_cache::SourceSnapshotError::InvalidSnapshot {
@@ -26,7 +37,7 @@ pub(crate) fn plan_cache_hit(
         }
     })?;
     let stamp = unit.source_input_policy().stamp_from_snapshot(snapshot)?;
-    if cached.fingerprint.stamp != stamp || !cached.has_messages {
+    if cached.fingerprint.stamp != stamp {
         unit.mark_cache_lookup_completed_no_hit();
         return Ok(CacheHitPlan::Miss(unit));
     }
@@ -34,12 +45,15 @@ pub(crate) fn plan_cache_hit(
 
     let read_plan =
         message_cache::CacheReadPlan::new(&unit.path, unit.parser_version, cached.fingerprint);
-    Ok(CacheHitPlan::Hit(ParsedUnit::healthy(
-        unit,
-        UnitMessageSource::CacheHit(read_plan),
-        None,
-        false,
-    )))
+    let mut parsed = ParsedUnit::healthy(unit, UnitMessageSource::CacheHit(read_plan), None, false);
+    parsed.health.rejections = cached.rejections;
+    Ok(CacheHitPlan::Hit(parsed))
+}
+
+pub(crate) fn report_cache_lookup_failure(failure: &message_cache::CacheLookupFailure) {
+    eprintln!(
+        "[tokscale] Warning: {failure}; ignoring that cache shard and reparsing the current source"
+    );
 }
 
 /// Compatibility seam for parsers that have not migrated to record-level
@@ -120,12 +134,10 @@ where
     };
     let complete = scanned.interrupted.is_none();
     let cache_write = if complete && cacheable && source_unchanged {
-        Some(Box::new(message_cache::CacheWritePlan::new(
-            &unit.path,
-            unit.parser_version,
-            fingerprint,
-            None,
-        )))
+        Some(Box::new(
+            message_cache::CacheWritePlan::new(&unit.path, unit.parser_version, fingerprint, None)
+                .with_rejections(scanned.rejections.clone()),
+        ))
     } else {
         None
     };
@@ -645,13 +657,13 @@ mod tests {
     }
 
     #[test]
-    fn previous_format_lookup_fails_without_parsing_or_mutating_the_shard() {
+    fn previous_format_lookup_downgrades_to_miss_without_mutating_the_shard() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
         std::fs::write(&source_path, PI_SOURCE).unwrap();
         let unit = pi_unit(&source_path);
-        seed_disk_cache(cache_dir.path(), &unit, "v3-cache-session");
+        seed_disk_cache(cache_dir.path(), &unit, "previous-format-session");
         let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
             cache_dir.path(),
             &source_path,
@@ -659,19 +671,15 @@ mod tests {
         );
         let before = std::fs::read(&shard_path).unwrap();
         let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let error = plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache)
-            .expect_err("v3 shards must fail current-format lookup");
-        assert!(matches!(
-            error,
-            crate::adapters::SourcePlanningError::CacheLookup(message_cache::CacheLookupFailure {
-                reason: message_cache::CacheReadFailureReason::PreviousFormat { actual: 3, .. },
-                ..
-            })
-        ));
+        let miss = expect_cache_miss(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
+            "a previous-format shard must plan a reparse miss instead of failing the source",
+        );
+        assert_eq!(miss.path, source_path);
         assert_eq!(
             std::fs::read(shard_path).unwrap(),
             before,
-            "ordinary lookup must not mutate a previous-format shard"
+            "planning must not mutate a previous-format shard"
         );
     }
 

@@ -58,10 +58,10 @@ impl RecordRejectionReason {
 /// are keyed by stable strings so shards written with reasons this build
 /// does not know still round-trip losslessly through the cache.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// Field attributes stay plain: shards serialize this with bincode, which is
+// not self-describing, so `skip_serializing_if` would corrupt round-trips.
 pub struct RejectionSummary {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     counts: BTreeMap<String, u64>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     samples: BTreeMap<String, String>,
 }
 
