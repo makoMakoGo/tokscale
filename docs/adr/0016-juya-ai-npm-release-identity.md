@@ -73,6 +73,13 @@ Core CI and Test & Coverage share `scripts/test-release-tooling.sh` as the
 single release-tooling validation entrypoint. Individual release checks are not
 duplicated in workflow YAML.
 
+The root `package.json` declares the repository's exact Bun version through
+`packageManager`. GitHub Actions jobs that require Bun install it through the
+local `.github/actions/setup-bun` Module. That Module pins the external
+`oven-sh/setup-bun` implementation to a full commit SHA; workflows must not
+reference the external action or declare their own Bun versions. The release
+workflow safety check enforces this toolchain contract.
+
 Before publishing, validate the launcher and release scripts:
 
 ```bash

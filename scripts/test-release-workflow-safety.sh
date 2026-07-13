@@ -6,9 +6,57 @@ SCRIPT_UNDER_TEST="${ROOT_DIR}/scripts/check-release-workflow-safety.py"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
+replace_text() {
+  local path="$1"
+  local old="$2"
+  local new="$3"
+  python3 - "${path}" "${old}" "${new}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+old, new = sys.argv[2:]
+text = path.read_text()
+if old not in text:
+    raise SystemExit(f"Expected text not found in {path}: {old!r}")
+path.write_text(text.replace(old, new, 1))
+PY
+}
+
+assert_safety_rejected() {
+  local work="$1"
+  local output="$2"
+  local expected="$3"
+  local failure_message="$4"
+  if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
+    echo "${failure_message}" >&2
+    return 1
+  fi
+  grep -Fq "${expected}" "${output}"
+}
+
 write_good_workflows() {
   local work="$1"
-  mkdir -p "${work}/.github/workflows" "${work}/packages/cli-linux-x64-gnu" "${work}/scripts"
+  mkdir -p \
+    "${work}/.github/actions/setup-bun" \
+    "${work}/.github/workflows" \
+    "${work}/packages/cli-linux-x64-gnu" \
+    "${work}/scripts"
+  cat > "${work}/package.json" <<'EOF_MANIFEST'
+{
+  "name": "release-tooling-test",
+  "private": true,
+  "packageManager": "bun@1.3.14"
+}
+EOF_MANIFEST
+  cat > "${work}/.github/actions/setup-bun/action.yml" <<'EOF_YAML'
+name: Set up repository Bun
+description: Install the exact Bun version declared in the root package manifest
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+EOF_YAML
   cat > "${work}/scripts/test-release-tooling.sh" <<'EOF_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -90,14 +138,46 @@ jobs:
   authorize-publish:
     steps:
       - run: bash scripts/check-release-commit.sh
+  publish-cli:
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
+      - run: bun install
+  finalize:
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
+      - run: bun scripts/generate-release-notes.ts 3.0.0
 EOF_YAML
   cat > "${work}/.github/workflows/core_ci.yml" <<'EOF_YAML'
 name: Core CI (Test Only)
 
 jobs:
-  lint:
+  rust-core:
     steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
       - run: bash scripts/test-release-tooling.sh
+EOF_YAML
+  cat > "${work}/.github/workflows/launcher_validation.yml" <<'EOF_YAML'
+name: Launcher Validation (Test Only)
+
+on:
+  push:
+    paths:
+      - package.json
+      - .github/actions/setup-bun/action.yml
+  pull_request:
+    paths:
+      - package.json
+      - .github/actions/setup-bun/action.yml
+
+jobs:
+  launcher-smoke:
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
 EOF_YAML
   cat > "${work}/.github/workflows/test_coverage.yml" <<'EOF_YAML'
 name: Test & Coverage (Test Only)
@@ -106,21 +186,29 @@ on:
   push:
     paths:
       - scripts/**
+      - package.json
+      - .github/actions/setup-bun/action.yml
       - .github/workflows/build-native.yml
       - .github/workflows/core_ci.yml
+      - .github/workflows/launcher_validation.yml
       - .github/workflows/publish-cli.yml
       - .github/workflows/test_coverage.yml
   pull_request:
     paths:
       - scripts/**
+      - package.json
+      - .github/actions/setup-bun/action.yml
       - .github/workflows/build-native.yml
       - .github/workflows/core_ci.yml
+      - .github/workflows/launcher_validation.yml
       - .github/workflows/publish-cli.yml
       - .github/workflows/test_coverage.yml
 
 jobs:
   lint:
     steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
       - run: bash scripts/test-release-tooling.sh
 EOF_YAML
 
@@ -429,6 +517,87 @@ PY
   grep -q "Test & Coverage push paths are missing release inputs" "${output}"
 }
 
+test_rejects_unpinned_bun_package_manager() {
+  local work="${TMP_DIR}/unpinned-bun-package-manager"
+  write_good_workflows "${work}"
+  replace_text "${work}/package.json" "bun@1.3.14" "bun@1.3"
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/unpinned-bun-package-manager-output.txt" \
+    "root packageManager must pin Bun to an exact semantic version" \
+    "Expected workflow safety check to reject an unpinned Bun packageManager"
+}
+
+test_rejects_mutable_setup_bun_reference() {
+  local work="${TMP_DIR}/mutable-setup-bun-reference"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/actions/setup-bun/action.yml" \
+    "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6" \
+    "oven-sh/setup-bun@v2"
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/mutable-setup-bun-reference-output.txt" \
+    "repository Bun setup action must reference oven-sh/setup-bun at exactly one full commit SHA" \
+    "Expected workflow safety check to reject a mutable setup-bun reference"
+}
+
+test_rejects_direct_setup_bun_workflow_reference() {
+  local work="${TMP_DIR}/direct-setup-bun-reference"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/workflows/launcher_validation.yml" \
+    "uses: ./.github/actions/setup-bun" \
+    "uses: oven-sh/setup-bun@v2"
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/direct-setup-bun-reference-output.txt" \
+    "must use './.github/actions/setup-bun', not oven-sh/setup-bun directly" \
+    "Expected workflow safety check to reject a direct setup-bun reference"
+}
+
+test_rejects_workflow_owned_bun_version() {
+  local work="${TMP_DIR}/workflow-owned-bun-version"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/workflows/launcher_validation.yml" \
+    $'      - uses: ./.github/actions/setup-bun\n' \
+    $'      - uses: ./.github/actions/setup-bun\n        with:\n          bun-version: 1.3.14\n'
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/workflow-owned-bun-version-output.txt" \
+    "must read the root packageManager instead of declaring bun-version" \
+    "Expected workflow safety check to reject a workflow-owned Bun version"
+}
+
+test_rejects_bun_setup_after_release_tooling() {
+  local work="${TMP_DIR}/late-bun-setup"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/workflows/core_ci.yml" \
+    $'      - uses: ./.github/actions/setup-bun\n      - run: bash scripts/test-release-tooling.sh' \
+    $'      - run: bash scripts/test-release-tooling.sh\n      - uses: ./.github/actions/setup-bun'
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/late-bun-setup-output.txt" \
+    "Core CI rust-core must set up Bun before" \
+    "Expected workflow safety check to reject Bun setup after release tooling"
+}
+
+test_rejects_missing_launcher_toolchain_trigger() {
+  local work="${TMP_DIR}/missing-launcher-toolchain-trigger"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/workflows/launcher_validation.yml" \
+    $'      - .github/actions/setup-bun/action.yml\n' \
+    ""
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/missing-launcher-toolchain-trigger-output.txt" \
+    "Launcher Validation push paths are missing Bun toolchain inputs" \
+    "Expected workflow safety check to reject a missing launcher toolchain trigger"
+}
+
 test_accepts_matching_publish_and_native_workflows
 test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
@@ -444,5 +613,11 @@ test_rejects_missing_release_tooling_entrypoint
 test_accepts_executable_git_mode_without_worktree_execute_bits
 test_rejects_non_executable_release_tooling_entrypoint
 test_rejects_release_validation_path_drift
+test_rejects_unpinned_bun_package_manager
+test_rejects_mutable_setup_bun_reference
+test_rejects_direct_setup_bun_workflow_reference
+test_rejects_workflow_owned_bun_version
+test_rejects_bun_setup_after_release_tooling
+test_rejects_missing_launcher_toolchain_trigger
 
 echo "release workflow safety tests passed"

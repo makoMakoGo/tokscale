@@ -4,6 +4,7 @@
   "private": true,
   "description": "Local AI coding usage reports for CLI and TUI workflows",
   "type": "module",
+  "packageManager": "bun@1.3.14",
   "workspaces": [
     "packages/*"
   ],

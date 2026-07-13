@@ -219,11 +219,6 @@ jobs:
           ref: ${{ needs.prepare-release.outputs.release_commit }}
           persist-credentials: false
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.1.38
-
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
@@ -265,9 +260,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.1.38
+        uses: ./.github/actions/setup-bun
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -301,11 +294,6 @@ jobs:
           ref: ${{ needs.prepare-release.outputs.release_commit }}
           persist-credentials: false
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.1.38
-
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
@@ -334,9 +322,7 @@ jobs:
           fetch-tags: true
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.1.38
+        uses: ./.github/actions/setup-bun
 
       - name: Create tag and GitHub release
         env:

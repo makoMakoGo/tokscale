@@ -7,9 +7,13 @@ import sys
 
 
 ROOT = pathlib.Path.cwd()
+WORKFLOWS_DIR = ROOT / ".github/workflows"
+PACKAGE_MANIFEST = ROOT / "package.json"
+BUN_SETUP_ACTION = ROOT / ".github/actions/setup-bun/action.yml"
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish-cli.yml"
 BUILD_NATIVE_WORKFLOW = ROOT / ".github/workflows/build-native.yml"
 CORE_CI_WORKFLOW = ROOT / ".github/workflows/core_ci.yml"
+LAUNCHER_VALIDATION_WORKFLOW = ROOT / ".github/workflows/launcher_validation.yml"
 TEST_COVERAGE_WORKFLOW = ROOT / ".github/workflows/test_coverage.yml"
 RELEASE_TOOLING_SCRIPT = ROOT / "scripts/test-release-tooling.sh"
 REQUIRED_ENV_KEYS = ("MACOSX_DEPLOYMENT_TARGET", "CARGO_TERM_COLOR", "CARGO_INCREMENTAL")
@@ -22,12 +26,20 @@ TARGET_PACKAGES = {
 DEFAULT_RELEASE_BRANCH = "personal/local-clients"
 RELEASE_TRIGGER_PATH = "packages/cli/package.json"
 RELEASE_TOOLING_COMMAND = "bash scripts/test-release-tooling.sh"
+LOCAL_BUN_SETUP_ACTION = "./.github/actions/setup-bun"
 RELEASE_VALIDATION_PATHS = {
     "scripts/**",
+    "package.json",
+    ".github/actions/setup-bun/action.yml",
     ".github/workflows/build-native.yml",
     ".github/workflows/core_ci.yml",
+    ".github/workflows/launcher_validation.yml",
     ".github/workflows/publish-cli.yml",
     ".github/workflows/test_coverage.yml",
+}
+LAUNCHER_TOOLCHAIN_PATHS = {
+    "package.json",
+    ".github/actions/setup-bun/action.yml",
 }
 
 
@@ -171,6 +183,49 @@ def exact_run_command_count(lines: list[str], command: str) -> int:
     return sum(1 for line in lines if pattern.fullmatch(line))
 
 
+def uses_reference_indexes(lines: list[str], reference: str) -> list[int]:
+    pattern = re.compile(
+        rf"\s+(?:-\s+)?uses:\s*{re.escape(reference)}(?:\s+#.*)?$"
+    )
+    return [index for index, line in enumerate(lines) if pattern.fullmatch(line)]
+
+
+def uses_prefix_indexes(lines: list[str], prefix: str) -> list[int]:
+    pattern = re.compile(rf"\s+(?:-\s+)?uses:\s*{re.escape(prefix)}[^\s#]*(?:\s+#.*)?$")
+    return [index for index, line in enumerate(lines) if pattern.fullmatch(line)]
+
+
+def text_indexes(lines: list[str], text: str) -> list[int]:
+    return [index for index, line in enumerate(lines) if text in line]
+
+
+def validate_bun_job(
+    errors: list[str],
+    label: str,
+    workflow_lines: list[str],
+    job_name: str,
+    consumer_text: str,
+) -> None:
+    block = job_block(workflow_lines, job_name)
+    setup_indexes = uses_reference_indexes(block, LOCAL_BUN_SETUP_ACTION)
+    if len(setup_indexes) != 1:
+        errors.append(
+            f"{label} must use {LOCAL_BUN_SETUP_ACTION!r} exactly once, "
+            f"found {len(setup_indexes)}"
+        )
+        return
+
+    checkout_indexes = uses_prefix_indexes(block, "actions/checkout@")
+    if not checkout_indexes or checkout_indexes[0] > setup_indexes[0]:
+        errors.append(f"{label} must check out the repository before setting up Bun")
+
+    consumer_indexes = text_indexes(block, consumer_text)
+    if not consumer_indexes:
+        errors.append(f"{label} is missing Bun consumer {consumer_text!r}")
+    elif setup_indexes[0] > consumer_indexes[0]:
+        errors.append(f"{label} must set up Bun before {consumer_text!r}")
+
+
 def matrix_settings(lines: list[str], job_name: str) -> list[dict[str, str]]:
     block = job_block(lines, job_name)
     settings_start = None
@@ -237,8 +292,66 @@ def main() -> None:
     publish_lines = read_lines(PUBLISH_WORKFLOW)
     native_lines = read_lines(BUILD_NATIVE_WORKFLOW)
     core_ci_lines = read_lines(CORE_CI_WORKFLOW)
+    launcher_validation_lines = read_lines(LAUNCHER_VALIDATION_WORKFLOW)
     test_coverage_lines = read_lines(TEST_COVERAGE_WORKFLOW)
     errors: list[str] = []
+
+    if not PACKAGE_MANIFEST.is_file():
+        errors.append(f"missing root package manifest: {PACKAGE_MANIFEST}")
+    else:
+        try:
+            package_manifest = json.loads(PACKAGE_MANIFEST.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as error:
+            errors.append(f"unable to read root package manifest: {error}")
+        else:
+            package_manager = package_manifest.get("packageManager")
+            if not isinstance(package_manager, str) or not re.fullmatch(
+                r"bun@\d+\.\d+\.\d+", package_manager
+            ):
+                errors.append(
+                    "root packageManager must pin Bun to an exact semantic version"
+                )
+
+    if not BUN_SETUP_ACTION.is_file():
+        errors.append(f"missing repository Bun setup action: {BUN_SETUP_ACTION}")
+    else:
+        bun_setup_lines = BUN_SETUP_ACTION.read_text(encoding="utf-8").splitlines()
+        external_setup_indexes = uses_prefix_indexes(
+            bun_setup_lines, "oven-sh/setup-bun@"
+        )
+        pinned_setup_pattern = re.compile(
+            r"\s+(?:-\s+)?uses:\s*oven-sh/setup-bun@[0-9a-f]{40}(?:\s+#.*)?$"
+        )
+        pinned_setup_indexes = [
+            index
+            for index, line in enumerate(bun_setup_lines)
+            if pinned_setup_pattern.fullmatch(line)
+        ]
+        if len(external_setup_indexes) != 1 or len(pinned_setup_indexes) != 1:
+            errors.append(
+                "repository Bun setup action must reference oven-sh/setup-bun "
+                "at exactly one full commit SHA"
+            )
+        if any(re.match(r"\s*bun-version:\s*", line) for line in bun_setup_lines):
+            errors.append(
+                "repository Bun setup action must read packageManager instead of declaring bun-version"
+            )
+
+    workflow_paths = sorted(WORKFLOWS_DIR.glob("*.yml")) + sorted(
+        WORKFLOWS_DIR.glob("*.yaml")
+    )
+    for workflow_path in workflow_paths:
+        workflow_lines = workflow_path.read_text(encoding="utf-8").splitlines()
+        relative_path = workflow_path.relative_to(ROOT)
+        if uses_prefix_indexes(workflow_lines, "oven-sh/setup-bun@"):
+            errors.append(
+                f"{relative_path} must use {LOCAL_BUN_SETUP_ACTION!r}, "
+                "not oven-sh/setup-bun directly"
+            )
+        if any(re.match(r"\s*bun-version:\s*", line) for line in workflow_lines):
+            errors.append(
+                f"{relative_path} must read the root packageManager instead of declaring bun-version"
+            )
 
     if not RELEASE_TOOLING_SCRIPT.is_file():
         errors.append(f"missing release tooling entrypoint: {RELEASE_TOOLING_SCRIPT}")
@@ -255,6 +368,42 @@ def main() -> None:
                 f"{label} must call {RELEASE_TOOLING_COMMAND!r} exactly once, found {command_count}"
             )
 
+    validate_bun_job(
+        errors,
+        "Core CI rust-core",
+        core_ci_lines,
+        "rust-core",
+        RELEASE_TOOLING_COMMAND,
+    )
+    validate_bun_job(
+        errors,
+        "Test & Coverage lint",
+        test_coverage_lines,
+        "lint",
+        RELEASE_TOOLING_COMMAND,
+    )
+    validate_bun_job(
+        errors,
+        "Launcher Validation launcher-smoke",
+        launcher_validation_lines,
+        "launcher-smoke",
+        "bun install --frozen-lockfile",
+    )
+    validate_bun_job(
+        errors,
+        "Publish publish-cli",
+        publish_lines,
+        "publish-cli",
+        "bun install",
+    )
+    validate_bun_job(
+        errors,
+        "Publish finalize",
+        publish_lines,
+        "finalize",
+        "bun scripts/generate-release-notes.ts",
+    )
+
     for event_name in ("push", "pull_request"):
         block = event_block(test_coverage_lines, event_name)
         if block is None:
@@ -265,6 +414,19 @@ def main() -> None:
         if missing_paths:
             errors.append(
                 f"Test & Coverage {event_name} paths are missing release inputs: {missing_paths}"
+            )
+
+    for event_name in ("push", "pull_request"):
+        launcher_block = event_block(launcher_validation_lines, event_name)
+        if launcher_block is None:
+            errors.append(f"Launcher Validation must run on {event_name}")
+            continue
+        launcher_paths = set(nested_list_values(launcher_block, "paths"))
+        missing_launcher_paths = sorted(LAUNCHER_TOOLCHAIN_PATHS - launcher_paths)
+        if missing_launcher_paths:
+            errors.append(
+                f"Launcher Validation {event_name} paths are missing Bun toolchain inputs: "
+                f"{missing_launcher_paths}"
             )
 
     push_block = event_block(publish_lines, "push")
