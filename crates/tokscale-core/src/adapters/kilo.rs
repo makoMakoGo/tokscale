@@ -1,12 +1,14 @@
 use rayon::prelude::*;
 
+use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FoldContext, LocalSourceAdapter, MessageSink, ParseContext, ParsedUnit,
-    SourceDiscoveryError, SourceParseError, SourceUnit, UnitMessageSource,
+    SourceDiscoveryError, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
+use crate::source_health::ScannedSource;
 
 pub(crate) struct KiloAdapter;
 
@@ -34,29 +36,12 @@ impl LocalSourceAdapter for KiloAdapter {
             .collect())
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages =
-                    sessions::kilo::parse_kilo_sqlite(&unit.path).map_err(|source| {
-                        SourceParseError::from_session(
-                            unit.client,
-                            &unit.path,
-                            unit.parser_version.parser_id,
-                            source,
-                        )
-                    })?;
-                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                Ok(ParsedUnit {
-                    unit,
-                    messages: UnitMessageSource::Fresh(messages),
-                    cache_write: None,
-                    invalidate_cache: false,
+                adapter_cache::parse_uncached_unit(unit, ctx, |path| {
+                    sessions::kilo::parse_kilo_sqlite(path).map(ScannedSource::complete)
                 })
             })
             .collect()
@@ -65,10 +50,11 @@ impl LocalSourceAdapter for KiloAdapter {
     fn fold(
         &self,
         parsed: Vec<ParsedUnit>,
-        _ctx: &mut FoldContext<'_>,
+        ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
     ) -> Result<(), crate::adapters::SourcePipelineError> {
         for unit in parsed {
+            ctx.health.record(unit.source_health());
             if let UnitMessageSource::Fresh(messages) = unit.messages {
                 sink.extend_messages(messages);
             }

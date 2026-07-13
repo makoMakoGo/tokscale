@@ -4,7 +4,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -40,11 +40,7 @@ impl LocalSourceAdapter for PiAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -122,19 +118,10 @@ mod tests {
         units: Vec<SourceUnit>,
         cache: &mut message_cache::SourceMessageCache,
     ) -> Vec<crate::UnifiedMessage> {
-        let parsed = adapter
-            .parse_checked(units, &ParseContext { pricing: None })
-            .unwrap();
+        let parsed = adapter.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
         adapter
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: cache,
-                    pricing: None,
-                },
-                &mut sink,
-            )
+            .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
         sink
     }
@@ -191,25 +178,18 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("missing.jsonl");
 
-        let error = PI_ADAPTER
-            .parse_checked(
-                vec![SourceUnit::plain_file(ClientId::Pi, path.clone())],
-                &ParseContext { pricing: None },
-            )
-            .unwrap_err();
-
-        assert_eq!(error.client, ClientId::Pi);
-        assert_eq!(error.path, path);
-        assert_eq!(error.operation, "snapshot source metadata and content");
-        let snapshot_error = std::error::Error::source(&error).unwrap();
-        assert!(snapshot_error.to_string().contains(path.to_str().unwrap()));
-        assert_eq!(
-            snapshot_error
-                .source()
-                .and_then(|source| source.downcast_ref::<std::io::Error>())
-                .map(std::io::Error::kind),
-            Some(std::io::ErrorKind::NotFound)
+        let parsed = PI_ADAPTER.parse_checked(
+            vec![SourceUnit::plain_file(ClientId::Pi, path.clone())],
+            &ParseContext { pricing: None },
         );
+
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert_eq!(health.client, ClientId::Pi);
+        assert_eq!(health.path, path);
+        let failure = health.status.failure().expect("source must be unavailable");
+        assert_eq!(failure.operation, "snapshot source metadata and content");
+        assert!(failure.message.contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -224,20 +204,18 @@ mod tests {
             ),
         );
 
-        let error = PI_ADAPTER
-            .parse_checked(
-                vec![SourceUnit::plain_file(ClientId::Pi, path.clone())],
-                &ParseContext { pricing: None },
-            )
-            .unwrap_err();
+        let parsed = PI_ADAPTER.parse_checked(
+            vec![SourceUnit::plain_file(ClientId::Pi, path.clone())],
+            &ParseContext { pricing: None },
+        );
 
-        assert_eq!(error.client, ClientId::Pi);
-        assert_eq!(error.path, path);
-        assert_eq!(error.operation, "decode Pi JSONL message");
-        assert!(std::error::Error::source(&error)
-            .unwrap()
-            .to_string()
-            .contains("decode Pi JSONL message"));
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert_eq!(health.client, ClientId::Pi);
+        assert_eq!(health.path, path);
+        let failure = health.status.failure().expect("source must be unavailable");
+        assert_eq!(failure.operation, "decode Pi JSONL message");
+        assert!(failure.message.contains("decode Pi JSONL message"));
     }
 
     #[test]
@@ -268,14 +246,7 @@ mod tests {
 
         let mut second = Vec::new();
         PI_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut second,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut second)
             .unwrap();
 
         assert_eq!(second, first);

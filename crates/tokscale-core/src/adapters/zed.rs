@@ -5,8 +5,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
-    EXPLICIT_TOKEN_OVERFLOW_REVISION,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -81,11 +80,7 @@ impl LocalSourceAdapter for ZedAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         use rayon::prelude::*;
 
         units
@@ -235,19 +230,10 @@ mod tests {
 
         let units = vec![SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())];
         let mut cache = message_cache::SourceMessageCache::default();
-        let parsed = ZED_ADAPTER
-            .parse_checked(units, &ParseContext { pricing: None })
-            .unwrap();
+        let parsed = ZED_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
         let mut actual = Vec::new();
         ZED_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut actual,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut actual)
             .unwrap();
 
         let expected = finalized(sessions::zed::parse_zed_sqlite(&db_path).unwrap());

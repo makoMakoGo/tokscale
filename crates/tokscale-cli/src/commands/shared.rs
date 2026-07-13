@@ -576,3 +576,42 @@ pub(crate) fn get_date_range_label_for_date(
         Some(parts.join(" "))
     }
 }
+
+/// Print the report's data-health summary to stderr. Data stays on stdout;
+/// degraded sources are warnings, never a failed exit.
+pub(crate) fn emit_health_summary(health: &tokscale_core::source_health::HealthReport) {
+    use colored::Colorize;
+    if health.complete {
+        return;
+    }
+    for source in &health.sources {
+        if let Some(failure) = &source.failure {
+            eprintln!(
+                "{}",
+                format!(
+                    "  Warning: {} source {} ({}): {}",
+                    source.client, source.status, source.path, failure.message
+                )
+                .yellow()
+            );
+        }
+        for entry in source.rejections.entries() {
+            eprintln!(
+                "{}",
+                format!(
+                    "  Warning: {} rejected {} record(s) [{}] ({})",
+                    source.client, entry.count, entry.label, source.path
+                )
+                .yellow()
+            );
+        }
+    }
+    eprintln!(
+        "{}",
+        format!(
+            "  Data health: {} rejected record(s), {} partial source(s), {} failed source(s)",
+            health.rejected_records, health.partial_sources, health.failed_sources
+        )
+        .yellow()
+    );
+}

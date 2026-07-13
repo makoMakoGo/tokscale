@@ -14,6 +14,7 @@ mod provider_identity;
 pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
+pub mod source_health;
 mod token_imputation;
 
 mod aggregate;
@@ -37,6 +38,10 @@ pub use sessionize::{
     SessionInterval, TimeMetrics, TimeSessionInterval, DEFAULT_IDLE_GAP_MS,
 };
 pub use sessions::UnifiedMessage;
+pub use source_health::{
+    DataHealth, RecordRejectionReason, RejectionEntry, RejectionSummary, ScannedSource,
+    SourceFailure, SourceHealth, SourceStatus,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
@@ -50,6 +55,10 @@ use sha2::{Digest, Sha256};
 ///
 /// Local report aggregation consumes finalized messages directly and treats
 /// `UnifiedMessage.model_id` as already canonical.
+fn health_is_complete(health: &source_health::HealthReport) -> bool {
+    health.complete
+}
+
 #[doc(hidden)]
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
     model_aliases::canonicalize_model_id(model_id)
@@ -308,6 +317,7 @@ pub struct PreparedLocalSources {
     clients: Vec<String>,
     groups: Vec<adapters::PreparedAdapterSources>,
     signature: SourceInventorySignature,
+    health: DataHealth,
 }
 
 impl PreparedLocalSources {
@@ -432,6 +442,8 @@ pub struct GraphResult {
     pub contributions: Vec<DailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_metrics: Option<sessionize::TimeMetrics>,
+    #[serde(default, skip_serializing_if = "health_is_complete")]
+    pub health: source_health::HealthReport,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -490,6 +502,8 @@ pub struct ModelReport {
     pub total_messages: i32,
     pub total_cost: f64,
     pub processing_time_ms: u32,
+    #[serde(default, skip_serializing_if = "health_is_complete")]
+    pub health: source_health::HealthReport,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -497,6 +511,8 @@ pub struct MonthlyReport {
     pub entries: Vec<MonthlyUsage>,
     pub total_cost: f64,
     pub processing_time_ms: u32,
+    #[serde(default, skip_serializing_if = "health_is_complete")]
+    pub health: source_health::HealthReport,
 }
 
 /// Hourly usage entry for a single hour slot (e.g. "03-23 14:00")
@@ -521,6 +537,8 @@ pub struct HourlyReport {
     pub entries: Vec<HourlyUsage>,
     pub total_cost: f64,
     pub processing_time_ms: u32,
+    #[serde(default, skip_serializing_if = "health_is_complete")]
+    pub health: source_health::HealthReport,
 }
 
 pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, String> {
@@ -558,6 +576,39 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<Vec<UnifiedMessage>, String> {
+    parse_all_messages_with_health_with_env_strategy(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+    )
+    .map(|(messages, _)| messages)
+}
+
+#[cfg(test)]
+fn parse_all_messages_with_health(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+) -> Result<(Vec<UnifiedMessage>, DataHealth), String> {
+    parse_all_messages_with_health_with_env_strategy(
+        home_dir,
+        clients,
+        pricing,
+        true,
+        &scanner::ScannerSettings::default(),
+    )
+}
+
+#[cfg(test)]
+fn parse_all_messages_with_health_with_env_strategy(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+) -> Result<(Vec<UnifiedMessage>, DataHealth), String> {
     let prepared = prepare_local_sources(LocalParseOptions {
         home_dir: Some(home_dir.to_string()),
         use_env_roots,
@@ -566,24 +617,34 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         ..LocalParseOptions::default()
     })?;
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
-    fold_prepared_local_sources_with_pricing(prepared, pricing, &mut all_messages)?;
-    Ok(all_messages)
+    let (_, health) =
+        fold_prepared_local_sources_with_pricing(prepared, pricing, &mut all_messages)?;
+    Ok((all_messages, health))
 }
 
 fn fold_prepared_local_sources_with_pricing(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn adapters::MessageSink,
-) -> Result<SourceInventorySignature, String> {
+) -> Result<(SourceInventorySignature, DataHealth), String> {
     let PreparedLocalSources {
-        clients, groups, ..
+        clients,
+        groups,
+        mut health,
+        ..
     } = prepared;
     let mut source_cache = message_cache::SourceMessageCache::load()
         .map_err(adapters::SourcePipelineError::from)
         .map_err(|error| error.to_string())?;
 
     let parse_result = if clients.is_empty() {
-        adapters::run_prepared_local_source_adapters(groups, &mut source_cache, pricing, sink)
+        adapters::run_prepared_local_source_adapters(
+            groups,
+            &mut source_cache,
+            pricing,
+            sink,
+            &mut health,
+        )
     } else {
         let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
         let mut filtered_sink = RequestedClientFilterSink {
@@ -595,6 +656,7 @@ fn fold_prepared_local_sources_with_pricing(
             &mut source_cache,
             pricing,
             &mut filtered_sink,
+            &mut health,
         )
     };
 
@@ -608,7 +670,12 @@ fn fold_prepared_local_sources_with_pricing(
         ),
     };
     result
-        .map(|confirmed| confirmed_source_inventory_signature(&clients, &confirmed))
+        .map(|confirmed| {
+            (
+                confirmed_source_inventory_signature(&clients, &confirmed),
+                health,
+            )
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -675,7 +742,7 @@ fn stream_local_sources_into_engine(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
     engine: &mut crate::aggregate::AggregationEngine,
-) -> Result<SourceInventorySignature, String> {
+) -> Result<(SourceInventorySignature, DataHealth), String> {
     let mut sink = AggregationSink(engine);
     fold_prepared_local_sources_with_pricing(prepared, pricing, &mut sink)
 }
@@ -692,37 +759,66 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
         use_env_roots: options.use_env_roots,
         scanner_settings: &options.scanner_settings,
     };
+    let mut health = DataHealth::default();
     let groups: Vec<_> = selected_adapters
         .into_iter()
         .map(|adapter| {
             #[cfg(test)]
             PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
-            let units = adapter
-                .discover_checked(&scan_ctx)?
+            // Discovery and snapshot failures stay inside their source's
+            // failure domain: the affected source becomes unavailable health
+            // instead of erasing every other adapter's data.
+            let units = match adapter.discover_checked(&scan_ctx) {
+                Ok(units) => units,
+                Err(error) => {
+                    health.record(SourceHealth {
+                        client: error.client,
+                        path: error.path.clone(),
+                        status: SourceStatus::Unavailable {
+                            failure: SourceFailure::new(error.operation, error.to_string()),
+                        },
+                        rejections: RejectionSummary::default(),
+                    });
+                    return adapters::PreparedAdapterSources {
+                        adapter,
+                        units: Vec::new(),
+                    };
+                }
+            };
+            let units = units
                 .into_iter()
-                .map(|unit| {
+                .filter_map(|unit| {
                     let client = unit.client;
                     let path = unit.path.clone();
-                    unit.prepare_snapshot().map_err(|source| {
-                        adapters::SourceDiscoveryError::new(
-                            client,
-                            path,
-                            "snapshot source metadata and identity",
-                            source,
-                        )
-                    })
+                    match unit.prepare_snapshot() {
+                        Ok(unit) => Some(unit),
+                        Err(source) => {
+                            health.record(SourceHealth {
+                                client,
+                                path,
+                                status: SourceStatus::Unavailable {
+                                    failure: SourceFailure::new(
+                                        "snapshot source metadata and identity",
+                                        source.to_string(),
+                                    ),
+                                },
+                                rejections: RejectionSummary::default(),
+                            });
+                            None
+                        }
+                    }
                 })
-                .collect::<Result<Vec<_>, adapters::SourceDiscoveryError>>()?;
-            Ok(adapters::PreparedAdapterSources { adapter, units })
+                .collect();
+            adapters::PreparedAdapterSources { adapter, units }
         })
-        .collect::<Result<_, adapters::SourceDiscoveryError>>()
-        .map_err(|error| error.to_string())?;
+        .collect();
     let signature = source_inventory_signature(&clients, &groups);
     Ok(PreparedLocalSources {
         options,
         clients,
         groups,
         signature,
+        health,
     })
 }
 
@@ -988,16 +1084,17 @@ fn load_prepared_aggregated_views(
         date_range,
         views,
     });
-    let source_inventory_signature =
+    let (source_inventory_signature, health) =
         match stream_local_sources_into_engine(prepared, pricing, &mut engine) {
-            Ok(signature) => signature,
+            Ok(outcome) => outcome,
             Err(error) => {
                 drop(engine);
                 sessions::intern::prune_dead();
                 return Err(error);
             }
         };
-    let views = engine.finish();
+    let mut views = engine.finish();
+    views.health = health;
     // The streaming sink has dropped every source message and `finish` has
     // consumed all Arc-backed accumulators. Public views own Strings, so this
     // is the narrow lifecycle seam where dead weak identity indices can be
@@ -1045,14 +1142,15 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
-    let views = load_aggregated_views_for_resolved_report(
+    let mut views = load_aggregated_views_for_resolved_report(
         &options,
         &home_dir,
         &clients,
         ViewSet::MODEL,
         pricing.as_deref(),
     )?;
-    let mut report = views.model_report.expect("model view requested");
+    let mut report = views.model_report.take().expect("model view requested");
+    report.health = views.health.to_report();
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
 }
@@ -1061,14 +1159,15 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
-    let views = load_aggregated_views_for_resolved_report(
+    let mut views = load_aggregated_views_for_resolved_report(
         &options,
         &home_dir,
         &clients,
         ViewSet::MONTHLY,
         pricing.as_deref(),
     )?;
-    let mut report = views.monthly_report.expect("monthly view requested");
+    let mut report = views.monthly_report.take().expect("monthly view requested");
+    report.health = views.health.to_report();
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
 }
@@ -1081,14 +1180,15 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
-    let views = load_aggregated_views_for_resolved_report(
+    let mut views = load_aggregated_views_for_resolved_report(
         &options,
         &home_dir,
         &clients,
         ViewSet::HOURLY,
         pricing.as_deref(),
     )?;
-    let mut report = views.hourly_report.expect("hourly view requested");
+    let mut report = views.hourly_report.take().expect("hourly view requested");
+    report.health = views.health.to_report();
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
 }
@@ -1099,14 +1199,15 @@ async fn generate_graph_with_loaded_pricing(
 ) -> Result<GraphResult, String> {
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
-    let views = load_aggregated_views_for_resolved_report(
+    let mut views = load_aggregated_views_for_resolved_report(
         &options,
         &home_dir,
         &clients,
         ViewSet::GRAPH | ViewSet::TIME_METRICS,
         pricing,
     )?;
-    let mut result = views.graph.expect("graph view requested");
+    let mut result = views.graph.take().expect("graph view requested");
+    result.health = views.health.to_report();
     result.meta.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(result)
 }
@@ -1438,6 +1539,7 @@ pub struct UsageDataWithDiagnostics {
     pub data: usage_views::UsageData,
     pub pricing_diagnostics: pricing::PricingDiagnostics,
     pub source_inventory_signature: SourceInventorySignature,
+    pub health: DataHealth,
 }
 
 pub async fn load_usage_data_with_diagnostics(
@@ -1459,18 +1561,19 @@ pub async fn load_prepared_usage_data_with_diagnostics(
         until: prepared.options.until.clone(),
         year: prepared.options.year.clone(),
     };
-    let (views, source_inventory_signature) = load_prepared_aggregated_views(
+    let (mut views, source_inventory_signature) = load_prepared_aggregated_views(
         prepared,
         group_by,
         date_range,
         ViewSet::TUI,
         pricing.as_deref(),
     )?;
-    let data = views.tui_usage.expect("tui view requested");
+    let data = views.tui_usage.take().expect("tui view requested");
     Ok(UsageDataWithDiagnostics {
         data,
         pricing_diagnostics,
         source_inventory_signature,
+        health: views.health,
     })
 }
 

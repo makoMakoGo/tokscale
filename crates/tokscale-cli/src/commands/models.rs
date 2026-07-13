@@ -114,6 +114,7 @@ pub(crate) fn run_models_report(
         had_cursor_cache,
         explicit_cursor_filter,
     );
+    super::shared::emit_health_summary(&report.health);
     let processing_time_ms = start.elapsed().as_millis();
     let claude_message_count = report
         .entries
@@ -180,8 +181,13 @@ pub(crate) fn run_models_report(
             warnings: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
+            #[serde(
+                skip_serializing_if = "tokscale_core::source_health::HealthReport::is_complete"
+            )]
+            health: tokscale_core::source_health::HealthReport,
         }
 
+        let health = report.health.clone();
         let output = ModelReportJson {
             group_by: group_by.to_string(),
             entries: report
@@ -234,6 +240,7 @@ pub(crate) fn run_models_report(
             processing_time_ms: report.processing_time_ms,
             warnings: cursor_setup_warnings,
             diagnostics,
+            health,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {

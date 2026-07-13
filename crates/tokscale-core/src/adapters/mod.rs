@@ -29,6 +29,9 @@ use rayon::prelude::*;
 
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserRevision, ParserVersion};
+use crate::source_health::{
+    DataHealth, RejectionSummary, SourceFailure, SourceHealth, SourceStatus,
+};
 use crate::{message_cache, pricing, scanner, UnifiedMessage};
 
 pub(crate) use error::{
@@ -49,11 +52,7 @@ pub(crate) trait LocalSourceAdapter: Sync {
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<SourceUnit>, SourceDiscoveryError>;
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError>;
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit>;
 
     fn plan_cache_hit(
         &self,
@@ -96,6 +95,20 @@ pub(crate) struct ParseContext<'a> {
 pub(crate) struct FoldContext<'a> {
     pub source_cache: &'a mut message_cache::SourceMessageCache,
     pub pricing: Option<&'a pricing::PricingService>,
+    pub health: DataHealth,
+}
+
+impl<'a> FoldContext<'a> {
+    pub(crate) fn new(
+        source_cache: &'a mut message_cache::SourceMessageCache,
+        pricing: Option<&'a pricing::PricingService>,
+    ) -> Self {
+        Self {
+            source_cache,
+            pricing,
+            health: DataHealth::default(),
+        }
+    }
 }
 
 pub(crate) trait MessageSink {
@@ -507,12 +520,67 @@ pub(crate) enum UnitMessageSource {
     CodexAppend(Box<codex::CodexAppendSource>),
 }
 
+/// Scan status and record rejections for one parsed unit, boxed to keep
+/// `ParsedUnit`'s inline size close to `SourceUnit`'s.
+#[derive(Debug, Default)]
+pub(crate) struct UnitScanHealth {
+    pub status: SourceStatus,
+    pub rejections: RejectionSummary,
+}
+
 #[derive(Debug)]
 pub(crate) struct ParsedUnit {
     pub unit: SourceUnit,
     pub messages: UnitMessageSource,
     pub cache_write: Option<Box<message_cache::CacheWritePlan>>,
     pub invalidate_cache: bool,
+    pub health: Box<UnitScanHealth>,
+}
+
+impl ParsedUnit {
+    /// A unit whose scan finished without source-level damage. Record-level
+    /// rejections, if any, are attached separately by the scan seam.
+    pub(crate) fn healthy(
+        unit: SourceUnit,
+        messages: UnitMessageSource,
+        cache_write: Option<Box<message_cache::CacheWritePlan>>,
+        invalidate_cache: bool,
+    ) -> Self {
+        Self {
+            unit,
+            messages,
+            cache_write,
+            invalidate_cache,
+            health: Box::default(),
+        }
+    }
+
+    /// A unit whose source could not be read at all. It contributes no
+    /// messages and leaves any previously cached shard untouched: that shard
+    /// is only served again if the source's fingerprint matches, in which
+    /// case its content is still authoritative.
+    pub(crate) fn unavailable(mut unit: SourceUnit, failure: SourceFailure) -> Self {
+        unit.release_prepared_snapshot();
+        Self {
+            unit,
+            messages: UnitMessageSource::Fresh(Vec::new()),
+            cache_write: None,
+            invalidate_cache: false,
+            health: Box::new(UnitScanHealth {
+                status: SourceStatus::Unavailable { failure },
+                rejections: RejectionSummary::default(),
+            }),
+        }
+    }
+
+    pub(crate) fn source_health(&self) -> SourceHealth {
+        SourceHealth {
+            client: self.unit.client,
+            path: self.unit.path.clone(),
+            status: self.health.status.clone(),
+            rejections: self.health.rejections.clone(),
+        }
+    }
 }
 
 static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 31] = [
@@ -598,6 +666,7 @@ pub(crate) struct ParsedBatchSource<'a> {
     units: Option<Vec<SourceUnit>>,
     planned: VecDeque<PlannedSourceUnit>,
     confirmed_inventory_digests: Vec<[u8; 32]>,
+    failed_health: Vec<SourceHealth>,
     batch_width: usize,
 }
 
@@ -624,6 +693,7 @@ impl<'a> ParsedBatchSource<'a> {
             units: Some(units),
             planned: VecDeque::new(),
             confirmed_inventory_digests: Vec::new(),
+            failed_health: Vec::new(),
             batch_width: rayon::current_num_threads().max(1),
         }
     }
@@ -668,7 +738,7 @@ impl<'a> ParsedBatchSource<'a> {
                 &ParseContext {
                     pricing: ctx.pricing,
                 },
-            )?
+            )
         };
         let mut parsed_misses = parsed_misses.into_iter();
         let mut parsed = Vec::with_capacity(slots.len());
@@ -717,30 +787,72 @@ impl<'a> ParsedBatchSource<'a> {
         self.batch_width
     }
 
+    fn take_failed_health(&mut self) -> Vec<SourceHealth> {
+        std::mem::take(&mut self.failed_health)
+    }
+
     fn plan_remaining_units(&mut self, ctx: &FoldContext<'_>) -> Result<(), SourcePipelineError> {
         let Some(units) = self.units.take() else {
             return Ok(());
         };
-        let planned: Result<Vec<_>, SourcePlanningError> = units
+        // A unit whose snapshot or cache planning fails is isolated as an
+        // unavailable source; it contributes no inventory digest, so the
+        // inventory signature shifts and downstream caches retry later.
+        #[allow(clippy::large_enum_variant)] // transient per-unit planning slot
+        enum PlannedOrFailed {
+            Planned(PlannedSourceUnit, [u8; 32]),
+            Failed(SourceHealth),
+        }
+        let planned: Vec<PlannedOrFailed> = units
             .into_par_iter()
             .map(|mut unit| {
-                unit.revalidate_snapshot_for_cache_decision()?;
+                let client = unit.client;
+                let path = unit.path.clone();
+                if let Err(source) = unit.revalidate_snapshot_for_cache_decision() {
+                    return PlannedOrFailed::Failed(SourceHealth {
+                        client,
+                        path,
+                        status: SourceStatus::Unavailable {
+                            failure: SourceFailure::new(
+                                "snapshot source metadata for cache planning",
+                                source.to_string(),
+                            ),
+                        },
+                        rejections: RejectionSummary::default(),
+                    });
+                }
                 let inventory_digest = unit.inventory_signature_digest();
-                self.adapter
-                    .plan_cache_hit(unit, &*ctx.source_cache)
-                    .map(|plan| {
+                match self.adapter.plan_cache_hit(unit, &*ctx.source_cache) {
+                    Ok(plan) => {
                         let planned = match plan {
                             CacheHitPlan::Hit(parsed) => PlannedSourceUnit::Hit(parsed),
                             CacheHitPlan::Miss(unit) => PlannedSourceUnit::Miss(unit),
                         };
-                        (planned, inventory_digest)
-                    })
+                        PlannedOrFailed::Planned(planned, inventory_digest)
+                    }
+                    Err(source) => PlannedOrFailed::Failed(SourceHealth {
+                        client,
+                        path,
+                        status: SourceStatus::Unavailable {
+                            failure: SourceFailure::new(
+                                "plan source cache hit",
+                                source.to_string(),
+                            ),
+                        },
+                        rejections: RejectionSummary::default(),
+                    }),
+                }
             })
             .collect();
-        let planned = planned?;
-        self.confirmed_inventory_digests
-            .extend(planned.iter().map(|(_, digest)| *digest));
-        self.planned = planned.into_iter().map(|(planned, _)| planned).collect();
+        for outcome in planned {
+            match outcome {
+                PlannedOrFailed::Planned(planned, digest) => {
+                    self.confirmed_inventory_digests.push(digest);
+                    self.planned.push_back(planned);
+                }
+                PlannedOrFailed::Failed(health) => self.failed_health.push(health),
+            }
+        }
         Ok(())
     }
 }
@@ -750,15 +862,17 @@ pub(crate) fn run_prepared_local_source_adapters(
     source_cache: &mut message_cache::SourceMessageCache,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn MessageSink,
+    health: &mut DataHealth,
 ) -> Result<Vec<ConfirmedAdapterSources>, SourcePipelineError> {
     let mut confirmed = Vec::with_capacity(prepared.len());
     for PreparedAdapterSources { adapter, units } in prepared {
         let mut batches = ParsedBatchSource::new(adapter, units);
-        let mut fold_ctx = FoldContext {
-            source_cache,
-            pricing,
-        };
+        let mut fold_ctx = FoldContext::new(source_cache, pricing);
         adapter.fold_batches(&mut batches, &mut fold_ctx, sink)?;
+        health.merge(std::mem::take(&mut fold_ctx.health));
+        for failed in batches.take_failed_health() {
+            health.record(failed);
+        }
         confirmed.push(ConfirmedAdapterSources {
             client: adapter.client(),
             unit_digests: batches.confirmed_inventory_digests,
@@ -833,13 +947,13 @@ mod tests {
             &self,
             units: Vec<SourceUnit>,
             _ctx: &ParseContext<'_>,
-        ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+        ) -> Vec<ParsedUnit> {
             self.batch_sizes.lock().unwrap().push(units.len());
-            Ok(units
+            units
                 .into_iter()
                 .enumerate()
-                .map(|(index, unit)| ParsedUnit {
-                    messages: UnitMessageSource::Fresh(vec![UnifiedMessage::new(
+                .map(|(index, unit)| {
+                    let message = UnifiedMessage::new(
                         "amp",
                         "model",
                         "provider",
@@ -847,12 +961,10 @@ mod tests {
                         index as i64,
                         crate::TokenBreakdown::default(),
                         0.0,
-                    )]),
-                    unit,
-                    cache_write: None,
-                    invalidate_cache: false,
+                    );
+                    ParsedUnit::healthy(unit, UnitMessageSource::Fresh(vec![message]), None, false)
                 })
-                .collect())
+                .collect()
         }
 
         fn fold(
@@ -881,7 +993,7 @@ mod tests {
             &self,
             units: Vec<SourceUnit>,
             _ctx: &ParseContext<'_>,
-        ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+        ) -> Vec<ParsedUnit> {
             let mut previous = self.previous_batch_message.lock().unwrap();
             assert!(
                 previous
@@ -904,14 +1016,14 @@ mod tests {
                     0.0,
                 );
                 message.session_id = session_id;
-                parsed.push(ParsedUnit {
-                    messages: UnitMessageSource::Fresh(vec![message]),
+                parsed.push(ParsedUnit::healthy(
                     unit,
-                    cache_write: None,
-                    invalidate_cache: false,
-                });
+                    UnitMessageSource::Fresh(vec![message]),
+                    None,
+                    false,
+                ));
             }
-            Ok(parsed)
+            parsed
         }
 
         fn fold(
@@ -940,12 +1052,12 @@ mod tests {
             &self,
             units: Vec<SourceUnit>,
             _ctx: &ParseContext<'_>,
-        ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+        ) -> Vec<ParsedUnit> {
             self.parse_batch_sizes.lock().unwrap().push(units.len());
-            Ok(units
+            units
                 .into_iter()
-                .map(|unit| ParsedUnit {
-                    messages: UnitMessageSource::Fresh(vec![UnifiedMessage::new(
+                .map(|unit| {
+                    let message = UnifiedMessage::new(
                         "amp",
                         "model",
                         "provider",
@@ -956,12 +1068,10 @@ mod tests {
                             ..Default::default()
                         },
                         0.0,
-                    )]),
-                    unit,
-                    cache_write: None,
-                    invalidate_cache: false,
+                    );
+                    ParsedUnit::healthy(unit, UnitMessageSource::Fresh(vec![message]), None, false)
                 })
-                .collect())
+                .collect()
         }
 
         fn plan_cache_hit(
@@ -1020,10 +1130,7 @@ mod tests {
                 adapter
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: None,
-                        },
+                        &mut FoldContext::new(&mut cache, None),
                         &mut sink,
                     )
                     .unwrap();
@@ -1066,10 +1173,7 @@ mod tests {
                 adapter
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: None,
-                        },
+                        &mut FoldContext::new(&mut cache, None),
                         &mut DroppingSink,
                     )
                     .unwrap();
@@ -1124,10 +1228,7 @@ mod tests {
                 adapter
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: None,
-                        },
+                        &mut FoldContext::new(&mut cache, None),
                         &mut sink,
                     )
                     .unwrap();
@@ -1191,10 +1292,7 @@ mod tests {
                 adapter
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: None,
-                        },
+                        &mut FoldContext::new(&mut cache, None),
                         &mut sink,
                     )
                     .unwrap();
@@ -1246,10 +1344,7 @@ mod tests {
         adapter
             .fold_batches(
                 &mut batches,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
+                &mut FoldContext::new(&mut cache, None),
                 &mut sink,
             )
             .unwrap();
@@ -1270,10 +1365,7 @@ mod tests {
         let mut batches =
             ParsedBatchSource::new(&adapter, vec![SourceUnit::plain_file(ClientId::Amp, path)]);
         let mut cache = message_cache::SourceMessageCache::default();
-        let fold_context = FoldContext {
-            source_cache: &mut cache,
-            pricing: None,
-        };
+        let fold_context = FoldContext::new(&mut cache, None);
 
         let planned = batches.take_all_planned_units(&fold_context).unwrap();
 

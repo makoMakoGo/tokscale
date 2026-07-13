@@ -7,8 +7,8 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
-    SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -76,11 +76,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -139,7 +135,15 @@ fn fold_claude_units(
             messages,
             cache_write,
             invalidate_cache,
+            status,
+            rejections,
         } = adapter_cache::resolve_unit(parsed_unit, ctx)?;
+        ctx.health.record(crate::source_health::SourceHealth {
+            client: unit.client,
+            path: unit.path.clone(),
+            status,
+            rejections,
+        });
         let path = unit.path.clone();
         let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
         if cache_write_outcome.is_err() && invalidate_cache {
@@ -284,19 +288,10 @@ mod tests {
             home.path().to_path_buf(),
         )
         .unwrap();
-        let parsed = CLAUDE_ADAPTER
-            .parse_checked(vec![unit], &ParseContext { pricing: None })
-            .unwrap();
+        let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         let mut actual = Vec::new();
         CLAUDE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut actual,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut actual)
             .unwrap();
 
         let expected =
@@ -318,15 +313,14 @@ mod tests {
         )
         .unwrap();
 
-        let error = CLAUDE_ADAPTER
-            .parse_checked(vec![unit], &ParseContext { pricing: None })
-            .unwrap_err();
+        let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
 
-        assert_eq!(error.client, ClientId::Claude);
-        assert_eq!(error.path, session_path);
-        assert_eq!(error.parser, ParserId::Claude);
-        assert_eq!(error.operation, "decode Claude session line");
-        assert!(error.to_string().contains("line 1"));
-        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert_eq!(health.client, ClientId::Claude);
+        assert_eq!(health.path, session_path);
+        let failure = health.status.failure().expect("source must be unavailable");
+        assert_eq!(failure.operation, "decode Claude session line");
+        assert!(failure.message.contains("line 1"));
     }
 }

@@ -46,19 +46,18 @@ impl LocalSourceAdapter for OmpAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
-        let Some(context_path) = units.first().map(|unit| unit.path.clone()) else {
-            return Ok(Vec::new());
-        };
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+        if units.is_empty() {
+            return Vec::new();
+        }
         let miss_paths: Vec<PathBuf> = units.iter().map(|unit| unit.path.clone()).collect();
-        let parent_index =
-            sessions::pi::build_omp_parent_task_agent_index(&miss_paths).map_err(|source| {
-                SourceParseError::from_session(ClientId::Omp, &context_path, ParserId::Omp, source)
-            })?;
+        // The shared parent-task index feeds every OMP unit; when it cannot
+        // be built, every unit in the batch becomes unavailable instead of
+        // the failure escaping the OMP failure domain.
+        let parent_index = match sessions::pi::build_omp_parent_task_agent_index(&miss_paths) {
+            Ok(parent_index) => parent_index,
+            Err(source) => return units_unavailable(units, &source),
+        };
         parse_omp_miss_units(units, ctx, &parent_index)
     }
 
@@ -103,28 +102,20 @@ impl LocalSourceAdapter for OmpAdapter {
                 .iter()
                 .map(|unit| unit.path.clone())
                 .collect();
-            let context_path = all_miss_units
-                .first()
-                .map(|unit| unit.path.clone())
-                .ok_or_else(|| {
-                    SourcePipelineError::contract(
-                        "OMP recovery lost all failed and parsed source units",
-                    )
-                })?;
-            let parent_index = sessions::pi::build_omp_parent_task_agent_index(&miss_paths)
-                .map_err(|source| {
-                    SourceParseError::from_session(
-                        ClientId::Omp,
-                        &context_path,
-                        ParserId::Omp,
-                        source,
-                    )
-                })?;
+            let parent_index = match sessions::pi::build_omp_parent_task_agent_index(&miss_paths) {
+                Ok(parent_index) => parent_index,
+                Err(source) => {
+                    for parsed in units_unavailable(all_miss_units, &source) {
+                        ctx.health.record(parsed.source_health());
+                    }
+                    return Ok(());
+                }
+            };
             let mut reparsed = {
                 let parse_ctx = ParseContext {
                     pricing: ctx.pricing,
                 };
-                parse_omp_miss_units(all_miss_units, &parse_ctx, &parent_index)?
+                parse_omp_miss_units(all_miss_units, &parse_ctx, &parent_index)
             };
             for (unit, invalidate_cache) in reparsed
                 .iter_mut()
@@ -185,7 +176,7 @@ impl LocalSourceAdapter for OmpAdapter {
                 let parse_ctx = ParseContext {
                     pricing: ctx.pricing,
                 };
-                parse_omp_miss_units(units, &parse_ctx, &parent_index)?
+                parse_omp_miss_units(units, &parse_ctx, &parent_index)
             };
             let recovered_in_batch = remaining_failed_hits.min(parsed.len());
             for unit in parsed.iter_mut().take(recovered_in_batch) {
@@ -225,6 +216,7 @@ fn fold_omp_cache_hits(
             messages,
             cache_write,
             invalidate_cache,
+            health: _,
         } = parsed;
         if cache_write.is_some() || invalidate_cache {
             return Err(SourcePipelineError::contract(
@@ -258,11 +250,22 @@ fn fold_omp_cache_hits(
     Ok(failed_units)
 }
 
+fn units_unavailable(
+    units: Vec<SourceUnit>,
+    source: &crate::sessions::error::SessionParseError,
+) -> Vec<ParsedUnit> {
+    let failure = crate::source_health::SourceFailure::from(source);
+    units
+        .into_iter()
+        .map(|unit| ParsedUnit::unavailable(unit, failure.clone()))
+        .collect()
+}
+
 fn parse_omp_miss_units(
     units: Vec<SourceUnit>,
     ctx: &ParseContext<'_>,
     parent_index: &sessions::pi::OmpParentTaskAgentIndex,
-) -> Result<Vec<ParsedUnit>, SourceParseError> {
+) -> Vec<ParsedUnit> {
     units
         .into_par_iter()
         .map(|unit| {
@@ -314,19 +317,10 @@ mod tests {
         units: Vec<SourceUnit>,
         cache: &mut message_cache::SourceMessageCache,
     ) -> Vec<crate::UnifiedMessage> {
-        let parsed = OMP_ADAPTER
-            .parse_checked(units, &ParseContext { pricing: None })
-            .unwrap();
+        let parsed = OMP_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
         OMP_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: cache,
-                    pricing: None,
-                },
-                &mut sink,
-            )
+            .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
         sink
     }
@@ -502,10 +496,7 @@ mod tests {
                 OMP_ADAPTER
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: None,
-                        },
+                        &mut FoldContext::new(&mut cache, None),
                         &mut sink,
                     )
                     .unwrap();
@@ -588,10 +579,7 @@ mod tests {
                 OMP_ADAPTER
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: None,
-                        },
+                        &mut FoldContext::new(&mut cache, None),
                         &mut sink,
                     )
                     .unwrap();

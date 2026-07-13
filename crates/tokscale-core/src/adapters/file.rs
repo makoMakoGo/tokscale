@@ -6,8 +6,8 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourcePipelineError,
-    SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourcePipelineError, SourceUnit,
+    MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -58,11 +58,7 @@ impl LocalSourceAdapter for CachedFileAdapter {
         .collect())
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
         units
             .into_par_iter()
@@ -133,11 +129,7 @@ impl LocalSourceAdapter for CopilotAdapter {
         .collect())
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -266,19 +258,10 @@ mod tests {
         units: Vec<SourceUnit>,
         cache: &mut message_cache::SourceMessageCache,
     ) -> Vec<UnifiedMessage> {
-        let parsed = adapter
-            .parse_checked(units, &ParseContext { pricing: None })
-            .unwrap();
+        let parsed = adapter.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
         adapter
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: cache,
-                    pricing: None,
-                },
-                &mut sink,
-            )
+            .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
         sink
     }
@@ -419,12 +402,17 @@ mod tests {
             "{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session-1\"}\nnot-json\n{\"type\":\"result\",\"stats\":{\"input_tokens\":10,\"output_tokens\":20}}\n",
         );
         let units = vec![SourceUnit::plain_file(ClientId::Gemini, path.clone())];
-        let error = GEMINI_ADAPTER
-            .parse_checked(units, &ParseContext { pricing: None })
-            .unwrap_err();
+        let parsed = GEMINI_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
 
-        assert_eq!(error.client, ClientId::Gemini);
-        assert_eq!(error.path, path);
-        assert_eq!(error.operation, "decode JSONL line");
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert_eq!(health.client, ClientId::Gemini);
+        assert_eq!(health.path, path);
+        let failure = health.status.failure().expect("source must be unavailable");
+        assert_eq!(failure.operation, "decode JSONL line");
+        assert!(matches!(
+            health.status,
+            crate::source_health::SourceStatus::Unavailable { .. }
+        ));
     }
 }

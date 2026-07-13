@@ -66,11 +66,7 @@ impl LocalSourceAdapter for CodexAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        _ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, _ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -78,11 +74,14 @@ impl LocalSourceAdapter for CodexAdapter {
                     SourceUnitMeta::Codex { is_headless } => is_headless,
                     _ => unreachable!("unexpected Codex source unit meta"),
                 };
-                let client = unit.client;
-                let path = unit.path.clone();
-                let parser = unit.parser_version.parser_id;
-                load_or_parse_codex_unit(unit, is_headless)
-                    .map_err(|source| SourceParseError::from_session(client, &path, parser, source))
+                let unit_identity = unit.clone();
+                match load_or_parse_codex_unit(unit, is_headless) {
+                    Ok(parsed) => parsed,
+                    Err(source) => ParsedUnit::unavailable(
+                        unit_identity,
+                        crate::source_health::SourceFailure::from(&source),
+                    ),
+                }
             })
             .collect()
     }
@@ -149,15 +148,15 @@ fn plan_exact_codex_cache_hit(
     let read_plan =
         message_cache::CacheReadPlan::new(&unit.path, unit.parser_version, cached.fingerprint);
     unit.release_prepared_snapshot();
-    Ok(CacheHitPlan::Hit(ParsedUnit {
+    Ok(CacheHitPlan::Hit(ParsedUnit::healthy(
         unit,
-        messages: UnitMessageSource::CodexCacheHit {
+        UnitMessageSource::CodexCacheHit {
             read_plan,
             is_headless,
         },
-        cache_write: None,
-        invalidate_cache: false,
-    }))
+        None,
+        false,
+    )))
 }
 
 fn fold_codex_units(
@@ -169,6 +168,7 @@ fn fold_codex_units(
     for parsed in parsed {
         let path = parsed.unit.path.clone();
         let parser_version = parsed.unit.parser_version;
+        ctx.health.record(parsed.source_health());
         let CodexResolvedMessages {
             mut messages,
             cache_write: extra_write,
@@ -305,15 +305,15 @@ fn parse_full_log_source(
     })?
     .map(Box::new);
 
-    Ok(ParsedUnit {
+    Ok(ParsedUnit::healthy(
         unit,
-        messages: UnitMessageSource::CodexFresh {
+        UnitMessageSource::CodexFresh {
             messages,
             is_headless,
         },
         cache_write,
-        invalidate_cache: false,
-    })
+        false,
+    ))
 }
 
 fn finalize_codex_messages(
@@ -433,15 +433,15 @@ fn load_or_parse_codex_unit(
                     unit.parser_version,
                     cached.fingerprint,
                 );
-                return Ok(ParsedUnit {
+                return Ok(ParsedUnit::healthy(
                     unit,
-                    messages: UnitMessageSource::CodexCacheHit {
+                    UnitMessageSource::CodexCacheHit {
                         read_plan,
                         is_headless,
                     },
-                    cache_write: None,
-                    invalidate_cache: false,
-                });
+                    None,
+                    false,
+                ));
             }
 
             return reparse_from_start(true);
@@ -491,9 +491,9 @@ fn load_or_parse_codex_unit(
                             parser_version,
                             cached.fingerprint.clone(),
                         );
-                        return Ok(ParsedUnit {
+                        return Ok(ParsedUnit::healthy(
                             unit,
-                            messages: UnitMessageSource::CodexAppend(Box::new(CodexAppendSource {
+                            UnitMessageSource::CodexAppend(Box::new(CodexAppendSource {
                                 path,
                                 read_plan,
                                 parser_version,
@@ -502,9 +502,9 @@ fn load_or_parse_codex_unit(
                                 fingerprint: entry_fingerprint,
                                 codex_incremental: codex_incremental_cache,
                             })),
-                            cache_write: None,
-                            invalidate_cache: false,
-                        });
+                            None,
+                            false,
+                        ));
                     }
                 }
             }
@@ -790,10 +790,7 @@ mod tests {
         CODEX_ADAPTER
             .fold(
                 parsed,
-                &mut FoldContext {
-                    source_cache: cache,
-                    pricing: Some(pricing),
-                },
+                &mut FoldContext::new(cache, Some(pricing)),
                 &mut sink,
             )
             .expect("valid Codex fixture must fold");
@@ -816,11 +813,8 @@ mod tests {
                 .expect("Codex cache planning must succeed")
             {
                 CacheHitPlan::Hit(hit) => parsed.push(hit),
-                CacheHitPlan::Miss(miss) => parsed.extend(
-                    CODEX_ADAPTER
-                        .parse_checked(vec![miss], &ParseContext { pricing })
-                        .expect("valid Codex fixture must parse"),
-                ),
+                CacheHitPlan::Miss(miss) => parsed
+                    .extend(CODEX_ADAPTER.parse_checked(vec![miss], &ParseContext { pricing })),
             }
         }
         parsed
@@ -847,14 +841,7 @@ mod tests {
         let mut sink = Vec::new();
         let mut batches = crate::adapters::ParsedBatchSource::new(&CODEX_ADAPTER, units);
         CODEX_ADAPTER
-            .fold_batches(
-                &mut batches,
-                &mut FoldContext {
-                    source_cache: cache,
-                    pricing: None,
-                },
-                &mut sink,
-            )
+            .fold_batches(&mut batches, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
         sink
     }
@@ -865,14 +852,7 @@ mod tests {
     ) -> Vec<UnifiedMessage> {
         let mut sink = Vec::new();
         CODEX_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: cache,
-                    pricing: None,
-                },
-                &mut sink,
-            )
+            .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
             .expect("valid Codex fixture must fold");
         sink
     }
@@ -1046,17 +1026,17 @@ mod tests {
         let path = dir.path().join("malformed.jsonl");
         write_file(&path, r#"{"type":7,"payload":{}}"#);
 
-        let error = CODEX_ADAPTER
-            .parse_checked(
-                vec![codex_unit(&path, false)],
-                &ParseContext { pricing: None },
-            )
-            .expect_err("malformed Codex JSONL must fail the adapter seam");
+        let parsed = CODEX_ADAPTER.parse_checked(
+            vec![codex_unit(&path, false)],
+            &ParseContext { pricing: None },
+        );
 
-        assert_eq!(error.client, ClientId::Codex);
-        assert_eq!(error.path, path);
-        assert_eq!(error.parser, message_cache::ParserId::Codex);
-        assert_eq!(error.operation, "decode Codex JSONL entry");
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert_eq!(health.client, ClientId::Codex);
+        assert_eq!(health.path, path);
+        let failure = health.status.failure().expect("source must be unavailable");
+        assert_eq!(failure.operation, "decode Codex JSONL entry");
     }
 
     #[test]
@@ -1186,10 +1166,7 @@ mod tests {
         let error = CODEX_ADAPTER
             .fold(
                 vec![planned],
-                &mut FoldContext {
-                    source_cache: &mut repair_cache,
-                    pricing: None,
-                },
+                &mut FoldContext::new(&mut repair_cache, None),
                 &mut sink,
             )
             .expect_err("strict Codex reparse must return the missing timestamp error");
@@ -1230,10 +1207,7 @@ mod tests {
         CODEX_ADAPTER
             .fold(
                 vec![planned],
-                &mut FoldContext {
-                    source_cache: &mut repair_cache,
-                    pricing: None,
-                },
+                &mut FoldContext::new(&mut repair_cache, None),
                 &mut sink,
             )
             .expect_err("strict Codex reparse must return the missing timestamp error");
@@ -1268,14 +1242,9 @@ mod tests {
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &cache),
             "valid header must still plan a Codex hit",
         );
-        let resolved = resolve_codex_messages(
-            planned.messages,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
-        )
-        .expect("valid source must repair the corrupt cache body");
+        let resolved =
+            resolve_codex_messages(planned.messages, &mut FoldContext::new(&mut cache, None))
+                .expect("valid source must repair the corrupt cache body");
         assert!(resolved.recovery_requires_removal);
         assert!(resolved.cache_write.is_some());
 
@@ -1290,10 +1259,7 @@ mod tests {
             &resolved.messages,
             false,
             resolved.recovery_requires_removal,
-            &mut FoldContext {
-                source_cache: &mut cache,
-                pricing: None,
-            },
+            &mut FoldContext::new(&mut cache, None),
         );
         std::fs::remove_file(&cache_path).unwrap();
         std::fs::rename(&backup_path, &cache_path).unwrap();
@@ -1325,9 +1291,7 @@ mod tests {
         );
         message_cache::reset_source_read_stats(&path);
 
-        let parsed = CODEX_ADAPTER
-            .parse_checked(vec![miss], &ParseContext { pricing: None })
-            .expect("valid Codex fixture must parse");
+        let parsed = CODEX_ADAPTER.parse_checked(vec![miss], &ParseContext { pricing: None });
 
         assert!(matches!(
             parsed[0].messages,
@@ -1424,9 +1388,7 @@ mod tests {
             "an appended Codex source must remain a parse miss",
         );
         assert!(miss.prepared_source_input_snapshot().is_some());
-        let parsed = CODEX_ADAPTER
-            .parse_checked(vec![miss], &ParseContext { pricing: None })
-            .expect("valid Codex append fixture must parse");
+        let parsed = CODEX_ADAPTER.parse_checked(vec![miss], &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
         assert!(matches!(

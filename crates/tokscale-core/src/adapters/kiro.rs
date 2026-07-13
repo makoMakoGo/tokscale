@@ -6,8 +6,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit, SourceUnitMeta,
-    UnitMessageSource,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, SourceUnitMeta,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -56,11 +55,7 @@ impl LocalSourceAdapter for KiroAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
@@ -70,21 +65,9 @@ impl LocalSourceAdapter for KiroAdapter {
                     sessions::kiro::parse_kiro_file,
                 ),
                 SourceUnitMeta::KiroSqlite => {
-                    let mut messages =
-                        sessions::kiro::parse_kiro_sqlite(&unit.path).map_err(|source| {
-                            SourceParseError::from_session(
-                                unit.client,
-                                &unit.path,
-                                unit.parser_version.parser_id,
-                                source,
-                            )
-                        })?;
-                    crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                    Ok(ParsedUnit {
-                        unit,
-                        messages: UnitMessageSource::Fresh(messages),
-                        cache_write: None,
-                        invalidate_cache: false,
+                    adapter_cache::parse_uncached_unit(unit, ctx, |path| {
+                        sessions::kiro::parse_kiro_sqlite(path)
+                            .map(crate::source_health::ScannedSource::complete)
                     })
                 }
                 SourceUnitMeta::KiroGlobalStorage => adapter_cache::load_or_parse_unit_with(

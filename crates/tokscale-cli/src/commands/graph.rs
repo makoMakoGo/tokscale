@@ -242,6 +242,7 @@ pub(crate) fn run_graph_command(
         had_cursor_cache,
         explicit_cursor_filter,
     );
+    super::shared::emit_health_summary(&graph_result.health);
     emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;

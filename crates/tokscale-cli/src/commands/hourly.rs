@@ -79,6 +79,7 @@ pub(crate) fn run_hourly_report(
         had_cursor_cache,
         explicit_cursor_filter,
     );
+    super::shared::emit_health_summary(&report.health);
 
     let processing_time_ms = start.elapsed().as_millis();
 
@@ -106,6 +107,10 @@ pub(crate) fn run_hourly_report(
             processing_time_ms: u32,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
+            #[serde(
+                skip_serializing_if = "tokscale_core::source_health::HealthReport::is_complete"
+            )]
+            health: tokscale_core::source_health::HealthReport,
         }
 
         let output = HourlyReportJson {
@@ -128,6 +133,7 @@ pub(crate) fn run_hourly_report(
             total_cost: report.total_cost,
             processing_time_ms: report.processing_time_ms,
             warnings: cursor_setup_warnings,
+            health: report.health.clone(),
         };
 
         println!("{}", serde_json::to_string_pretty(&output)?);

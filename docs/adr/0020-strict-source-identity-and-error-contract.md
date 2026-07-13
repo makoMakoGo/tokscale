@@ -76,3 +76,9 @@ requires a fallible current-format parser and explicit handling of every I/O,
 decode, and semantic failure. Compatibility imports must be explicitly
 enumerated in the ADR that owns the affected identity or storage contract;
 generic alias tables and fallback parsing remain prohibited.
+
+ADR 0021 later refined how these typed errors propagate: third-party source
+failures are contained to their source unit as structured health instead of
+aborting the whole report, and `parse_checked` returns per-unit outcomes
+rather than a batch-level `Result`. The typing, attribution, and
+current-format-only requirements of this ADR are unchanged.

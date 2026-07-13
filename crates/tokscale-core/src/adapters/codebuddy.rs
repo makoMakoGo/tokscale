@@ -7,8 +7,8 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, CodeBuddyLogSource, FingerprintPolicy, FoldContext, LocalSourceAdapter,
-    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError,
-    SourceParseError, SourceUnit, SourceUnitMeta,
+    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    SourceUnitMeta,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -58,11 +58,7 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
@@ -325,19 +321,10 @@ mod tests {
 
     fn fold_with_units(units: Vec<SourceUnit>) -> Vec<crate::UnifiedMessage> {
         let mut cache = message_cache::SourceMessageCache::default();
-        let parsed = CODEBUDDY_ADAPTER
-            .parse_checked(units, &ParseContext { pricing: None })
-            .unwrap();
+        let parsed = CODEBUDDY_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
         CODEBUDDY_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut sink,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
             .unwrap();
         sink
     }

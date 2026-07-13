@@ -4,8 +4,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
-    EXPLICIT_TOKEN_OVERFLOW_REVISION,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{sessions, ClientId};
@@ -37,11 +36,7 @@ impl LocalSourceAdapter for JunieAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -118,19 +113,10 @@ mod tests {
         cache: &mut message_cache::SourceMessageCache,
         pricing: Option<&PricingService>,
     ) -> Vec<sessions::UnifiedMessage> {
-        let parsed = JUNIE_ADAPTER
-            .parse_checked(units, &ParseContext { pricing })
-            .unwrap();
+        let parsed = JUNIE_ADAPTER.parse_checked(units, &ParseContext { pricing });
         let mut messages = Vec::new();
         JUNIE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: cache,
-                    pricing,
-                },
-                &mut messages,
-            )
+            .fold(parsed, &mut FoldContext::new(cache, pricing), &mut messages)
             .unwrap();
         messages
     }
@@ -205,14 +191,7 @@ mod tests {
 
         let mut cached = Vec::new();
         JUNIE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut cached,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut cached)
             .unwrap();
 
         assert_eq!(cached, fresh);

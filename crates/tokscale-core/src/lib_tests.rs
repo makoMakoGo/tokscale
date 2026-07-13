@@ -3,12 +3,13 @@ use super::{
     finalize_token_priced_messages, generate_graph_with_loaded_pricing,
     load_aggregated_views_with_pricing, load_cache_only_pricing_with_diagnostics,
     load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
+    parse_all_messages_with_health, parse_all_messages_with_health_with_env_strategy,
     parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-    parse_prepared_local_unified_messages, positive_token_total, pricing,
-    retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
-    AggregationConfig, ClientContribution, ClientCounts, ClientId, DailyTotals, DateRange,
-    GraphResult, GroupBy, LocalParseOptions, ReportOptions, SessionContribution, TimeMetricsReport,
-    TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
+    positive_token_total, pricing, retain_for_requested_clients, scanner,
+    select_local_parse_pricing, AggregatedViews, AggregationConfig, ClientContribution,
+    ClientCounts, ClientId, DailyTotals, DateRange, GraphResult, GroupBy, LocalParseOptions,
+    ReportOptions, SessionContribution, TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
+    UNKNOWN_WORKSPACE_LABEL,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -21,15 +22,23 @@ use std::sync::Arc;
 struct LocalMessagesForTest {
     messages: Vec<UnifiedMessage>,
     counts: ClientCounts,
+    health: super::DataHealth,
 }
 
 fn load_local_messages_for_test(
     options: LocalParseOptions,
 ) -> Result<LocalMessagesForTest, String> {
     let counts = super::count_local_client_messages(options.clone())?.counts;
-    let prepared = super::prepare_local_sources(options)?;
-    let messages = parse_prepared_local_unified_messages(prepared, None)?;
-    Ok(LocalMessagesForTest { messages, counts })
+    let prepared = super::prepare_local_sources(options.clone())?;
+    let mut messages = Vec::new();
+    let (_, health) =
+        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages)?;
+    let messages = super::filter_unified_messages(messages, &options);
+    Ok(LocalMessagesForTest {
+        messages,
+        counts,
+        health,
+    })
 }
 
 struct HomeEnvGuard(Option<OsString>);
@@ -2695,23 +2704,32 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
             ..scanner::ScannerSettings::default()
         };
 
-        let first_error = parse_all_messages_with_pricing_with_env_strategy(
+        let (first_messages, first_health) = parse_all_messages_with_health_with_env_strategy(
             source_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
             false,
             &scanner_settings,
         )
-        .unwrap_err();
+        .unwrap();
+        assert!(first_messages.is_empty());
+        assert_eq!(first_health.failed_sources(), 1);
+        let source = &first_health.sources()[0];
+        assert_eq!(source.path, path);
+        let failure = source.status.failure().unwrap();
         assert!(
-            first_error.contains(path.to_str().unwrap()),
-            "{first_error}"
-        );
-        assert!(
-            first_error.contains("snapshot source metadata and content")
-                || first_error.contains("read source metadata and file identity")
-                || first_error.contains("open current OpenCode SQLite database"),
-            "error must identify the failed source operation: {first_error}"
+            failure.message.contains("snapshot source metadata")
+                || failure
+                    .message
+                    .contains("read source metadata and file identity")
+                || failure
+                    .message
+                    .contains("open current OpenCode SQLite database")
+                || failure.operation.contains("snapshot source metadata")
+                || failure
+                    .operation
+                    .contains("open current OpenCode SQLite database"),
+            "failure must identify the failed source operation: {failure:?}"
         );
 
         let cache = message_cache::SourceMessageCache::load().unwrap();
@@ -3602,19 +3620,22 @@ fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
         )
         .unwrap();
 
-        let error = parse_all_messages_with_pricing(
+        let (messages, health) = parse_all_messages_with_health(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap_err();
-        assert!(error.contains("codex parser `codex`"), "{error}");
+        .unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(health.failed_sources(), 1);
+        let source = &health.sources()[0];
+        assert_eq!(source.path, path);
+        let failure = source.status.failure().unwrap();
+        assert_eq!(failure.operation, "validate Codex token-count event");
         assert!(
-            error.contains("validate Codex token-count event"),
-            "{error}"
+            failure.message.contains("timestamp is missing"),
+            "{failure:?}"
         );
-        assert!(error.contains(path.to_str().unwrap()), "{error}");
-        assert!(error.contains("timestamp is missing"), "{error}");
 
         assert!(message_cache::SourceMessageCache::load()
             .unwrap()
@@ -3660,15 +3681,18 @@ fn test_codex_malformed_json_suffix_returns_error_without_cache_shard() {
         )
         .unwrap();
 
-        let error = parse_all_messages_with_pricing(
+        let (messages, health) = parse_all_messages_with_health(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap_err();
-        assert!(error.contains("codex parser `codex`"), "{error}");
-        assert!(error.contains("decode Codex headless line"), "{error}");
-        assert!(error.contains(path.to_str().unwrap()), "{error}");
+        .unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(health.failed_sources(), 1);
+        let source = &health.sources()[0];
+        assert_eq!(source.path, path);
+        let failure = source.status.failure().unwrap();
+        assert_eq!(failure.operation, "decode Codex headless line");
         assert!(message_cache::SourceMessageCache::load()
             .unwrap()
             .get_meta(
@@ -3715,15 +3739,18 @@ fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
         file.write_all(&[0xff, b'\n']).unwrap();
         file.flush().unwrap();
 
-        let error = parse_all_messages_with_pricing(
+        let (messages, health) = parse_all_messages_with_health(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap_err();
-        assert!(error.contains("codex parser `codex`"), "{error}");
-        assert!(error.contains("read Codex JSONL line"), "{error}");
-        assert!(error.contains(path.to_str().unwrap()), "{error}");
+        .unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(health.failed_sources(), 1);
+        let source = &health.sources()[0];
+        assert_eq!(source.path, path);
+        let failure = source.status.failure().unwrap();
+        assert_eq!(failure.operation, "read Codex JSONL line");
 
         let cache = message_cache::SourceMessageCache::load().unwrap();
         assert!(cache
@@ -3768,23 +3795,21 @@ fn test_codex_unknown_model_prefix_errors_without_shard_then_parses_when_complet
         )
         .unwrap();
 
-        let initial_error = parse_all_messages_with_pricing(
+        let (initial_messages, initial_health) = parse_all_messages_with_health(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap_err();
+        .unwrap();
+        assert!(initial_messages.is_empty());
+        assert_eq!(initial_health.failed_sources(), 1);
+        let source = &initial_health.sources()[0];
+        assert_eq!(source.path, path);
+        let failure = source.status.failure().unwrap();
+        assert_eq!(failure.operation, "resolve Codex token-count model");
         assert!(
-            initial_error.contains("resolve Codex token-count model"),
-            "{initial_error}"
-        );
-        assert!(
-            initial_error.contains(path.to_str().unwrap()),
-            "{initial_error}"
-        );
-        assert!(
-            initial_error.contains("model was never identified"),
-            "{initial_error}"
+            failure.message.contains("model was never identified"),
+            "{failure:?}"
         );
         assert!(message_cache::SourceMessageCache::load()
             .unwrap()
@@ -5622,7 +5647,7 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
     let _home_guard = HomeEnvGuard::set(temp_dir.path());
     let missing_db = temp_dir.path().join("missing/custom-current.db");
 
-    let error = load_local_messages_for_test(LocalParseOptions {
+    let loaded = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
         use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
@@ -5632,13 +5657,22 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
         },
         ..LocalParseOptions::default()
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains(missing_db.to_str().unwrap()), "{error}");
+    assert!(loaded.messages.is_empty());
+    assert_eq!(loaded.health.failed_sources(), 1);
+    let source = &loaded.health.sources()[0];
+    assert_eq!(source.path, missing_db);
+    let failure = source.status.failure().unwrap();
     assert!(
-        error.contains("read source metadata and file identity")
-            || error.contains("open current OpenCode SQLite database"),
-        "error must identify the failed source operation: {error}"
+        failure
+            .message
+            .contains("read source metadata and file identity")
+            || failure
+                .message
+                .contains("open current OpenCode SQLite database")
+            || failure.operation.contains("snapshot source metadata"),
+        "failure must identify the failed source operation: {failure:?}"
     );
 
     let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, missing_db.clone())
@@ -5658,16 +5692,27 @@ fn test_opencode_auto_discovery_error_reaches_public_loader() {
     std::fs::create_dir_all(data_root.parent().unwrap()).unwrap();
     std::fs::write(&data_root, "not a directory").unwrap();
 
-    let error = load_local_messages_for_test(LocalParseOptions {
+    let loaded = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
         use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
         ..LocalParseOptions::default()
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("failed to read OpenCode data directory"));
-    assert!(error.contains(data_root.to_str().unwrap()));
+    assert!(loaded.messages.is_empty());
+    assert_eq!(loaded.health.failed_sources(), 1);
+    let failure = loaded.health.sources()[0].status.failure().unwrap();
+    assert!(
+        failure
+            .message
+            .contains("failed to read OpenCode data directory"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.message.contains(data_root.to_str().unwrap()),
+        "{failure:?}"
+    );
 }
 
 #[test]

@@ -1126,7 +1126,8 @@ fn test_opencode_obsolete_sqlite_schema_is_an_explicit_cli_error() {
     cmd_with_home(tmp.path())
         .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .assert()
-        .failure()
+        .success()
+        .stdout(predicate::str::contains("\"failedSources\": 1"))
         .stderr(predicate::str::contains(
             "does not match the current session schema",
         ));
@@ -1151,7 +1152,8 @@ fn test_opencode_invalid_sqlite_payload_is_an_explicit_cli_error() {
     cmd_with_home(tmp.path())
         .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .assert()
-        .failure()
+        .success()
+        .stdout(predicate::str::contains("\"failedSources\": 1"))
         .stderr(predicate::str::contains(
             "failed to decode current OpenCode SQLite message payload",
         ))

@@ -1,13 +1,15 @@
 use rayon::prelude::*;
 
+use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
-    SourceUnit, UnitMessageSource,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
+use crate::source_health::ScannedSource;
 
 pub(crate) struct TraeAdapter;
 
@@ -27,29 +29,12 @@ impl LocalSourceAdapter for TraeAdapter {
         )
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages =
-                    sessions::trae::parse_trae_file("trae", &unit.path).map_err(|source| {
-                        SourceParseError::from_session(
-                            unit.client,
-                            &unit.path,
-                            unit.parser_version.parser_id,
-                            source,
-                        )
-                    })?;
-                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                Ok(ParsedUnit {
-                    unit,
-                    messages: UnitMessageSource::Fresh(messages),
-                    cache_write: None,
-                    invalidate_cache: false,
+                adapter_cache::parse_uncached_unit(unit, ctx, |path| {
+                    sessions::trae::parse_trae_file("trae", path).map(ScannedSource::complete)
                 })
             })
             .collect()
@@ -58,11 +43,12 @@ impl LocalSourceAdapter for TraeAdapter {
     fn fold(
         &self,
         parsed: Vec<ParsedUnit>,
-        _ctx: &mut FoldContext<'_>,
+        ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
     ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut messages = Vec::new();
         for unit in parsed {
+            ctx.health.record(unit.source_health());
             if let UnitMessageSource::Fresh(unit_messages) = unit.messages {
                 messages.extend(unit_messages);
             }
@@ -80,6 +66,7 @@ impl LocalSourceAdapter for TraeAdapter {
         let mut accumulator = crate::TraeMessageAccumulator::default();
         while let Some(parsed) = batches.next(ctx)? {
             for unit in parsed {
+                ctx.health.record(unit.source_health());
                 if let UnitMessageSource::Fresh(messages) = unit.messages {
                     accumulator.push_messages(messages);
                 }
@@ -147,10 +134,7 @@ mod tests {
                 TRAE_ADAPTER
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: Some(&pricing),
-                        },
+                        &mut FoldContext::new(&mut cache, Some(&pricing)),
                         &mut sink,
                     )
                     .unwrap();

@@ -2,14 +2,16 @@ use std::collections::HashSet;
 
 use rayon::prelude::*;
 
+use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
-    SourceUnit, UnitMessageSource,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
+use crate::source_health::ScannedSource;
 
 pub(crate) struct HermesAdapter;
 
@@ -45,29 +47,12 @@ impl LocalSourceAdapter for HermesAdapter {
         )
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages =
-                    sessions::hermes::parse_hermes_sqlite(&unit.path).map_err(|source| {
-                        SourceParseError::from_session(
-                            unit.client,
-                            &unit.path,
-                            unit.parser_version.parser_id,
-                            source,
-                        )
-                    })?;
-                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                Ok(ParsedUnit {
-                    unit,
-                    messages: UnitMessageSource::Fresh(messages),
-                    cache_write: None,
-                    invalidate_cache: false,
+                adapter_cache::parse_uncached_unit(unit, ctx, |path| {
+                    sessions::hermes::parse_hermes_sqlite(path).map(ScannedSource::complete)
                 })
             })
             .collect()
@@ -76,11 +61,11 @@ impl LocalSourceAdapter for HermesAdapter {
     fn fold(
         &self,
         parsed: Vec<ParsedUnit>,
-        _ctx: &mut FoldContext<'_>,
+        ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
     ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut seen = HashSet::new();
-        fold_hermes_units(parsed, sink, &mut seen);
+        fold_hermes_units(parsed, ctx, sink, &mut seen);
         Ok(())
     }
 
@@ -92,14 +77,20 @@ impl LocalSourceAdapter for HermesAdapter {
     ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut seen = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
-            fold_hermes_units(parsed, sink, &mut seen);
+            fold_hermes_units(parsed, ctx, sink, &mut seen);
         }
         Ok(())
     }
 }
 
-fn fold_hermes_units(parsed: Vec<ParsedUnit>, sink: &mut dyn MessageSink, seen: &mut HashSet<u64>) {
+fn fold_hermes_units(
+    parsed: Vec<ParsedUnit>,
+    ctx: &mut FoldContext<'_>,
+    sink: &mut dyn MessageSink,
+    seen: &mut HashSet<u64>,
+) {
     for unit in parsed {
+        ctx.health.record(unit.source_health());
         if let UnitMessageSource::Fresh(messages) = unit.messages {
             sink.extend_messages(
                 messages

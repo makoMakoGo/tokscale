@@ -6,8 +6,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourcePipelineError,
-    SourceUnit,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourcePipelineError, SourceUnit,
 };
 use crate::clients::ClientId;
 use crate::sessions::error::SessionParseResult;
@@ -60,11 +59,7 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
         )
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
         units
             .into_par_iter()
