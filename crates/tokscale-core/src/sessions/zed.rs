@@ -24,7 +24,7 @@ const MAX_ZED_THREAD_JSON_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Debug)]
 struct ZedThreadRow {
     id: String,
-    updated_at: String,
+    updated_at: Option<String>,
     created_at: Option<String>,
     folder_paths: Option<String>,
     folder_paths_order: Option<String>,
@@ -48,33 +48,35 @@ pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         .prepare(query)
         .map_err(|error| SessionParseError::new("prepare Zed thread query", error))?;
 
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(ZedThreadRow {
-                id: row.get(0)?,
-                updated_at: row.get(1)?,
-                created_at: row.get(2)?,
-                folder_paths: row.get(3)?,
-                folder_paths_order: row.get(4)?,
-                data_type: row.get(5)?,
-                data: row.get(6)?,
-            })
-        })
+    let mut rows = stmt
+        .query([])
         .map_err(|error| SessionParseError::new("execute Zed thread query", error))?;
 
     let mut scanned = ScannedSource::default();
-    for row in rows {
-        let row = match row {
-            Ok(row) => row,
+    let mut row_number = 0_u64;
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
             // A failed row step means the database is damaged mid-scan: how
             // many further rows are affected is unknown, so the confirmed
             // records are kept and the scan is declared interrupted.
             Err(error) => {
                 scanned.interrupted = Some(SourceFailure::new(
-                    "decode Zed thread row",
+                    "read Zed thread rows",
                     error.to_string(),
                 ));
                 break;
+            }
+        };
+        row_number += 1;
+        let row = match decode_thread_row(row, row_number) {
+            Ok(row) => row,
+            Err(sample) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord, || sample);
+                continue;
             }
         };
         match parse_thread_row(row) {
@@ -86,6 +88,33 @@ pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         }
     }
     Ok(scanned)
+}
+
+fn decode_thread_row(row: &rusqlite::Row<'_>, row_number: u64) -> Result<ZedThreadRow, String> {
+    let id: Option<String> = decode_thread_column(row, row_number, 0, "id")?;
+    let id = id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| format!("row {row_number}: id is missing or empty"))?;
+
+    Ok(ZedThreadRow {
+        id,
+        updated_at: decode_thread_column(row, row_number, 1, "updated_at")?,
+        created_at: decode_thread_column(row, row_number, 2, "created_at")?,
+        folder_paths: decode_thread_column(row, row_number, 3, "folder_paths")?,
+        folder_paths_order: decode_thread_column(row, row_number, 4, "folder_paths_order")?,
+        data_type: decode_thread_column(row, row_number, 5, "data_type")?,
+        data: decode_thread_column(row, row_number, 6, "data")?,
+    })
+}
+
+fn decode_thread_column<T: rusqlite::types::FromSql>(
+    row: &rusqlite::Row<'_>,
+    row_number: u64,
+    index: usize,
+    name: &str,
+) -> Result<T, String> {
+    row.get(index)
+        .map_err(|error| format!("row {row_number}: failed to decode {name}: {error}"))
 }
 
 fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
@@ -117,7 +146,20 @@ fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
         return ThreadOutcome::Filtered;
     }
 
-    let Some(model) = thread.get("model").filter(|model| !model.is_null()) else {
+    let model = thread.get("model").filter(|model| !model.is_null());
+    if model
+        .and_then(|model| model.get("provider"))
+        .and_then(Value::as_str)
+        .is_some_and(|provider| !provider.trim().eq_ignore_ascii_case(ZED_HOSTED_PROVIDER))
+    {
+        return ThreadOutcome::Filtered;
+    }
+
+    let usage = thread_usage(&thread);
+    if matches!(usage, Ok(None)) {
+        return ThreadOutcome::Filtered;
+    }
+    let Some(model) = model else {
         return ThreadOutcome::Rejected(
             RecordRejectionReason::MissingModel,
             format!("thread `{}`: thread is missing model", row.id),
@@ -129,9 +171,7 @@ fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
             format!("thread `{}`: model is missing provider", row.id),
         );
     };
-    if !provider.trim().eq_ignore_ascii_case(ZED_HOSTED_PROVIDER) {
-        return ThreadOutcome::Filtered;
-    }
+    debug_assert!(provider.trim().eq_ignore_ascii_case(ZED_HOSTED_PROVIDER));
 
     let model_id = model
         .get("model")
@@ -145,9 +185,9 @@ fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
         );
     }
 
-    let usage = match thread_usage(&thread) {
+    let (tokens, message_count) = match usage {
         Ok(Some(usage)) => usage,
-        Ok(None) => return ThreadOutcome::Filtered,
+        Ok(None) => unreachable!("zero usage returned before metadata validation"),
         Err(error) => {
             return ThreadOutcome::Rejected(
                 RecordRejectionReason::MalformedRecord,
@@ -155,7 +195,7 @@ fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
             );
         }
     };
-    let (tokens, message_count) = usage;
+
     let Some(timestamp) = timestamp_ms(&row, &thread) else {
         return ThreadOutcome::Rejected(
             RecordRejectionReason::MissingTimestamp,
@@ -329,7 +369,7 @@ fn timestamp_ms(row: &ZedThreadRow, thread: &Value) -> Option<i64> {
     row.created_at
         .as_deref()
         .and_then(parse_timestamp_str)
-        .or_else(|| parse_timestamp_str(&row.updated_at))
+        .or_else(|| row.updated_at.as_deref().and_then(parse_timestamp_str))
         .or_else(|| {
             thread
                 .get("updated_at")
@@ -727,7 +767,43 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_row_interrupts_the_scan_but_keeps_confirmed_records() {
+    fn zero_usage_without_model_is_an_intentional_filter() {
+        let dir = TempDir::new().unwrap();
+        let (db_path, conn) = create_threads_db(&dir);
+        let payload = json!({
+            "version": "0.3.0",
+            "model": null,
+            "request_token_usage": {
+                "user-1": {"input_tokens": 0, "output_tokens": 0}
+            },
+            "cumulative_token_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+            },
+            "imported": false
+        })
+        .to_string();
+        insert_thread(
+            &conn,
+            "thread-zero-usage",
+            &payload,
+            "json",
+            "not-a-timestamp",
+            None,
+            None,
+            None,
+        );
+        drop(conn);
+
+        let scanned = super::parse_zed_sqlite(&db_path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn undecodable_row_is_rejected_and_later_threads_are_kept() {
         let dir = TempDir::new().unwrap();
         let (db_path, conn) = create_threads_db(&dir);
         let good = thread_json(
@@ -750,16 +826,27 @@ mod tests {
             [],
         )
         .unwrap();
+        insert_thread(
+            &conn,
+            "thread-good-after",
+            &good,
+            "json",
+            "2026-05-01T12:30:00Z",
+            None,
+            None,
+            None,
+        );
         drop(conn);
 
         let scanned = super::parse_zed_sqlite(&db_path).unwrap();
 
-        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages.len(), 2);
         assert_eq!(scanned.messages[0].session_id.as_ref(), "thread-good");
-        let interrupted = scanned
-            .interrupted
-            .expect("row decode failure must interrupt");
-        assert_eq!(interrupted.operation, "decode Zed thread row");
+        assert_eq!(scanned.messages[1].session_id.as_ref(), "thread-good-after");
+        assert!(scanned.interrupted.is_none());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert!(rejection.sample.unwrap().contains("row 2"));
     }
 
     #[test]

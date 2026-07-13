@@ -7,7 +7,7 @@ use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, CacheHitPlan, FingerprintPolicy, FoldContext, LocalSourceAdapter,
     MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError,
-    SourceParseError, SourcePipelineError, SourceUnit,
+    SourcePipelineError, SourceUnit,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -159,10 +159,16 @@ impl LocalSourceAdapter for OmpAdapter {
         miss_units.splice(0..0, failed_hits.into_iter().map(|failed| failed.unit));
 
         let miss_paths: Vec<PathBuf> = miss_units.iter().map(|unit| unit.path.clone()).collect();
-        let parent_index = if let Some(context_path) = miss_paths.first() {
-            sessions::pi::build_omp_parent_task_agent_index(&miss_paths).map_err(|source| {
-                SourceParseError::from_session(ClientId::Omp, context_path, ParserId::Omp, source)
-            })?
+        let parent_index = if !miss_paths.is_empty() {
+            match sessions::pi::build_omp_parent_task_agent_index(&miss_paths) {
+                Ok(parent_index) => parent_index,
+                Err(source) => {
+                    for parsed in units_unavailable(miss_units, &source) {
+                        ctx.health.record(parsed.source_health());
+                    }
+                    return Ok(());
+                }
+            }
         } else {
             sessions::pi::OmpParentTaskAgentIndex::new()
         };
@@ -216,7 +222,7 @@ fn fold_omp_cache_hits(
             messages,
             cache_write,
             invalidate_cache,
-            health: _,
+            health,
         } = parsed;
         if cache_write.is_some() || invalidate_cache {
             return Err(SourcePipelineError::contract(
@@ -224,7 +230,16 @@ fn fold_omp_cache_hits(
             ));
         }
         match adapter_cache::resolve_messages(messages, ctx) {
-            Ok(messages) => sink.extend_messages(messages),
+            Ok(messages) => {
+                let crate::adapters::UnitScanHealth { status, rejections } = *health;
+                ctx.health.record(crate::source_health::SourceHealth {
+                    client: unit.client,
+                    path: unit.path.clone(),
+                    status,
+                    rejections,
+                });
+                sink.extend_messages(messages);
+            }
             Err(failure) => {
                 if !failure.is_recoverable_body_fault() {
                     return Err(failure.into());
@@ -512,6 +527,81 @@ mod tests {
             ["cached-session", "child-session", "root-session"]
         );
         assert_eq!(messages[1].agent.as_deref(), Some("OMP Reviewer"));
+    }
+
+    #[test]
+    fn omp_batched_fold_contains_a_damaged_parent_index_to_its_units() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session_root = dir.path().join(".omp/agent/sessions/project/root-session");
+        let parent_path = session_root.with_extension("jsonl");
+        let child_path = session_root.join("0-ReviewFindings.jsonl");
+        write_file(&parent_path, "{not-json\n");
+        write_file(&child_path, OMP_CHILD_CONTENT);
+
+        let unit = SourceUnit::plain_file(ClientId::Omp, child_path).with_parser_version(
+            ParserVersion::new(ParserId::Omp, OMP_USAGE_AND_SWARM_REVISION),
+        );
+        let mut cache = message_cache::SourceMessageCache::default();
+        let mut sink = Vec::new();
+        let mut batches = crate::adapters::ParsedBatchSource::new(&OMP_ADAPTER, vec![unit]);
+        let mut ctx = FoldContext::new(&mut cache, None);
+
+        OMP_ADAPTER
+            .fold_batches(&mut batches, &mut ctx, &mut sink)
+            .expect("a damaged shared parent index must not escape the OMP failure domain");
+
+        assert!(sink.is_empty());
+        assert_eq!(ctx.health.failed_sources(), 1);
+        let failure = ctx.health.sources()[0].status.failure().unwrap();
+        assert!(failure.message.contains("JSON"), "{failure:?}");
+    }
+
+    #[test]
+    fn omp_warm_hit_restores_cached_rejection_health() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("cached.jsonl");
+        write_file(&path, OMP_CHILD_CONTENT);
+        let parser_version = ParserVersion::new(ParserId::Omp, OMP_USAGE_AND_SWARM_REVISION);
+        let unit = SourceUnit::plain_file(ClientId::Omp, path.clone())
+            .with_parser_version(parser_version)
+            .prepare_snapshot()
+            .unwrap();
+        let mut entry = message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            parser_version,
+            unit.source_input_policy().fingerprint().unwrap(),
+            vec![crate::UnifiedMessage::new(
+                "omp",
+                "gpt-5.5",
+                "openai",
+                "cached-session",
+                1_767_225_600_000,
+                crate::TokenBreakdown {
+                    input: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )],
+            None,
+        );
+        entry.rejections.record(
+            crate::source_health::RecordRejectionReason::MissingModel,
+            || "bad cached row".to_string(),
+        );
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(entry);
+        let hit = match OMP_ADAPTER.plan_cache_hit(unit, &cache).unwrap() {
+            CacheHitPlan::Hit(hit) => hit,
+            CacheHitPlan::Miss(_) => panic!("unchanged OMP source must use its warm shard"),
+        };
+        let mut sink = Vec::new();
+        let mut ctx = FoldContext::new(&mut cache, None);
+
+        OMP_ADAPTER.fold(vec![hit], &mut ctx, &mut sink).unwrap();
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(ctx.health.rejected_records(), 1);
+        assert_eq!(ctx.health.sources()[0].path, path);
     }
 
     #[test]

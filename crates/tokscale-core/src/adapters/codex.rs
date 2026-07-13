@@ -25,6 +25,7 @@ pub(crate) struct CodexAppendSource {
     tail_messages: Vec<UnifiedMessage>,
     fingerprint: message_cache::SourceFingerprint,
     codex_incremental: message_cache::CodexIncrementalCache,
+    rejections: crate::source_health::RejectionSummary,
 }
 
 impl LocalSourceAdapter for CodexAdapter {
@@ -133,6 +134,7 @@ fn plan_exact_codex_cache_hit(
             unit.mark_cache_lookup_completed_no_hit();
             return Ok(CacheHitPlan::Miss(unit));
         }
+        Err(failure) if failure.is_future_format() => return Err(failure.into()),
         Err(failure) => {
             adapter_cache::report_cache_lookup_failure(&failure);
             unit.mark_cache_lookup_completed_no_hit();
@@ -156,7 +158,7 @@ fn plan_exact_codex_cache_hit(
     let read_plan =
         message_cache::CacheReadPlan::new(&unit.path, unit.parser_version, cached.fingerprint);
     unit.release_prepared_snapshot();
-    Ok(CacheHitPlan::Hit(ParsedUnit::healthy(
+    let mut parsed = ParsedUnit::healthy(
         unit,
         UnitMessageSource::CodexCacheHit {
             read_plan,
@@ -164,7 +166,9 @@ fn plan_exact_codex_cache_hit(
         },
         None,
         false,
-    )))
+    );
+    parsed.health.rejections = cached.rejections;
+    Ok(CacheHitPlan::Hit(parsed))
 }
 
 fn fold_codex_units(
@@ -175,14 +179,30 @@ fn fold_codex_units(
 ) -> Result<(), SourcePipelineError> {
     for parsed in parsed {
         let path = parsed.unit.path.clone();
+        let client = parsed.unit.client;
         let parser_version = parsed.unit.parser_version;
-        ctx.health.record(parsed.source_health());
+        let source_health = parsed.source_health();
         let CodexResolvedMessages {
             mut messages,
             cache_write: extra_write,
             finalization,
             recovery_requires_removal,
-        } = resolve_codex_messages(parsed.messages, ctx)?;
+        } = match resolve_codex_messages(parsed.messages, ctx) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let Some(failure) = codex_recovery_source_failure(&error) else {
+                    return Err(error);
+                };
+                ctx.health.record(crate::source_health::SourceHealth {
+                    client,
+                    path,
+                    status: crate::source_health::SourceStatus::Unavailable { failure },
+                    rejections: Default::default(),
+                });
+                continue;
+            }
+        };
+        ctx.health.record(source_health);
         write_codex_cache_and_apply_recovery(
             &path,
             parser_version,
@@ -203,6 +223,24 @@ fn fold_codex_units(
         );
     }
     Ok(())
+}
+
+fn codex_recovery_source_failure(
+    error: &SourcePipelineError,
+) -> Option<crate::source_health::SourceFailure> {
+    match error {
+        SourcePipelineError::Parse(source) => Some(crate::source_health::SourceFailure::new(
+            source.operation,
+            source.to_string(),
+        )),
+        SourcePipelineError::Planning(SourcePlanningError::Snapshot(source)) => {
+            Some(crate::source_health::SourceFailure::new(
+                "snapshot Codex source for cache recovery",
+                source.to_string(),
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn write_codex_cache_and_apply_recovery(
@@ -441,7 +479,7 @@ fn load_or_parse_codex_unit(
                     unit.parser_version,
                     cached.fingerprint,
                 );
-                return Ok(ParsedUnit::healthy(
+                let mut parsed = ParsedUnit::healthy(
                     unit,
                     UnitMessageSource::CodexCacheHit {
                         read_plan,
@@ -449,7 +487,9 @@ fn load_or_parse_codex_unit(
                     },
                     None,
                     false,
-                ));
+                );
+                parsed.health.rejections = cached.rejections;
+                return Ok(parsed);
             }
 
             return reparse_from_start(true);
@@ -494,12 +534,13 @@ fn load_or_parse_codex_unit(
                     };
                     if let Some((entry_fingerprint, codex_incremental_cache)) = cache_metadata {
                         let parser_version = unit.parser_version;
+                        let rejections = cached.rejections.clone();
                         let read_plan = message_cache::CacheReadPlan::new(
                             &path,
                             parser_version,
                             cached.fingerprint.clone(),
                         );
-                        return Ok(ParsedUnit::healthy(
+                        let mut parsed = ParsedUnit::healthy(
                             unit,
                             UnitMessageSource::CodexAppend(Box::new(CodexAppendSource {
                                 path,
@@ -509,10 +550,13 @@ fn load_or_parse_codex_unit(
                                 tail_messages: parsed.messages,
                                 fingerprint: entry_fingerprint,
                                 codex_incremental: codex_incremental_cache,
+                                rejections: rejections.clone(),
                             })),
                             None,
                             false,
-                        ));
+                        );
+                        parsed.health.rejections = rejections;
+                        return Ok(parsed);
                     }
                 }
             }
@@ -581,6 +625,7 @@ fn resolve_codex_messages(
                 tail_messages,
                 fingerprint,
                 codex_incremental,
+                rejections,
             } = *append;
             let mut raw_messages = match ctx.source_cache.take_messages(&read_plan) {
                 Ok(cached) => cached,
@@ -601,12 +646,15 @@ fn resolve_codex_messages(
                 }
             };
             raw_messages.extend(tail_messages);
-            let cache_write = Box::new(message_cache::CacheWritePlan::new(
-                &path,
-                parser_version,
-                fingerprint,
-                Some(codex_incremental),
-            ));
+            let cache_write = Box::new(
+                message_cache::CacheWritePlan::new(
+                    &path,
+                    parser_version,
+                    fingerprint,
+                    Some(codex_incremental),
+                )
+                .with_rejections(rejections),
+            );
             Ok(CodexResolvedMessages {
                 messages: raw_messages,
                 cache_write: Some(cache_write),
@@ -1119,6 +1167,114 @@ mod tests {
     }
 
     #[test]
+    fn codex_exact_warm_hit_restores_cached_rejection_health() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        let meta = seed_cache.get_meta(&path, parser_version).unwrap().unwrap();
+        let raw_messages = seed_cache
+            .take_messages(&message_cache::CacheReadPlan::new(
+                &path,
+                parser_version,
+                meta.fingerprint.clone(),
+            ))
+            .unwrap();
+        let mut entry = message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            parser_version,
+            meta.fingerprint,
+            raw_messages,
+            meta.codex_incremental,
+        );
+        entry.rejections.record(
+            crate::source_health::RecordRejectionReason::MalformedRecord,
+            || "cached Codex row".to_string(),
+        );
+        seed_cache.insert(entry);
+        seed_cache.save_if_dirty().unwrap();
+
+        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let hit = expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &warm_cache),
+            "unchanged Codex source must plan an exact warm hit",
+        );
+        let mut sink = Vec::new();
+        let mut ctx = FoldContext::new(&mut warm_cache, None);
+        CODEX_ADAPTER.fold(vec![hit], &mut ctx, &mut sink).unwrap();
+
+        assert!(!sink.is_empty());
+        assert_eq!(ctx.health.rejected_records(), 1);
+        assert_eq!(ctx.health.sources()[0].path, path);
+    }
+
+    #[test]
+    fn codex_append_preserves_cached_rejection_health_in_rewritten_shard() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let parser_version = message_cache::ParserVersion::new(
+            message_cache::ParserId::Codex,
+            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+        );
+        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
+        let meta = seed_cache.get_meta(&path, parser_version).unwrap().unwrap();
+        let raw_messages = seed_cache
+            .take_messages(&message_cache::CacheReadPlan::new(
+                &path,
+                parser_version,
+                meta.fingerprint.clone(),
+            ))
+            .unwrap();
+        let mut entry = message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            parser_version,
+            meta.fingerprint,
+            raw_messages,
+            meta.codex_incremental,
+        );
+        entry.rejections.record(
+            crate::source_health::RecordRejectionReason::MalformedRecord,
+            || "cached Codex row".to_string(),
+        );
+        seed_cache.insert(entry);
+        seed_cache.save_if_dirty().unwrap();
+        append_file(&path, APPENDED_CODEX_ENTRY);
+
+        let mut append_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let parsed = plan_and_parse(vec![codex_unit(&path, false)], &append_cache, None);
+        let mut appended_messages = Vec::new();
+        let mut append_ctx = FoldContext::new(&mut append_cache, None);
+        CODEX_ADAPTER
+            .fold(parsed, &mut append_ctx, &mut appended_messages)
+            .unwrap();
+        assert_eq!(append_ctx.health.rejected_records(), 1);
+        append_ctx.source_cache.save_if_dirty().unwrap();
+
+        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let hit = expect_codex_hit(
+            CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path, false), &warm_cache),
+            "appended Codex source must be rewritten as an exact warm shard",
+        );
+        let mut warm_messages = Vec::new();
+        let mut warm_ctx = FoldContext::new(&mut warm_cache, None);
+        CODEX_ADAPTER
+            .fold(vec![hit], &mut warm_ctx, &mut warm_messages)
+            .unwrap();
+
+        assert_eq!(warm_messages, appended_messages);
+        assert_eq!(warm_ctx.health.rejected_records(), 1);
+    }
+
+    #[test]
     fn codex_message_count_mismatch_is_reparsed_and_repaired() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
@@ -1171,16 +1327,19 @@ mod tests {
         );
         write_file(&path, MISSING_TIMESTAMP_CODEX_ENTRY);
         let mut sink = Vec::new();
-        let error = CODEX_ADAPTER
-            .fold(
-                vec![planned],
-                &mut FoldContext::new(&mut repair_cache, None),
-                &mut sink,
-            )
-            .expect_err("strict Codex reparse must return the missing timestamp error");
-        assert!(error.to_string().contains("timestamp is missing"));
+        let mut ctx = FoldContext::new(&mut repair_cache, None);
+        CODEX_ADAPTER
+            .fold(vec![planned], &mut ctx, &mut sink)
+            .expect("a failed Codex recovery parse must stay inside the source failure domain");
         assert!(sink.is_empty());
-        repair_cache.save_if_dirty().unwrap();
+        assert_eq!(ctx.health.failed_sources(), 1);
+        assert!(ctx.health.sources()[0]
+            .status
+            .failure()
+            .unwrap()
+            .message
+            .contains("timestamp is missing"));
+        ctx.source_cache.save_if_dirty().unwrap();
 
         assert!(
             !shard_path.exists(),
@@ -1212,14 +1371,19 @@ mod tests {
         std::fs::write(&shard_path, unknown).unwrap();
         write_file(&path, MISSING_TIMESTAMP_CODEX_ENTRY);
         let mut sink = Vec::new();
+        let mut ctx = FoldContext::new(&mut repair_cache, None);
         CODEX_ADAPTER
-            .fold(
-                vec![planned],
-                &mut FoldContext::new(&mut repair_cache, None),
-                &mut sink,
-            )
-            .expect_err("strict Codex reparse must return the missing timestamp error");
-        repair_cache.save_if_dirty().unwrap();
+            .fold(vec![planned], &mut ctx, &mut sink)
+            .expect("a failed Codex recovery parse must stay inside the source failure domain");
+        assert!(sink.is_empty());
+        assert_eq!(ctx.health.failed_sources(), 1);
+        assert!(ctx.health.sources()[0]
+            .status
+            .failure()
+            .unwrap()
+            .message
+            .contains("timestamp is missing"));
+        ctx.source_cache.save_if_dirty().unwrap();
 
         assert_eq!(
             std::fs::read(shard_path).unwrap(),
@@ -1333,7 +1497,6 @@ mod tests {
             .get_meta(&path, parser_version)
             .expect("Codex cache lookup must succeed")
             .expect("an empty Codex parse is still a valid cache result");
-        assert!(!meta.has_messages);
         assert!(meta.codex_incremental.is_some());
 
         let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());

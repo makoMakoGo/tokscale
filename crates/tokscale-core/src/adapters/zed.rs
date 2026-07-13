@@ -5,7 +5,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, ZED_RECORD_FILTER_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -73,7 +73,7 @@ impl LocalSourceAdapter for ZedAdapter {
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
                 ParserId::Zed,
-                EXPLICIT_TOKEN_OVERFLOW_REVISION,
+                ZED_RECORD_FILTER_REVISION,
             ))
         })
         .collect();
@@ -283,7 +283,7 @@ mod tests {
         let unit = SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())
             .with_parser_version(ParserVersion::new(
                 ParserId::Zed,
-                EXPLICIT_TOKEN_OVERFLOW_REVISION,
+                ZED_RECORD_FILTER_REVISION,
             ))
             .prepare_snapshot()
             .unwrap();

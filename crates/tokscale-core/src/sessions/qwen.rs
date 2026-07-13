@@ -7,6 +7,7 @@ use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::model_aliases;
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -40,31 +41,32 @@ struct UsageMetadata {
 
 const DEFAULT_PROVIDER: &str = "qwen";
 
-fn invalid_at_path(
-    path: &Path,
-    operation: &'static str,
-    detail: impl Into<String>,
-) -> SessionParseError {
-    SessionParseError::at_path(
-        path,
-        operation,
-        std::io::Error::new(std::io::ErrorKind::InvalidData, detail.into()),
-    )
-}
-
-/// Parse a Qwen CLI JSONL file
-pub fn parse_qwen_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+/// Parse a Qwen CLI JSONL file.
+///
+/// A malformed record is rejected without erasing messages from other lines.
+/// File-open failures remain source-level errors, while an I/O error during
+/// iteration marks the scan partial and preserves messages confirmed earlier.
+pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
     let (workspace_key, workspace_label) = qwen_workspace_from_path(path);
 
     let reader = BufReader::new(file);
-    let mut messages: Vec<UnifiedMessage> = Vec::new();
+    let mut scanned = ScannedSource::default();
     let mut message_index = 0usize;
 
-    for line in reader.lines() {
-        let line =
-            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
+    for (line_index, line) in reader.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read Qwen JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -72,8 +74,17 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
         }
 
         let mut bytes = trimmed.as_bytes().to_vec();
-        let qwen_line = simd_json::from_slice::<QwenLine>(&mut bytes)
-            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
+        let qwen_line = match simd_json::from_slice::<QwenLine>(&mut bytes) {
+            Ok(qwen_line) => qwen_line,
+            Err(error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord, || {
+                        format!("{} line {line_number}: {error}", path.display())
+                    });
+                continue;
+            }
+        };
 
         // Only process assistant type messages with usageMetadata
         if qwen_line.msg_type.as_deref() != Some("assistant") {
@@ -97,56 +108,76 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
             continue;
         }
 
-        let timestamp = qwen_line.timestamp.as_deref().ok_or_else(|| {
-            invalid_at_path(
-                path,
-                "validate assistant timestamp",
-                "assistant record is missing timestamp",
-            )
-        })?;
-        let timestamp_ms = parse_timestamp_str(timestamp).ok_or_else(|| {
-            invalid_at_path(
-                path,
-                "validate assistant timestamp",
-                format!("invalid Qwen timestamp `{timestamp}`"),
-            )
-        })?;
+        let Some(timestamp) = qwen_line.timestamp.as_deref() else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp, || {
+                    format!(
+                        "{} line {line_number}: assistant record is missing timestamp",
+                        path.display()
+                    )
+                });
+            continue;
+        };
+        let Some(timestamp_ms) = parse_timestamp_str(timestamp) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp, || {
+                    format!(
+                        "{} line {line_number}: invalid Qwen timestamp `{timestamp}`",
+                        path.display()
+                    )
+                });
+            continue;
+        };
         if timestamp_ms <= 0 {
-            return Err(invalid_at_path(
-                path,
-                "validate assistant timestamp",
-                format!("Qwen timestamp `{timestamp}` must resolve after the Unix epoch"),
-            ));
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp, || {
+                    format!(
+                        "{} line {line_number}: Qwen timestamp `{timestamp}` must resolve after the Unix epoch",
+                        path.display()
+                    )
+                });
+            continue;
         }
 
-        let raw_model = qwen_line
+        let Some(raw_model) = qwen_line
             .model
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty())
-            .ok_or_else(|| {
-                invalid_at_path(
-                    path,
-                    "validate assistant model",
-                    "assistant record is missing a non-empty model",
-                )
-            })?;
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel, || {
+                    format!(
+                        "{} line {line_number}: assistant record is missing a non-empty model",
+                        path.display()
+                    )
+                });
+            continue;
+        };
         let model = model_aliases::canonicalize_source_model_id(raw_model)
             .unwrap_or_else(|| raw_model.to_string());
 
-        let line_session_id = qwen_line
+        let Some(line_session_id) = qwen_line
             .session_id
             .as_deref()
             .map(str::trim)
             .filter(|session_id| !session_id.is_empty())
-            .ok_or_else(|| {
-                invalid_at_path(
-                    path,
-                    "validate assistant session",
-                    "assistant record is missing a non-empty sessionId",
-                )
-            })?
-            .to_string();
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    format!(
+                        "{} line {line_number}: assistant record is missing a non-empty sessionId",
+                        path.display()
+                    )
+                });
+            continue;
+        };
+        let line_session_id = line_session_id.to_string();
         let dedup_key =
             crate::sessions::dedup_hash_str(&format!("qwen:{line_session_id}:{message_index}"));
         message_index += 1;
@@ -168,10 +199,10 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
             Some(dedup_key),
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
-        messages.push(unified);
+        scanned.messages.push(unified);
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn qwen_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
@@ -194,13 +225,12 @@ fn qwen_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error;
     use std::io::Write;
     use std::path::Path;
     use tempfile::{NamedTempFile, TempDir};
 
     fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_qwen_file(path).unwrap()
+        super::parse_qwen_file(path).unwrap().messages
     }
 
     fn create_test_file(content: &str) -> NamedTempFile {
@@ -331,14 +361,76 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_qwen_rejects_malformed_lines() {
+    fn test_parse_qwen_open_failure_remains_a_source_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.jsonl");
+
+        let error = super::parse_qwen_file(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "open file");
+        assert_eq!(error.path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn test_parse_qwen_keeps_good_messages_around_malformed_lines() {
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}
 not valid json at all
 {"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:25:00.000Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 300, "candidatesTokenCount": 400, "thoughtsTokenCount": 20, "cachedContentTokenCount": 10}}"#;
         let file = create_test_file(content);
 
-        let error = super::parse_qwen_file(file.path()).unwrap_err();
-        assert_eq!(error.operation(), "decode JSONL line");
+        let scanned = super::parse_qwen_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].tokens.input, 100);
+        assert_eq!(scanned.messages[1].tokens.input, 300);
+        assert!(scanned.interrupted.is_none());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
+        assert!(rejection.sample.unwrap().contains("line 2"));
+    }
+
+    #[test]
+    fn test_parse_qwen_all_bad_records_complete_with_structured_rejections() {
+        let content = r#"not json
+{"type":"assistant","timestamp":"2026-02-23T14:24:56.857Z","sessionId":"session1","usageMetadata":{"promptTokenCount":1}}
+{"type":"assistant","model":"qwen3.5-plus","sessionId":"session1","usageMetadata":{"promptTokenCount":1}}
+{"type":"assistant","model":"qwen3.5-plus","timestamp":"2026-02-23T14:24:56.857Z","usageMetadata":{"promptTokenCount":1}}"#;
+        let file = create_test_file(content);
+
+        let scanned = super::parse_qwen_file(file.path()).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.interrupted.is_none());
+        let reasons: std::collections::BTreeMap<_, _> = scanned
+            .rejections
+            .entries()
+            .map(|entry| (entry.key, entry.count))
+            .collect();
+        assert_eq!(
+            reasons,
+            std::collections::BTreeMap::from([
+                ("malformed-record", 2),
+                ("missing-model", 1),
+                ("missing-timestamp", 1),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_qwen_intentional_filters_do_not_create_issues() {
+        let content = r#"
+{"type":"user","content":"hello"}
+{"type":"assistant","usageMetadata":null}
+{"type":"assistant","usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"cachedContentTokenCount":0}}
+"#;
+        let file = create_test_file(content);
+
+        let scanned = super::parse_qwen_file(file.path()).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -383,11 +475,15 @@ not valid json at all
         let content = r#"{"type": "assistant", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
         let file = create_test_file(content);
 
-        let error = super::parse_qwen_file(file.path()).unwrap_err();
+        let scanned = super::parse_qwen_file(file.path()).unwrap();
 
-        assert_eq!(error.operation(), "validate assistant model");
-        assert_eq!(error.path(), Some(file.path()));
-        assert!(error.source().is_some());
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-model");
+        assert!(rejection
+            .sample
+            .unwrap()
+            .contains(file.path().to_str().unwrap()));
     }
 
     #[test]
@@ -395,10 +491,15 @@ not valid json at all
         let content = r#"{"type":"assistant","model":"qwen3.5-plus","sessionId":"session1","usageMetadata":{"promptTokenCount":1}}"#;
         let file = create_test_file(content);
 
-        let error = super::parse_qwen_file(file.path()).unwrap_err();
+        let scanned = super::parse_qwen_file(file.path()).unwrap();
 
-        assert_eq!(error.operation(), "validate assistant timestamp");
-        assert_eq!(error.path(), Some(file.path()));
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-timestamp");
+        assert!(rejection
+            .sample
+            .unwrap()
+            .contains(file.path().to_str().unwrap()));
     }
 
     #[test]
@@ -418,10 +519,12 @@ not valid json at all
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
         let (_dir, path) = create_test_file_with_name(content, "json_empty");
 
-        let error = super::parse_qwen_file(&path).unwrap_err();
+        let scanned = super::parse_qwen_file(&path).unwrap();
 
-        assert_eq!(error.operation(), "validate assistant session");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert!(rejection.sample.unwrap().contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -429,10 +532,12 @@ not valid json at all
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
         let (_dir, path) = create_test_file_with_name(content, "json_missing");
 
-        let error = super::parse_qwen_file(&path).unwrap_err();
+        let scanned = super::parse_qwen_file(&path).unwrap();
 
-        assert_eq!(error.operation(), "validate assistant session");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert!(rejection.sample.unwrap().contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -440,10 +545,12 @@ not valid json at all
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": null, "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}"#;
         let (_dir, path) = create_test_file_with_name(content, "json_null");
 
-        let error = super::parse_qwen_file(&path).unwrap_err();
+        let scanned = super::parse_qwen_file(&path).unwrap();
 
-        assert_eq!(error.operation(), "validate assistant session");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert!(rejection.sample.unwrap().contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -472,15 +579,19 @@ not valid json at all
     }
 
     #[test]
-    fn test_mixed_session_id_in_file_is_rejected() {
+    fn test_mixed_session_id_in_file_keeps_valid_records() {
         let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "valid_id", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 10, "cachedContentTokenCount": 5}}
 {"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:25:00.000Z", "usageMetadata": {"promptTokenCount": 300, "candidatesTokenCount": 400, "thoughtsTokenCount": 20, "cachedContentTokenCount": 10}}
 {"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:26:00.000Z", "sessionId": "", "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 600, "thoughtsTokenCount": 30, "cachedContentTokenCount": 15}}"#;
         let (_dir, path) = create_test_file_with_name(content, "mixed");
 
-        let error = super::parse_qwen_file(&path).unwrap_err();
+        let scanned = super::parse_qwen_file(&path).unwrap();
 
-        assert_eq!(error.operation(), "validate assistant session");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "valid_id");
+        assert_eq!(scanned.rejections.total(), 2);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert!(rejection.sample.unwrap().contains("line 2"));
     }
 }

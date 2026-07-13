@@ -6,21 +6,22 @@
 
 use super::error::SessionParseResult;
 use super::roocode::parse_roo_kilo_file;
-use super::UnifiedMessage;
+use crate::source_health::ScannedSource;
 use std::path::Path;
 
-pub fn parse_cline_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_cline_file(path: &Path) -> SessionParseResult<ScannedSource> {
     parse_roo_kilo_file(path, "cline")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::UnifiedMessage;
     use std::fs;
     use tempfile::TempDir;
 
     fn parse_cline_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_cline_file(path).unwrap()
+        super::parse_cline_file(path).unwrap().messages
     }
 
     #[test]

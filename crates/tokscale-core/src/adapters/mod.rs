@@ -39,10 +39,13 @@ pub(crate) use error::{
 };
 
 pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 3;
+// Record-level rejection changes the cached scan outcome even when the
+// accepted messages are unchanged, so old OpenCode shards must be rebuilt.
 pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
-    MODEL_ID_CANONICALIZATION_REVISION + 1;
+    MODEL_ID_CANONICALIZATION_REVISION + 3;
 pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
+pub(crate) const ZED_RECORD_FILTER_REVISION: ParserRevision = EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
 
 pub(crate) trait LocalSourceAdapter: Sync {
     fn client(&self) -> ClientId;
@@ -795,13 +798,15 @@ impl<'a> ParsedBatchSource<'a> {
         let Some(units) = self.units.take() else {
             return Ok(());
         };
-        // A unit whose snapshot or cache planning fails is isolated as an
-        // unavailable source; it contributes no inventory digest, so the
-        // inventory signature shifts and downstream caches retry later.
+        // A unit whose source snapshot fails is isolated as unavailable. A
+        // cache-planning failure belongs to tokscale's cache infrastructure
+        // and must remain a pipeline error instead of being attributed to
+        // third-party source data.
         #[allow(clippy::large_enum_variant)] // transient per-unit planning slot
         enum PlannedOrFailed {
             Planned(PlannedSourceUnit, [u8; 32]),
             Failed(SourceHealth),
+            PipelineError(SourcePlanningError),
         }
         let planned: Vec<PlannedOrFailed> = units
             .into_par_iter()
@@ -830,17 +835,7 @@ impl<'a> ParsedBatchSource<'a> {
                         };
                         PlannedOrFailed::Planned(planned, inventory_digest)
                     }
-                    Err(source) => PlannedOrFailed::Failed(SourceHealth {
-                        client,
-                        path,
-                        status: SourceStatus::Unavailable {
-                            failure: SourceFailure::new(
-                                "plan source cache hit",
-                                source.to_string(),
-                            ),
-                        },
-                        rejections: RejectionSummary::default(),
-                    }),
+                    Err(error) => PlannedOrFailed::PipelineError(error),
                 }
             })
             .collect();
@@ -851,6 +846,7 @@ impl<'a> ParsedBatchSource<'a> {
                     self.planned.push_back(planned);
                 }
                 PlannedOrFailed::Failed(health) => self.failed_health.push(health),
+                PlannedOrFailed::PipelineError(error) => return Err(error.into()),
             }
         }
         Ok(())
@@ -1306,6 +1302,63 @@ mod tests {
                     ["0", "1", "2", "3"]
                 );
             });
+    }
+
+    #[test]
+    fn future_cache_format_remains_a_pipeline_error_across_batch_planning() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let path = source_dir.path().join("future-cache-source");
+        std::fs::write(&path, b"source").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+            .prepare_snapshot()
+            .unwrap();
+        let adapter = PlannedWeaveAdapter {
+            parse_batch_sizes: Mutex::new(Vec::new()),
+            planner_calls: AtomicUsize::new(0),
+        };
+        let mut seeded = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        seeded.insert(message_cache::CachedSourceEntry::new_with_version(
+            &path,
+            unit.parser_version,
+            unit.source_input_policy().fingerprint().unwrap(),
+            vec![UnifiedMessage::new(
+                "amp",
+                "model",
+                "provider",
+                "cached-session",
+                1,
+                crate::TokenBreakdown::default(),
+                0.0,
+            )],
+            None,
+        ));
+        seeded.save_if_dirty().unwrap();
+        message_cache::mark_current_key_shard_as_future_format_for_test(
+            cache_dir.path(),
+            &path,
+            unit.parser_version,
+        );
+
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut batches = ParsedBatchSource::new(&adapter, vec![unit]);
+        let error = adapter
+            .fold_batches(
+                &mut batches,
+                &mut FoldContext::new(&mut cache, None),
+                &mut DroppingSink,
+            )
+            .expect_err("a newer cache format is a tokscale compatibility error");
+
+        assert!(matches!(
+            error,
+            SourcePipelineError::Planning(SourcePlanningError::CacheLookup(
+                message_cache::CacheLookupFailure {
+                    reason: message_cache::CacheReadFailureReason::UnsupportedFormat { .. },
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]

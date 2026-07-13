@@ -411,15 +411,22 @@ fn test_batched_tui_and_model_views_match_individual_outputs() {
     };
 
     let batched = streaming_views(&report_options, ViewSet::TUI | ViewSet::MODEL);
-    let tui = load_usage_data_with_pricing(local_options, GroupBy::ClientModel, None).unwrap();
+    let mut tui = load_usage_data_with_pricing(local_options, GroupBy::ClientModel, None).unwrap();
     let model = streaming_views(&report_options, ViewSet::MODEL)
         .model_report
         .unwrap();
+    let batched_health = batched.health.to_report();
+    let mut batched_tui = batched.tui_usage.unwrap();
 
-    assert_eq!(
-        format!("{:?}", batched.tui_usage.unwrap()),
-        format!("{tui:?}")
-    );
+    // `AggregatedViews` carries fold health beside its internal materialized
+    // views. The public TUI loader projects that health into `UsageData` at
+    // its API boundary, so compare the projection separately from aggregate
+    // payload parity.
+    assert_eq!(batched_health, tui.health);
+    batched_tui.health = Default::default();
+    tui.health = Default::default();
+
+    assert_eq!(format!("{batched_tui:?}"), format!("{tui:?}"));
     assert_eq!(
         json_value(&batched.model_report.unwrap()),
         json_value(&model)
@@ -522,10 +529,17 @@ fn test_streaming_tui_usage_matches_vec_compat() {
     };
     let report_options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
 
-    let streaming = load_usage_data_with_pricing(options, GroupBy::ClientModel, None).unwrap();
-    let compat = vec_compat_views(&report_options, ViewSet::TUI)
+    let mut streaming = load_usage_data_with_pricing(options, GroupBy::ClientModel, None).unwrap();
+    let mut compat = vec_compat_views(&report_options, ViewSet::TUI)
         .tui_usage
         .unwrap();
+
+    // The vec-compat harness exercises aggregation from a bare message list,
+    // which intentionally has no source-health envelope. Health propagation
+    // is covered by the local loader; normalize it out for payload parity.
+    assert!(streaming.health.complete);
+    streaming.health = Default::default();
+    compat.health = Default::default();
 
     assert_eq!(format!("{streaming:?}"), format!("{compat:?}"));
 }
@@ -2268,6 +2282,43 @@ fn inventory_probe_revalidates_identity_without_rediscovery_or_source_reads() {
 
 #[test]
 #[serial_test::serial]
+fn inventory_probe_isolates_a_source_that_disappears_after_prepare() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let retained = amp_dir.join("T-retained.json");
+    let removed = amp_dir.join("T-removed.json");
+    let source = |session: &str, input: u64| {
+        format!(
+            r#"{{"id":"{session}","created":1747800000000,"messages":[{{"role":"assistant","messageId":1,"usage":{{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":{input},"outputTokens":2}}}}]}}"#
+        )
+    };
+    std::fs::write(&retained, source("retained", 10)).unwrap();
+    std::fs::write(&removed, source("removed", 20)).unwrap();
+
+    let mut prepared =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    std::fs::remove_file(&removed).unwrap();
+
+    prepared
+        .refresh_source_inventory_signature()
+        .expect("a vanished third-party source must not abort the inventory probe");
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::load_prepared_usage_data_with_diagnostics(
+            prepared,
+            GroupBy::Model,
+        ))
+        .unwrap();
+
+    assert_eq!(result.data.total_tokens, 12);
+    assert_eq!(result.health.failed_sources(), 1);
+    assert_eq!(result.health.sources()[0].path, removed);
+}
+
+#[test]
+#[serial_test::serial]
 fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
@@ -2795,7 +2846,6 @@ fn test_empty_opencode_scan_result_is_cached_and_served_warm() {
             .get_meta(&path, unit.parser_version)
             .unwrap()
             .expect("a complete empty scan must be cached");
-        assert!(!meta.has_messages);
         assert!(meta.rejections.is_empty());
 
         message_cache::reset_source_read_stats(&path);
@@ -5676,6 +5726,101 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
         .get_meta(&missing_db, unit.parser_version)
         .unwrap()
         .is_none());
+}
+
+#[test]
+#[serial_test::serial]
+fn time_metrics_report_preserves_source_health() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/custom-current.db");
+
+    let report = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::get_time_metrics_report(ReportOptions {
+            home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string()]),
+            scanner_settings: scanner::ScannerSettings {
+                opencode_db_paths: vec![missing_db.clone()],
+                ..Default::default()
+            },
+            ..ReportOptions::default()
+        }))
+        .expect("a broken third-party source must not abort time-metrics");
+
+    assert_eq!(report.metrics.session_count, 0);
+    assert!(!report.health.complete);
+    assert_eq!(report.health.failed_sources, 1);
+    assert_eq!(
+        report.health.sources[0].path,
+        missing_db.display().to_string()
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn local_client_counts_preserve_source_health() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/client-counts.db");
+
+    let report = super::count_local_client_messages(LocalParseOptions {
+        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        use_env_roots: false,
+        clients: Some(vec!["opencode".to_string()]),
+        scanner_settings: scanner::ScannerSettings {
+            opencode_db_paths: vec![missing_db.clone()],
+            ..Default::default()
+        },
+        ..LocalParseOptions::default()
+    })
+    .expect("a broken third-party source must not abort client counts");
+
+    assert_eq!(report.counts.get(ClientId::OpenCode), 0);
+    assert!(!report.health.complete);
+    assert_eq!(report.health.failed_sources, 1);
+    assert_eq!(
+        report.health.sources[0].path,
+        missing_db.display().to_string()
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn public_raw_message_report_preserves_source_health_and_metadata() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/raw-report.db");
+
+    let report = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::parse_local_unified_messages_with_pricing(
+            LocalParseOptions {
+                home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+                use_env_roots: false,
+                clients: Some(vec!["opencode".to_string()]),
+                scanner_settings: scanner::ScannerSettings {
+                    opencode_db_paths: vec![missing_db.clone()],
+                    ..Default::default()
+                },
+                ..LocalParseOptions::default()
+            },
+            None,
+        ))
+        .expect("a broken source must produce a degraded raw-message report");
+
+    assert!(report.data.is_empty());
+    assert!(!report.health.complete);
+    assert_eq!(report.health.failed_sources, 1);
+    assert_eq!(
+        report.health.sources[0].path,
+        missing_db.display().to_string()
+    );
+    assert_ne!(
+        report.metadata.source_inventory_signature.as_bytes(),
+        &[0_u8; 32]
+    );
 }
 
 #[test]

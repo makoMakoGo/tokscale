@@ -9,7 +9,6 @@ use crate::adapters::{
 };
 use crate::clients::ClientId;
 use crate::sessions;
-use crate::source_health::ScannedSource;
 
 pub(crate) struct TraeAdapter;
 
@@ -34,7 +33,7 @@ impl LocalSourceAdapter for TraeAdapter {
             .into_par_iter()
             .map(|unit| {
                 adapter_cache::parse_uncached_unit(unit, ctx, |path| {
-                    sessions::trae::parse_trae_file("trae", path).map(ScannedSource::complete)
+                    sessions::trae::parse_trae_file("trae", path)
                 })
             })
             .collect()
@@ -144,5 +143,35 @@ mod tests {
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].timestamp, 1_776_000_001_000);
         assert_eq!(sink[0].cost, 110.0);
+    }
+
+    #[test]
+    fn trae_adapter_keeps_valid_sessions_and_reports_rejections() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("mixed.json");
+        write_file(
+            &source,
+            r#"[
+                {"model_name":"GPT-5.4","session_id":"good","usage_time":1776000000,"extra_info":{"input_token":10,"output_token":1}},
+                {"model_name":"","session_id":"bad","usage_time":1776000001,"extra_info":{"input_token":10,"output_token":1}}
+            ]"#,
+        );
+        let mut cache = message_cache::SourceMessageCache::default();
+        let unit = SourceUnit::no_message_cache(ClientId::Trae, source);
+        let parsed = TRAE_ADAPTER
+            .parse_checked(vec![unit], &crate::adapters::ParseContext { pricing: None });
+        let mut sink = Vec::new();
+        let mut ctx = FoldContext::new(&mut cache, None);
+
+        TRAE_ADAPTER.fold(parsed, &mut ctx, &mut sink).unwrap();
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].session_id.as_ref(), "good");
+        assert_eq!(ctx.health.rejected_records(), 1);
+        let source = &ctx.health.sources()[0];
+        assert_eq!(source.client, ClientId::Trae);
+        let rejection = source.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-model");
+        assert_eq!(rejection.count, 1);
     }
 }

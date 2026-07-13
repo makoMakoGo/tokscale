@@ -528,6 +528,7 @@ fn parity_time_metrics() {
     let old = crate::TimeMetricsReport {
         metrics,
         processing_time_ms: 0,
+        health: Default::default(),
     };
     let new = {
         let mut e = AggregationEngine::new(AggregationConfig {

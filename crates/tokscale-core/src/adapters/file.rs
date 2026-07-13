@@ -12,16 +12,24 @@ use crate::adapters::{
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions::error::SessionParseResult;
+use crate::source_health::ScannedSource;
 use crate::{scanner, sessions, UnifiedMessage};
 
 const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const QWEN_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const ZCODE_OVERLAP_NORMALIZATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+
+#[derive(Clone, Copy)]
+enum CachedFileParser {
+    Legacy(fn(&Path) -> SessionParseResult<Vec<UnifiedMessage>>),
+    Scanned(fn(&Path) -> SessionParseResult<ScannedSource>),
+}
 
 pub(crate) struct CachedFileAdapter {
     client: ClientId,
     parser_version: ParserVersion,
-    parse: fn(&Path) -> SessionParseResult<Vec<UnifiedMessage>>,
+    parse: CachedFileParser,
 }
 
 impl CachedFileAdapter {
@@ -34,7 +42,20 @@ impl CachedFileAdapter {
         Self {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
-            parse,
+            parse: CachedFileParser::Legacy(parse),
+        }
+    }
+
+    pub(crate) const fn new_scanned(
+        client: ClientId,
+        parser_id: ParserId,
+        revision: u32,
+        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+    ) -> Self {
+        Self {
+            client,
+            parser_version: ParserVersion::new(parser_id, revision),
+            parse: CachedFileParser::Scanned(parse),
         }
     }
 }
@@ -62,7 +83,14 @@ impl LocalSourceAdapter for CachedFileAdapter {
         let parse = self.parse;
         units
             .into_par_iter()
-            .map(|unit| adapter_cache::load_or_parse_unit_with(unit, ctx, parse))
+            .map(|unit| match parse {
+                CachedFileParser::Legacy(parse) => {
+                    adapter_cache::load_or_parse_unit_with(unit, ctx, parse)
+                }
+                CachedFileParser::Scanned(parse) => {
+                    adapter_cache::load_or_scan_unit_with(unit, ctx, parse)
+                }
+            })
             .collect()
     }
 
@@ -195,10 +223,10 @@ pub(crate) static KIMI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     MODEL_ID_CANONICALIZATION_REVISION,
     sessions::kimi::parse_kimi_file,
 );
-pub(crate) static QWEN_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+pub(crate) static QWEN_ADAPTER: CachedFileAdapter = CachedFileAdapter::new_scanned(
     ClientId::Qwen,
     ParserId::Qwen,
-    MODEL_ID_CANONICALIZATION_REVISION,
+    QWEN_RECORD_REJECTION_REVISION,
     sessions::qwen::parse_qwen_file,
 );
 pub(crate) static MUX_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
@@ -229,6 +257,9 @@ mod tests {
     use crate::message_cache;
 
     const AMP_CONTENT: &str = r#"{"id":"T-test","created":1767225600000,"usageLedger":{"events":[{"timestamp":"2026-01-01T00:00:00Z","model":"claude-sonnet-4-5","tokens":{"input":10,"output":5,"cacheReadInputTokens":2,"cacheCreationInputTokens":1}}]}}"#;
+    const QWEN_MIXED_CONTENT: &str = r#"{"type":"assistant","model":"qwen3.5-plus","timestamp":"2026-02-23T14:24:56.857Z","sessionId":"session1","usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20}}
+not-json
+{"type":"assistant","model":"qwen3-coder-plus","timestamp":"2026-02-23T14:25:00Z","sessionId":"session1","usageMetadata":{"promptTokenCount":300,"candidatesTokenCount":40}}"#;
     const ZCODE_CONTENT: &str = r#"{"role":"user","sessionId":"s","content":"hello"}
 {"role":"assistant","sessionId":"s","model":"GLM-5.2","timestamp":"2026-06-20T10:00:05Z","content":"hi","usage":{"input_tokens":10,"output_tokens":5}}"#;
 
@@ -307,6 +338,63 @@ mod tests {
         let expected = finalized(sessions::amp::parse_amp_file(&path).unwrap());
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn qwen_warm_cache_restores_record_rejection_health() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(&path, QWEN_MIXED_CONTENT);
+        let unit = SourceUnit::plain_file(ClientId::Qwen, path.clone())
+            .with_parser_version(ParserVersion::new(
+                ParserId::Qwen,
+                QWEN_RECORD_REJECTION_REVISION,
+            ))
+            .prepare_snapshot()
+            .unwrap();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+
+        let parsed =
+            QWEN_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert!(matches!(
+            health.status,
+            crate::source_health::SourceStatus::Complete
+        ));
+        assert_eq!(health.rejections.total(), 1);
+        assert_eq!(
+            health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+
+        let mut sink = Vec::new();
+        let mut fold_ctx = FoldContext::new(&mut cache, None);
+        QWEN_ADAPTER.fold(parsed, &mut fold_ctx, &mut sink).unwrap();
+        assert_eq!(sink.len(), 2);
+        assert_eq!(fold_ctx.health.rejected_records(), 1);
+        cache.save_if_dirty().unwrap();
+
+        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let planned = QWEN_ADAPTER.plan_cache_hit(unit, &warm_cache).unwrap();
+        let crate::adapters::CacheHitPlan::Hit(hit) = planned else {
+            panic!("unchanged Qwen source must use its cached complete scan");
+        };
+        let warm_health = hit.source_health();
+        assert_eq!(warm_health.rejections.total(), 1);
+        assert_eq!(
+            warm_health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        assert!(warm_health
+            .rejections
+            .entries()
+            .next()
+            .unwrap()
+            .sample
+            .unwrap()
+            .contains("line 2"));
     }
 
     #[test]

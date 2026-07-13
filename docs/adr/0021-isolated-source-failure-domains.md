@@ -24,12 +24,14 @@ erase unrelated data.
 
 Damage is contained to the smallest unit that owns it:
 
-- **Record**: a record inside an otherwise readable source that fails
+- **Record**: once a parser exposes its record boundaries through
+  `ScannedSource`, a record inside an otherwise readable source that fails
   validation (missing model, missing provider, missing timestamp, malformed
   payload) is rejected and counted under a stable reason key. The scan of
-  that source continues. Intentional filtering defined by the source contract
-  (for example Zed non-`zed.dev` providers, imported threads, zero-token
-  records) is not rejection and is not counted.
+  that source continues whenever later records can be interpreted without
+  the damaged record's state. Intentional filtering defined by the source
+  contract (for example Zed non-`zed.dev` providers, imported threads,
+  zero-token records) is not rejection and is not counted.
 - **Source unit**: a source that cannot be opened, decoded, or planned is
   `Unavailable`; it contributes no data and no other source is affected. A
   scan interrupted mid-source is `Partial`: records confirmed before the
@@ -45,12 +47,19 @@ Damage is contained to the smallest unit that owns it:
 
 ### Data health
 
-Every load returns its payload together with `DataHealth`: per-source status
+Every internal fold produces `DataHealth`: per-source status
 (`Complete`/`Partial`/`Unavailable` with a structured operation + message
-failure) and per-reason rejection counts with one sample each. Rejection
-reasons serialize as stable string keys; unknown keys from newer parsers are
-preserved and displayed as-is. No raw record payloads and no per-record error
-objects are retained.
+failure) and per-reason rejection counts with one sample each. Public reports
+carry its serializable `HealthReport` projection alongside the payload.
+Rejection reasons serialize as stable string keys; unknown keys from newer
+parsers are preserved and displayed as-is. No raw record payloads and no
+per-record error objects are retained.
+
+The public raw-message loaders return `LocalReport<Vec<UnifiedMessage>>`
+instead of a bare vector. Its `health` field carries the serializable report
+summary and its metadata carries the confirmed source-inventory signature;
+callers therefore cannot accidentally discard degradation at the API
+boundary.
 
 Parsers report a completed scan as `ScannedSource { messages, rejections,
 interrupted }`. A parser `Err` means the source could not be read at all.
@@ -68,6 +77,10 @@ isolation automatically through the shared seam.
   shard is served again only if the source fingerprint still matches, in
   which case its content is still authoritative. This is not stale-data
   fallback: fingerprint-matched content is current content.
+- A TUI aggregate containing `Partial` or `Unavailable` health may be shown
+  immediately, but it is always treated as stale and retried even when the
+  source inventory fingerprint is unchanged. Complete scans with stable
+  record rejections remain fresh.
 
 ### Surfaces
 
@@ -98,3 +111,8 @@ health fields, which is a one-time format bump and cold rebuild. This ADR
 does not weaken ADR 0001: nothing substitutes guessed or synthetic data, and
 no failure is delivered as ordinary success — it is delivered as data plus
 health.
+
+Record-level adoption is incremental. Until a multi-record parser returns
+`ScannedSource`, its failures are still visible and isolated to that source,
+but a bad record can discard other records in the same source. Issue #141
+remains open until those legacy parsers migrate.

@@ -7,24 +7,34 @@ use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
     ParseContext, ParsedUnit, SourceDiscoveryError, SourcePipelineError, SourceUnit,
+    MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
+use crate::sessions;
 use crate::sessions::error::SessionParseResult;
-use crate::{sessions, UnifiedMessage};
+use crate::source_health::ScannedSource;
 
 const ROO_FAMILY_SIBLINGS: &[&str] = &["api_conversation_history.json"];
+const ROO_FAMILY_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
 
 pub(crate) struct VscodeTaskAdapter {
     client: ClientId,
-    parse: fn(&Path) -> SessionParseResult<Vec<UnifiedMessage>>,
+    parser_version: ParserVersion,
+    parse: fn(&Path) -> SessionParseResult<ScannedSource>,
 }
 
 impl VscodeTaskAdapter {
     pub(crate) const fn new(
         client: ClientId,
-        parse: fn(&Path) -> SessionParseResult<Vec<UnifiedMessage>>,
+        parser_id: ParserId,
+        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
     ) -> Self {
-        Self { client, parse }
+        Self {
+            client,
+            parser_version: ParserVersion::new(parser_id, ROO_FAMILY_RECORD_REJECTION_REVISION),
+            parse,
+        }
     }
 }
 
@@ -50,20 +60,23 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
         });
         roots.extend(adapter_discover::extra_roots_for_client(self.client, ctx)?);
 
-        adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::source_units_from_paths(
             self.client,
             adapter_discover::scan_roots(self.client, roots, def.pattern)?,
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names: ROO_FAMILY_SIBLINGS,
             },
-        )
+        )?
+        .into_iter()
+        .map(|unit| unit.with_parser_version(self.parser_version))
+        .collect())
     }
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
         units
             .into_par_iter()
-            .map(|unit| adapter_cache::load_or_parse_unit_with(unit, ctx, parse))
+            .map(|unit| adapter_cache::load_or_scan_unit_with(unit, ctx, parse))
             .collect()
     }
 
@@ -119,16 +132,26 @@ fn cline_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     roots
 }
 
-pub(crate) static ROOCODE_ADAPTER: VscodeTaskAdapter =
-    VscodeTaskAdapter::new(ClientId::RooCode, sessions::roocode::parse_roocode_file);
-pub(crate) static KILOCODE_ADAPTER: VscodeTaskAdapter =
-    VscodeTaskAdapter::new(ClientId::KiloCode, sessions::kilocode::parse_kilocode_file);
-pub(crate) static CLINE_ADAPTER: VscodeTaskAdapter =
-    VscodeTaskAdapter::new(ClientId::Cline, sessions::cline::parse_cline_file);
+pub(crate) static ROOCODE_ADAPTER: VscodeTaskAdapter = VscodeTaskAdapter::new(
+    ClientId::RooCode,
+    ParserId::RooCode,
+    sessions::roocode::parse_roocode_file,
+);
+pub(crate) static KILOCODE_ADAPTER: VscodeTaskAdapter = VscodeTaskAdapter::new(
+    ClientId::KiloCode,
+    ParserId::KiloCode,
+    sessions::kilocode::parse_kilocode_file,
+);
+pub(crate) static CLINE_ADAPTER: VscodeTaskAdapter = VscodeTaskAdapter::new(
+    ClientId::Cline,
+    ParserId::Cline,
+    sessions::cline::parse_cline_file,
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message_cache;
 
     fn write_file(path: &std::path::Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -248,5 +271,98 @@ mod tests {
         expected.sort_unstable();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn roo_family_all_bad_scans_cache_rejections_with_each_adapter_identity() {
+        let home = tempfile::TempDir::new().unwrap();
+        let cases = [
+            (
+                &ROOCODE_ADAPTER,
+                ClientId::RooCode,
+                ParserId::RooCode,
+                home.path().join(
+                    ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/roo-bad/ui_messages.json",
+                ),
+            ),
+            (
+                &KILOCODE_ADAPTER,
+                ClientId::KiloCode,
+                ParserId::KiloCode,
+                home.path().join(
+                    ".config/Code/User/globalStorage/kilocode.kilo-code/tasks/kilo-bad/ui_messages.json",
+                ),
+            ),
+            (
+                &CLINE_ADAPTER,
+                ClientId::Cline,
+                ParserId::Cline,
+                home.path().join(
+                    ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/cline-bad/ui_messages.json",
+                ),
+            ),
+        ];
+        let bad_usage = r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "not-a-timestamp",
+    "text": "{\"tokensIn\":7,\"apiProtocol\":\"anthropic\"}"
+  }
+]"#;
+        for (_, _, _, path) in &cases {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bad_usage).unwrap();
+        }
+
+        let settings = crate::scanner::ScannerSettings::default();
+        let scan_ctx = scan_context(home.path(), &settings);
+        for (adapter, client, parser_id, path) in cases {
+            let mut units = adapter.discover_checked(&scan_ctx).unwrap();
+            assert_eq!(units.len(), 1);
+            let unit = units.pop().unwrap();
+            assert_eq!(unit.path, path);
+            assert_eq!(
+                unit.parser_version,
+                ParserVersion::new(parser_id, ROO_FAMILY_RECORD_REJECTION_REVISION)
+            );
+
+            let cache_dir = tempfile::TempDir::new().unwrap();
+            let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+            let parsed = adapter.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
+            assert_eq!(parsed.len(), 1);
+            let health = parsed[0].source_health();
+            assert_eq!(health.client, client);
+            assert_eq!(health.path, path);
+            assert!(matches!(
+                health.status,
+                crate::source_health::SourceStatus::Complete
+            ));
+            assert_eq!(health.rejections.total(), 1);
+            assert_eq!(
+                health.rejections.entries().next().unwrap().key,
+                "missing-timestamp"
+            );
+
+            let mut sink = Vec::new();
+            let mut fold_ctx = FoldContext::new(&mut cache, None);
+            adapter.fold(parsed, &mut fold_ctx, &mut sink).unwrap();
+            assert!(sink.is_empty());
+            assert_eq!(fold_ctx.health.rejected_records(), 1);
+            cache.save_if_dirty().unwrap();
+
+            let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+            let warm = adapter.plan_cache_hit(unit, &warm_cache).unwrap();
+            let crate::adapters::CacheHitPlan::Hit(warm) = warm else {
+                panic!("unchanged {client:?} all-bad scan must use its cached health");
+            };
+            let warm_health = warm.source_health();
+            assert_eq!(warm_health.client, client);
+            assert_eq!(warm_health.rejections.total(), 1);
+            assert_eq!(
+                warm_health.rejections.entries().next().unwrap().key,
+                "missing-timestamp"
+            );
+        }
     }
 }

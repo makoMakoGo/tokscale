@@ -1069,6 +1069,16 @@ pub(crate) struct CacheLookupFailure {
     pub(crate) reason: CacheReadFailureReason,
 }
 
+impl CacheLookupFailure {
+    pub(crate) fn is_future_format(&self) -> bool {
+        matches!(
+            self.reason,
+            CacheReadFailureReason::UnsupportedFormat { actual }
+                if actual > CACHE_FORMAT_VERSION
+        )
+    }
+}
+
 impl std::fmt::Display for CacheLookupFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -1287,7 +1297,6 @@ struct BorrowedCachedShardBody<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct CachedSourceMeta {
     pub fingerprint: SourceFingerprint,
-    pub has_messages: bool,
     pub codex_incremental: Option<CodexIncrementalCache>,
     pub rejections: crate::source_health::RejectionSummary,
 }
@@ -1789,7 +1798,6 @@ pub fn prune_source_message_cache() -> Result<SourceCachePruneStats, SourceCache
 fn meta_from_entry(entry: &CachedSourceEntry) -> CachedSourceMeta {
     CachedSourceMeta {
         fingerprint: entry.fingerprint.clone(),
-        has_messages: !entry.messages.is_empty(),
         codex_incremental: entry.codex_incremental.clone(),
         rejections: entry.rejections.clone(),
     }
@@ -1798,7 +1806,6 @@ fn meta_from_entry(entry: &CachedSourceEntry) -> CachedSourceMeta {
 fn meta_from_header(header: CachedShardHeader) -> CachedSourceMeta {
     CachedSourceMeta {
         fingerprint: header.fingerprint,
-        has_messages: header.message_count > 0,
         codex_incremental: header.codex_incremental,
         rejections: header.rejections,
     }
@@ -1864,6 +1871,25 @@ pub(crate) fn mark_current_key_shard_as_previous_format_for_test(
     file.seek(SeekFrom::Start(SHARD_MAGIC.len() as u64))
         .expect("test shard format field must be seekable");
     file.write_all(&PREVIOUS_CACHE_FORMAT_VERSION.to_le_bytes())
+        .expect("test shard format field must be writable");
+    file.flush().expect("test shard format rewrite must flush");
+    shard_path
+}
+
+#[cfg(test)]
+pub(crate) fn mark_current_key_shard_as_future_format_for_test(
+    cache_dir: &Path,
+    source_path: &Path,
+    parser_version: ParserVersion,
+) -> PathBuf {
+    let shard_path = shard_path_for_test(cache_dir, source_path, parser_version);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&shard_path)
+        .expect("test cache shard must exist");
+    file.seek(SeekFrom::Start(SHARD_MAGIC.len() as u64))
+        .expect("test shard format field must be seekable");
+    file.write_all(&(CACHE_FORMAT_VERSION + 1).to_le_bytes())
         .expect("test shard format field must be writable");
     file.flush().expect("test shard format rewrite must flush");
     shard_path
@@ -3149,7 +3175,7 @@ mod tests {
 
         let file = write_temp_file(b"{}\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
-        let entry = CachedSourceEntry::new(
+        let mut entry = CachedSourceEntry::new(
             file.path(),
             fingerprint,
             vec![UnifiedMessage::new(
@@ -3169,6 +3195,9 @@ mod tests {
             )],
             None,
         );
+        entry
+            .rejections
+            .record_key("future-rejection", || "future sample".to_string());
 
         let expected_fingerprint = entry.fingerprint.clone();
         let mut cache = SourceMessageCache::load().unwrap();
@@ -3194,7 +3223,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(meta.fingerprint, expected_fingerprint);
-        assert!(meta.has_messages);
+        let rejection = meta.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "future-rejection");
+        assert_eq!(rejection.count, 1);
+        assert_eq!(rejection.sample, Some("future sample"));
         let messages = loaded
             .take_messages(&CacheReadPlan::new(
                 file.path(),

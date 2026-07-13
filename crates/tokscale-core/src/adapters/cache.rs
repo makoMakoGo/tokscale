@@ -24,6 +24,7 @@ pub(crate) fn plan_cache_hit(
         // An unreadable or outdated-format shard is a derived-cache fault:
         // report it and reparse the authoritative source, which rewrites the
         // shard in the current format.
+        Err(failure) if failure.is_future_format() => return Err(failure.into()),
         Err(failure) => {
             report_cache_lookup_failure(&failure);
             unit.mark_cache_lookup_completed_no_hit();
@@ -681,6 +682,35 @@ mod tests {
             before,
             "planning must not mutate a previous-format shard"
         );
+    }
+
+    #[test]
+    fn future_format_lookup_remains_an_explicit_error_without_mutating_the_shard() {
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let source_path = source_dir.path().join("session.jsonl");
+        std::fs::write(&source_path, PI_SOURCE).unwrap();
+        let unit = pi_unit(&source_path);
+        seed_disk_cache(cache_dir.path(), &unit, "future-format-session");
+        let shard_path = message_cache::mark_current_key_shard_as_future_format_for_test(
+            cache_dir.path(),
+            &source_path,
+            unit.parser_version,
+        );
+        let before = std::fs::read(&shard_path).unwrap();
+        let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+
+        let error = plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache)
+            .expect_err("a future-format shard must not be overwritten by this binary");
+
+        assert!(matches!(
+            error,
+            crate::adapters::SourcePlanningError::CacheLookup(message_cache::CacheLookupFailure {
+                reason: message_cache::CacheReadFailureReason::UnsupportedFormat { .. },
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read(shard_path).unwrap(), before);
     }
 
     #[test]

@@ -55,10 +55,6 @@ use sha2::{Digest, Sha256};
 ///
 /// Local report aggregation consumes finalized messages directly and treats
 /// `UnifiedMessage.model_id` as already canonical.
-fn health_is_complete(health: &source_health::HealthReport) -> bool {
-    health.complete
-}
-
 #[doc(hidden)]
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
     model_aliases::canonicalize_model_id(model_id)
@@ -272,6 +268,19 @@ pub struct LocalClientMessageCounts {
     pub counts: ClientCounts,
     pub headless_codex_count: i32,
     pub processing_time_ms: u32,
+    pub health: source_health::HealthReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalLoadMetadata {
+    pub source_inventory_signature: SourceInventorySignature,
+}
+
+#[derive(Debug)]
+pub struct LocalReport<T> {
+    pub data: T,
+    pub health: source_health::HealthReport,
+    pub metadata: LocalLoadMetadata,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -335,23 +344,32 @@ impl PreparedLocalSources {
     pub fn refresh_source_inventory_signature(
         &mut self,
     ) -> Result<SourceInventorySignature, String> {
+        let mut unavailable = Vec::new();
         for group in &mut self.groups {
-            for unit in &mut group.units {
+            group.units.retain_mut(|unit| {
                 let client = unit.client;
                 let path = unit.path.clone();
-                let parser = unit.parser_version.parser_id;
-                unit.refresh_prepared_snapshot_for_inventory_probe()
-                    .map_err(|source| {
-                        adapters::SourceParseError::new(
+                match unit.refresh_prepared_snapshot_for_inventory_probe() {
+                    Ok(()) => true,
+                    Err(source) => {
+                        unavailable.push(SourceHealth {
                             client,
                             path,
-                            parser,
-                            "refresh source inventory metadata and identity",
-                            source,
-                        )
-                        .to_string()
-                    })?;
-            }
+                            status: SourceStatus::Unavailable {
+                                failure: SourceFailure::new(
+                                    "refresh source inventory metadata and identity",
+                                    source.to_string(),
+                                ),
+                            },
+                            rejections: RejectionSummary::default(),
+                        });
+                        false
+                    }
+                }
+            });
+        }
+        for health in unavailable {
+            self.health.record(health);
         }
         self.signature = source_inventory_signature(&self.clients, &self.groups);
         Ok(self.signature)
@@ -442,7 +460,6 @@ pub struct GraphResult {
     pub contributions: Vec<DailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_metrics: Option<sessionize::TimeMetrics>,
-    #[serde(default, skip_serializing_if = "health_is_complete")]
     pub health: source_health::HealthReport,
 }
 
@@ -502,7 +519,6 @@ pub struct ModelReport {
     pub total_messages: i32,
     pub total_cost: f64,
     pub processing_time_ms: u32,
-    #[serde(default, skip_serializing_if = "health_is_complete")]
     pub health: source_health::HealthReport,
 }
 
@@ -511,7 +527,6 @@ pub struct MonthlyReport {
     pub entries: Vec<MonthlyUsage>,
     pub total_cost: f64,
     pub processing_time_ms: u32,
-    #[serde(default, skip_serializing_if = "health_is_complete")]
     pub health: source_health::HealthReport,
 }
 
@@ -537,7 +552,6 @@ pub struct HourlyReport {
     pub entries: Vec<HourlyUsage>,
     pub total_cost: f64,
     pub processing_time_ms: u32,
-    #[serde(default, skip_serializing_if = "health_is_complete")]
     pub health: source_health::HealthReport,
 }
 
@@ -1216,6 +1230,7 @@ async fn generate_graph_with_loaded_pricing(
 pub struct TimeMetricsReport {
     pub metrics: sessionize::TimeMetrics,
     pub processing_time_ms: u32,
+    pub health: source_health::HealthReport,
 }
 
 pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetricsReport, String> {
@@ -1229,6 +1244,7 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
         None,
     )?;
     let mut report = views.time_metrics.expect("time-metrics view requested");
+    report.health = views.health.to_report();
     report.processing_time_ms = start.elapsed().as_millis() as u32;
     Ok(report)
 }
@@ -1466,11 +1482,18 @@ fn resolve_local_parse_request(
 fn parse_prepared_local_unified_messages(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
-) -> Result<Vec<UnifiedMessage>, String> {
+) -> Result<LocalReport<Vec<UnifiedMessage>>, String> {
     let filters = prepared.options.clone();
     let mut messages = Vec::new();
-    fold_prepared_local_sources_with_pricing(prepared, pricing, &mut messages)?;
-    Ok(filter_unified_messages(messages, &filters))
+    let (source_inventory_signature, health) =
+        fold_prepared_local_sources_with_pricing(prepared, pricing, &mut messages)?;
+    Ok(LocalReport {
+        data: filter_unified_messages(messages, &filters),
+        health: health.to_report(),
+        metadata: LocalLoadMetadata {
+            source_inventory_signature,
+        },
+    })
 }
 #[doc(hidden)]
 pub fn count_local_client_messages(
@@ -1483,11 +1506,12 @@ pub fn count_local_client_messages(
         until: prepared.options.until.clone(),
         year: prepared.options.year.clone(),
     });
-    fold_prepared_local_sources_with_pricing(prepared, None, &mut sink)?;
+    let (_, health) = fold_prepared_local_sources_with_pricing(prepared, None, &mut sink)?;
     Ok(LocalClientMessageCounts {
         counts: sink.counts,
         headless_codex_count: sink.headless_codex_count,
         processing_time_ms: start.elapsed().as_millis() as u32,
+        health: health.to_report(),
     })
 }
 
@@ -1495,14 +1519,14 @@ pub fn count_local_client_messages(
 pub async fn parse_local_unified_messages_with_pricing(
     options: LocalParseOptions,
     pricing: Option<&pricing::PricingService>,
-) -> Result<Vec<UnifiedMessage>, String> {
+) -> Result<LocalReport<Vec<UnifiedMessage>>, String> {
     let prepared = prepare_local_sources(options)?;
     parse_prepared_local_unified_messages(prepared, pricing)
 }
 
 pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
-) -> Result<Vec<UnifiedMessage>, String> {
+) -> Result<LocalReport<Vec<UnifiedMessage>>, String> {
     let prepared = prepare_local_sources(options)?;
     let pricing = load_pricing_for_local_parse().await;
     parse_prepared_local_unified_messages(prepared, pricing.as_deref())

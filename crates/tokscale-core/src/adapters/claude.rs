@@ -14,7 +14,7 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
 
-const CLAUDE_WORKFLOW_AND_AGENT_IDENTITY_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
+const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
 
 pub(crate) struct ClaudeAdapter;
 
@@ -69,7 +69,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
                 ParserId::Claude,
-                CLAUDE_WORKFLOW_AND_AGENT_IDENTITY_REVISION,
+                CLAUDE_RECORD_HEALTH_REVISION,
             ))
         })
         .collect();
@@ -84,7 +84,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
                     FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => home_dir.clone(),
                     _ => unreachable!("unexpected Claude source fingerprint policy"),
                 };
-                adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
+                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                     sessions::claudecode::parse_claude_file_with_home(path, Some(&home_dir))
                 })
             })
@@ -296,22 +296,29 @@ mod tests {
 
         let expected =
             sessions::claudecode::parse_claude_file_with_home(&session_path, Some(home.path()))
-                .unwrap();
+                .unwrap()
+                .messages;
         assert_eq!(actual, expected);
         assert_eq!(actual.len(), 1);
     }
 
     #[test]
-    fn claude_adapter_retains_client_path_parser_and_session_operation() {
+    fn claude_adapter_marks_unknown_malformed_event_partial() {
         let home = tempfile::TempDir::new().unwrap();
         let session_path = home.path().join(".claude/projects/project-a/broken.jsonl");
-        write_file(&session_path, "{not-json\n");
+        write_file(
+            &session_path,
+            r#"{"type":"assistant","timestamp":"2026-07-14T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":1}}}
+{not-json
+"#,
+        );
         let unit = SourceUnit::claude_code(
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
         )
         .unwrap();
+        let parser_version = unit.parser_version;
 
         let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
 
@@ -319,8 +326,85 @@ mod tests {
         let health = parsed[0].source_health();
         assert_eq!(health.client, ClientId::Claude);
         assert_eq!(health.path, session_path);
-        let failure = health.status.failure().expect("source must be unavailable");
+        assert!(matches!(
+            health.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(health.rejections.total(), 1);
+        assert_eq!(
+            health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        let failure = health.status.failure().expect("source must be partial");
         assert_eq!(failure.operation, "decode Claude session line");
-        assert!(failure.message.contains("line 1"));
+        assert!(failure.message.contains("line 2"));
+
+        let mut cache = message_cache::SourceMessageCache::default();
+        let mut messages = Vec::new();
+        CLAUDE_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext::new(&mut cache, None),
+                &mut messages,
+            )
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 10);
+        assert!(cache
+            .get_meta(&session_path, parser_version)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn claude_warm_cache_hit_restores_record_rejections() {
+        let home = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let session_path = home.path().join(".claude/projects/project-a/health.jsonl");
+        write_file(
+            &session_path,
+            r#"{"type":"assistant","timestamp":"2026-07-14T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":1}}}
+{"type":"assistant","timestamp":"2026-07-14T00:00:01Z","message":{"usage":{"input_tokens":99,"output_tokens":9}}}
+{"type":"assistant","timestamp":"2026-07-14T00:00:02Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":20,"output_tokens":2}}}"#,
+        );
+        let unit = SourceUnit::claude_code(
+            ClientId::Claude,
+            session_path.clone(),
+            home.path().to_path_buf(),
+        )
+        .unwrap()
+        .with_parser_version(ParserVersion::new(
+            ParserId::Claude,
+            CLAUDE_RECORD_HEALTH_REVISION,
+        ))
+        .prepare_snapshot()
+        .unwrap();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+
+        let cold =
+            CLAUDE_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
+        assert_eq!(cold[0].source_health().rejections.total(), 1);
+        let mut messages = Vec::new();
+        CLAUDE_ADAPTER
+            .fold(cold, &mut FoldContext::new(&mut cache, None), &mut messages)
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        cache.save_if_dirty().unwrap();
+
+        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let planned = CLAUDE_ADAPTER.plan_cache_hit(unit, &warm_cache).unwrap();
+        let crate::adapters::CacheHitPlan::Hit(warm) = planned else {
+            panic!("unchanged Claude source must use its complete cached scan");
+        };
+        let health = warm.source_health();
+        assert!(matches!(
+            health.status,
+            crate::source_health::SourceStatus::Complete
+        ));
+        assert_eq!(health.rejections.total(), 1);
+        assert_eq!(
+            health.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
     }
 }
