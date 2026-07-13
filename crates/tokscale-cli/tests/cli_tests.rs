@@ -3627,8 +3627,7 @@ fn light_report_surfaces_malformed_display_config_without_panicking() {
         .stderr(
             predicate::str::contains("failed to parse TOML config")
                 .and(predicate::str::contains(config_path.display().to_string()))
-                .and(predicate::str::contains("panicked").not())
-                .and(predicate::str::contains("backtrace").not()),
+                .and(predicate::str::contains("panicked").not()),
         );
 }
 

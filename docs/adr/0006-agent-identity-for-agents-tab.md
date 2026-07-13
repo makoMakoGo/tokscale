@@ -26,11 +26,10 @@ Group `Agents` rows by stable agent identity only.
   a grouping identity.
 - Claude preserves known stable subagent types and collapses unknown temporary
   sidechain names to `Claude Subagent`.
-- OMP recovers task agent roles from parent `task` calls and official swarm
-  artifact paths. A canonical
-  `.swarm_<swarm>/context/swarm-<swarm>-<agent>-<iteration>.jsonl` path supplies
-  the stable swarm agent label, while the full artifact stem remains the
-  instance identifier.
+- OMP recovers task agent roles from parent `task` calls. Canonical
+  `.swarm_<swarm>/context/swarm-<swarm>-<agent>-<iteration>.jsonl` artifacts
+  share the stable `OMP Swarm` reporting identity, while the full artifact stem
+  remains the instance identifier.
 - Kimi uses explicit `config.update.profileName` values from the known profile
   set only; filesystem segments such as `main` and `agent-N` are not fallbacks.
 - Messages without a recognized stable agent identity should not create an

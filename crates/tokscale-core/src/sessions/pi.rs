@@ -353,7 +353,7 @@ fn omp_swarm_agent_label_from_path(path: &Path) -> SessionParseResult<Option<Str
         ));
     }
 
-    Ok(Some(format!("OMP Swarm {agent_name}")))
+    Ok(Some("OMP Swarm".to_string()))
 }
 
 fn omp_parent_session_path(path: &Path) -> SessionParseResult<Option<PathBuf>> {
@@ -1111,28 +1111,31 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_omp_swarm_artifact_recovers_agent_identity() {
+    fn test_parse_omp_swarm_artifact_uses_shared_agent_identity() {
         let dir = TempDir::new().unwrap();
         let context = dir.path().join(".swarm_docs-factcheck").join("context");
         std::fs::create_dir_all(&context).unwrap();
         let path = context.join("swarm-docs-factcheck-architecture-reviewer-2.jsonl");
-        std::fs::write(
-            &path,
-            r#"{"type":"session","id":"swarm-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
-        )
-        .unwrap();
+        let second_path = context.join("swarm-docs-factcheck-implementation-reviewer-3.jsonl");
+        let content = r#"{"type":"session","id":"swarm-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
+        std::fs::write(&path, content).unwrap();
+        std::fs::write(&second_path, content).unwrap();
 
         let messages = parse_omp_file(&path).unwrap();
+        let second_messages = parse_omp_file(&second_path).unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0].agent.as_deref(),
-            Some("OMP Swarm architecture-reviewer")
-        );
+        assert_eq!(second_messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("OMP Swarm"));
+        assert_eq!(second_messages[0].agent.as_deref(), Some("OMP Swarm"));
         assert_eq!(
             messages[0].agent_instance.as_deref(),
             Some("swarm-docs-factcheck-architecture-reviewer-2")
+        );
+        assert_eq!(
+            second_messages[0].agent_instance.as_deref(),
+            Some("swarm-docs-factcheck-implementation-reviewer-3")
         );
     }
 

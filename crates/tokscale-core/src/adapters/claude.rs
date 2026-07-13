@@ -14,7 +14,7 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
 
-const CLAUDE_WORKFLOW_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const CLAUDE_WORKFLOW_AND_AGENT_IDENTITY_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
 
 pub(crate) struct ClaudeAdapter;
 
@@ -69,7 +69,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
                 ParserId::Claude,
-                CLAUDE_WORKFLOW_REVISION,
+                CLAUDE_WORKFLOW_AND_AGENT_IDENTITY_REVISION,
             ))
         })
         .collect();
