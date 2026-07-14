@@ -26,6 +26,7 @@ const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 3] = [2, 3, 4];
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const SHARD_KEY_FORMAT_VERSION: u32 = 1;
 const SHARDS_DIRNAME: &str = "shards";
+const SHARD_FORMAT_FILENAME: &str = ".format";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SHARD_HEADER_BYTES: u64 = 16 * 1024 * 1024;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -371,6 +372,26 @@ fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+fn initialize_source_shards(cache_dir: &Path) -> std::io::Result<()> {
+    ensure_cache_dir(cache_dir)?;
+    let shards_dir = cache_dir.join(SHARDS_DIRNAME);
+    let format_path = shards_dir.join(SHARD_FORMAT_FILENAME);
+    let current_format = format!("{CACHE_FORMAT_VERSION}\n");
+
+    if fs::read_to_string(&format_path).is_ok_and(|value| value == current_format) {
+        return ensure_cache_dir(&shards_dir);
+    }
+
+    match fs::symlink_metadata(&shards_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(&shards_dir)?,
+        Ok(_) => fs::remove_file(&shards_dir)?,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => return Err(source),
+    }
+    ensure_cache_dir(&shards_dir)?;
+    fs::write(format_path, current_format)
 }
 
 #[cfg(unix)]
@@ -988,10 +1009,8 @@ pub(crate) enum CacheReadFailureReason {
     },
     #[error("unrecognized shard magic {actual:?}")]
     InvalidMagic { actual: [u8; 8] },
-    #[error("shard format version {actual} is a known legacy format; current format is {current}")]
-    PreviousFormat { actual: u32, current: u32 },
-    #[error("unsupported shard format version {actual}")]
-    UnsupportedFormat { actual: u32 },
+    #[error("shard format version {actual} does not match current format {current}")]
+    FormatMismatch { actual: u32, current: u32 },
     #[error("invalid shard header length {actual}")]
     InvalidHeaderLength { actual: u64 },
     #[error("failed to decode shard header: {source}")]
@@ -1023,8 +1042,7 @@ impl CacheReadFailureReason {
                 | Self::TooLarge { .. }
                 | Self::HeaderRead { .. }
                 | Self::InvalidMagic { .. }
-                | Self::PreviousFormat { .. }
-                | Self::UnsupportedFormat { .. }
+                | Self::FormatMismatch { .. }
                 | Self::InvalidHeaderLength { .. }
                 | Self::HeaderDecode { .. }
                 | Self::SourcePathMismatch
@@ -1063,8 +1081,7 @@ impl CacheReadFailure {
             | CacheReadFailureReason::TooLarge { .. }
             | CacheReadFailureReason::HeaderRead { .. }
             | CacheReadFailureReason::InvalidMagic { .. }
-            | CacheReadFailureReason::PreviousFormat { .. }
-            | CacheReadFailureReason::UnsupportedFormat { .. }
+            | CacheReadFailureReason::FormatMismatch { .. }
             | CacheReadFailureReason::InvalidHeaderLength { .. }
             | CacheReadFailureReason::HeaderDecode { .. }
             | CacheReadFailureReason::SourcePathMismatch
@@ -1080,16 +1097,6 @@ pub(crate) struct CacheLookupFailure {
     pub(crate) parser_version: ParserVersion,
     pub(crate) shard_path: PathBuf,
     pub(crate) reason: CacheReadFailureReason,
-}
-
-impl CacheLookupFailure {
-    pub(crate) fn is_future_format(&self) -> bool {
-        matches!(
-            self.reason,
-            CacheReadFailureReason::UnsupportedFormat { actual }
-                if actual > CACHE_FORMAT_VERSION
-        )
-    }
 }
 
 impl std::fmt::Display for CacheLookupFailure {
@@ -1343,7 +1350,7 @@ impl SourceMessageCache {
     pub(crate) fn load() -> Result<Self, SourceCacheError> {
         let cache_dir =
             cache_dir().map_err(|source| SourceCacheError::CacheDirectoryUnavailable { source })?;
-        ensure_cache_dir(&cache_dir).map_err(|source| {
+        initialize_source_shards(&cache_dir).map_err(|source| {
             SourceCacheError::io("initialize source cache directory", &cache_dir, source)
         })?;
 
@@ -1360,7 +1367,7 @@ impl SourceMessageCache {
 
     #[cfg(test)]
     pub(crate) fn with_cache_dir(cache_dir: &Path) -> Self {
-        ensure_cache_dir(cache_dir).expect("test source cache directory must be usable");
+        initialize_source_shards(cache_dir).expect("test source cache directory must be usable");
         Self {
             cache_dir: cache_dir.to_path_buf(),
             dirty_entries: HashMap::new(),
@@ -2073,13 +2080,10 @@ fn read_current_shard_envelope(file: &mut File) -> Result<(), CacheReadFailureRe
         .map_err(|source| CacheReadFailureReason::HeaderRead { source })?;
     let version = u32::from_le_bytes(version_bytes);
     if version != CACHE_FORMAT_VERSION {
-        if LEGACY_MAGIC_FORMAT_VERSIONS.contains(&version) {
-            return Err(CacheReadFailureReason::PreviousFormat {
-                actual: version,
-                current: CACHE_FORMAT_VERSION,
-            });
-        }
-        return Err(CacheReadFailureReason::UnsupportedFormat { actual: version });
+        return Err(CacheReadFailureReason::FormatMismatch {
+            actual: version,
+            current: CACHE_FORMAT_VERSION,
+        });
     }
     Ok(())
 }
@@ -2438,6 +2442,60 @@ mod tests {
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
+    #[test]
+    fn source_cache_format_mismatch_discards_all_shards_on_load() {
+        for format_value in [
+            None,
+            Some(format!("{}\n", CACHE_FORMAT_VERSION - 1)),
+            Some(format!("{}\n", CACHE_FORMAT_VERSION + 1)),
+            Some("damaged\n".to_string()),
+        ] {
+            let cache_dir = TempDir::new().unwrap();
+            let source = write_temp_file(b"source\n");
+            let parser_version = test_parser_version(1);
+            let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+            let mut cache = SourceMessageCache::with_cache_dir(cache_dir.path());
+            cache.insert(CachedSourceEntry::new_with_version(
+                source.path(),
+                parser_version,
+                fingerprint,
+                vec![UnifiedMessage::new(
+                    "client",
+                    "gpt-5",
+                    "provider",
+                    "cached-session",
+                    1,
+                    TokenBreakdown::default(),
+                    0.0,
+                )],
+                None,
+            ));
+            cache.save_if_dirty().unwrap();
+
+            let shard = shard_path_for_test(cache_dir.path(), source.path(), parser_version);
+            let format_path = cache_dir
+                .path()
+                .join(SHARDS_DIRNAME)
+                .join(SHARD_FORMAT_FILENAME);
+            assert!(shard.exists());
+            match format_value {
+                Some(value) => std::fs::write(&format_path, value).unwrap(),
+                None => std::fs::remove_file(&format_path).unwrap(),
+            }
+
+            let loaded = SourceMessageCache::with_cache_dir(cache_dir.path());
+            assert!(!shard.exists());
+            assert!(loaded
+                .get_meta(source.path(), parser_version)
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                std::fs::read_to_string(format_path).unwrap(),
+                format!("{CACHE_FORMAT_VERSION}\n")
+            );
+        }
+    }
+
     #[allow(dead_code)]
     #[derive(Serialize)]
     enum LegacyV2ParserId {
@@ -2598,12 +2656,13 @@ mod tests {
             CacheReadFailureReason::InvalidMagic {
                 actual: *b"notmagic",
             },
-            CacheReadFailureReason::PreviousFormat {
+            CacheReadFailureReason::FormatMismatch {
                 actual: PREVIOUS_CACHE_FORMAT_VERSION,
                 current: CACHE_FORMAT_VERSION,
             },
-            CacheReadFailureReason::UnsupportedFormat {
+            CacheReadFailureReason::FormatMismatch {
                 actual: CACHE_FORMAT_VERSION + 1,
+                current: CACHE_FORMAT_VERSION,
             },
             CacheReadFailureReason::InvalidHeaderLength { actual: 0 },
             CacheReadFailureReason::HeaderDecode {
@@ -3683,8 +3742,8 @@ mod tests {
         let source = write_temp_file(b"source");
         let parser_version = test_parser_version(31);
         let shard_path = shard_path_for_test(cache_home.path(), source.path(), parser_version);
-        ensure_cache_dir(&shard_path).unwrap();
         let mut cache = SourceMessageCache::with_cache_dir(cache_home.path());
+        ensure_cache_dir(&shard_path).unwrap();
         cache.remove(source.path(), parser_version);
 
         let error = cache
@@ -3745,6 +3804,7 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
 
         let source = write_temp_file(b"source\n");
+        let _initialized = SourceMessageCache::load().unwrap();
         let shard = shard_path(source.path(), test_parser_version(1)).unwrap();
         ensure_cache_dir(shard.parent().unwrap()).unwrap();
         let header = CachedShardHeader {
@@ -3864,6 +3924,7 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
         let source = write_temp_file(b"source\n");
         let parser_version = test_parser_version(1);
+        let _initialized = SourceMessageCache::load().unwrap();
         let current_shard = shard_path(source.path(), parser_version).unwrap();
         let v2_shard = legacy_v2_amp_shard_path(cache_dir().unwrap().as_path(), source.path(), 1);
         assert_ne!(v2_shard, current_shard);
@@ -3920,6 +3981,7 @@ mod tests {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
         let source = write_temp_file(b"source\n");
+        let _initialized = SourceMessageCache::load().unwrap();
 
         for (parser_version, bytes) in [
             (test_parser_version(11), b"raw-v1??".to_vec()),
@@ -3952,6 +4014,7 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
         let source = write_temp_file(b"source\n");
         let parser_version = test_parser_version(13);
+        let _initialized = SourceMessageCache::load().unwrap();
         let shard = shard_path(source.path(), parser_version).unwrap();
         ensure_cache_dir(shard.parent().unwrap()).unwrap();
         let unknown_bytes = b"unknown!";

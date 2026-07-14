@@ -450,7 +450,6 @@ fn fold_omp_cache_hits(
                 }
                 debug_assert_eq!(failure.source_path, unit.path);
                 debug_assert_eq!(failure.parser_version, unit.parser_version);
-                adapter_cache::report_cache_read_failure(&failure);
                 let remove_failed_shard = failure.requires_shard_removal();
                 if remove_failed_shard {
                     ctx.source_cache.remove(&unit.path, unit.parser_version);
@@ -997,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_health_header_faults_preserve_cache_error_policy() {
+    fn parent_health_header_faults_reparse_the_source() {
         let dir = tempfile::TempDir::new().unwrap();
         let parent_path = dir.path().join("root-session.jsonl");
         let child_path = dir.path().join("root-session/0-ReviewFindings.jsonl");
@@ -1039,19 +1038,9 @@ mod tests {
         );
         let future_cache =
             message_cache::SourceMessageCache::with_cache_dir(future_cache_dir.path());
-        let error = match plan_parent_health_cache(vec![candidate()], &future_cache) {
-            Err(error) => error,
-            Ok(_) => panic!("future parent-health shard format must remain a hard error"),
-        };
-        assert!(matches!(
-            error,
-            SourcePipelineError::Planning(SourcePlanningError::CacheLookup(
-                message_cache::CacheLookupFailure {
-                    reason: message_cache::CacheReadFailureReason::UnsupportedFormat { .. },
-                    ..
-                }
-            ))
-        ));
+        let (hits, misses) = plan_parent_health_cache(vec![candidate()], &future_cache).unwrap();
+        assert!(hits.is_empty());
+        assert_eq!(misses.len(), 1);
     }
 
     #[test]

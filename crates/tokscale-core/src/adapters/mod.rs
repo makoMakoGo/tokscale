@@ -1358,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn future_cache_format_remains_a_pipeline_error_across_batch_planning() {
+    fn future_cache_format_reparses_across_batch_planning() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let path = source_dir.path().join("future-cache-source");
@@ -1395,23 +1395,13 @@ mod tests {
 
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
         let mut batches = ParsedBatchSource::new(&adapter, vec![unit]);
-        let error = adapter
+        adapter
             .fold_batches(
                 &mut batches,
                 &mut FoldContext::new(&mut cache, None),
                 &mut DroppingSink,
             )
-            .expect_err("a newer cache format is a tokscale compatibility error");
-
-        assert!(matches!(
-            error,
-            SourcePipelineError::Planning(SourcePlanningError::CacheLookup(
-                message_cache::CacheLookupFailure {
-                    reason: message_cache::CacheReadFailureReason::UnsupportedFormat { .. },
-                    ..
-                }
-            ))
-        ));
+            .expect("a newer cache shard must be discarded and reparsed");
     }
 
     #[test]

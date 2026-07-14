@@ -80,5 +80,8 @@ generic alias tables and fallback parsing remain prohibited.
 ADR 0021 later refined how these typed errors propagate: third-party source
 failures are contained to their source unit as structured health instead of
 aborting the whole report, and `parse_checked` returns per-unit outcomes
-rather than a batch-level `Result`. The typing, attribution, and
-current-format-only requirements of this ADR are unchanged.
+rather than a batch-level `Result`. It also makes source-message cache reads
+disposable: a missing or mismatched store marker resets all shards, and an
+unreadable shard reparses its authoritative source without a terminal warning.
+The source typing, attribution, and current-format-only requirements of this
+ADR are unchanged.

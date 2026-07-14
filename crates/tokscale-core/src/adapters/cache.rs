@@ -21,12 +21,7 @@ pub(crate) fn plan_cache_hit(
             unit.mark_cache_lookup_completed_no_hit();
             return Ok(CacheHitPlan::Miss(unit));
         }
-        // An unreadable or outdated-format shard is a derived-cache fault:
-        // report it and reparse the authoritative source, which rewrites the
-        // shard in the current format.
-        Err(failure) if failure.is_future_format() => return Err(failure.into()),
-        Err(failure) => {
-            report_cache_lookup_failure(&failure);
+        Err(_) => {
             unit.mark_cache_lookup_completed_no_hit();
             return Ok(CacheHitPlan::Miss(unit));
         }
@@ -49,12 +44,6 @@ pub(crate) fn plan_cache_hit(
     let mut parsed = ParsedUnit::healthy(unit, UnitMessageSource::CacheHit(read_plan), None, false);
     parsed.health.rejections = cached.rejections;
     Ok(CacheHitPlan::Hit(parsed))
-}
-
-pub(crate) fn report_cache_lookup_failure(failure: &message_cache::CacheLookupFailure) {
-    eprintln!(
-        "[tokscale] Warning: {failure}; ignoring that cache shard and reparsing the current source"
-    );
 }
 
 /// Seam for migrated parsers returning `ScannedSource`: record rejections
@@ -306,7 +295,6 @@ pub(crate) fn resolve_unit(
                 }
                 debug_assert_eq!(failure.source_path, unit.path);
                 debug_assert_eq!(failure.parser_version, unit.parser_version);
-                report_cache_read_failure(&failure);
                 let remove_failed_shard = failure.requires_shard_removal();
                 if remove_failed_shard {
                     ctx.source_cache.remove(&unit.path, unit.parser_version);
@@ -344,16 +332,6 @@ pub(crate) fn combine_recovery_invalidation(
     reparsed_invalidate_cache: bool,
 ) -> bool {
     recovery_requires_removal || reparsed_invalidate_cache
-}
-
-pub(crate) fn report_cache_read_failure(failure: &message_cache::CacheReadFailure) {
-    eprintln!("{}", cache_read_failure_diagnostic(failure));
-}
-
-pub(crate) fn cache_read_failure_diagnostic(failure: &message_cache::CacheReadFailure) -> String {
-    format!(
-        "[tokscale] Warning: {failure}; discarding that planned cache read and reparsing the current source"
-    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -696,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn future_format_lookup_remains_an_explicit_error_without_mutating_the_shard() {
+    fn future_format_lookup_downgrades_to_miss_without_mutating_the_shard() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
@@ -711,16 +689,11 @@ mod tests {
         let before = std::fs::read(&shard_path).unwrap();
         let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
 
-        let error = plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache)
-            .expect_err("a future-format shard must not be overwritten by this binary");
-
-        assert!(matches!(
-            error,
-            crate::adapters::SourcePlanningError::CacheLookup(message_cache::CacheLookupFailure {
-                reason: message_cache::CacheReadFailureReason::UnsupportedFormat { .. },
-                ..
-            })
-        ));
+        let miss = expect_cache_miss(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
+            "a future-format shard is disposable and must trigger a source reparse",
+        );
+        assert_eq!(miss.path, source_path);
         assert_eq!(std::fs::read(shard_path).unwrap(), before);
     }
 
@@ -845,14 +818,14 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_body_is_reported_reparsed_rewritten_and_warm_after_repair() {
+    fn corrupt_body_is_reparsed_rewritten_and_warm_after_repair() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
         std::fs::write(&source_path, PI_SOURCE).unwrap();
         let unit = pi_unit(&source_path);
         let fingerprint = seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
-        let shard_path = message_cache::truncate_shard_after_header_for_test(
+        message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
             &source_path,
             unit.parser_version,
@@ -877,13 +850,6 @@ mod tests {
             reason.source().is_some(),
             "body decode reason must retain the bincode root cause"
         );
-        let diagnostic = cache_read_failure_diagnostic(&failure);
-        assert!(diagnostic.contains("[tokscale] Warning:"));
-        assert!(diagnostic.contains(source_path.to_str().unwrap()));
-        assert!(diagnostic.contains(shard_path.to_str().unwrap()));
-        assert!(diagnostic.contains("failed to decode shard body"));
-        assert!(diagnostic.contains("reparsing the current source"));
-
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),

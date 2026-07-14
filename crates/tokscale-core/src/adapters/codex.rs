@@ -133,9 +133,7 @@ fn plan_exact_codex_cache_hit(
             unit.mark_cache_lookup_completed_no_hit();
             return Ok(CacheHitPlan::Miss(unit));
         }
-        Err(failure) if failure.is_future_format() => return Err(failure.into()),
-        Err(failure) => {
-            adapter_cache::report_cache_lookup_failure(&failure);
+        Err(_) => {
             unit.mark_cache_lookup_completed_no_hit();
             return Ok(CacheHitPlan::Miss(unit));
         }
@@ -631,7 +629,6 @@ fn resolve_codex_messages(
                 health_override: None,
             }),
             Err(failure) => {
-                adapter_cache::report_cache_read_failure(&failure);
                 let recovery_requires_removal = failure.requires_shard_removal();
                 if recovery_requires_removal {
                     ctx.source_cache
@@ -660,7 +657,6 @@ fn resolve_codex_messages(
             let mut raw_messages = match ctx.source_cache.take_messages(&read_plan) {
                 Ok(cached) => cached,
                 Err(failure) => {
-                    adapter_cache::report_cache_read_failure(&failure);
                     let recovery_requires_removal = failure.requires_shard_removal();
                     if recovery_requires_removal {
                         ctx.source_cache.remove(&path, parser_version);

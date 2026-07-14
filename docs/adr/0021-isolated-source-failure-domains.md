@@ -79,6 +79,13 @@ stop the scan as `Partial` before they can pollute model or token state.
 
 ### Cache
 
+- Source-message cache data is disposable derived state, never source
+  authority. The shard store has one current-format marker. A missing,
+  malformed, older, or newer marker deletes the shard store and starts a cold
+  scan; there is no cache migration or old/new-format compatibility branch.
+  An unreadable individual shard is a cache miss and is reparsed from its
+  authoritative source. Cache read faults do not enter `DataHealth`, do not
+  emit terminal warnings, and do not block unrelated sources.
 - A `Complete` scan is cacheable even when it rejected records and even when
   it produced zero messages; its rejection summary is part of the shard, so a
   warm hit restores the Issues view without rescanning. A stable bad record
@@ -125,6 +132,11 @@ health fields, which is a one-time format bump and cold rebuild. This ADR
 does not weaken ADR 0001: nothing substitutes guessed or synthetic data, and
 no failure is delivered as ordinary success — it is delivered as data plus
 health.
+
+The disposable shard-store rule supersedes ADR 0020's preservation of
+historical shards during ordinary scans and its propagation of cache-read
+format failures. ADR 0020 still governs source identity, cache writes, and
+internal invariant failures.
 
 Every production local source parser now exposes record health through
 `ScannedSource` or, for Codex's stateful append path, the equivalent
