@@ -34,12 +34,19 @@ pub use tokscale_core::{
 /// hermetic across developer machines; production builds still honor
 /// user-configured paths.
 #[cfg(not(test))]
-fn data_loader_scanner_settings() -> Result<tokscale_core::scanner::ScannerSettings> {
-    crate::tui::settings::load_scanner_settings()
+fn data_loader_scanner_settings(
+    home_dir: &Option<PathBuf>,
+) -> Result<tokscale_core::scanner::ScannerSettings> {
+    let home = home_dir
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    crate::tui::settings::load_scanner_settings_for_home(&home)
 }
 
 #[cfg(test)]
-fn data_loader_scanner_settings() -> Result<tokscale_core::scanner::ScannerSettings> {
+fn data_loader_scanner_settings(
+    _home_dir: &Option<PathBuf>,
+) -> Result<tokscale_core::scanner::ScannerSettings> {
     Ok(tokscale_core::scanner::ScannerSettings::default())
 }
 
@@ -54,7 +61,7 @@ pub(super) fn trim_allocator() {
 }
 
 pub struct DataLoader {
-    _sessions_path: Option<PathBuf>,
+    pub home_dir: Option<PathBuf>,
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
@@ -81,13 +88,13 @@ impl PreparedDataLoad {
 
 impl DataLoader {
     pub fn with_filters(
-        sessions_path: Option<PathBuf>,
+        home_dir: Option<PathBuf>,
         since: Option<String>,
         until: Option<String>,
         year: Option<String>,
     ) -> Self {
         Self {
-            _sessions_path: sessions_path,
+            home_dir,
             since,
             until,
             year,
@@ -110,10 +117,16 @@ impl DataLoader {
     }
 
     pub fn prepare(&self, enabled_clients: &[ClientId]) -> Result<PreparedDataLoad> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-            .to_string_lossy()
-            .to_string();
+        let (home, use_env_roots) = match &self.home_dir {
+            Some(home) => (home.to_string_lossy().into_owned(), false),
+            None => (
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                    .to_string_lossy()
+                    .into_owned(),
+                true,
+            ),
+        };
 
         let sources: Vec<String> = enabled_clients
             .iter()
@@ -122,12 +135,12 @@ impl DataLoader {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
-            use_env_roots: true,
+            use_env_roots,
             clients: Some(sources),
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
-            scanner_settings: data_loader_scanner_settings()?,
+            scanner_settings: data_loader_scanner_settings(&self.home_dir)?,
         };
 
         prepare_local_sources(opts)
@@ -180,10 +193,16 @@ impl DataLoader {
         group_by: &GroupBy,
         pricing: &tokscale_core::pricing::PricingService,
     ) -> Result<UsageData> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-            .to_string_lossy()
-            .to_string();
+        let (home, use_env_roots) = match &self.home_dir {
+            Some(home) => (home.to_string_lossy().into_owned(), false),
+            None => (
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                    .to_string_lossy()
+                    .into_owned(),
+                true,
+            ),
+        };
 
         let sources: Vec<String> = enabled_clients
             .iter()
@@ -196,8 +215,8 @@ impl DataLoader {
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
-            use_env_roots: false,
-            scanner_settings: data_loader_scanner_settings()?,
+            use_env_roots,
+            scanner_settings: data_loader_scanner_settings(&self.home_dir)?,
         };
 
         let usage_data =
@@ -256,10 +275,16 @@ mod tests {
         group_by: &GroupBy,
         pricing: Option<&PricingService>,
     ) -> Result<UsageData> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-            .to_string_lossy()
-            .to_string();
+        let (home, use_env_roots) = match &loader.home_dir {
+            Some(home) => (home.to_string_lossy().into_owned(), false),
+            None => (
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                    .to_string_lossy()
+                    .into_owned(),
+                true,
+            ),
+        };
 
         let sources: Vec<String> = enabled_clients
             .iter()
@@ -268,12 +293,12 @@ mod tests {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
-            use_env_roots: true,
+            use_env_roots,
             clients: Some(sources),
             since: loader.since.clone(),
             until: loader.until.clone(),
             year: loader.year.clone(),
-            scanner_settings: data_loader_scanner_settings()?,
+            scanner_settings: data_loader_scanner_settings(&loader.home_dir)?,
         };
 
         tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), pricing)
@@ -451,7 +476,7 @@ mod tests {
     #[test]
     fn test_data_loader_new() {
         let loader = DataLoader::with_filters(None, None, None, None);
-        assert!(loader._sessions_path.is_none());
+        assert!(loader.home_dir.is_none());
         assert!(loader.since.is_none());
         assert!(loader.until.is_none());
         assert!(loader.year.is_none());
@@ -470,7 +495,7 @@ mod tests {
         // instead it asserts the cfg(test) helper returns a default
         // ScannerSettings regardless of what the real settings file
         // contains on the developer's machine.
-        let settings = super::data_loader_scanner_settings().unwrap();
+        let settings = super::data_loader_scanner_settings(&None).unwrap();
         assert!(
             settings.opencode_db_paths.is_empty(),
             "under #[cfg(test)] data_loader_scanner_settings must return \
@@ -489,7 +514,7 @@ mod tests {
             Some("2024".to_string()),
         );
 
-        assert_eq!(loader._sessions_path, Some(PathBuf::from("/tmp/sessions")));
+        assert_eq!(loader.home_dir, Some(PathBuf::from("/tmp/sessions")));
         assert_eq!(loader.since, Some("2024-01-01".to_string()));
         assert_eq!(loader.until, Some("2024-12-31".to_string()));
         assert_eq!(loader.year, Some("2024".to_string()));

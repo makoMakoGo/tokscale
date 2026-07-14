@@ -610,14 +610,6 @@ pub fn has_cursor_usage_cache_in_home(home_dir: &Path) -> bool {
     }
 }
 
-pub fn has_cursor_usage_cache() -> bool {
-    let home_dir = match home_dir() {
-        Ok(home_dir) => home_dir,
-        Err(_) => return false,
-    };
-    has_cursor_usage_cache_in_home(&home_dir)
-}
-
 fn expected_cursor_usage_cache_paths_in(home_dir: &Path) -> Vec<PathBuf> {
     let cache_dir = cursor_cache_dir(home_dir);
 

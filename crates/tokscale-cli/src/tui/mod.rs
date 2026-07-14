@@ -16,6 +16,7 @@ pub use cache::{
 };
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
+pub(crate) use themes::ThemeName;
 
 use std::collections::HashSet;
 use std::io;
@@ -59,11 +60,12 @@ fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool, Op
 }
 
 fn background_data_loader(
+    home_dir: Option<String>,
     since: Option<String>,
     until: Option<String>,
     year: Option<String>,
 ) -> DataLoader {
-    DataLoader::with_filters(None, since, until, year)
+    DataLoader::with_filters(home_dir.map(std::path::PathBuf::from), since, until, year)
 }
 
 fn should_force_source_reload(
@@ -214,18 +216,21 @@ fn send_background_result(
 }
 
 fn background_cache_scope(
+    home_dir: &Option<String>,
     since: &Option<String>,
     until: &Option<String>,
     year: &Option<String>,
 ) -> CacheReportScope {
-    CacheReportScope::new(since.clone(), until.clone(), year.clone())
+    CacheReportScope::new(home_dir.clone(), since.clone(), until.clone(), year.clone())
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     theme: Option<&str>,
-    refresh: u64,
+    refresh: Option<u64>,
+    no_refresh: bool,
     debug: bool,
+    home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
     until: Option<String>,
@@ -241,8 +246,9 @@ pub fn run(
 
     let config = TuiConfig {
         theme: theme.map(str::to_string),
-        refresh,
-        sessions_path: None,
+        refresh: refresh.unwrap_or(0),
+        no_refresh,
+        home_dir: home_dir.clone(),
         clients: clients.clone(),
         since: since.clone(),
         until: until.clone(),
@@ -266,7 +272,7 @@ pub fn run(
 
     // Single file read: load cache and check freshness in one pass.
     let initial_group_by = TUI_DEFAULT_GROUP_BY;
-    let initial_report_scope = background_cache_scope(&since, &until, &year);
+    let initial_report_scope = background_cache_scope(&home_dir, &since, &until, &year);
     let (cached_data, needs_background_load, initial_source_digest) = decide_initial_data(
         load_cache(&enabled_clients, &initial_group_by, &initial_report_scope),
     );
@@ -318,12 +324,13 @@ pub fn run(
         let bg_since = since.clone();
         let bg_until = until.clone();
         let bg_year = year.clone();
+        let bg_home_dir = home_dir.clone();
         let bg_enabled_clients = enabled_clients.clone();
         let bg_group_by = app.group_by.borrow().clone();
-        let bg_report_scope = background_cache_scope(&since, &until, &year);
+        let bg_report_scope = background_cache_scope(&home_dir, &since, &until, &year);
 
         thread::spawn(move || {
-            let loader = background_data_loader(bg_since, bg_until, bg_year);
+            let loader = background_data_loader(bg_home_dir, bg_since, bg_until, bg_year);
             let result = persist_background_load(
                 load_background_data(&loader, &bg_clients, &bg_group_by, true, None),
                 &bg_enabled_clients,
@@ -432,12 +439,17 @@ fn run_loop_with_background(
             let since = app.data_loader.since.clone();
             let until = app.data_loader.until.clone();
             let year = app.data_loader.year.clone();
+            let home_dir = app
+                .data_loader
+                .home_dir
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
             let enabled_clients = app.enabled_clients.borrow().clone();
             let group_by = app.group_by.borrow().clone();
-            let report_scope = background_cache_scope(&since, &until, &year);
+            let report_scope = background_cache_scope(&home_dir, &since, &until, &year);
 
             thread::spawn(move || {
-                let loader = background_data_loader(since, until, year);
+                let loader = background_data_loader(home_dir, since, until, year);
                 let result = persist_background_load(
                     load_background_data(&loader, &clients, &group_by, force, last_digest),
                     &enabled_clients,
@@ -591,6 +603,7 @@ mod tests {
     #[test]
     fn background_loader_preserves_filters() {
         let loader = background_data_loader(
+            None,
             Some("2026-05-01".to_string()),
             Some("2026-05-19".to_string()),
             Some("2026".to_string()),
@@ -607,7 +620,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_source(home.path(), 10);
-        let loader = background_data_loader(None, None, None);
+        let loader = background_data_loader(None, None, None, None);
         let clients = [ClientId::Amp];
         let signature_a = loader
             .load_with_diagnostics(&clients, &tokscale_core::GroupBy::Model)
@@ -653,7 +666,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_source(home.path(), 10);
-        let loader = background_data_loader(None, None, None);
+        let loader = background_data_loader(None, None, None, None);
         let clients = [ClientId::Amp];
         let mut prepared = loader.prepare(&clients).unwrap();
         let baseline = Some(
@@ -762,7 +775,8 @@ mod tests {
             TuiConfig {
                 theme: Some("blue".to_string()),
                 refresh: 0,
-                sessions_path: None,
+                no_refresh: false,
+                home_dir: None,
                 clients: None,
                 since: None,
                 until: None,

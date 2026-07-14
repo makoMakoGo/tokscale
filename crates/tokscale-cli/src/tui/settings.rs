@@ -32,16 +32,6 @@ impl ExplicitHomeConfigLayout {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LightSettings {
-    /// When true, every `tokscale --light` run atomically overwrites the
-    /// TUI cache (same semantics as `--light --write-cache`). The CLI
-    /// flags `--write-cache` / `--no-write-cache` override this per-invocation.
-    #[serde(default)]
-    pub write_cache: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -75,8 +65,6 @@ pub struct Settings {
     /// override this list completely.
     #[serde(default)]
     pub default_clients: Vec<String>,
-    #[serde(default)]
-    pub light: LightSettings,
     /// Opt-in toggle for the subscription quota Usage tab. Default is
     /// `false` so the tab strip stays focused on local token usage unless
     /// the user explicitly wants subscription usage lookups.
@@ -88,7 +76,6 @@ pub struct Settings {
     /// such as `codex`, `zai`, and `minimax-token-plan-cn`.
     #[serde(default)]
     pub usage_providers: Vec<String>,
-    #[cfg(test)]
     #[serde(skip)]
     pub save_path_override: Option<PathBuf>,
 }
@@ -115,23 +102,11 @@ impl Default for Settings {
             native_timeout_ms: DEFAULT_NATIVE_TIMEOUT_MS,
             scanner: ScannerSettings::default(),
             default_clients: Vec::new(),
-            light: LightSettings::default(),
             usage_tab_enabled: false,
             usage_providers: Vec::new(),
-            #[cfg(test)]
             save_path_override: None,
         }
     }
-}
-
-/// Thin helper that loads settings and returns just the scanner portion.
-///
-/// Every CLI entry point that builds `LocalParseOptions`/`ReportOptions`
-/// calls this so user-configured scanner paths are honored on every
-/// invocation. A missing file means the user has not configured scanner
-/// overrides; malformed or unreadable files are reported to the command.
-pub fn load_scanner_settings() -> Result<ScannerSettings> {
-    Settings::load().map(|settings| settings.scanner)
 }
 
 pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> Result<ScannerSettings> {
@@ -145,10 +120,6 @@ pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> Result<Scann
 ///
 /// A missing file or unset field produces an empty list. Malformed or
 /// unreadable settings are reported to the command.
-pub fn load_default_clients() -> Result<Vec<String>> {
-    Settings::load().map(|settings| settings.default_clients)
-}
-
 pub fn load_default_clients_for_home(home_dir: &Option<String>) -> Result<Vec<String>> {
     Settings::load_for_home_override(home_dir.as_deref().map(Path::new))
         .map(|settings| settings.default_clients)
@@ -244,13 +215,15 @@ impl Settings {
             return Self::load();
         };
 
-        Self::load_from_path(&Self::explicit_home_config_path(home_dir))
+        let path = Self::explicit_home_config_path(home_dir);
+        let mut settings = Self::load_from_path(&path)?;
+        settings.save_path_override = Some(path);
+        Ok(settings)
     }
 
     pub fn save(&self) -> Result<()> {
         self.clone().validate()?;
 
-        #[cfg(test)]
         let path = self.save_path_override.clone().map_or_else(
             Self::writable_config_path,
             |path| -> Result<PathBuf> {
@@ -260,9 +233,6 @@ impl Settings {
                 Ok(path)
             },
         )?;
-
-        #[cfg(not(test))]
-        let path = Self::writable_config_path()?;
 
         let content = serde_json::to_string_pretty(self)?;
 
@@ -372,6 +342,19 @@ mod tests {
 
         assert_eq!(loaded.color_palette, Settings::default().color_palette);
         assert!(loaded.default_clients.is_empty());
+    }
+
+    #[test]
+    fn settings_loaded_for_explicit_home_save_back_to_that_home() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        let mut loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
+        loaded.color_palette = "halloween".to_string();
+
+        loaded.save().unwrap();
+
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["colorPalette"], "halloween");
     }
 
     #[test]
@@ -624,7 +607,7 @@ mod tests {
     #[test]
     fn settings_default_clients_round_trips() {
         // User-configured list must survive load+save unchanged. This is
-        // what `tokscale --client opencode,claude` consults when no CLI
+        // what `tokscale models --client opencode,claude` consults when no CLI
         // flag is present.
         let json = r#"{
             "colorPalette": "blue",
@@ -659,27 +642,6 @@ mod tests {
             "defaultClients": ["opencode", 123, null, "claude", true, {"x":1}]
         }"#;
         assert!(serde_json::from_str::<Settings>(json).is_err());
-    }
-
-    #[test]
-    fn settings_load_accepts_legacy_json_without_light_section() {
-        let json = r#"{
-            "colorPalette": "blue",
-            "autoRefreshEnabled": false,
-            "autoRefreshMs": 60000,
-            "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000
-        }"#;
-        let parsed: Settings = serde_json::from_str(json).unwrap();
-        assert!(!parsed.light.write_cache);
-    }
-
-    #[test]
-    fn light_settings_round_trip() {
-        let light = LightSettings { write_cache: true };
-        let serialized = serde_json::to_string(&light).unwrap();
-        let parsed: LightSettings = serde_json::from_str(&serialized).unwrap();
-        assert!(parsed.write_cache);
     }
 
     #[test]

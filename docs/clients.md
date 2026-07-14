@@ -108,7 +108,7 @@ Use `TOKSCALE_EXTRA_DIRS` for one-off runs:
 
 ```bash
 TOKSCALE_EXTRA_DIRS='codex:/abs/path/.codex/sessions,gemini:/abs/path/gemini/tmp' \
-  tokscale --no-spinner --light
+  tokscale models --no-spinner
 ```
 
 ## Cache-backed integrations

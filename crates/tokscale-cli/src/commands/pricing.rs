@@ -3,7 +3,7 @@ use anyhow::Result;
 pub(crate) fn run_pricing_lookup(
     model_id: &str,
     json: bool,
-    provider: Option<&str>,
+    source: Option<&str>,
     no_spinner: bool,
 ) -> Result<()> {
     use colored::Colorize;
@@ -12,16 +12,14 @@ pub(crate) fn run_pricing_lookup(
     use tokio::runtime::Runtime;
     use tokscale_core::pricing::PricingService;
 
-    if model_id.eq_ignore_ascii_case("list-overrides") {
-        return run_pricing_list_overrides(json);
-    }
-
-    let provider_normalized = provider.map(|p| p.to_lowercase());
+    let source_normalized = source.map(|value| value.to_lowercase());
 
     let spinner = if no_spinner {
         None
     } else {
-        let provider_label = provider.map(|p| format!(" from {}", p)).unwrap_or_default();
+        let provider_label = source
+            .map(|value| format!(" from {}", value))
+            .unwrap_or_default();
         let pb = ProgressBar::new_spinner();
         pb.set_style(ProgressStyle::default_spinner());
         pb.set_message(format!("Fetching pricing data{}...", provider_label));
@@ -32,28 +30,12 @@ pub(crate) fn run_pricing_lookup(
     let rt = Runtime::new()?;
     let result = match rt.block_on(async {
         let svc = PricingService::get_or_init().await?;
-        Ok::<_, String>(svc.lookup_with_source(model_id, provider_normalized.as_deref()))
+        Ok::<_, String>(svc.lookup_with_source(model_id, source_normalized.as_deref()))
     }) {
         Ok(result) => result,
         Err(err) => {
             if let Some(pb) = spinner {
                 pb.finish_and_clear();
-            }
-            if json {
-                #[derive(serde::Serialize)]
-                #[serde(rename_all = "camelCase")]
-                struct ErrorOutput {
-                    error: String,
-                    model_id: String,
-                }
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&ErrorOutput {
-                        error: err,
-                        model_id: model_id.to_string(),
-                    })?
-                );
-                std::process::exit(1);
             }
             return Err(anyhow::anyhow!(err));
         }
@@ -103,20 +85,7 @@ pub(crate) fn run_pricing_lookup(
                 println!("{}", serde_json::to_string_pretty(&output)?);
             }
             None => {
-                #[derive(serde::Serialize)]
-                #[serde(rename_all = "camelCase")]
-                struct ErrorOutput {
-                    error: String,
-                    model_id: String,
-                }
-
-                let output = ErrorOutput {
-                    error: "Model not found".to_string(),
-                    model_id: model_id.to_string(),
-                };
-
-                println!("{}", serde_json::to_string_pretty(&output)?);
-                std::process::exit(1);
+                return Err(anyhow::anyhow!("Model not found: {model_id}"));
             }
         }
     } else {
@@ -152,8 +121,10 @@ pub(crate) fn run_pricing_lookup(
                 println!();
             }
             None => {
-                println!("\n  {}\n", format!("Model not found: {}", model_id).red());
-                std::process::exit(1);
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    format!("Model not found: {model_id}").red()
+                ));
             }
         }
     }

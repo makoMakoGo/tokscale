@@ -56,7 +56,6 @@ usage cache today.
 | `autoRefreshMs` | number | TUI auto-refresh interval in milliseconds. |
 | `nativeTimeoutMs` | number | Maximum processing time for native subprocess work. |
 | `defaultClients` | string[] | Client filter used when no `--client/-c` flag is passed. |
-| `light.writeCache` | boolean | Allow `tokscale --light` to refresh the TUI startup cache after rendering. |
 | `usageTabEnabled` | boolean | Show the subscription quota Usage tab in the TUI. |
 | `usageProviders` | string[] | Explicit allowlist of subscription providers the TUI may fetch. Empty means cache-display mode. |
 | `scanner.opencodeDbPaths` | string[] | Authoritative additional current-format OpenCode SQLite database files. Missing, unreadable, or obsolete entries fail explicitly. This is the only custom OpenCode scan setting. |
@@ -120,6 +119,9 @@ migrating, or deleting older v2 shards. Run `tokscale cache prune` when you
 explicitly want a full traversal that removes classified v2 shards; there is no
 automatic v2 migration. Retired `source-message-cache.bin` and
 `source-message-cache.lock` files are not current cache inputs.
+
+The TUI aggregate cache is separate from source-message shards. Reports never
+write it; use `tokscale cache warm` when you intentionally want to prebuild it.
 
 Integration roots are mixed state, not all disposable caches:
 

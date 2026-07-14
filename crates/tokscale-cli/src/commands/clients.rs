@@ -1,11 +1,15 @@
 use crate::claude_diagnostics;
 use crate::commands::render::format_number;
-use crate::commands::shared::use_env_roots;
+use crate::commands::shared::{use_env_roots, ReportEnvelope};
 use crate::tui;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
+pub(crate) fn run_clients_command(
+    json: bool,
+    home_dir: Option<String>,
+    clients: Option<Vec<String>>,
+) -> Result<()> {
     use tokscale_core::scanner::{
         built_in_extra_scan_paths_for, copilot_exporter_path_with_env_strategy,
         discover_opencode_dbs, extra_scan_paths_for, opencode_data_dir_with_env_strategy,
@@ -16,6 +20,19 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
         LocalParseOptions,
     };
 
+    let start = std::time::Instant::now();
+    let selected_clients: std::collections::HashSet<ClientId> = clients
+        .as_ref()
+        .map(|clients| {
+            clients
+                .iter()
+                .map(|client| {
+                    ClientId::from_str(client)
+                        .expect("resolved client scope must contain canonical client ids")
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| ClientId::iter().collect());
     let explicit_home_dir = home_dir;
     let use_env_roots = use_env_roots(&explicit_home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&explicit_home_dir)?;
@@ -30,7 +47,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
         use_env_roots,
         clients: Some(
             ClientId::iter()
-                .filter(|client| client.parse_local())
+                .filter(|client| selected_clients.contains(client) && client.parse_local())
                 .map(|client| client.as_str().to_string())
                 .collect(),
         ),
@@ -99,7 +116,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
         source: String,
     }
 
-    let all_clients: std::collections::HashSet<ClientId> = ClientId::iter().collect();
+    let all_clients = selected_clients.clone();
     let extra_dirs_val = if use_env_roots {
         match std::env::var("TOKSCALE_EXTRA_DIRS") {
             Ok(value) => value,
@@ -135,6 +152,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
 
     let clients: Vec<ClientRow> =
         ClientId::iter()
+            .filter(|client| selected_clients.contains(client))
             .map(|client| {
                 let warp_default_roots = if client == ClientId::Warp {
                     warp_sqlite_roots_with_env_strategy(&home_dir_str, use_env_roots)
@@ -288,22 +306,21 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     if json {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct Output<'a> {
+        struct ClientsData {
             headless_roots: Vec<String>,
             clients: Vec<ClientRow>,
             note: String,
-            health: &'a tokscale_core::source_health::HealthReport,
         }
 
-        let output = Output {
+        let data = ClientsData {
             headless_roots: headless_roots
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
                 .collect(),
             clients,
             note: "Headless capture is supported for Codex CLI only.".to_string(),
-            health: &health,
         };
+        let output = ReportEnvelope::new(data, health, start.elapsed().as_millis() as u64);
 
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {

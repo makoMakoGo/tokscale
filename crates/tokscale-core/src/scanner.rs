@@ -925,7 +925,7 @@ fn scan_all_clients_with_env_strategy_inner(
 
         // Merge user-configured `scanner.opencodeDbPaths` here, INSIDE the
         // `enabled.contains(&ClientId::OpenCode)` guard, so a request like
-        // `tokscale --client claude` does not pull in OpenCode dbs the user
+        // `tokscale models --client claude` does not pull in OpenCode dbs the user
         // pinned for unrelated reasons. Inflated OpenCode `counts` and wasted
         // SQLite parsing work otherwise sneak past the message-level
         // client filter that runs much later in the pipeline.
@@ -2423,7 +2423,7 @@ mod tests {
         // Regression guard: previously the scanner unconditionally
         // merged `scanner.opencodeDbPaths` after the inner scan, which
         // bypassed the existing `enabled.contains(&ClientId::OpenCode)`
-        // guard. A request like `tokscale --client claude` would still pull
+        // guard. A request like `tokscale models --client claude` would still pull
         // in user-pinned OpenCode dbs and inflate local message loading
         // counts plus waste SQLite parsing work.
         //

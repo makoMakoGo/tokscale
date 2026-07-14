@@ -2,7 +2,7 @@ use crate::commands::render::format_currency;
 use crate::commands::shared::{
     auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
     emit_cursor_setup_warnings, emit_cursor_sync_warning, has_cursor_usage_cache_for_report,
-    setup_warnings_for_report, use_env_roots,
+    setup_warnings_for_report, use_env_roots, ReportEnvelope,
 };
 use crate::tui;
 use anyhow::Result;
@@ -103,7 +103,6 @@ pub(crate) struct GraphExportData {
     contributions: Vec<GraphDailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     time_metrics: Option<GraphTimeMetrics>,
-    health: tokscale_core::source_health::HealthReport,
 }
 
 pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphExportData {
@@ -188,7 +187,6 @@ pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphE
             max_concurrent_sessions: tm.max_concurrent_sessions,
             session_count: tm.session_count,
         }),
-        health: graph.health.clone(),
     }
 }
 
@@ -249,7 +247,12 @@ pub(crate) fn run_graph_command(
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
     let output_data = to_graph_export_data(&graph_result);
-    let json_output = serde_json::to_string_pretty(&output_data)?;
+    let output_document = ReportEnvelope::new(
+        output_data,
+        graph_result.health.clone(),
+        processing_time_ms as u64,
+    );
+    let json_output = serde_json::to_string_pretty(&output_document)?;
 
     if let Some(output_path) = output {
         std::fs::write(&output_path, json_output)?;
@@ -262,9 +265,9 @@ pub(crate) fn run_graph_command(
             "{}",
             format!(
                 "  {} days, {} clients, {} models",
-                output_data.contributions.len(),
-                output_data.summary.clients.len(),
-                output_data.summary.models.len()
+                output_document.data.contributions.len(),
+                output_document.data.summary.clients.len(),
+                output_document.data.summary.models.len()
             )
             .bright_black()
         );
@@ -272,35 +275,36 @@ pub(crate) fn run_graph_command(
             "{}",
             format!(
                 "  Total: {}",
-                format_currency(output_data.summary.total_cost)
+                format_currency(output_document.data.summary.total_cost)
             )
             .bright_black()
         );
+        println!("{output_path}");
+    } else {
+        println!("{}", json_output);
+    }
 
-        if benchmark {
-            eprintln!(
-                "{}",
-                format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
-            );
-            if let Some(sync) = cursor_sync_result {
-                if sync.synced {
-                    eprintln!(
-                        "{}",
-                        format!(
-                            "  Cursor: {} usage events synced (full lifetime data)",
-                            sync.rows
-                        )
-                        .bright_black()
-                    );
-                } else if let Some(err) = sync.error {
-                    if had_cursor_cache {
-                        eprintln!("{}", format!("  Cursor: sync failed - {}", err).yellow());
-                    }
+    if benchmark {
+        eprintln!(
+            "{}",
+            format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
+        );
+        if let Some(sync) = cursor_sync_result {
+            if sync.synced {
+                eprintln!(
+                    "{}",
+                    format!(
+                        "  Cursor: {} usage events synced (full lifetime data)",
+                        sync.rows
+                    )
+                    .bright_black()
+                );
+            } else if let Some(err) = sync.error {
+                if had_cursor_cache {
+                    eprintln!("{}", format!("  Cursor: sync failed - {}", err).yellow());
                 }
             }
         }
-    } else {
-        println!("{}", json_output);
     }
 
     Ok(())
@@ -345,7 +349,12 @@ mod tests {
             },
         };
 
-        let json = serde_json::to_value(to_graph_export_data(&graph)).unwrap();
+        let json = serde_json::to_value(ReportEnvelope::new(
+            to_graph_export_data(&graph),
+            graph.health,
+            0_u64,
+        ))
+        .unwrap();
 
         assert_eq!(json["health"]["complete"], false);
         assert_eq!(json["health"]["cleanSources"], 4);

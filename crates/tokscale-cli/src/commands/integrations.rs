@@ -1,7 +1,7 @@
-use crate::{
-    antigravity, commands, cursor, trae, warp, AntigravitySubcommand, CodexSubcommand,
-    CursorSubcommand, TraeSubcommand, WarpSubcommand,
+use crate::cli::{
+    AntigravitySubcommand, CodexSubcommand, CursorSubcommand, TraeSubcommand, WarpSubcommand,
 };
+use crate::{antigravity, commands, cursor, trae, warp};
 use anyhow::Result;
 
 pub(crate) fn run_codex_command(subcommand: CodexSubcommand) -> Result<()> {

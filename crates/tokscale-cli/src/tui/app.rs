@@ -28,7 +28,8 @@ use super::ui::dialog::{ClientPickerDialog, DialogStack};
 pub struct TuiConfig {
     pub theme: Option<String>,
     pub refresh: u64,
-    pub sessions_path: Option<String>,
+    pub no_refresh: bool,
+    pub home_dir: Option<String>,
     pub clients: Option<Vec<String>>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -419,7 +420,8 @@ pub struct App {
 
 impl App {
     pub fn new_with_cached_data(config: TuiConfig, cached_data: Option<UsageData>) -> Result<Self> {
-        let settings = Settings::load()?;
+        let settings =
+            Settings::load_for_home_override(config.home_dir.as_deref().map(std::path::Path::new))?;
         Self::new_with_cached_data_and_settings(config, cached_data, settings)
     }
 
@@ -463,13 +465,17 @@ impl App {
             Duration::from_secs(30)
         };
 
-        let auto_refresh = config.refresh > 0 || settings.auto_refresh_enabled;
+        let auto_refresh = if config.no_refresh {
+            false
+        } else {
+            config.refresh > 0 || settings.auto_refresh_enabled
+        };
         let usage_tab_enabled = settings.usage_tab_enabled;
         let subscription_provider_ids =
             crate::commands::usage::parse_provider_settings(&settings.usage_providers);
 
         let data_loader = DataLoader::with_filters(
-            config.sessions_path.map(std::path::PathBuf::from),
+            config.home_dir.map(std::path::PathBuf::from),
             config.since,
             config.until,
             config.year,
@@ -480,11 +486,13 @@ impl App {
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_needs_reload = Rc::new(RefCell::new(false));
         let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
-        let current_tab = if Self::tab_visible(&settings, requested_tab) {
-            requested_tab
-        } else {
-            Tab::Overview
-        };
+        if !Self::tab_visible(&settings, requested_tab) {
+            anyhow::bail!(
+                "TUI tab `{}` is disabled in settings.json",
+                requested_tab.as_str().to_ascii_lowercase()
+            );
+        }
+        let current_tab = requested_tab;
         let (sort_field, sort_direction) = Self::default_sort_for_tab(current_tab);
 
         let mut app = Self {
@@ -2148,7 +2156,8 @@ mod tests {
         TuiConfig {
             theme: theme.map(str::to_string),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -2277,7 +2286,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -2326,7 +2336,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -2375,7 +2386,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -2415,7 +2427,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -2449,7 +2462,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -2475,7 +2489,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -2505,7 +2520,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -2739,24 +2755,54 @@ mod tests {
     }
 
     #[test]
-    fn test_initial_usage_tab_clamps_to_overview_when_flag_off() {
+    fn cli_no_refresh_overrides_enabled_setting_for_this_run() {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: true,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let settings = Settings {
+            auto_refresh_enabled: true,
+            ..Settings::default()
+        };
+
+        let app =
+            App::new_with_cached_data_and_settings(config, Some(UsageData::default()), settings)
+                .unwrap();
+
+        assert!(!app.auto_refresh);
+        assert!(app.settings.auto_refresh_enabled);
+    }
+
+    #[test]
+    fn test_initial_usage_tab_fails_when_flag_off() {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
             year: None,
             initial_tab: Some(Tab::Usage),
         };
-        let app = App::new_with_cached_data_and_settings(
+        let result = App::new_with_cached_data_and_settings(
             config,
             Some(UsageData::default()),
             Settings::default(),
-        )
-        .unwrap();
-        assert_eq!(app.current_tab, Tab::Overview);
+        );
+        let error = match result {
+            Ok(_) => panic!("a disabled explicit tab must not silently fall back"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("disabled in settings.json"));
     }
 
     #[test]
@@ -3407,7 +3453,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,
@@ -3475,7 +3522,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,

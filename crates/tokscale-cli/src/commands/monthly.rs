@@ -5,7 +5,7 @@ use crate::commands::render::{
 use crate::commands::shared::{
     auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
     emit_cursor_setup_warnings, emit_cursor_sync_warning, get_date_range_label,
-    has_cursor_usage_cache_for_report, setup_warnings_for_report, use_env_roots,
+    has_cursor_usage_cache_for_report, setup_warnings_for_report, use_env_roots, ReportEnvelope,
 };
 use crate::tui;
 use anyhow::Result;
@@ -91,6 +91,7 @@ pub(crate) fn run_monthly_report(
     super::shared::emit_health_summary(&report.health);
 
     let processing_time_ms = start.elapsed().as_millis();
+    emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     if json {
         #[derive(serde::Serialize)]
@@ -108,16 +109,14 @@ pub(crate) fn run_monthly_report(
 
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct MonthlyReportJson {
+        struct MonthlyReportData {
             entries: Vec<MonthlyUsageJson>,
             total_cost: f64,
-            processing_time_ms: u32,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            warnings: Vec<String>,
-            health: tokscale_core::source_health::HealthReport,
         }
 
-        let output = MonthlyReportJson {
+        let health = report.health.clone();
+        let report_processing_time_ms = report.processing_time_ms;
+        let data = MonthlyReportData {
             entries: report
                 .entries
                 .into_iter()
@@ -136,16 +135,12 @@ pub(crate) fn run_monthly_report(
                 })
                 .collect(),
             total_cost: report.total_cost,
-            processing_time_ms: report.processing_time_ms,
-            warnings: cursor_setup_warnings,
-            health: report.health.clone(),
         };
+        let output = ReportEnvelope::new(data, health, report_processing_time_ms as u64);
 
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
-
-        emit_cursor_setup_warnings(&cursor_setup_warnings);
         let term_width = crossterm::terminal::size()
             .map(|(w, _)| w as usize)
             .unwrap_or(120);
@@ -302,14 +297,14 @@ pub(crate) fn run_monthly_report(
             "\x1b[90m\n  Total Cost: \x1b[32m{}\x1b[90m\x1b[0m",
             format_currency(report.total_cost)
         );
+    }
 
-        if benchmark {
-            use colored::Colorize;
-            println!(
-                "{}",
-                format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
-            );
-        }
+    if benchmark {
+        use colored::Colorize;
+        eprintln!(
+            "{}",
+            format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
+        );
     }
 
     Ok(())

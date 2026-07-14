@@ -5,7 +5,7 @@ use crate::commands::render::{
 use crate::commands::shared::{
     auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
     emit_cursor_setup_warnings, emit_cursor_sync_warning, get_date_range_label,
-    has_cursor_usage_cache_for_report, setup_warnings_for_report, use_env_roots,
+    has_cursor_usage_cache_for_report, setup_warnings_for_report, use_env_roots, ReportEnvelope,
 };
 use crate::tui::{self, get_client_display_name};
 use anyhow::Result;
@@ -82,6 +82,7 @@ pub(crate) fn run_hourly_report(
     super::shared::emit_health_summary(&report.health);
 
     let processing_time_ms = start.elapsed().as_millis();
+    emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     if json {
         #[derive(serde::Serialize)]
@@ -101,16 +102,14 @@ pub(crate) fn run_hourly_report(
 
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct HourlyReportJson {
+        struct HourlyReportData {
             entries: Vec<HourlyUsageJson>,
             total_cost: f64,
-            processing_time_ms: u32,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            warnings: Vec<String>,
-            health: tokscale_core::source_health::HealthReport,
         }
 
-        let output = HourlyReportJson {
+        let health = report.health.clone();
+        let report_processing_time_ms = report.processing_time_ms;
+        let data = HourlyReportData {
             entries: report
                 .entries
                 .into_iter()
@@ -128,16 +127,12 @@ pub(crate) fn run_hourly_report(
                 })
                 .collect(),
             total_cost: report.total_cost,
-            processing_time_ms: report.processing_time_ms,
-            warnings: cursor_setup_warnings,
-            health: report.health.clone(),
         };
+        let output = ReportEnvelope::new(data, health, report_processing_time_ms as u64);
 
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         use comfy_table::{Cell, CellAlignment, Color, ContentArrangement, Table};
-
-        emit_cursor_setup_warnings(&cursor_setup_warnings);
         let term_width = crossterm::terminal::size()
             .map(|(w, _)| w as usize)
             .unwrap_or(120);
@@ -291,13 +286,14 @@ pub(crate) fn run_hourly_report(
             "Total:".bold(),
             format_currency(report.total_cost).green().bold()
         );
+    }
 
-        if benchmark {
-            println!(
-                "{}",
-                format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
-            );
-        }
+    if benchmark {
+        use colored::Colorize;
+        eprintln!(
+            "{}",
+            format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
+        );
     }
 
     Ok(())

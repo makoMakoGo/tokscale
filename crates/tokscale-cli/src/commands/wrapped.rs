@@ -59,6 +59,7 @@ const COLOR_SISYPHUS: Rgba<u8> = Rgba([0x00, 0xCE, 0xD1, 0xFF]);
 pub struct WrappedOptions {
     pub output: Option<String>,
     pub year: Option<String>,
+    pub home_dir: Option<String>,
     pub clients: Option<Vec<String>>,
     pub short: bool,
     pub include_agents: bool,
@@ -143,12 +144,12 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
     let effective_include_agents = agents_requested && has_agent_data;
 
     if agents_requested && opencode_enabled && !has_agent_data {
-        println!(
+        eprintln!(
             "{}",
             format!("\n  ⚠ No OpenCode agent data found for {}.", data.year).yellow()
         );
-        println!("{}", "    Falling back to clients view.".bright_black());
-        println!(
+        eprintln!("{}", "    Falling back to clients view.".bright_black());
+        eprintln!(
             "{}",
             "    Use --clients to always show clients view.\n".bright_black()
         );
@@ -202,8 +203,9 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let since = format!("{}-01-01", year);
     let until = format!("{}-12-31", year);
 
-    let has_cursor_cache = cursor::has_cursor_usage_cache();
-    let cursor_logged_in = cursor::is_cursor_logged_in();
+    let has_cursor_cache =
+        crate::commands::shared::has_cursor_usage_cache_for_report(&options.home_dir);
+    let cursor_logged_in = options.home_dir.is_none() && cursor::is_cursor_logged_in();
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
     if include_cursor && cursor_logged_in {
@@ -218,7 +220,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 } else {
                     "Cursor sync failed; using cached data"
                 };
-                println!("{}", format!("  {}: {}", prefix, error).yellow());
+                eprintln!("{}", format!("  {}: {}", prefix, error).yellow());
             }
         }
     }
@@ -258,14 +260,16 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .map_err(anyhow::Error::msg)?;
     let aggregated = load_aggregated_views_with_pricing(
         &ReportOptions {
-            home_dir: None,
-            use_env_roots: true,
+            home_dir: options.home_dir.clone(),
+            use_env_roots: crate::commands::shared::use_env_roots(&options.home_dir),
             clients: Some(graph_clients),
             since: Some(since),
             until: Some(until),
             year: Some(year.clone()),
             group_by: GroupBy::default(),
-            scanner_settings: crate::tui::settings::load_scanner_settings()?,
+            scanner_settings: crate::tui::settings::load_scanner_settings_for_home(
+                &options.home_dir,
+            )?,
         },
         views,
         Some(pricing.as_ref()),

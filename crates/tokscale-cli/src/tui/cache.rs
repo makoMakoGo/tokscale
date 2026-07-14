@@ -23,19 +23,30 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 35;
+const CACHE_SCHEMA_VERSION: u32 = 36;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheReportScope {
+    pub home_dir: Option<String>,
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
 }
 
 impl CacheReportScope {
-    pub fn new(since: Option<String>, until: Option<String>, year: Option<String>) -> Self {
-        Self { since, until, year }
+    pub fn new(
+        home_dir: Option<String>,
+        since: Option<String>,
+        until: Option<String>,
+        year: Option<String>,
+    ) -> Self {
+        Self {
+            home_dir,
+            since,
+            until,
+            year,
+        }
     }
 }
 
@@ -1389,6 +1400,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Cursor, ClientId::Claude]);
         let scope = CacheReportScope::new(
+            None,
             Some("2026-07-01".to_string()),
             Some("2026-07-11".to_string()),
             Some("2026".to_string()),
@@ -1458,7 +1470,7 @@ mod tests {
         );
         assert_eq!(
             ordered.field("reportScope").keys(),
-            vec!["since", "until", "year"]
+            vec!["homeDir", "since", "until", "year"]
         );
 
         let ordered_data = ordered.field("data");
@@ -1896,6 +1908,7 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         let filtered_scope = CacheReportScope::new(
+            None,
             Some("2026-05-01".to_string()),
             Some("2026-05-07".to_string()),
             None,
@@ -1917,6 +1930,17 @@ mod tests {
         assert!(matches!(
             load_cache(&clients, &GroupBy::Model, &filtered_scope),
             CacheResult::Fresh(_, _)
+        ));
+
+        let other_home_scope = CacheReportScope::new(
+            Some("/tmp/other-tokscale-home".to_string()),
+            Some("2026-05-01".to_string()),
+            Some("2026-05-07".to_string()),
+            None,
+        );
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &other_home_scope),
+            CacheResult::Miss
         ));
 
         match previous_home {

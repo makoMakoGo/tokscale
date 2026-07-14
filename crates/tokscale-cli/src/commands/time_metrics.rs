@@ -2,7 +2,7 @@ use crate::commands::render::LightSpinner;
 use crate::commands::shared::{
     auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
     emit_cursor_setup_warnings, emit_cursor_sync_warning, has_cursor_usage_cache_for_report,
-    setup_warnings_for_report, use_env_roots,
+    setup_warnings_for_report, use_env_roots, ReportEnvelope,
 };
 use crate::tui;
 use anyhow::Result;
@@ -15,6 +15,7 @@ pub(crate) fn run_time_metrics_report(
     since: Option<String>,
     until: Option<String>,
     year: Option<String>,
+    benchmark: bool,
     no_spinner: bool,
 ) -> Result<()> {
     use tokio::runtime::Runtime;
@@ -57,29 +58,27 @@ pub(crate) fn run_time_metrics_report(
         explicit_cursor_filter,
     );
     super::shared::emit_health_summary(&report.health);
+    emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     let m = &report.metrics;
 
     if json {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct TimeMetricsReportJson<'a> {
+        struct TimeMetricsData<'a> {
             metrics: &'a tokscale_core::TimeMetrics,
-            processing_time_ms: u32,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            warnings: Vec<String>,
-            health: &'a tokscale_core::source_health::HealthReport,
         }
 
-        let output = TimeMetricsReportJson {
+        let data = TimeMetricsData {
             metrics: &report.metrics,
-            processing_time_ms: report.processing_time_ms,
-            warnings: cursor_setup_warnings,
-            health: &report.health,
         };
+        let output = ReportEnvelope::new(
+            data,
+            report.health.clone(),
+            report.processing_time_ms as u64,
+        );
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        emit_cursor_setup_warnings(&cursor_setup_warnings);
         println!("Session Time Metrics");
         println!("====================");
         println!(
@@ -96,7 +95,10 @@ pub(crate) fn run_time_metrics_report(
         );
         println!("Max concurrent sessions: {}", m.max_concurrent_sessions);
         println!("Total sessions:          {}", m.session_count);
-        println!("Processing time:         {}ms", report.processing_time_ms);
+    }
+
+    if benchmark {
+        eprintln!("Processing time: {}ms", report.processing_time_ms);
     }
 
     Ok(())

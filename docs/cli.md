@@ -1,70 +1,120 @@
 # CLI usage
 
-This page documents the command surface most users need. Run commands from this
-fork with `bun run cli --` after building from source, or with `tokscale` when
-using an installed binary.
+Tokscale separates its interactive interface from report commands. Command
+meaning is determined entirely by argv; piping or redirecting output never
+selects a different feature.
 
-Use `--no-spinner` in automation so output stays deterministic.
+Run commands from a built checkout with `bun run cli --`, or use `tokscale`
+with an installed fork package. Pass `--no-spinner` to report commands in
+automation.
 
-## Report commands
+## Interactive TUI
 
 ```bash
-# Interactive TUI
 tokscale
 tokscale tui
-tokscale models
-tokscale monthly
-tokscale hourly
-
-# Table or JSON output
-tokscale --no-spinner --light
-tokscale models --no-spinner --json
-tokscale monthly --no-spinner --json
-tokscale hourly --no-spinner --json
-
-# Contribution graph export
-tokscale graph --no-spinner --output graph.json
-
-# Session time metrics
-tokscale time-metrics --no-spinner --json
+tokscale tui --tab models
+tokscale tui --client opencode,claude --week
+tokscale tui --theme blue --refresh 30
+tokscale tui --no-refresh
 ```
 
-The root command defaults to the interactive TUI when stdin/stdout are terminals
-and falls back to scriptable output otherwise.
+Bare `tokscale` is exactly the default TUI shortcut. Any TUI option requires
+the explicit `tui` subcommand. The TUI requires interactive stdin and stdout;
+for example, `tokscale | jq` fails and points to `tokscale models --json`
+instead of changing into a report command.
 
-The TUI captures normal mouse input for tabs, filters, and graph cells. Use your
-terminal's native modified selection gesture, usually `Shift+drag`, when you
-want to select and copy text from the TUI.
+Available `--tab` values are `overview`, `models`, `monthly`, `weekly`,
+`daily`, `hourly`, `stats`, `agents`, `issues`, and `usage`. Requesting the
+Usage tab while `usageTabEnabled` is false is an error; Tokscale does not
+silently open Overview.
 
-## Filters
+CLI options override settings for the current TUI process and do not rewrite
+`settings.json`. The TUI captures normal mouse input; use the terminal's
+modified selection gesture, usually `Shift+drag`, to select terminal text.
 
-Client filters accept comma-separated values or repeated flags:
+## Local reports
 
 ```bash
-tokscale --client opencode
-tokscale --client opencode,claude
-tokscale -c opencode -c claude
+# Human-readable tables
+tokscale models --no-spinner
+tokscale monthly --no-spinner
+tokscale hourly --no-spinner
+tokscale time-metrics --no-spinner
+
+# Structured output
+tokscale models --json
+tokscale monthly --json
+tokscale hourly --json
+tokscale time-metrics --json
 ```
 
-Date filters are inclusive and use the local timezone:
+These commands always produce reports, even when stdout is a terminal. Table
+output is the default; the removed `--light` mode is not an alias. To open a
+specific TUI view, use `tokscale tui --tab models` or the corresponding tab.
+
+All local JSON reports use the same top-level envelope:
+
+```json
+{
+  "data": {},
+  "health": {
+    "complete": true,
+    "cleanSources": 0,
+    "degradedSources": 0,
+    "rejectedRecords": 0,
+    "partialSources": 0,
+    "failedSources": 0,
+    "sourceDataBytes": 0,
+    "issues": []
+  },
+  "metadata": {
+    "processingTimeMs": 0
+  }
+}
+```
+
+Stdout contains only the table or JSON document. Progress, `--benchmark`
+timing, health summaries, warnings, and errors go to stderr. A degraded report
+still exits `0` when its payload was produced; inspect `health` when automation
+must react to rejected records or unavailable sources.
+
+## Source and date scope
+
+Local commands that read usage share the same source scope:
 
 ```bash
-tokscale --today
-tokscale --week
-tokscale --month
-tokscale --since 2026-01-01 --until 2026-01-31
-tokscale --year 2026
+tokscale models --client opencode
+tokscale models --client opencode,claude
+tokscale models -c opencode -c claude
+tokscale models --home /tmp/test-home --no-spinner
+tokscale tui --client codex --home /tmp/test-home
 ```
 
-For testing or alternate home roots, local report commands accept:
+Repeated client ids are deduplicated. Without a CLI filter, Tokscale uses
+`defaultClients` when configured and otherwise scans all local clients. An
+unknown client is an error. `--home` must be an existing directory and is
+authoritative: source discovery does not silently fall back to the process
+home or client-specific environment roots.
+
+Date boundaries are inclusive and use the local timezone:
 
 ```bash
-tokscale --home /tmp/test-home --no-spinner --json
+tokscale models --today
+tokscale models --week
+tokscale models --month
+tokscale models --year 2026
+tokscale models --since 2026-01-01
+tokscale models --until 2026-01-31
+tokscale models --since 2026-01-01 --until 2026-01-31
 ```
 
-## Grouping
+Choose one preset or a custom range. Combining presets, combining `--year`
+with `--since`/`--until`, or specifying `since > until` is invalid usage.
 
-`models` output supports these `--group-by` values:
+## Model grouping
+
+Only `models` owns `--group-by`:
 
 | Strategy | Effect |
 | --- | --- |
@@ -75,134 +125,114 @@ tokscale --home /tmp/test-home --no-spinner --json
 | `session,model` | One row per session id and model. |
 | `client,session,model` | One row per client, session id, and model. |
 
-Examples:
-
 ```bash
-tokscale models --no-spinner --json --group-by model
-tokscale models --no-spinner --json --group-by client,provider,model
-tokscale models --no-spinner --json --group-by session,model
+tokscale models --json --group-by model
+tokscale models --json --group-by client,provider,model
 ```
 
-## Inspecting local sources
+## Graph and source inspection
+
+`graph` always produces JSON:
+
+```bash
+tokscale graph --no-spinner
+tokscale graph --no-spinner --output graph.json
+```
+
+Without `--output`, the JSON document is stdout. With an output file, stdout
+contains only the final path and operational details use stderr.
+
+Inspect source locations and counts with:
 
 ```bash
 tokscale clients
 tokscale clients --json
+tokscale clients --client codex --home /tmp/test-home
 ```
-
-This shows scan locations and session counts for local clients.
 
 ## Cache maintenance
 
 ```bash
+tokscale cache warm
+tokscale cache warm --client codex
 tokscale cache prune
 ```
 
-This explicitly scans every source-message cache shard, removes shards whose
-source file no longer exists, and removes older parser revisions when a newer
-revision exists for the same source and parser. It prints the scanned, removed,
-and retained shard counts. Normal reports and TUI loads do not run this full
-cache traversal. If a shard cannot be read or decoded, or a selected shard
-cannot be removed, the command fails instead of reporting a partial success.
+`cache warm` explicitly builds the TUI aggregate cache for its source scope.
+Report commands never modify that aggregate cache. Source-message shards remain
+an internal derived cache and are written automatically while parsing.
+
+`cache prune` traverses source-message shards, removes orphaned sources and
+superseded parser revisions, and prints scanned, removed, and retained counts.
+Unreadable or unclassifiable shards make the explicit maintenance command fail
+instead of reporting partial success.
 
 ## Pricing lookup
 
 ```bash
-tokscale pricing claude-sonnet-4-5 --no-spinner
-tokscale pricing grok-code --provider openrouter --no-spinner
-tokscale pricing list-overrides --json
+tokscale pricing lookup claude-sonnet-4-5 --no-spinner
+tokscale pricing lookup grok-code --source openrouter --no-spinner
+tokscale pricing lookup claude-sonnet-4-5 --json
+tokscale pricing overrides
+tokscale pricing overrides --json
 ```
 
-Standalone pricing lookup is a catalog query. Local report pricing
-canonicalizes parsed model ids before lookup, but standalone
-`tokscale pricing <model>` does not replay arbitrary local source cleanup unless
-the command itself is explicitly changed later.
+`--source` selects a pricing catalog and is distinct from a model's provider.
+Standalone lookup is a catalog query; it does not replay arbitrary cleanup from
+a local source parser.
 
-## Integration commands
-
-Cursor:
+## Integration and usage commands
 
 ```bash
+# Cursor
 tokscale cursor login --name work
 tokscale cursor status
 tokscale cursor accounts --json
 tokscale cursor sync --json
 tokscale cursor switch work
 tokscale cursor logout --name work
-tokscale cursor logout --all --purge-cache
-```
 
-Codex account helpers:
-
-```bash
+# Codex accounts
 tokscale codex import --name work
 tokscale codex accounts --json
 tokscale codex switch work
 tokscale codex status --json
 tokscale codex remove work
-```
 
-Antigravity:
-
-```bash
+# Other local integrations
 tokscale antigravity status --json
 tokscale antigravity sync
-tokscale antigravity purge-cache
-```
-
-Trae:
-
-```bash
-tokscale trae login
-tokscale trae login --manual --variant solo
 tokscale trae status --json
 tokscale trae sync --since 30
-tokscale trae sync --since 30 --include-aux
-tokscale trae logout --variant solo
-```
-
-Warp/Oz subscription aggregate data:
-
-```bash
-tokscale warp login
-tokscale warp login --cookie
 tokscale warp status --json
 tokscale warp sync --json
-tokscale warp logout --purge-cache
-```
 
-## Subscription usage
-
-Subscription usage is separate from local token reports.
-
-```bash
+# Subscription quota, separate from local reports
 tokscale usage
 tokscale usage --json
 ```
 
-The TUI Usage tab is hidden unless `usageTabEnabled` is set in
-`settings.json`.
+Flags belong to the leaf command that executes them. They cannot be placed on
+the root or before the owning subcommand.
 
 ## Headless capture
 
-Headless capture currently supports Codex CLI:
+Headless capture requires `--` between Tokscale options and the child command:
 
 ```bash
-tokscale headless codex exec -m gpt-5 "review this change"
+tokscale headless codex --format jsonl -- codex exec -m gpt-5 "review this change"
 ```
 
-Manual redirect is also possible:
+This boundary prevents child flags such as `--json` or `--output` from being
+claimed by Tokscale. Set `TOKSCALE_HEADLESS_DIR` to change the capture root.
 
-```bash
-mkdir -p ~/.config/tokscale/headless/codex
-codex exec --json "review this change" \
-  > ~/.config/tokscale/headless/codex/review.jsonl
-```
+## Exit codes
 
-Set `TOKSCALE_HEADLESS_DIR` to customize the headless log root.
+| Code | Meaning |
+| --- | --- |
+| `0` | The command produced its result, including an incomplete local report. |
+| `1` | Internal, I/O, network, or authentication failure. |
+| `2` | Invalid CLI arguments, option combinations, or runtime environment. |
+| `130` | User interruption where supplied by the terminal or child process. |
 
-## Local-only surface
-
-This fork does not expose hosted Tokscale account or submission commands. The
-CLI surface is limited to local reports, cache-backed local integrations,
-subscription usage helpers, and source-build tooling for this fork.
+This fork does not expose hosted login, submission, or leaderboard commands.

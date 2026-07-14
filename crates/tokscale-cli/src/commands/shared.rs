@@ -1,4 +1,5 @@
-use crate::{claude_diagnostics, cursor, tui, ClientFlags};
+use crate::cli::ClientFlags;
+use crate::{claude_diagnostics, cursor, tui};
 use anyhow::Result;
 use std::path::PathBuf;
 use tokscale_core::ClientId;
@@ -301,120 +302,6 @@ pub(crate) fn emit_cursor_sync_warning(
     }
 }
 
-pub(crate) fn reject_unsupported_home_override(
-    home_dir: &Option<String>,
-    command: &str,
-) -> Result<()> {
-    if home_dir.is_some() {
-        return Err(anyhow::anyhow!(
-            "--home is currently supported only for local report commands. It is not supported for `{}`.",
-            command
-        ));
-    }
-
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct UsageParentFlag {
-    pub(crate) id: &'static str,
-    pub(crate) display: &'static str,
-}
-
-pub(crate) const USAGE_PARENT_FLAGS: [UsageParentFlag; 17] = [
-    UsageParentFlag {
-        id: "json",
-        display: "--json",
-    },
-    UsageParentFlag {
-        id: "light",
-        display: "--light",
-    },
-    UsageParentFlag {
-        id: "write_cache",
-        display: "--write-cache",
-    },
-    UsageParentFlag {
-        id: "no_write_cache",
-        display: "--no-write-cache",
-    },
-    UsageParentFlag {
-        id: "clients",
-        display: "--client",
-    },
-    UsageParentFlag {
-        id: "today",
-        display: "--today",
-    },
-    UsageParentFlag {
-        id: "week",
-        display: "--week",
-    },
-    UsageParentFlag {
-        id: "month",
-        display: "--month",
-    },
-    UsageParentFlag {
-        id: "since",
-        display: "--since",
-    },
-    UsageParentFlag {
-        id: "until",
-        display: "--until",
-    },
-    UsageParentFlag {
-        id: "year",
-        display: "--year",
-    },
-    UsageParentFlag {
-        id: "benchmark",
-        display: "--benchmark",
-    },
-    UsageParentFlag {
-        id: "group_by",
-        display: "--group-by",
-    },
-    UsageParentFlag {
-        id: "no_spinner",
-        display: "--no-spinner",
-    },
-    UsageParentFlag {
-        id: "theme",
-        display: "--theme",
-    },
-    UsageParentFlag {
-        id: "refresh",
-        display: "--refresh",
-    },
-    UsageParentFlag {
-        id: "debug",
-        display: "--debug",
-    },
-];
-
-pub(crate) fn reject_usage_parent_flags(matches: &clap::ArgMatches) -> Result<()> {
-    use clap::parser::ValueSource;
-
-    let flags = USAGE_PARENT_FLAGS
-        .into_iter()
-        .filter_map(|flag| {
-            matches
-                .value_source(flag.id)
-                .is_some_and(|source| source == ValueSource::CommandLine)
-                .then_some(flag.display)
-        })
-        .collect::<Vec<_>>();
-
-    if flags.is_empty() {
-        return Ok(());
-    }
-
-    Err(anyhow::anyhow!(
-        "`usage` does not support parent flag(s): {}. Use `tokscale usage` or `tokscale usage --json`.",
-        flags.join(", ")
-    ))
-}
-
 pub(crate) fn use_env_roots(home_dir: &Option<String>) -> bool {
     home_dir.is_none()
 }
@@ -447,16 +334,6 @@ pub(crate) fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientD
         );
         eprintln!("{}", format!("  {}", diagnostic.help).bright_black());
     }
-}
-
-pub(crate) fn ensure_home_supported_for_tui(home_dir: &Option<String>) -> Result<()> {
-    if home_dir.is_some() {
-        return Err(anyhow::anyhow!(
-            "--home is currently supported for local report commands only. Use `--json`, `--light`, `models`, `monthly`, or `graph` instead of TUI mode."
-        ));
-    }
-
-    Ok(())
 }
 
 pub(crate) fn build_date_filter(
@@ -595,4 +472,35 @@ pub(crate) fn emit_health_summary(health: &tokscale_core::source_health::HealthR
         )
         .yellow()
     );
+}
+
+/// Stable JSON envelope shared by every local report command.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReportEnvelope<T> {
+    pub(crate) data: T,
+    pub(crate) health: tokscale_core::source_health::HealthReport,
+    pub(crate) metadata: ReportMetadata,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReportMetadata {
+    pub(crate) processing_time_ms: u64,
+}
+
+impl<T> ReportEnvelope<T> {
+    pub(crate) fn new(
+        data: T,
+        health: tokscale_core::source_health::HealthReport,
+        processing_time_ms: impl Into<u64>,
+    ) -> Self {
+        Self {
+            data,
+            health,
+            metadata: ReportMetadata {
+                processing_time_ms: processing_time_ms.into(),
+            },
+        }
+    }
 }
