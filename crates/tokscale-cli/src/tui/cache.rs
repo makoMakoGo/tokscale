@@ -23,7 +23,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 30;
+const CACHE_SCHEMA_VERSION: u32 = 35;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +94,8 @@ struct CachedUsageData {
     total_cost: f64,
     current_streak: u32,
     longest_streak: u32,
+    #[serde(default)]
+    health: tokscale_core::source_health::HealthReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +243,7 @@ struct CachedUsageDataRef<'a> {
     total_cost: f64,
     current_streak: u32,
     longest_streak: u32,
+    health: &'a tokscale_core::source_health::HealthReport,
 }
 
 impl<'a> From<&'a UsageData> for CachedUsageDataRef<'a> {
@@ -255,6 +258,7 @@ impl<'a> From<&'a UsageData> for CachedUsageDataRef<'a> {
             total_cost: data.total_cost,
             current_streak: data.current_streak,
             longest_streak: data.longest_streak,
+            health: &data.health,
         }
     }
 }
@@ -811,6 +815,7 @@ impl TryFrom<CachedUsageData> for UsageData {
         let graph: Option<Result<GraphData, _>> = u.graph.map(|g| g.try_into());
 
         Ok(Self {
+            health: u.health,
             models: u.models.into_iter().map(|m| m.into()).collect(),
             agents: normalize_cached_agents(u.agents)?,
             daily: daily?,
@@ -909,30 +914,15 @@ pub fn load_cache(
 ) -> CacheResult {
     let cache_path = match cache_file() {
         Ok(path) => path,
-        Err(error) => {
-            eprintln!("tokscale: TUI cache path unavailable; cache miss: {error}");
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
     let cached: CachedTUIData = match File::open(&cache_path) {
         Ok(file) => match serde_json::from_reader(BufReader::new(file)) {
             Ok(cached) => cached,
-            Err(err) => {
-                eprintln!(
-                    "tokscale: invalid TUI cache JSON {}; cache miss: {err}",
-                    cache_path.display()
-                );
-                return CacheResult::Miss;
-            }
+            Err(_) => return CacheResult::Miss,
         },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return CacheResult::Miss,
-        Err(err) => {
-            eprintln!(
-                "tokscale: failed to open TUI cache {}: {err}",
-                cache_path.display()
-            );
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
 
     if cached.schema_version != CACHE_SCHEMA_VERSION {
@@ -940,13 +930,7 @@ pub fn load_cache(
     }
     let cached_group_by = match cached.group_by.parse::<GroupBy>() {
         Ok(value) => value,
-        Err(err) => {
-            eprintln!(
-                "tokscale: invalid TUI cache groupBy {}; cache miss: {err}",
-                cache_path.display()
-            );
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
     if &cached_group_by != group_by {
         return CacheResult::Miss;
@@ -962,21 +946,20 @@ pub fn load_cache(
     // Convert cached data to UsageData
     let data: UsageData = match cached.data.try_into() {
         Ok(d) => d,
-        Err(err) => {
-            eprintln!(
-                "tokscale: invalid TUI cache data {}; cache miss: {err}",
-                cache_path.display()
-            );
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
+
+    // Preserve the degraded report for immediate rendering, but force the
+    // caller to rescan. A locked database or interrupted read can recover
+    // without changing the source inventory fingerprint. Completed scans
+    // with record rejections remain fresh because their result is stable.
+    if data.health.requires_source_retry() {
+        return CacheResult::Stale(data);
+    }
 
     let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_millis() as u64,
-        Err(err) => {
-            eprintln!("tokscale: system clock is before UNIX_EPOCH while reading TUI cache: {err}");
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
     let Some(cache_age) = now.checked_sub(cached.timestamp) else {
         return CacheResult::Stale(data);
@@ -1330,6 +1313,7 @@ mod tests {
             .collect();
 
         UsageData {
+            health: Default::default(),
             models: vec![ModelUsage {
                 model: "claude-sonnet-4".to_string(),
                 provider: "anthropic".to_string(),
@@ -1445,6 +1429,7 @@ mod tests {
             value["data"]["graph"]["weeks"][0][0],
             serde_json::Value::Null
         );
+        assert_eq!(value["data"]["health"]["complete"], true);
         assert_eq!(
             tuple_array_keys(&value["data"]["daily"][0]["sourceBreakdown"]),
             vec!["claude", "cursor"]
@@ -1489,6 +1474,7 @@ mod tests {
                 "totalCost",
                 "currentStreak",
                 "longestStreak",
+                "health",
             ]
         );
         let ordered_model = ordered_data.field("models").element(0);
@@ -1729,6 +1715,7 @@ mod tests {
             report_scope: CacheReportScope::default(),
             source_inventory_signature: test_signature(),
             data: CachedUsageData {
+                health: Default::default(),
                 models: Vec::new(),
                 agents: vec![
                     cached_agent("Sisyphus", "opencode", u64::MAX),
@@ -1974,6 +1961,83 @@ mod tests {
         match previous_home {
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn complete_rejections_remain_a_fresh_tui_cache_hit() {
+        let temp_dir = TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
+        let clients = make_filters(&[ClientId::Zed]);
+        let scope = CacheReportScope::default();
+        let data = UsageData {
+            health: tokscale_core::source_health::HealthReport {
+                complete: false,
+                clean_sources: 0,
+                degraded_sources: 1,
+                rejected_records: 1,
+                partial_sources: 0,
+                failed_sources: 0,
+                source_data_bytes: 4_096,
+                issues: vec![tokscale_core::source_health::HealthIssueReport {
+                    level: "warning".to_string(),
+                    source: "zed".to_string(),
+                    issue: "missing-model".to_string(),
+                    affected_sources: 1,
+                    rejected_records: Some(1),
+                    handling: "record-skipped".to_string(),
+                }],
+            },
+            ..Default::default()
+        };
+        save_cached_data(&data, &clients, &GroupBy::Model, &scope, test_signature()).unwrap();
+
+        let result = load_cache(&clients, &GroupBy::Model, &scope);
+
+        assert!(matches!(result, CacheResult::Fresh(_, _)));
+    }
+
+    #[test]
+    #[serial]
+    fn source_failures_make_recent_tui_cache_stale_for_immediate_retry() {
+        let temp_dir = TempDir::new().unwrap();
+        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
+        let clients = make_filters(&[ClientId::OpenCode]);
+        let scope = CacheReportScope::default();
+
+        for (issue, handling, partial_sources, failed_sources) in [
+            ("partial-source", "confirmed-data-kept", 1, 0),
+            ("source-unavailable", "source-skipped", 0, 1),
+        ] {
+            let data = UsageData {
+                health: tokscale_core::source_health::HealthReport {
+                    complete: false,
+                    clean_sources: 0,
+                    degraded_sources: 0,
+                    rejected_records: 0,
+                    partial_sources,
+                    failed_sources,
+                    source_data_bytes: 8_192,
+                    issues: vec![tokscale_core::source_health::HealthIssueReport {
+                        level: "error".to_string(),
+                        source: "opencode".to_string(),
+                        issue: issue.to_string(),
+                        affected_sources: 1,
+                        rejected_records: None,
+                        handling: handling.to_string(),
+                    }],
+                },
+                ..Default::default()
+            };
+            save_cached_data(&data, &clients, &GroupBy::Model, &scope, test_signature()).unwrap();
+
+            let result = load_cache(&clients, &GroupBy::Model, &scope);
+
+            assert!(
+                matches!(result, CacheResult::Stale(_)),
+                "{issue} health must force a retry"
+            );
         }
     }
 

@@ -66,6 +66,13 @@ fn background_data_loader(
     DataLoader::with_filters(None, since, until, year)
 }
 
+fn should_force_source_reload(
+    explicitly_requested: bool,
+    health: &tokscale_core::source_health::HealthReport,
+) -> bool {
+    explicitly_requested || health.requires_source_retry()
+}
+
 /// Background loader result: a full reload, or proof that no source changed.
 enum BackgroundLoad {
     Unchanged,
@@ -417,7 +424,8 @@ fn run_loop_with_background(
             app.needs_reload = false;
             app.set_background_loading(true);
 
-            let force = std::mem::take(&mut app.reload_force);
+            let force =
+                should_force_source_reload(std::mem::take(&mut app.reload_force), &app.data.health);
             let last_digest = app.last_source_digest;
             let tx = bg_tx.clone();
             let clients = app.scan_clients();
@@ -559,6 +567,25 @@ mod tests {
         assert!(cached_data.is_none());
         assert!(needs_background_load);
         assert!(digest.is_none());
+    }
+
+    #[test]
+    fn degraded_health_forces_reload_even_when_inventory_is_unchanged() {
+        let health = tokscale_core::source_health::HealthReport {
+            failed_sources: 1,
+            complete: false,
+            ..Default::default()
+        };
+
+        assert!(should_force_source_reload(false, &health));
+        assert!(!should_force_source_reload(
+            false,
+            &tokscale_core::source_health::HealthReport::default()
+        ));
+        assert!(should_force_source_reload(
+            true,
+            &tokscale_core::source_health::HealthReport::default()
+        ));
     }
 
     #[test]

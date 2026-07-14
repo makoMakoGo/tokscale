@@ -125,6 +125,7 @@ impl AggregationEngine {
             let entries = finish_month_map(map);
             let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
             MonthlyReport {
+                health: Default::default(),
                 entries,
                 total_cost: clean_total_cost(total_cost),
                 processing_time_ms: 0,
@@ -135,6 +136,7 @@ impl AggregationEngine {
             let entries = finish_hour_map(map);
             let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
             HourlyReport {
+                health: Default::default(),
                 entries,
                 total_cost: clean_total_cost(total_cost),
                 processing_time_ms: 0,
@@ -161,6 +163,7 @@ impl AggregationEngine {
         };
 
         AggregatedViews {
+            health: crate::source_health::DataHealth::default(),
             tui_usage,
             model_report,
             monthly_report,
@@ -182,6 +185,7 @@ fn wrap_model_report(entries: Vec<crate::ModelUsage>) -> ModelReport {
     let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
     ModelReport {
+        health: Default::default(),
         entries,
         total_input,
         total_output,

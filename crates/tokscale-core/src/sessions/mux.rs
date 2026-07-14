@@ -4,6 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, ScannedSource};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use std::path::Path;
 pub struct MuxSessionUsage {
     pub version: Option<u32>,
     #[serde(rename = "byModel")]
-    pub by_model: Option<HashMap<String, MuxModelUsage>>,
+    pub by_model: Option<HashMap<String, serde_json::Value>>,
     #[serde(rename = "lastRequest")]
     pub last_request: Option<MuxLastRequest>,
 }
@@ -42,7 +43,7 @@ pub struct MuxLastRequest {
 
 /// Parse a mux session-usage.json file.
 /// Returns one UnifiedMessage per model entry in byModel.
-pub fn parse_mux_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
 
@@ -81,7 +82,7 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
 
     let by_model = match usage.by_model {
         Some(m) => m,
-        None => return Ok(vec![]),
+        None => return Ok(ScannedSource::default()),
     };
 
     let mut by_model = by_model.into_iter().collect::<Vec<_>>();
@@ -92,68 +93,97 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
         .as_ref()
         .and_then(|request| request.timestamp)
         .filter(|timestamp| *timestamp > 0);
-    let mut messages = Vec::new();
-    for (model_key, model_usage) in by_model {
-        let input = bucket_tokens(path, &model_key, "input", &model_usage.input)?;
-        let cached = bucket_tokens(path, &model_key, "cached", &model_usage.cached)?;
-        let cache_create =
-            bucket_tokens(path, &model_key, "cacheCreate", &model_usage.cache_create)?;
-        let output = bucket_tokens(path, &model_key, "output", &model_usage.output)?;
-        let reasoning = bucket_tokens(path, &model_key, "reasoning", &model_usage.reasoning)?;
+    let mut scanned = ScannedSource::default();
+    for (model_key, model_value) in by_model {
+        let model_usage = match serde_json::from_value::<MuxModelUsage>(model_value) {
+            Ok(model_usage) => model_usage,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let tokens = (|| -> SessionParseResult<TokenBreakdown> {
+            Ok(TokenBreakdown {
+                input: bucket_tokens(path, &model_key, "input", &model_usage.input)?,
+                cache_read: bucket_tokens(path, &model_key, "cached", &model_usage.cached)?,
+                cache_write: bucket_tokens(
+                    path,
+                    &model_key,
+                    "cacheCreate",
+                    &model_usage.cache_create,
+                )?,
+                output: bucket_tokens(path, &model_key, "output", &model_usage.output)?,
+                reasoning: bucket_tokens(path, &model_key, "reasoning", &model_usage.reasoning)?,
+            })
+        })();
+        let tokens: TokenBreakdown = match tokens {
+            Ok(tokens) => tokens,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
-        if input == 0 && cached == 0 && cache_create == 0 && output == 0 && reasoning == 0 {
+        let Some(token_total) = tokens.checked_total() else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        if token_total == 0 {
             continue;
         }
 
-        let timestamp = timestamp.ok_or_else(|| {
-            invalid_at_path(
-                path,
-                "validate Mux usage timestamp",
-                "token-bearing session is missing a positive lastRequest.timestamp",
-            )
-        })?;
+        let Some(timestamp) = timestamp else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        };
 
         let dedup_key = crate::sessions::dedup_hash_str(&format!("mux:{session_id}:{model_key}"));
 
-        let (raw_provider, raw_model_id) = model_key.split_once(':').ok_or_else(|| {
-            invalid_at_path(
-                path,
-                "validate Mux model key",
-                format!("token-bearing model key `{model_key}` must be `provider:model`"),
-            )
-        })?;
+        let Some((raw_provider, raw_model_id)) = model_key.split_once(':') else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
         let raw_provider = raw_provider.trim();
         let raw_model_id = raw_model_id.trim();
-        if raw_provider.is_empty() || raw_model_id.is_empty() {
-            return Err(invalid_at_path(
-                path,
-                "validate Mux model key",
-                format!("token-bearing model key `{model_key}` has an empty provider or model"),
-            ));
+        if raw_provider.is_empty() {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingProvider);
+            continue;
+        }
+        if raw_model_id.is_empty() {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
         }
         let provider = provider_identity::canonical_provider(raw_provider)
             .unwrap_or_else(|| raw_provider.to_string());
         let model_id = model_aliases::canonicalize_source_model_id(raw_model_id)
             .unwrap_or_else(|| raw_model_id.to_string());
 
-        messages.push(UnifiedMessage::new_with_dedup(
+        scanned.messages.push(UnifiedMessage::new_with_dedup(
             "mux",
             model_id,
             provider,
             session_id.clone(),
             timestamp,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read: cached,
-                cache_write: cache_create,
-                reasoning,
-            },
+            tokens,
             0.0,
             Some(dedup_key),
         ));
     }
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn bucket_tokens(
@@ -192,7 +222,7 @@ mod tests {
     use super::*;
 
     fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_mux_file(path).unwrap()
+        super::parse_mux_file(path).unwrap().messages
     }
     use std::io::Write;
     use tempfile::TempDir;
@@ -272,6 +302,27 @@ mod tests {
     }
 
     #[test]
+    fn mixed_model_entries_reject_bad_record_and_keep_later_usage() {
+        let file = write_temp_json(
+            r#"{
+                "version": 1,
+                "byModel": {
+                    "anthropic:claude-sonnet-4": {"input": {"tokens": 10}},
+                    "broken": "not-an-object",
+                    "openai:gpt-5": {"output": {"tokens": 30}}
+                },
+                "lastRequest": {"timestamp": 1780000000000}
+            }"#,
+        );
+
+        let scanned = super::parse_mux_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
     fn test_parse_empty_by_model() {
         let json = r#"{ "version": 1, "byModel": {} }"#;
         let f = write_temp_json(json);
@@ -320,9 +371,13 @@ mod tests {
             "lastRequest": { "timestamp": 1700000000000 }
         }"#;
         let f = write_temp_json(json);
-        let error = super::parse_mux_file(f.path()).unwrap_err();
-        assert_eq!(error.operation(), "validate Mux model key");
-        assert_eq!(error.path(), Some(f.path()));
+        let scanned = super::parse_mux_file(f.path()).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -352,9 +407,42 @@ mod tests {
             "lastRequest": { "timestamp": 1700000000000 }
         }"#;
         let f = write_temp_json(json);
-        let error = super::parse_mux_file(f.path()).unwrap_err();
-        assert_eq!(error.operation(), "validate Mux token bucket");
-        assert_eq!(error.path(), Some(f.path()));
+        let scanned = super::parse_mux_file(f.path()).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn overflowing_model_tokens_are_malformed_and_sibling_model_survives() {
+        let json = r#"{
+            "version": 1,
+            "byModel": {
+                "openai:gpt-bad": {
+                    "input": { "tokens": 9223372036854775807 },
+                    "output": { "tokens": 1 }
+                },
+                "openai:gpt-good": {
+                    "output": { "tokens": 30 }
+                }
+            },
+            "lastRequest": { "timestamp": 1700000000000 }
+        }"#;
+        let f = write_temp_json(json);
+
+        let scanned = super::parse_mux_file(f.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gpt-good");
+        assert_eq!(scanned.messages[0].tokens.output, 30);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -460,12 +548,24 @@ mod tests {
 
     #[test]
     fn token_usage_without_timestamp_is_rejected() {
-        let f =
-            write_temp_json(r#"{"version":1,"byModel":{"openai:gpt-5":{"input":{"tokens":1}}}}"#);
+        let f = write_temp_json(
+            r#"{
+                "version":1,
+                "byModel":{
+                    "openai:gpt-5":{"input":{"tokens":1}},
+                    "anthropic:claude-zero":{"input":{"tokens":0}}
+                }
+            }"#,
+        );
 
-        let error = super::parse_mux_file(f.path()).unwrap_err();
+        let scanned = super::parse_mux_file(f.path()).unwrap();
 
-        assert_eq!(error.operation(), "validate Mux usage timestamp");
-        assert_eq!(error.path(), Some(f.path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
+        assert!(scanned.interrupted.is_none());
     }
 }

@@ -172,6 +172,7 @@ fn current_count_label(app: &App) -> String {
         ),
         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
+        Tab::Issues => String::new(),
         Tab::Stats | Tab::Usage => String::new(),
     }
 }
@@ -183,6 +184,15 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
 
 fn help_row_line(app: &App) -> Line<'static> {
     let is_very_narrow = app.is_very_narrow();
+
+    if app.current_tab == Tab::Issues {
+        let text = if is_very_narrow {
+            "↑↓·←→·r·e·q"
+        } else {
+            "↑↓ scroll • ←→/tab view • [r:refresh local] • e • q"
+        };
+        return Line::from(Span::styled(text, Style::default().fg(app.theme.muted)));
+    }
 
     if app.current_tab == Tab::Usage {
         let local_auto = if app.auto_refresh {

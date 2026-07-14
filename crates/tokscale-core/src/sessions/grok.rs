@@ -9,6 +9,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_string, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
 use crate::{model_aliases, token_imputation};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
@@ -23,6 +24,13 @@ struct GrokMetadata {
     model_id: Option<String>,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
+}
+
+#[derive(Debug)]
+struct GrokMetadataScan {
+    metadata: GrokMetadata,
+    rejections: RejectionSummary,
+    interrupted: Option<SourceFailure>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,7 +74,15 @@ impl ActiveTurn {
     }
 
     fn into_pending_message(self) -> SessionParseResult<Option<PendingGrokMessage>> {
-        let token_delta = self.max_total.saturating_sub(self.baseline_total);
+        let token_delta = self
+            .max_total
+            .checked_sub(self.baseline_total)
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate cumulative token delta",
+                    "Grok cumulative token delta exceeds i64",
+                )
+            })?;
         if token_delta <= 0 {
             return Ok(None);
         }
@@ -87,12 +103,14 @@ impl ActiveTurn {
     }
 }
 
-pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource> {
     if path.file_name().and_then(|name| name.to_str()) != Some("updates.jsonl") {
-        return Ok(Vec::new());
+        return Ok(ScannedSource::default());
     }
 
-    let metadata = read_metadata(path)?;
+    let metadata_scan = read_metadata(path);
+    let metadata = metadata_scan.metadata;
+    let related_interruption = metadata_scan.interrupted;
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
@@ -103,18 +121,73 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<Vec<UnifiedMes
     let mut last_total_timestamp: Option<i64> = None;
     let mut active_turn: Option<ActiveTurn> = None;
     let mut turn_index = 0usize;
+    let mut scanned = ScannedSource {
+        rejections: metadata_scan.rejections,
+        ..ScannedSource::default()
+    };
+    let mut aggregate_replay_allowed = true;
 
-    for line in BufReader::new(file).lines() {
-        let line =
-            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
 
-        let value = serde_json::from_str::<Value>(&line)
-            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
+        let value = match serde_json::from_str::<Value>(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "decode JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
 
-        if let Some(model_id) = extract_model_id(&value) {
+        let record_model = extract_model_id(&value);
+        let record_session = extract_session_id(&value);
+        let is_user_chunk = is_user_message_chunk(&value);
+        let total_tokens = match extract_total_tokens(&value) {
+            Ok(total_tokens) => total_tokens,
+            Err(error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                scanned.interrupted = Some(SourceFailure::new(
+                    error.operation(),
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
+        if !is_user_chunk && total_tokens.is_none() {
+            continue;
+        }
+        let Some(timestamp) = extract_timestamp_ms(&value).filter(|timestamp| *timestamp > 0)
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            scanned.interrupted = Some(SourceFailure::new(
+                "validate usage timestamp",
+                format!(
+                    "{} line {line_number}: Grok state-bearing update is missing a timestamp",
+                    path.display()
+                ),
+            ));
+            break;
+        };
+        if let Some(model_id) = record_model {
             current_model = Some(model_id);
             if let Some(turn) = active_turn.as_mut() {
                 if turn.model_id.is_none() {
@@ -122,27 +195,31 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<Vec<UnifiedMes
                 }
             }
         }
-        if let Some(id) = extract_session_id(&value) {
+        if let Some(id) = record_session {
             session_id = Some(id);
         }
-
-        let is_user_chunk = is_user_message_chunk(&value);
-        let total_tokens = extract_total_tokens(&value)?;
-        if !is_user_chunk && total_tokens.is_none() {
-            continue;
-        }
-        let timestamp = extract_timestamp_ms(&value)
-            .filter(|timestamp| *timestamp > 0)
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate usage timestamp",
-                    "Grok usage event is missing a timestamp",
-                )
-            })?;
         if is_user_chunk {
             if let Some(turn) = active_turn.take() {
-                if let Some(message) = turn.into_pending_message()? {
-                    pending_messages.push(message);
+                match turn.into_pending_message() {
+                    Ok(Some(message)) => pending_messages.push(message),
+                    Ok(None) => {}
+                    Err(error) => {
+                        if error.operation() == "validate usage model" {
+                            scanned
+                                .rejections
+                                .record(RecordRejectionReason::MissingModel);
+                            aggregate_replay_allowed = false;
+                        } else {
+                            scanned
+                                .rejections
+                                .record(RecordRejectionReason::MalformedRecord);
+                            scanned.interrupted = Some(SourceFailure::new(
+                                error.operation(),
+                                format!("{} line {line_number}: {error}", path.display()),
+                            ));
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -159,10 +236,15 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<Vec<UnifiedMes
             continue;
         };
         if total_tokens < 0 {
-            return Err(SessionParseError::invalid(
-                "validate total tokens",
-                format!("Grok totalTokens must be non-negative, got {total_tokens}"),
-            ));
+            let detail = format!(
+                "{} line {line_number}: Grok totalTokens must be non-negative, got {total_tokens}",
+                path.display()
+            );
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            scanned.interrupted = Some(SourceFailure::new("validate total tokens", detail));
+            break;
         }
 
         match last_total {
@@ -200,13 +282,32 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<Vec<UnifiedMes
         }
     }
 
-    if let Some(turn) = active_turn {
-        if let Some(message) = turn.into_pending_message()? {
-            pending_messages.push(message);
+    if scanned.interrupted.is_none() {
+        if let Some(turn) = active_turn {
+            match turn.into_pending_message() {
+                Ok(Some(message)) => pending_messages.push(message),
+                Ok(None) => {}
+                Err(error) => {
+                    if error.operation() == "validate usage model" {
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingModel);
+                        aggregate_replay_allowed = false;
+                    } else {
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MalformedRecord);
+                        scanned.interrupted = Some(SourceFailure::new(
+                            error.operation(),
+                            format!("{}: {error}", path.display()),
+                        ));
+                    }
+                }
+            }
         }
     }
 
-    if pending_messages.is_empty() {
+    if pending_messages.is_empty() && scanned.interrupted.is_none() && aggregate_replay_allowed {
         if let Some(total_tokens) = last_total.filter(|tokens| *tokens > 0) {
             let timestamp = last_total_timestamp.ok_or_else(|| {
                 SessionParseError::invalid(
@@ -221,39 +322,83 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<Vec<UnifiedMes
                 model_id: current_model,
                 turn_index: 0,
             };
-            if let Some(message) = aggregate_turn.into_pending_message()? {
-                pending_messages.push(message);
+            match aggregate_turn.into_pending_message() {
+                Ok(Some(message)) => pending_messages.push(message),
+                Ok(None) => {}
+                Err(error) => {
+                    if error.operation() == "validate usage model" {
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingModel);
+                    } else {
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MalformedRecord);
+                        scanned.interrupted = Some(SourceFailure::new(
+                            error.operation(),
+                            format!("{}: {error}", path.display()),
+                        ));
+                    }
+                }
             }
         }
     }
 
-    if pending_messages.is_empty() {
-        return Ok(Vec::new());
+    if scanned.interrupted.is_none() {
+        scanned.interrupted = related_interruption;
     }
-    let session_id = session_id.ok_or_else(|| {
-        SessionParseError::invalid(
-            "validate usage session",
-            "Grok usage with positive tokens is missing a non-empty session identifier",
-        )
-    })?;
-    Ok(build_messages(metadata, session_id, pending_messages))
+
+    if pending_messages.is_empty() {
+        return Ok(scanned);
+    }
+    let Some(session_id) = session_id else {
+        for _ in pending_messages {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+        }
+        return Ok(scanned);
+    };
+    scanned.messages = build_messages(metadata, session_id, pending_messages)?;
+    Ok(scanned)
 }
 
 fn build_messages(
     metadata: GrokMetadata,
     session_id: String,
     pending_messages: Vec<PendingGrokMessage>,
-) -> Vec<UnifiedMessage> {
+) -> SessionParseResult<Vec<UnifiedMessage>> {
     let totals: Vec<i64> = pending_messages
         .iter()
         .map(|message| message.token_delta)
         .collect();
+    totals
+        .iter()
+        .try_fold(0_i64, |total, delta| total.checked_add(*delta))
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate cumulative token deltas",
+                "Grok cumulative token deltas exceed i64",
+            )
+        })?;
     let token_rows = token_imputation::impute_total_only_token_breakdowns(&totals);
 
-    pending_messages
+    let messages = pending_messages
         .into_iter()
         .zip(token_rows)
-        .map(|(pending, tokens)| {
+        .map(|(pending, tokens)| -> SessionParseResult<UnifiedMessage> {
+            let token_total = tokens.checked_total().ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate imputed token breakdown",
+                    "Grok imputed token total exceeds i64",
+                )
+            })?;
+            if token_total != pending.token_delta {
+                return Err(SessionParseError::invalid(
+                    "validate imputed token breakdown",
+                    "Grok imputed token total does not match its cumulative delta",
+                ));
+            }
             let mut message = UnifiedMessage::new_with_dedup(
                 CLIENT_ID,
                 pending.model_id,
@@ -272,12 +417,13 @@ fn build_messages(
                 metadata.workspace_label.clone(),
             );
             message.is_turn_start = true;
-            message
+            Ok(message)
         })
-        .collect()
+        .collect::<SessionParseResult<Vec<_>>>()?;
+    Ok(messages)
 }
 
-fn read_metadata(path: &Path) -> SessionParseResult<GrokMetadata> {
+fn read_metadata(path: &Path) -> GrokMetadataScan {
     let session_dir = path.parent();
     let workspace_key = session_dir
         .and_then(|dir| dir.parent())
@@ -294,59 +440,86 @@ fn read_metadata(path: &Path) -> SessionParseResult<GrokMetadata> {
         workspace_label,
     };
 
+    let mut rejections = RejectionSummary::default();
     if let Some(summary_path) = sibling(path, "summary.json") {
-        read_summary_metadata(&summary_path, &mut metadata)?;
+        read_summary_metadata(&summary_path, &mut metadata, &mut rejections);
     }
-    if let Some(events_path) = sibling(path, "events.jsonl") {
-        read_events_metadata(&events_path, &mut metadata)?;
-    }
+    let interrupted = sibling(path, "events.jsonl")
+        .and_then(|events_path| read_events_metadata(&events_path, &mut metadata, &mut rejections));
 
-    Ok(metadata)
+    GrokMetadataScan {
+        metadata,
+        rejections,
+        interrupted,
+    }
 }
 
-fn read_summary_metadata(path: &Path, metadata: &mut GrokMetadata) -> SessionParseResult<()> {
+fn read_summary_metadata(
+    path: &Path,
+    metadata: &mut GrokMetadata,
+    rejections: &mut RejectionSummary,
+) {
     let data = match std::fs::read(path) {
         Ok(data) => data,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(SessionParseError::at_path(
-                path,
-                "read related summary",
-                error,
-            ))
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_error) => {
+            rejections.record(RecordRejectionReason::MalformedRecord);
+            return;
         }
     };
-    let value = serde_json::from_slice::<Value>(&data)
-        .map_err(|error| SessionParseError::at_path(path, "decode related summary", error))?;
+    let value = match serde_json::from_slice::<Value>(&data) {
+        Ok(value) => value,
+        Err(_error) => {
+            rejections.record(RecordRejectionReason::MalformedRecord);
+            return;
+        }
+    };
 
     if metadata.model_id.is_none() {
         metadata.model_id = extract_string(value.get("current_model_id"))
             .or_else(|| extract_string(value.get("model_id")))
             .map(|model| canonicalize_grok_model(&model));
     }
-
-    Ok(())
 }
 
-fn read_events_metadata(path: &Path, metadata: &mut GrokMetadata) -> SessionParseResult<()> {
+fn read_events_metadata(
+    path: &Path,
+    metadata: &mut GrokMetadata,
+    rejections: &mut RejectionSummary,
+) -> Option<SourceFailure> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
-            return Err(SessionParseError::at_path(
-                path,
-                "open related events",
-                error,
-            ))
+            let detail = format!("{}: open related events failed: {error}", path.display());
+            rejections.record(RecordRejectionReason::MalformedRecord);
+            return Some(SourceFailure::new("open related events", detail));
         }
     };
 
-    for line in BufReader::new(file).lines().take(500) {
-        let line = line
-            .map_err(|error| SessionParseError::at_path(path, "read related events line", error))?;
-        let value = serde_json::from_str::<Value>(&line).map_err(|error| {
-            SessionParseError::at_path(path, "decode related events line", error)
-        })?;
+    for (line_index, line) in BufReader::new(file).lines().take(500).enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                let detail = format!(
+                    "{} line {line_number}: read related events line failed: {error}",
+                    path.display()
+                );
+                rejections.record(RecordRejectionReason::MalformedRecord);
+                return Some(SourceFailure::new("read related events line", detail));
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = match serde_json::from_str::<Value>(&line) {
+            Ok(value) => value,
+            Err(_error) => {
+                rejections.record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
         if metadata.model_id.is_none() {
             metadata.model_id =
@@ -357,12 +530,8 @@ fn read_events_metadata(path: &Path, metadata: &mut GrokMetadata) -> SessionPars
                 metadata.session_id = Some(session_id);
             }
         }
-
-        if metadata.model_id.is_some() && metadata.session_id.is_some() {
-            break;
-        }
     }
-    Ok(())
+    None
 }
 
 fn sibling(path: &Path, file_name: &str) -> Option<PathBuf> {
@@ -499,7 +668,7 @@ mod tests {
     use super::*;
 
     fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_grok_updates_file(path).unwrap()
+        super::parse_grok_updates_file(path).unwrap().messages
     }
 
     fn write_fixture(
@@ -520,6 +689,73 @@ mod tests {
             std::fs::write(session_dir.join("summary.json"), summary_json).unwrap();
         }
         (temp, updates_path)
+    }
+
+    fn write_events_fixture(
+        updates_jsonl: &str,
+        events_jsonl: &str,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let (temp, updates_path) = write_fixture(updates_jsonl, None);
+        std::fs::write(updates_path.with_file_name("events.jsonl"), events_jsonl).unwrap();
+        (temp, updates_path)
+    }
+
+    #[test]
+    fn malformed_summary_keeps_self_contained_usage_and_reports_rejection() {
+        let (_temp, path) = write_fixture(
+            r#"{"sessionId":"session-1","model":"grok-composer-2.5-fast","totalTokens":10,"timestamp":1700000000000}"#,
+            Some("not-json"),
+        );
+
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert!(scanned.interrupted.is_none());
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+    }
+
+    #[test]
+    fn malformed_events_record_keeps_metadata_from_later_records() {
+        let (_temp, path) = write_events_fixture(
+            r#"{"totalTokens":10,"timestamp":1700000000000}"#,
+            r#"{"model_id":"grok-composer-2.5-fast"}
+not-json
+{"session_id":"session-from-events"}"#,
+        );
+
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "composer-2.5-fast");
+        assert_eq!(
+            scanned.messages[0].session_id.as_ref(),
+            "session-from-events"
+        );
+        assert!(scanned.interrupted.is_none());
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+    }
+
+    #[test]
+    fn events_read_failure_keeps_usage_and_marks_the_scan_partial() {
+        let (temp, path) = write_fixture(
+            r#"{"sessionId":"session-1","model":"grok-composer-2.5-fast","totalTokens":10,"timestamp":1700000000000}"#,
+            None,
+        );
+        let events_path = path.with_file_name("events.jsonl");
+        std::fs::create_dir(&events_path).unwrap();
+
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        let failure = scanned.interrupted.expect("events read must be partial");
+        assert_eq!(failure.operation, "read related events line");
+        assert!(failure.message.contains(&events_path.display().to_string()));
+        assert_eq!(scanned.rejections.total(), 1);
+        drop(temp);
     }
 
     #[test]
@@ -550,6 +786,87 @@ mod tests {
         assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
         assert_eq!(messages[1].tokens, expected_tokens[1]);
         assert_eq!(messages[1].timestamp, 1700000005000);
+    }
+
+    #[test]
+    fn malformed_total_interrupts_the_active_turn_and_ignores_suffix() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-composer-2.5-fast"}},"_meta":{"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":10,"agentTimestampMs":1700000001000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":"bad","agentTimestampMs":1700000001500}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-composer-2.5-fast"}},"_meta":{"agentTimestampMs":1700000002000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":30,"agentTimestampMs":1700000003000}}}"#,
+            None,
+        );
+
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_some());
+    }
+
+    #[test]
+    fn missing_model_turn_is_rejected_without_losing_baseline_or_later_usage() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"available_commands_update"},"_meta":{"totalTokens":100,"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":150,"agentTimestampMs":1700000001000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk"},"_meta":{"agentTimestampMs":1700000002000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-composer-2.5-fast"}},"_meta":{"agentTimestampMs":1700000003000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":200,"agentTimestampMs":1700000004000}}}"#,
+            None,
+        );
+
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(
+            scanned.messages[0].tokens,
+            crate::token_imputation::impute_total_only_token_breakdown(50)
+        );
+        assert_eq!(scanned.messages[0].timestamp, 1700000004000);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn state_polluting_bad_update_keeps_prefix_marks_partial_and_ignores_suffix() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-composer-2.5-fast"}},"_meta":{"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":10,"agentTimestampMs":1700000001000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk"},"_meta":{"agentTimestampMs":1700000002000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":30,"agentTimestampMs":1700000003000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk"},"_meta":{"agentTimestampMs":1700000004000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":"bad","agentTimestampMs":1700000005000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":80,"agentTimestampMs":1700000006000}}}"#,
+            None,
+        );
+
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].timestamp, 1700000001000);
+        assert_eq!(scanned.messages[1].timestamp, 1700000003000);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_some());
+    }
+
+    #[test]
+    fn missing_model_turn_is_counted_once_and_disables_aggregate_replay() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":50,"agentTimestampMs":1700000001000}}}"#,
+            None,
+        );
+
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -621,14 +938,36 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_delta_accepts_the_i64_max_boundary_without_overflow() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-composer-2.5-fast"}},"_meta":{"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":9223372036854775807,"agentTimestampMs":1700000001000}}}"#,
+            None,
+        );
+
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.checked_total(), Some(i64::MAX));
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
     fn rejects_positive_total_tokens_without_model_metadata() {
         let (_temp, path) = write_fixture(
             r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"available_commands_update"},"_meta":{"totalTokens":120,"agentTimestampMs":1700000000000}}}"#,
             None,
         );
 
-        let error = super::parse_grok_updates_file(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate usage model");
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -639,8 +978,14 @@ mod tests {
             None,
         );
 
-        let error = super::parse_grok_updates_file(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate usage model");
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -649,14 +994,24 @@ mod tests {
             r#"{"model":"grok-composer-2.5-fast","totalTokens":10,"timestamp":1700000000000}"#,
             None,
         );
-        let error = super::parse_grok_updates_file(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate usage session");
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
 
         let (_temp, path) = write_fixture(
             r#"{"sessionId":"session-1","model":"grok-composer-2.5-fast","totalTokens":10}"#,
             None,
         );
-        let error = super::parse_grok_updates_file(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate usage timestamp");
+        let scanned = super::parse_grok_updates_file(&path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
     }
 }

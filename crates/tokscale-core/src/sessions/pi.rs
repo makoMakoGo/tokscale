@@ -3,14 +3,171 @@
 //! Parses JSONL files from ~/.pi/agent/sessions/<encoded-cwd>/*.jsonl
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{
+    normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
+};
+use crate::message_cache::{
+    source_file_identity_from_open_file, SourceInputPolicy, SourceInputSnapshot,
+};
+use crate::source_health::{
+    RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure, SourceStatus,
+};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
+use rayon::prelude::*;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-pub type OmpParentTaskAgentIndex = HashMap<PathBuf, HashMap<String, String>>;
+#[cfg(test)]
+fn omp_parent_scan_counts() -> &'static std::sync::Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> =
+        std::sync::OnceLock::new();
+    COUNTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn reset_omp_parent_scan_count(path: &Path) {
+    omp_parent_scan_counts().lock().unwrap().remove(path);
+}
+
+#[cfg(test)]
+pub(crate) fn omp_parent_scan_count(path: &Path) -> usize {
+    omp_parent_scan_counts()
+        .lock()
+        .unwrap()
+        .get(path)
+        .copied()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn forced_omp_parent_open_failures() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>>
+{
+    static PATHS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    PATHS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn force_omp_parent_open_failure(path: &Path, enabled: bool) {
+    let mut paths = forced_omp_parent_open_failures().lock().unwrap();
+    if enabled {
+        paths.insert(path.to_path_buf());
+    } else {
+        paths.remove(path);
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct OmpParentTaskAgentIndex {
+    child_parents: HashMap<PathBuf, PathBuf>,
+    parents: HashMap<PathBuf, OmpParentScan>,
+}
+
+impl OmpParentTaskAgentIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.parents.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parents.is_empty()
+    }
+
+    fn parent_scan_for_child(&self, child_path: &Path) -> Option<&OmpParentScan> {
+        let parent_path = self.child_parents.get(child_path)?;
+        self.parents.get(parent_path)
+    }
+
+    pub(crate) fn child_dependency_is_cacheable(&self, child_path: &Path) -> bool {
+        self.parent_scan_for_child(child_path)
+            .is_none_or(|scan| scan.cache_input.is_some())
+    }
+
+    pub(crate) fn child_dependency_cache_input(
+        &self,
+        child_path: &Path,
+    ) -> Option<OmpParentCacheInput> {
+        self.parent_scan_for_child(child_path)?.cache_input.clone()
+    }
+
+    pub(crate) fn unhealthy_parent_health(&self) -> Vec<OmpParentHealth> {
+        self.parent_health()
+            .into_iter()
+            .filter(|health| {
+                !matches!(health.status, SourceStatus::Complete) || !health.rejections.is_empty()
+            })
+            .collect()
+    }
+
+    pub(crate) fn parent_health(&self) -> Vec<OmpParentHealth> {
+        let mut health = self
+            .parents
+            .iter()
+            .map(|(path, scan)| OmpParentHealth {
+                path: path.clone(),
+                status: scan.status.clone(),
+                rejections: scan.rejections.clone(),
+                cache_input: scan.cache_input.clone(),
+            })
+            .collect::<Vec<_>>();
+        health.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        health
+    }
+}
+
+#[derive(Debug, Default)]
+struct OmpParentScan {
+    task_agents: HashMap<String, String>,
+    rejections: RejectionSummary,
+    status: SourceStatus,
+    cache_input: Option<OmpParentCacheInput>,
+}
+
+struct HashingReader<R> {
+    inner: R,
+    hasher: Sha256,
+}
+
+impl<R> HashingReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.hasher.finalize().into()
+    }
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.hasher.update(&buffer[..read]);
+        Ok(read)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct OmpParentHealth {
+    pub path: PathBuf,
+    pub status: SourceStatus,
+    pub rejections: RejectionSummary,
+    pub cache_input: Option<OmpParentCacheInput>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OmpParentCacheInput {
+    pub content_hash: [u8; 32],
+    pub snapshot: SourceInputSnapshot,
+}
 
 /// Pi session header (first line of JSONL)
 #[derive(Debug, Deserialize)]
@@ -85,19 +242,20 @@ pub struct PiOrchestrationUsage {
 }
 
 /// Parse a Pi JSONL session file
-pub fn parse_pi_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_pi_file(path: &Path) -> SessionParseResult<ScannedSource> {
     parse_pi_format_file(path, "pi", None)
 }
 
 /// Parse an OMP JSONL session file.
-pub fn parse_omp_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
-    parse_pi_format_file(path, "omp", None)
+pub fn parse_omp_file(path: &Path) -> SessionParseResult<ScannedSource> {
+    let parent_index = build_omp_parent_task_agent_index(&[path.to_path_buf()]);
+    parse_pi_format_file(path, "omp", Some(&parent_index))
 }
 
 pub fn parse_omp_file_with_parent_task_agent_index(
     path: &Path,
     parent_task_agent_index: &OmpParentTaskAgentIndex,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+) -> SessionParseResult<ScannedSource> {
     parse_pi_format_file(path, "omp", Some(parent_task_agent_index))
 }
 
@@ -243,7 +401,7 @@ fn token_breakdown_from_pi_usage(
         ));
     }
 
-    Ok(TokenBreakdown {
+    let tokens = TokenBreakdown {
         input: checked_usage_sum(
             [input, orchestration_input],
             "normalized input token count",
@@ -261,23 +419,28 @@ fn token_breakdown_from_pi_usage(
         )?,
         cache_write,
         reasoning,
-    })
+    };
+    let normalized_total = tokens.checked_total().ok_or_else(|| {
+        SessionParseError::invalid(
+            usage_validation_operation(client),
+            "normalized token total exceeds i64::MAX",
+        )
+    })?;
+    if normalized_total != source_total {
+        return Err(SessionParseError::invalid(
+            usage_validation_operation(client),
+            format!(
+                "normalized token total is {normalized_total}, expected source totalTokens {source_total}"
+            ),
+        ));
+    }
+
+    Ok(tokens)
 }
 
 fn normalize_omp_agent_label(agent: &str) -> Option<String> {
-    let label = match agent.trim().to_ascii_lowercase().as_str() {
-        "explore" => "OMP Explore",
-        "plan" => "OMP Plan",
-        "designer" => "OMP Designer",
-        "reviewer" => "OMP Reviewer",
-        "task" => "OMP Task",
-        "quick_task" => "OMP Quick Task",
-        "librarian" => "OMP Librarian",
-        "oracle" => "OMP Oracle",
-        _ => return None,
-    };
-
-    Some(label.to_string())
+    let label = normalize_agent_name(&format!("OMP {}", agent.replace('_', " ")));
+    (label != "OMP").then_some(label)
 }
 
 fn normalize_omp_advisor_label(child_stem: &str) -> Option<String> {
@@ -356,41 +519,145 @@ fn omp_swarm_agent_label_from_path(path: &Path) -> SessionParseResult<Option<Str
     Ok(Some("OMP Swarm".to_string()))
 }
 
-fn omp_parent_session_path(path: &Path) -> SessionParseResult<Option<PathBuf>> {
-    let Some(parent) = path.parent() else {
-        return Ok(None);
-    };
-    let root = parent.with_extension("jsonl");
-    root.try_exists()
-        .map(|exists| exists.then_some(root))
-        .map_err(|source| SessionParseError::at_path(path, "check OMP parent session", source))
+pub(crate) fn omp_parent_candidate_path(path: &Path) -> Option<PathBuf> {
+    path.parent().map(|parent| parent.with_extension("jsonl"))
 }
 
-pub fn build_omp_parent_task_agent_index(
-    paths: &[PathBuf],
-) -> SessionParseResult<OmpParentTaskAgentIndex> {
+pub fn build_omp_parent_task_agent_index(paths: &[PathBuf]) -> OmpParentTaskAgentIndex {
+    let mut index = OmpParentTaskAgentIndex::new();
     let mut parent_paths = Vec::new();
     for path in paths {
-        if let Some(parent_path) = omp_parent_session_path(path)? {
-            parent_paths.push(parent_path);
+        let Some(parent_path) = omp_parent_candidate_path(path) else {
+            continue;
+        };
+        match parent_path.try_exists() {
+            Ok(true) => {
+                index
+                    .child_parents
+                    .insert(path.clone(), parent_path.clone());
+                parent_paths.push(parent_path);
+            }
+            Ok(false) => {}
+            Err(source) => {
+                index
+                    .child_parents
+                    .insert(path.clone(), parent_path.clone());
+                let error =
+                    SessionParseError::at_path(&parent_path, "check OMP parent session", source);
+                index
+                    .parents
+                    .entry(parent_path)
+                    .or_insert_with(|| OmpParentScan {
+                        status: SourceStatus::Unavailable {
+                            failure: SourceFailure::from(&error),
+                        },
+                        ..OmpParentScan::default()
+                    });
+            }
         }
     }
     parent_paths.sort_unstable();
     parent_paths.dedup();
 
-    let mut index = OmpParentTaskAgentIndex::new();
-    for parent_path in parent_paths {
-        let task_agents = omp_task_agent_map_from_parent(&parent_path)?;
-        if !task_agents.is_empty() {
-            index.insert(parent_path, task_agents);
-        }
-    }
-    Ok(index)
+    let parent_scans: Vec<_> = parent_paths
+        .into_par_iter()
+        .map(|path| {
+            let scan = omp_task_agent_scan_from_parent(&path);
+            (path, scan)
+        })
+        .collect();
+    index.parents.extend(parent_scans);
+    index
 }
 
-fn omp_task_agent_map_from_parent(
-    parent_path: &Path,
-) -> SessionParseResult<HashMap<String, String>> {
+fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
+    #[cfg(test)]
+    {
+        *omp_parent_scan_counts()
+            .lock()
+            .unwrap()
+            .entry(parent_path.to_path_buf())
+            .or_default() += 1;
+    }
+    #[cfg(test)]
+    if forced_omp_parent_open_failures()
+        .lock()
+        .unwrap()
+        .contains(parent_path)
+    {
+        return OmpParentScan {
+            status: SourceStatus::Unavailable {
+                failure: SourceFailure::new(
+                    "open OMP parent session",
+                    "injected parent open failure",
+                ),
+            },
+            ..OmpParentScan::default()
+        };
+    }
+    let input_policy = SourceInputPolicy::plain(parent_path);
+    let before_snapshot = input_policy.snapshot().map_err(|source| {
+        SourceFailure::new(
+            "snapshot OMP parent session",
+            format!("{}: {source}", parent_path.display()),
+        )
+    });
+    let file = match std::fs::File::open(parent_path) {
+        Ok(file) => file,
+        Err(source) => {
+            let error = SessionParseError::at_path(parent_path, "open OMP parent session", source);
+            return OmpParentScan {
+                status: SourceStatus::Unavailable {
+                    failure: SourceFailure::from(&error),
+                },
+                ..OmpParentScan::default()
+            };
+        }
+    };
+    let opened_identity = source_file_identity_from_open_file(&file).map_err(|source| {
+        SourceFailure::new(
+            "identify OMP parent session",
+            format!("{}: {source}", parent_path.display()),
+        )
+    });
+    let mut reader = BufReader::new(HashingReader::new(file));
+    let mut scan = omp_task_agent_scan_from_reader(parent_path, &mut reader);
+    if matches!(scan.status, SourceStatus::Complete) {
+        let content_hash = reader.into_inner().finish();
+        let cache_input = before_snapshot.and_then(|snapshot| {
+            let opened_identity = opened_identity?;
+            if snapshot.primary_identity() != Some(opened_identity) {
+                return Err(SourceFailure::new(
+                    "validate OMP parent session snapshot",
+                    format!("{} changed before it was opened", parent_path.display()),
+                ));
+            }
+            let current_snapshot = input_policy.snapshot().map_err(|source| {
+                SourceFailure::new(
+                    "snapshot OMP parent session after scan",
+                    format!("{}: {source}", parent_path.display()),
+                )
+            })?;
+            if current_snapshot != snapshot {
+                return Err(SourceFailure::new(
+                    "validate OMP parent session snapshot",
+                    format!("{} changed while it was scanned", parent_path.display()),
+                ));
+            }
+            Ok(OmpParentCacheInput {
+                content_hash,
+                snapshot,
+            })
+        });
+        match cache_input {
+            Ok(cache_input) => scan.cache_input = Some(cache_input),
+            Err(failure) => scan.status = SourceStatus::Partial { failure },
+        }
+    }
+    scan
+}
+
+fn omp_task_agent_scan_from_reader(parent_path: &Path, reader: &mut impl BufRead) -> OmpParentScan {
     #[derive(Deserialize)]
     struct OmpParentLine {
         message: Option<OmpParentMessage>,
@@ -420,24 +687,35 @@ fn omp_task_agent_map_from_parent(
         id: Option<String>,
     }
 
-    let file = std::fs::File::open(parent_path).map_err(|source| {
-        SessionParseError::at_path(parent_path, "open OMP parent session", source)
-    })?;
-    let reader = BufReader::new(file);
-    let mut task_agents: HashMap<String, String> = HashMap::new();
+    let mut scan = OmpParentScan::default();
 
-    for line in reader.lines() {
-        let line = line.map_err(|source| {
-            SessionParseError::at_path(parent_path, "read OMP parent JSONL line", source)
-        })?;
+    for (line_index, line) in reader.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(source) => {
+                scan.status = SourceStatus::Partial {
+                    failure: SourceFailure::new(
+                        "read OMP parent JSONL line",
+                        format!("{} line {line_number}: {source}", parent_path.display()),
+                    ),
+                };
+                break;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let entry: OmpParentLine = serde_json::from_str(trimmed).map_err(|source| {
-            SessionParseError::at_path(parent_path, "decode OMP parent JSONL line", source)
-        })?;
+        let entry: OmpParentLine = match serde_json::from_str(trimmed) {
+            Ok(entry) => entry,
+            Err(_source) => {
+                scan.rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
         let Some(content) = entry.message.and_then(|message| message.content) else {
             continue;
@@ -469,34 +747,35 @@ fn omp_task_agent_map_from_parent(
                 let Some(task_id) = task.id.as_deref() else {
                     continue;
                 };
-                task_agents.insert(task_id.to_string(), agent.clone());
-                task_agents.insert(format!("{index}-{task_id}"), agent.clone());
+                scan.task_agents.insert(task_id.to_string(), agent.clone());
+                scan.task_agents
+                    .insert(format!("{index}-{task_id}"), agent.clone());
             }
         }
     }
 
-    Ok(task_agents)
-}
-
-fn omp_subagent_label_from_parent(
-    parent_path: &Path,
-    child_stem: &str,
-) -> SessionParseResult<Option<String>> {
-    let task_agents = omp_task_agent_map_from_parent(parent_path)?;
-    Ok(omp_subagent_label_from_map(&task_agents, child_stem))
+    scan
 }
 
 fn omp_subagent_label_from_map(
     task_agents: &HashMap<String, String>,
+    child_path: &Path,
     child_stem: &str,
 ) -> Option<String> {
     let suffix = child_stem
         .split_once('-')
         .map(|(_, suffix)| suffix)
         .unwrap_or(child_stem);
+    let nested_suffix = child_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|parent_stem| parent_stem.to_str())
+        .and_then(|parent_stem| child_stem.strip_prefix(parent_stem))
+        .and_then(|suffix| suffix.strip_prefix('.'));
 
     task_agents
         .get(child_stem)
+        .or_else(|| nested_suffix.and_then(|suffix| task_agents.get(suffix)))
         .or_else(|| task_agents.get(suffix))
         .cloned()
 }
@@ -573,33 +852,43 @@ fn parse_pi_format_file(
     path: &Path,
     client: &'static str,
     omp_parent_task_agent_index: Option<&OmpParentTaskAgentIndex>,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|source| SessionParseError::new("open Pi JSONL source", source))?;
 
     let reader = BufReader::new(file);
-    let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
+    let mut scanned = ScannedSource {
+        messages: Vec::with_capacity(64),
+        ..ScannedSource::default()
+    };
     let mut buffer = Vec::with_capacity(4096);
     let child_stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .map(str::to_string);
+    let omp_parent_scan = if client == "omp" {
+        omp_parent_task_agent_index.and_then(|index| index.parent_scan_for_child(path))
+    } else {
+        None
+    };
     let omp_subagent_label = if client == "omp" {
         match child_stem.as_deref() {
             Some(stem) => {
                 if let Some(label) = normalize_omp_advisor_label(stem) {
                     Some(label)
-                } else if let Some(label) = omp_swarm_agent_label_from_path(path)? {
-                    Some(label)
-                } else if let Some(parent) = omp_parent_session_path(path)? {
-                    match omp_parent_task_agent_index {
-                        Some(index) => index
-                            .get(&parent)
-                            .and_then(|task_agents| omp_subagent_label_from_map(task_agents, stem)),
-                        None => omp_subagent_label_from_parent(&parent, stem)?,
-                    }
                 } else {
-                    None
+                    match omp_swarm_agent_label_from_path(path) {
+                        Ok(Some(label)) => Some(label),
+                        Ok(None) => omp_parent_scan.and_then(|parent| {
+                            omp_subagent_label_from_map(&parent.task_agents, path, stem)
+                        }),
+                        Err(_error) => {
+                            scanned
+                                .rejections
+                                .record(RecordRejectionReason::MalformedRecord);
+                            None
+                        }
+                    }
                 }
             }
             None => None,
@@ -612,8 +901,21 @@ fn parse_pi_format_file(
     let mut workspace_key: Option<String> = None;
     let mut workspace_label: Option<String> = None;
     let mut saw_omp_title_slot = false;
-    for line in reader.lines() {
-        let line = line.map_err(|source| SessionParseError::new("read Pi JSONL line", source))?;
+    for (line_index, line) in reader.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(source) if session_id.is_none() => {
+                return Err(SessionParseError::new("read Pi JSONL line", source));
+            }
+            Err(source) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read Pi JSONL line",
+                    format!("{} line {line_number}: {source}", path.display()),
+                ));
+                break;
+            }
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -621,11 +923,20 @@ fn parse_pi_format_file(
         }
 
         if session_id.is_none() {
-            let header = match parse_pi_header_line(
+            let parsed_header = match parse_pi_header_line(
                 trimmed,
                 &mut buffer,
                 client == "omp" && !saw_omp_title_slot,
-            )? {
+            ) {
+                Ok(parsed) => parsed,
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            };
+            let header = match parsed_header {
                 PiHeaderParse::Session(header) => header,
                 PiHeaderParse::TitleSlot => {
                     saw_omp_title_slot = true;
@@ -641,8 +952,15 @@ fn parse_pi_format_file(
 
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
-        let entry = simd_json::from_slice::<PiSessionEntry>(&mut buffer)
-            .map_err(|source| SessionParseError::new("decode Pi JSONL message", source))?;
+        let entry = match simd_json::from_slice::<PiSessionEntry>(&mut buffer) {
+            Ok(entry) => entry,
+            Err(_source) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
         if entry.entry_type != "message" {
             continue;
@@ -662,51 +980,62 @@ fn parse_pi_format_file(
             None => continue,
         };
 
-        let tokens = token_breakdown_from_pi_usage(&usage, client)?;
-        if crate::positive_token_total(&tokens) == 0 {
+        let tokens = match token_breakdown_from_pi_usage(&usage, client) {
+            Ok(tokens) => tokens,
+            Err(_) => {
+                record_pi_rejection(&mut scanned);
+                continue;
+            }
+        };
+        if !crate::has_positive_tokens(&tokens) {
             continue;
         }
 
-        let raw_model = message
-            .model
-            .filter(|model| !model.trim().is_empty())
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate Pi assistant message",
-                    "positive-token usage is missing a non-empty model",
-                )
-            })?;
+        let Some(raw_model) = message.model.filter(|model| !model.trim().is_empty()) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
+        };
         let model = model_aliases::canonicalize_source_model_id(&raw_model)
             .unwrap_or_else(|| raw_model.trim().to_string());
 
-        let provider = message
+        let Some(provider) = message
             .provider
             .filter(|provider| !provider.trim().is_empty())
-            .or_else(|| provider_identity::inferred_provider_from_model(&model).map(str::to_string))
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate Pi assistant message",
-                    format!("provider is missing and cannot be inferred for model `{model}`"),
-                )
-            })?;
+            .or_else(|| {
+                provider_identity::inferred_provider_from_model(&model).map(str::to_string)
+            })
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingProvider);
+            continue;
+        };
 
-        let timestamp_text = entry.timestamp.ok_or_else(|| {
-            SessionParseError::invalid("validate Pi assistant message", "timestamp is missing")
-        })?;
-        let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_text)
-            .map_err(|source| SessionParseError::new("parse Pi message timestamp", source))?
-            .timestamp_millis();
+        let Some(timestamp_text) = entry.timestamp else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        };
+        let timestamp = match chrono::DateTime::parse_from_rfc3339(&timestamp_text) {
+            Ok(timestamp) => timestamp.timestamp_millis(),
+            Err(_source) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingTimestamp);
+                continue;
+            }
+        };
 
         let mut unified = UnifiedMessage::new(
             client,
             model,
             provider,
-            session_id.clone().ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate Pi assistant message",
-                    "session header was not established",
-                )
-            })?,
+            session_id.clone().expect(
+                "internal invariant: Pi-format assistant message parsed before session header",
+            ),
             timestamp,
             tokens,
             0.0,
@@ -716,7 +1045,7 @@ fn parse_pi_format_file(
             .as_deref()
             .map(crate::sessions::intern::intern);
         unified.set_agent_instance(child_stem.clone());
-        messages.push(unified);
+        scanned.messages.push(unified);
     }
 
     if session_id.is_none() {
@@ -725,13 +1054,19 @@ fn parse_pi_format_file(
             "session header is missing",
         ));
     }
-    Ok(messages)
+    Ok(scanned)
+}
+
+fn record_pi_rejection(scanned: &mut ScannedSource) {
+    scanned
+        .rejections
+        .record(RecordRejectionReason::MalformedRecord);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use tempfile::{NamedTempFile, TempDir};
 
     fn create_test_file(content: &str) -> NamedTempFile {
@@ -773,7 +1108,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path()).unwrap();
+        let messages = parse_pi_file(file.path()).unwrap().messages;
 
         // then
         assert_eq!(messages.len(), 1);
@@ -795,7 +1130,7 @@ mod tests {
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_pi_file(file.path()).unwrap();
+        let messages = parse_pi_file(file.path()).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "openai");
@@ -807,9 +1142,12 @@ mod tests {
 {"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_pi_file(file.path()).unwrap_err();
+        let scanned = parse_pi_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("non-empty model"));
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
     }
 
     #[test]
@@ -818,7 +1156,9 @@ mod tests {
 {"type":"message","message":{"role":"assistant","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0}}}"#;
         let file = create_test_file(content);
 
-        assert!(parse_pi_file(file.path()).unwrap().is_empty());
+        let scanned = parse_pi_file(file.path()).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
     }
 
     #[test]
@@ -827,9 +1167,9 @@ mod tests {
 {"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":-1,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":4}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_pi_file(file.path()).unwrap_err();
+        let scanned = parse_pi_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("must not be negative"));
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -840,7 +1180,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_omp_file(file.path()).unwrap();
+        let messages = parse_omp_file(file.path()).unwrap().messages;
 
         // then
         assert_eq!(messages.len(), 1);
@@ -858,7 +1198,7 @@ mod tests {
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":5,"cacheWrite":0,"reasoningTokens":2,"totalTokens":35}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_omp_file(file.path()).unwrap();
+        let messages = parse_omp_file(file.path()).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client.as_ref(), "omp");
@@ -869,28 +1209,37 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_omp_rejects_invalid_title_slot() {
+    fn test_parse_omp_rejects_invalid_title_slot_without_blocking_usage() {
         let content = r#"{"type":"title","title":"Missing slot metadata"}
 {"type":"session","id":"omp_ses_bad_title","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"totalTokens":30}}}"#;
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_omp_file(file.path()).unwrap_err();
+        let scanned = parse_omp_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("decode OMP title slot"));
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "omp_ses_bad_title");
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
-    fn test_parse_omp_rejects_duplicate_title_slot() {
+    fn test_parse_omp_rejects_duplicate_title_slot_without_blocking_usage() {
         let content = r#"{"type":"title","v":1,"title":"First","updatedAt":"2026-01-01T00:00:00.000Z","pad":" "}
 {"type":"title","v":1,"title":"Second","updatedAt":"2026-01-01T00:00:01.000Z","pad":" "}
 {"type":"session","id":"omp_ses_duplicate_title","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
-{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"totalTokens":30}}}"#;
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_omp_file(file.path()).unwrap_err();
+        let scanned = parse_omp_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("validate Pi session header"));
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(
+            scanned.messages[0].session_id.as_ref(),
+            "omp_ses_duplicate_title"
+        );
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -905,7 +1254,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_omp_file(&path).unwrap();
+        let messages = parse_omp_file(&path).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent.as_deref(), Some("OMP Advisor"));
@@ -919,7 +1268,7 @@ mod tests {
 {"type":"message","id":"msg_002","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.3-codex-xhigh","provider":"openai","usage":{"input":30,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":40}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_omp_file(file.path()).unwrap();
+        let messages = parse_omp_file(file.path()).unwrap().messages;
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
@@ -935,13 +1284,47 @@ mod tests {
         let (_dir, child_path) =
             create_omp_task_files(session_content, "0-ReviewFindings", child_content);
 
-        let messages = parse_omp_file(&child_path).unwrap();
+        let messages = parse_omp_file(&child_path).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent.as_deref(), Some("OMP Reviewer"));
         assert_eq!(
             messages[0].agent_instance.as_deref(),
             Some("0-ReviewFindings")
+        );
+    }
+
+    #[test]
+    fn test_parse_omp_nested_child_recovers_dynamic_task_agent_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join(".omp/agent/sessions/project");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let parent_stem = "138-SourceIntegritySweep";
+        let session_root = session_dir.join(parent_stem);
+        std::fs::write(
+            session_root.with_extension("jsonl"),
+            r#"{"type":"session","version":3,"id":"parent-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"root_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_001","name":"task","arguments":{"agent":"code-reviewer","tasks":[{"id":"ReviewFindings","description":"Review findings","assignment":"Check the diff"}]}}],"model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&session_root).unwrap();
+
+        let child_path = session_root.join(format!("{parent_stem}.0-ReviewFindings.jsonl"));
+        std::fs::write(
+            &child_path,
+            r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"child_001","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_omp_file(&child_path).unwrap().messages;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("OMP Code Reviewer"));
+        assert_eq!(
+            messages[0].agent_instance.as_deref(),
+            Some("138-SourceIntegritySweep.0-ReviewFindings")
         );
     }
 
@@ -974,15 +1357,112 @@ mod tests {
         std::fs::write(&second_child, child_content).unwrap();
 
         let paths = vec![first_child.clone(), second_child.clone()];
-        let index = build_omp_parent_task_agent_index(&paths).unwrap();
+        let index = build_omp_parent_task_agent_index(&paths);
 
         assert_eq!(index.len(), 1);
-        let first_messages =
-            parse_omp_file_with_parent_task_agent_index(&first_child, &index).unwrap();
-        let second_messages =
-            parse_omp_file_with_parent_task_agent_index(&second_child, &index).unwrap();
+        let first_messages = parse_omp_file_with_parent_task_agent_index(&first_child, &index)
+            .unwrap()
+            .messages;
+        let second_messages = parse_omp_file_with_parent_task_agent_index(&second_child, &index)
+            .unwrap()
+            .messages;
         assert_eq!(first_messages[0].agent.as_deref(), Some("OMP Reviewer"));
         assert_eq!(second_messages[0].agent.as_deref(), Some("OMP Reviewer"));
+    }
+
+    #[test]
+    fn test_parse_omp_keeps_mapping_and_attributes_parent_read_interruption_separately() {
+        struct FailingReader;
+
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected parent read failure"))
+            }
+        }
+
+        let parent_line = r#"{"type":"message","message":{"content":[{"type":"toolCall","name":"task","arguments":{"agent":"reviewer","tasks":[{"id":"ReviewFindings"}]}}]}}
+"#;
+        let child_content = r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
+        let (_dir, child_path) = create_omp_task_files("", "0-ReviewFindings", child_content);
+        let parent_path = child_path.parent().unwrap().with_extension("jsonl");
+        let mut reader =
+            BufReader::new(std::io::Cursor::new(parent_line.as_bytes()).chain(FailingReader));
+        let parent_scan = omp_task_agent_scan_from_reader(&parent_path, &mut reader);
+        let mut index = OmpParentTaskAgentIndex::new();
+        index
+            .child_parents
+            .insert(child_path.clone(), parent_path.clone());
+        index.parents.insert(parent_path.clone(), parent_scan);
+
+        let scanned = parse_omp_file_with_parent_task_agent_index(&child_path, &index).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].agent.as_deref(), Some("OMP Reviewer"));
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
+        let parent_health = index.unhealthy_parent_health();
+        assert_eq!(parent_health.len(), 1);
+        assert_eq!(parent_health[0].path, parent_path);
+        assert!(matches!(
+            &parent_health[0].status,
+            SourceStatus::Partial { .. }
+        ));
+        assert_eq!(
+            parent_health[0].status.failure().unwrap().operation,
+            "read OMP parent JSONL line"
+        );
+    }
+
+    #[test]
+    fn test_omp_parent_scan_hashes_the_exact_bytes_it_parses() {
+        let parent_content = "{\"type\":\"message\",\"message\":null}\r\n";
+        let (_dir, child_path) = create_omp_task_files(parent_content, "0-task", "");
+
+        let index = build_omp_parent_task_agent_index(&[child_path]);
+        let health = index.parent_health();
+        let expected: [u8; 32] = Sha256::digest(parent_content.as_bytes()).into();
+
+        assert_eq!(health.len(), 1);
+        assert_eq!(
+            health[0]
+                .cache_input
+                .as_ref()
+                .map(|input| input.content_hash),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_parse_omp_parent_open_failure_is_owned_by_parent_source() {
+        let child_content = r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
+        let child_file = create_test_file(child_content);
+        let child_path = child_file.path().to_path_buf();
+        let parent_path = child_path.with_extension("missing-parent.jsonl");
+        let parent_scan = omp_task_agent_scan_from_parent(&parent_path);
+        let mut index = OmpParentTaskAgentIndex::new();
+        index
+            .child_parents
+            .insert(child_path.clone(), parent_path.clone());
+        index.parents.insert(parent_path.clone(), parent_scan);
+
+        let scanned = parse_omp_file_with_parent_task_agent_index(&child_path, &index).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
+        let parent_health = index.unhealthy_parent_health();
+        assert_eq!(parent_health.len(), 1);
+        assert_eq!(parent_health[0].path, parent_path);
+        assert!(matches!(
+            &parent_health[0].status,
+            SourceStatus::Unavailable { .. }
+        ));
+        assert_eq!(
+            parent_health[0].status.failure().unwrap().operation,
+            "open OMP parent session"
+        );
     }
 
     #[test]
@@ -993,7 +1473,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path()).unwrap();
+        let messages = parse_pi_file(file.path()).unwrap().messages;
 
         // then
         assert_eq!(messages.len(), 1);
@@ -1011,7 +1491,7 @@ mod tests {
 {"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":20,"cacheRead":10,"cacheWrite":5,"reasoning":21,"totalTokens":135}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_pi_file(file.path()).unwrap();
+        let messages = parse_pi_file(file.path()).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.output, 0);
@@ -1025,7 +1505,7 @@ mod tests {
 {"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":20,"cacheRead":10,"cacheWrite":5,"reasoningTokens":21,"totalTokens":135}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_omp_file(file.path()).unwrap();
+        let messages = parse_omp_file(file.path()).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.output, 0);
@@ -1039,11 +1519,9 @@ mod tests {
 {"type":"message","id":"msg_bad_total","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":25,"totalTokens":166}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_pi_file(file.path()).unwrap_err();
+        let scanned = parse_pi_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("totalTokens"));
-        assert!(error.to_string().contains("165"));
-        assert!(error.to_string().contains("166"));
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -1052,9 +1530,9 @@ mod tests {
 {"type":"message","id":"msg_missing_total","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":25}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_pi_file(file.path()).unwrap_err();
+        let scanned = parse_pi_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("totalTokens"));
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -1063,7 +1541,7 @@ mod tests {
 {"type":"message","id":"msg_orchestration","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"orchestration":{"input":7,"cacheRead":3,"output":2},"totalTokens":177}}}"#;
         let file = create_test_file(content);
 
-        let messages = parse_omp_file(file.path()).unwrap();
+        let messages = parse_omp_file(file.path()).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 107);
@@ -1080,10 +1558,9 @@ mod tests {
 {"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_pi_file(file.path()).unwrap_err();
+        let scanned = parse_pi_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("reasoningTokens"));
-        assert!(error.to_string().contains("Pi"));
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -1092,10 +1569,9 @@ mod tests {
 {"type":"message","id":"msg_reasoning","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"glm-5.1","provider":"zai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":25,"totalTokens":165}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_omp_file(file.path()).unwrap_err();
+        let scanned = parse_omp_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("reasoning"));
-        assert!(error.to_string().contains("OMP"));
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -1104,10 +1580,27 @@ mod tests {
 {"type":"message","id":"msg_bad_orchestration","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"orchestration":{"input":-1},"totalTokens":164}}}"#;
         let file = create_test_file(content);
 
-        let error = parse_omp_file(file.path()).unwrap_err();
+        let scanned = parse_omp_file(file.path()).unwrap();
 
-        assert!(error.to_string().contains("must not be negative"));
-        assert!(error.to_string().contains("orchestration"));
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn test_parse_omp_rejects_overflowing_total_without_hiding_later_usage() {
+        let content = r#"{"type":"session","id":"omp_ses_overflow","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":9223372036854775807,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":9223372036854775807}}}
+{"type":"message","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
+        let file = create_test_file(content);
+
+        let scanned = parse_omp_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.checked_total(), Some(30));
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -1122,8 +1615,8 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         std::fs::write(&second_path, content).unwrap();
 
-        let messages = parse_omp_file(&path).unwrap();
-        let second_messages = parse_omp_file(&second_path).unwrap();
+        let messages = parse_omp_file(&path).unwrap().messages;
+        let second_messages = parse_omp_file(&second_path).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(second_messages.len(), 1);
@@ -1140,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_omp_rejects_invalid_swarm_artifact_name() {
+    fn test_parse_omp_keeps_usage_when_swarm_artifact_name_is_invalid() {
         let dir = TempDir::new().unwrap();
         let context = dir.path().join(".swarm_docs").join("context");
         std::fs::create_dir_all(&context).unwrap();
@@ -1152,9 +1645,15 @@ mod tests {
         )
         .unwrap();
 
-        let error = parse_omp_file(&path).unwrap_err();
+        let scanned = parse_omp_file(&path).unwrap();
 
-        assert!(error.to_string().contains("OMP swarm artifact"));
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.checked_total(), Some(30));
+        assert!(scanned.messages[0].agent.is_none());
+        assert!(scanned.interrupted.is_none());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
     }
 
     #[test]
@@ -1170,7 +1669,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_pi_file(&path).unwrap();
+        let messages = parse_pi_file(&path).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent, None);
@@ -1184,7 +1683,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path()).unwrap();
+        let messages = parse_pi_file(file.path()).unwrap().messages;
 
         // then
         assert!(messages.is_empty());
@@ -1198,7 +1697,7 @@ mod tests {
         let file = create_test_file(content);
 
         // when
-        let messages = parse_pi_file(file.path()).unwrap();
+        let messages = parse_pi_file(file.path()).unwrap().messages;
 
         // then
         assert!(messages.is_empty());
@@ -1213,10 +1712,45 @@ not valid json
         let file = create_test_file(content);
 
         // when
-        let error = parse_pi_file(file.path()).unwrap_err();
+        let scanned = parse_pi_file(file.path()).unwrap();
 
         // then
-        assert!(error.to_string().contains("decode Pi JSONL message"));
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn test_parse_pi_rejects_bad_record_and_keeps_later_messages() {
+        let content = r#"{"type":"session","id":"pi_ses_partial","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}
+{"type":"message","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":16}}}
+{"type":"message","timestamp":"2026-01-01T00:00:03.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":25}}}"#;
+        let file = create_test_file(content);
+
+        let scanned = parse_pi_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn test_parse_omp_rejects_bad_record_and_keeps_later_messages() {
+        let content = r#"{"type":"session","id":"omp_ses_partial","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}
+{"type":"message","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":16}}}
+{"type":"message","timestamp":"2026-01-01T00:00:03.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":25}}}"#;
+        let file = create_test_file(content);
+
+        let scanned = parse_omp_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]

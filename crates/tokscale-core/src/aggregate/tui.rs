@@ -904,6 +904,7 @@ impl TuiAcc {
         let (current_streak, longest_streak) = calculate_streaks(&daily);
 
         UsageData {
+            health: Default::default(),
             models,
             agents,
             daily,

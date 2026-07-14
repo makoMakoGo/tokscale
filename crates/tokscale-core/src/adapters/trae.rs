@@ -1,10 +1,11 @@
 use rayon::prelude::*;
 
+use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
-    SourceUnit, UnitMessageSource,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::sessions;
@@ -27,29 +28,12 @@ impl LocalSourceAdapter for TraeAdapter {
         )
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages =
-                    sessions::trae::parse_trae_file("trae", &unit.path).map_err(|source| {
-                        SourceParseError::from_session(
-                            unit.client,
-                            &unit.path,
-                            unit.parser_version.parser_id,
-                            source,
-                        )
-                    })?;
-                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                Ok(ParsedUnit {
-                    unit,
-                    messages: UnitMessageSource::Fresh(messages),
-                    cache_write: None,
-                    invalidate_cache: false,
+                adapter_cache::parse_uncached_unit(unit, ctx, |path| {
+                    sessions::trae::parse_trae_file("trae", path)
                 })
             })
             .collect()
@@ -58,11 +42,12 @@ impl LocalSourceAdapter for TraeAdapter {
     fn fold(
         &self,
         parsed: Vec<ParsedUnit>,
-        _ctx: &mut FoldContext<'_>,
+        ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
     ) -> Result<(), crate::adapters::SourcePipelineError> {
         let mut messages = Vec::new();
         for unit in parsed {
+            ctx.health.record(unit.source_health());
             if let UnitMessageSource::Fresh(unit_messages) = unit.messages {
                 messages.extend(unit_messages);
             }
@@ -80,6 +65,7 @@ impl LocalSourceAdapter for TraeAdapter {
         let mut accumulator = crate::TraeMessageAccumulator::default();
         while let Some(parsed) = batches.next(ctx)? {
             for unit in parsed {
+                ctx.health.record(unit.source_health());
                 if let UnitMessageSource::Fresh(messages) = unit.messages {
                     accumulator.push_messages(messages);
                 }
@@ -147,10 +133,7 @@ mod tests {
                 TRAE_ADAPTER
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: Some(&pricing),
-                        },
+                        &mut FoldContext::new(&mut cache, Some(&pricing)),
                         &mut sink,
                     )
                     .unwrap();
@@ -160,5 +143,35 @@ mod tests {
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].timestamp, 1_776_000_001_000);
         assert_eq!(sink[0].cost, 110.0);
+    }
+
+    #[test]
+    fn trae_adapter_keeps_valid_sessions_and_reports_rejections() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("mixed.json");
+        write_file(
+            &source,
+            r#"[
+                {"model_name":"GPT-5.4","session_id":"good","usage_time":1776000000,"extra_info":{"input_token":10,"output_token":1}},
+                {"model_name":"","session_id":"bad","usage_time":1776000001,"extra_info":{"input_token":10,"output_token":1}}
+            ]"#,
+        );
+        let mut cache = message_cache::SourceMessageCache::default();
+        let unit = SourceUnit::no_message_cache(ClientId::Trae, source);
+        let parsed = TRAE_ADAPTER
+            .parse_checked(vec![unit], &crate::adapters::ParseContext { pricing: None });
+        let mut sink = Vec::new();
+        let mut ctx = FoldContext::new(&mut cache, None);
+
+        TRAE_ADAPTER.fold(parsed, &mut ctx, &mut sink).unwrap();
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].session_id.as_ref(), "good");
+        assert_eq!(ctx.health.rejected_records(), 1);
+        let source = &ctx.health.sources()[0];
+        assert_eq!(source.client, ClientId::Trae);
+        let rejection = source.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-model");
+        assert_eq!(rejection.count, 1);
     }
 }

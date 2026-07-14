@@ -11,6 +11,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, ScannedSource};
 use crate::{provider_identity, TokenBreakdown};
 use std::path::Path;
 
@@ -58,17 +59,20 @@ fn infer_provider(model: &str) -> &'static str {
 /// Handles both formats:
 /// - New: Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 /// - Old: Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you
-pub fn parse_cursor_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_cursor_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let content = std::fs::read_to_string(path)
         .map_err(|error| SessionParseError::new("read CSV file", error))?;
 
-    let mut messages = Vec::with_capacity(128);
+    let mut scanned = ScannedSource {
+        messages: Vec::with_capacity(128),
+        ..ScannedSource::default()
+    };
     let mut lines = content.lines();
 
     // Parse header line to determine column indices
     let header = match lines.next() {
         Some(h) => h,
-        None => return Ok(vec![]),
+        None => return Ok(scanned),
     };
 
     // Verify this is a valid Cursor CSV
@@ -110,13 +114,10 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>>
         // Need at least enough columns for the format
         let min_fields = output_idx + 1;
         if fields.len() < min_fields {
-            return Err(SessionParseError::invalid(
-                "validate CSV row",
-                format!(
-                    "expected at least {min_fields} columns, found {}",
-                    fields.len()
-                ),
-            ));
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
         }
 
         let date_str = fields[0].trim().trim_matches('"');
@@ -128,41 +129,80 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>>
                 .parse::<i64>()
                 .map_err(|error| SessionParseError::new("decode CSV token count", error))
         };
-        let input_with_cache_write = parse_count(fields[input_cache_write_idx])?;
-        let input_without_cache_write = parse_count(fields[input_no_cache_idx])?;
-        let cache_read = parse_count(fields[cache_read_idx])?;
-        let output_tokens = parse_count(fields[output_idx])?;
-
-        // Skip empty or errored entries
-        if model.is_empty() {
+        let counts = [
+            fields[input_cache_write_idx],
+            fields[input_no_cache_idx],
+            fields[cache_read_idx],
+            fields[output_idx],
+        ]
+        .map(parse_count);
+        let [Ok(input_with_cache_write), Ok(input_without_cache_write), Ok(cache_read), Ok(output_tokens)] =
+            counts
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        if [
+            input_with_cache_write,
+            input_without_cache_write,
+            cache_read,
+            output_tokens,
+        ]
+        .into_iter()
+        .any(|tokens| tokens < 0)
+        {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        }
+        if input_with_cache_write < input_without_cache_write {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
 
-        // Parse timestamp from date string
-        let timestamp = parse_date_to_timestamp(date_str);
-        if timestamp == 0 {
-            return Err(SessionParseError::invalid(
-                "validate CSV date",
-                format!("invalid Cursor usage date `{date_str}`"),
-            ));
-        }
-
         // Cache write = input_with_cache_write - input_without_cache_write
-        let cache_write = (input_with_cache_write - input_without_cache_write).max(0);
+        let cache_write = input_with_cache_write - input_without_cache_write;
         // Input tokens = input_without_cache_write
         let input = input_without_cache_write;
         let tokens = TokenBreakdown {
             input: input.max(0),
             output: output_tokens.max(0),
             cache_read: cache_read.max(0),
-            cache_write, // Already clamped above with .max(0)
+            cache_write,
             reasoning: 0,
         };
-        if crate::positive_token_total(&tokens) == 0 {
+        let Some(token_total) = tokens.checked_total() else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        if token_total == 0 {
             continue;
         }
 
-        messages.push(UnifiedMessage::new(
+        if model.is_empty() {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
+        }
+
+        // Parse timestamp from date string
+        let timestamp = parse_date_to_timestamp(date_str);
+        if timestamp == 0 {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        }
+
+        scanned.messages.push(UnifiedMessage::new(
             "cursor",
             model,
             infer_provider(model),
@@ -173,7 +213,7 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>>
         ));
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 /// Simple CSV line parser that handles quoted fields
@@ -242,7 +282,7 @@ mod tests {
     use super::*;
 
     fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_cursor_file(path).unwrap()
+        super::parse_cursor_file(path).unwrap().messages
     }
 
     #[test]
@@ -262,6 +302,96 @@ mod tests {
 
         let error = super::parse_cursor_file(&path).unwrap_err();
         assert_eq!(error.operation(), "read CSV file");
+    }
+
+    #[test]
+    fn mixed_rows_reject_bad_record_and_keep_later_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.csv");
+        std::fs::write(
+            &path,
+            "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you\n\
+             2025-02-01,gpt-4o,10,8,1,2,11,$0,$0\n\
+             2025-02-02,gpt-4o,not-a-number,8,1,2,11,$0,$0\n\
+             2025-02-03,gpt-4o,20,16,2,4,22,$0,$0\n",
+        )
+        .unwrap();
+
+        let scanned = super::parse_cursor_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn negative_row_tokens_are_malformed_instead_of_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.csv");
+        std::fs::write(
+            &path,
+            "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you\n\
+             2025-02-01,gpt-4o,10,8,1,2,11,$0,$0\n\
+             2025-02-02,gpt-4o,10,-8,1,2,11,$0,$0\n\
+             2025-02-03,gpt-4o,20,16,2,4,22,$0,$0\n",
+        )
+        .unwrap();
+
+        let scanned = super::parse_cursor_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn inconsistent_cache_write_inputs_are_malformed_and_later_row_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.csv");
+        std::fs::write(
+            &path,
+            "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you\n\
+             2025-02-01,gpt-4o,10,20,1,2,23,$0,$0\n\
+             2025-02-02,gpt-4o,20,16,2,4,22,$0,$0\n",
+        )
+        .unwrap();
+
+        let scanned = super::parse_cursor_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 16);
+        assert_eq!(scanned.messages[0].tokens.cache_write, 4);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn overflowing_row_tokens_are_malformed_and_later_row_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.csv");
+        std::fs::write(
+            &path,
+            "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you\n\
+             2025-02-01,gpt-4o,9223372036854775807,9223372036854775807,0,1,0,$0,$0\n\
+             2025-02-02,gpt-4o,20,16,2,4,22,$0,$0\n",
+        )
+        .unwrap();
+
+        let scanned = super::parse_cursor_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 16);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -329,10 +459,10 @@ mod tests {
 
     #[test]
     fn test_parse_cursor_csv_sample_new_format() {
-        // Real format from Cursor API
+        // Cursor API column layout with internally consistent cache-write totals.
         let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 "2025-11-13T18:36:05.846Z","Included","auto","No","28342","775","105891","21282","156290","0.19"
-"2025-11-13T13:35:04.658Z","On-Demand","gpt-5-codex","No","0","8263","66964","1612","76839","0.03""#;
+"2025-11-13T13:35:04.658Z","On-Demand","gpt-5-codex","No","8263","8263","66964","1612","76839","0.03""#;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let file_path = temp_dir.path().join("usage.csv");
@@ -362,9 +492,9 @@ mod tests {
     fn test_parse_cursor_csv_sample_v3_format() {
         // v3 format includes Cloud Agent ID and Automation ID columns
         let csv = r#"Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
-"2026-04-09T20:01:10.528Z","bc-a380fb49-e1a5-414e-817d-6a85b6cdc51c","cc30782e-26cc-4359-bc22-7567efe282be","Included","composer-2","Yes","0","343446","29045760","915201","30304407","Included"
-"2026-04-09T18:02:13.576Z","bc-19a9b74b-2af3-46e2-9f61-3ba1cdac46c8","1a0df38f-1474-4dfe-896b-70b841d4a833","On-Demand","composer-2","Yes","0","43478","420864","7957","472299","0.11"
-"2026-04-09T07:39:09.091Z","bc-49262501-0ee0-49f9-b856-a5b0466deddb","","Errored, No Charge","composer-2","Yes","0","104504","985600","3666","1093770","-""#;
+"2026-04-09T20:01:10.528Z","bc-a380fb49-e1a5-414e-817d-6a85b6cdc51c","cc30782e-26cc-4359-bc22-7567efe282be","Included","composer-2","Yes","343446","343446","29045760","915201","30304407","Included"
+"2026-04-09T18:02:13.576Z","bc-19a9b74b-2af3-46e2-9f61-3ba1cdac46c8","1a0df38f-1474-4dfe-896b-70b841d4a833","On-Demand","composer-2","Yes","43478","43478","420864","7957","472299","0.11"
+"2026-04-09T07:39:09.091Z","bc-49262501-0ee0-49f9-b856-a5b0466deddb","","Errored, No Charge","composer-2","Yes","104504","104504","985600","3666","1093770","-""#;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let file_path = temp_dir.path().join("usage.csv");

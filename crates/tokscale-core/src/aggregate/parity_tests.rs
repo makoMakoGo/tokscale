@@ -162,6 +162,7 @@ fn model_report_from_entrypoint(msgs: &[UnifiedMessage], gb: &GroupBy) -> ModelR
     let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
     let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
     ModelReport {
+        health: Default::default(),
         entries,
         total_input,
         total_output,
@@ -527,6 +528,7 @@ fn parity_time_metrics() {
     let old = crate::TimeMetricsReport {
         metrics,
         processing_time_ms: 0,
+        health: Default::default(),
     };
     let new = {
         let mut e = AggregationEngine::new(AggregationConfig {

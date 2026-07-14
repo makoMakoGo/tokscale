@@ -48,6 +48,12 @@ Required boundary behavior should be visible:
 - log a clear failure,
 - or let a focused test fail.
 
+Visibility does not imply a global failure domain. "No silent fallback" is
+satisfied by recording and surfacing the failure where it happened; it does
+not require aborting unrelated work, and it never justifies discarding data
+that other sources produced correctly. ADR 0021 defines the failure-domain
+boundaries for local source ingestion.
+
 Before removing existing behavior under this ADR, a change must identify the
 hidden failure it masks and add a focused regression case. If the behavior is a
 documented domain rule, preserve it unless the relevant ADR and tests are

@@ -5,6 +5,7 @@ use super::{
     UnifiedMessage,
 };
 use crate::model_aliases;
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use rusqlite::{Connection, OpenFlags};
 use serde::de::{self, IgnoredAny, MapAccess, Visitor};
@@ -63,6 +64,10 @@ impl<'de> Visitor<'de> for OpenCodeMessageVisitor {
         let mut mode: Option<String> = None;
 
         let mut saw_id = false;
+        let mut saw_model_id = false;
+        let mut saw_provider_id = false;
+        let mut saw_tokens = false;
+        let mut saw_time = false;
         let mut saw_agent = false;
         let mut saw_mode = false;
 
@@ -91,28 +96,32 @@ impl<'de> Visitor<'de> for OpenCodeMessageVisitor {
                     id = map.next_value()?;
                 }
                 OpenCodeMessageField::ModelId => {
-                    if model_id.is_some() {
+                    if saw_model_id {
                         return Err(de::Error::duplicate_field("modelID"));
                     }
-                    model_id = Some(map.next_value()?);
+                    saw_model_id = true;
+                    model_id = map.next_value()?;
                 }
                 OpenCodeMessageField::ProviderId => {
-                    if provider_id.is_some() {
+                    if saw_provider_id {
                         return Err(de::Error::duplicate_field("providerID"));
                     }
-                    provider_id = Some(map.next_value()?);
+                    saw_provider_id = true;
+                    provider_id = map.next_value()?;
                 }
                 OpenCodeMessageField::Tokens => {
-                    if tokens.is_some() {
+                    if saw_tokens {
                         return Err(de::Error::duplicate_field("tokens"));
                     }
+                    saw_tokens = true;
                     tokens = Some(map.next_value()?);
                 }
                 OpenCodeMessageField::Time => {
-                    if time.is_some() {
+                    if saw_time {
                         return Err(de::Error::duplicate_field("time"));
                     }
-                    time = Some(map.next_value()?);
+                    saw_time = true;
+                    time = map.next_value()?;
                 }
                 OpenCodeMessageField::Agent => {
                     if saw_agent {
@@ -141,10 +150,10 @@ impl<'de> Visitor<'de> for OpenCodeMessageVisitor {
 
         Ok(DecodedOpenCodeMessage(Some(OpenCodeAssistant {
             id,
-            model_id: model_id.ok_or_else(|| de::Error::missing_field("modelID"))?,
-            provider_id: provider_id.ok_or_else(|| de::Error::missing_field("providerID"))?,
-            tokens: tokens.ok_or_else(|| de::Error::missing_field("tokens"))?,
-            time: time.ok_or_else(|| de::Error::missing_field("time"))?,
+            model_id,
+            provider_id,
+            tokens,
+            time,
             agent,
             mode,
         })))
@@ -163,10 +172,10 @@ impl<'de> Deserialize<'de> for DecodedOpenCodeMessage {
 #[derive(Debug)]
 struct OpenCodeAssistant {
     id: Option<String>,
-    model_id: String,
-    provider_id: String,
-    tokens: NullableOpenCodeTokens,
-    time: OpenCodeTime,
+    model_id: Option<String>,
+    provider_id: Option<String>,
+    tokens: Option<NullableOpenCodeTokens>,
+    time: Option<OpenCodeTime>,
     agent: Option<String>,
     mode: Option<String>,
 }
@@ -191,7 +200,7 @@ struct OpenCodeCache {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct OpenCodeTime {
-    created: f64,
+    created: Option<f64>,
     completed: Option<f64>,
 }
 
@@ -217,10 +226,18 @@ struct OpenCodeSqliteDedupState {
 
 #[derive(Debug, Error)]
 pub enum OpenCodeMessageSemanticError {
+    #[error("modelID is missing or null")]
+    MissingModelId,
     #[error("modelID must not be empty or whitespace")]
     EmptyModelId,
+    #[error("providerID is missing or null")]
+    MissingProviderId,
     #[error("providerID must not be empty or whitespace")]
     EmptyProviderId,
+    #[error("tokens is missing")]
+    MissingTokens,
+    #[error("time is missing or null")]
+    MissingTime,
     #[error("session_id must not be empty or whitespace")]
     EmptySessionId,
     #[error(
@@ -318,7 +335,7 @@ fn merge_duplicate_workspace(
 }
 
 fn opencode_duration_ms(time: &OpenCodeTime) -> Option<i64> {
-    let duration = time.completed? - time.created;
+    let duration = time.completed? - time.created?;
     if duration.is_finite() && duration > 0.0 {
         Some(duration as i64)
     } else {
@@ -352,11 +369,12 @@ fn decode_opencode_assistant(
 
 /// Parse a current-format OpenCode SQLite database.
 ///
-/// Opening the database, preparing the current `message`/`session` query,
-/// reading query rows, decoding payloads, or validating current assistant
-/// payload semantics is a hard error. In particular, databases that predate the
-/// current `session.directory` schema are not accepted as an empty source.
-pub fn parse_opencode_sqlite(db_path: &Path) -> Result<Vec<UnifiedMessage>, OpenCodeSqliteError> {
+/// Opening the database and preparing/executing the current `message`/`session`
+/// query are source-level errors. A malformed row is rejected without erasing
+/// other rows, while a row-step failure interrupts the scan and preserves the
+/// messages already confirmed. Databases that predate the current
+/// `session.directory` schema are not accepted as an empty source.
+pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSqliteError> {
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -386,62 +404,64 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<Vec<UnifiedMessage>, Open
             source,
         })?;
 
-    let mut messages: Vec<UnifiedMessage> = Vec::new();
+    let mut scanned = ScannedSource::default();
     let mut fingerprint_indices: HashMap<OpenCodeSqliteFingerprint, usize> = HashMap::new();
     let mut dedup_states: Vec<OpenCodeSqliteDedupState> = Vec::new();
 
-    while let Some(row) = rows.next().map_err(|source| OpenCodeSqliteError::RowId {
-        db_path: db_path.to_path_buf(),
-        source,
-    })? {
-        let row_id: String = row.get(0).map_err(|source| OpenCodeSqliteError::RowId {
-            db_path: db_path.to_path_buf(),
-            source,
-        })?;
-        let session_id: String = row.get(1).map_err(|source| OpenCodeSqliteError::Row {
-            db_path: db_path.to_path_buf(),
-            row_id: row_id.clone(),
-            source,
-        })?;
-        let workspace_root: Option<String> =
-            row.get(3).map_err(|source| OpenCodeSqliteError::Row {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source,
-            })?;
-        let data_value = row.get_ref(2).map_err(|source| OpenCodeSqliteError::Row {
-            db_path: db_path.to_path_buf(),
-            row_id: row_id.clone(),
-            source,
-        })?;
-        let data_json = data_value
-            .as_str()
-            .map_err(|source| OpenCodeSqliteError::Row {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    data_value.data_type(),
-                    Box::new(source),
-                ),
-            })?;
-
-        if session_id.trim().is_empty() {
-            return Err(OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id,
-                source: OpenCodeMessageSemanticError::EmptySessionId,
-            });
-        }
-
-        let Some(msg) = decode_opencode_assistant(data_json).map_err(|source| {
-            OpenCodeSqliteError::PayloadDecode {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source,
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(source) => {
+                let error = OpenCodeSqliteError::RowId {
+                    db_path: db_path.to_path_buf(),
+                    source,
+                };
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read OpenCode SQLite row",
+                    error.to_string(),
+                ));
+                break;
             }
-        })?
-        else {
+        };
+        let row_id: String = match row.get(0) {
+            Ok(row_id) => row_id,
+            Err(_) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let data_value = match row.get_ref(2) {
+            Ok(data_value) => data_value,
+            Err(_) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let data_json = match data_value.as_str() {
+            Ok(data_json) => data_json,
+            Err(_) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+
+        let msg = match decode_opencode_assistant(data_json) {
+            Ok(msg) => msg,
+            Err(_) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let Some(msg) = msg else {
             continue;
         };
 
@@ -455,35 +475,15 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<Vec<UnifiedMessage>, Open
             mode,
         } = msg;
 
-        if model_id.trim().is_empty() {
-            return Err(OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id,
-                source: OpenCodeMessageSemanticError::EmptyModelId,
-            });
-        }
-        if provider_id.trim().is_empty() {
-            return Err(OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id,
-                source: OpenCodeMessageSemanticError::EmptyProviderId,
-            });
-        }
-        let created_timestamp = validate_created_timestamp(time.created).map_err(|source| {
-            OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source,
-            }
-        })?;
+        let Some(tokens) = tokens else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
         let Some(tokens) = tokens.0 else {
             continue;
         };
-
-        let model_id = canonicalize_opencode_model_id(model_id);
-        let agent = mode
-            .or(agent)
-            .map(|value| normalize_opencode_agent_name(&value));
         let input = tokens.input.max(0);
         let output = tokens.output.max(0);
         let reasoning = tokens.reasoning.unwrap_or(0).max(0);
@@ -500,9 +500,85 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<Vec<UnifiedMessage>, Open
             continue;
         }
 
+        let session_id: String = match row.get(1) {
+            Ok(session_id) => session_id,
+            Err(_) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let workspace_root: Option<String> = match row.get(3) {
+            Ok(workspace_root) => workspace_root,
+            Err(_) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+
+        if session_id.trim().is_empty() {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        }
+
+        let Some(model_id) = model_id else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
+        };
+        if model_id.trim().is_empty() {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
+        }
+        let Some(provider_id) = provider_id else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingProvider);
+            continue;
+        };
+        if provider_id.trim().is_empty() {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingProvider);
+            continue;
+        }
+        let Some(time) = time else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        };
+        let Some(created) = time.created else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        };
+        let created_timestamp = match validate_created_timestamp(created) {
+            Ok(timestamp) => timestamp,
+            Err(_) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingTimestamp);
+                continue;
+            }
+        };
+        let model_id = canonicalize_opencode_model_id(model_id);
+        let agent = mode
+            .or(agent)
+            .map(|value| normalize_opencode_agent_name(&value));
+
         let dedup_key = message_id.clone().unwrap_or(row_id);
         let fingerprint = OpenCodeSqliteFingerprint {
-            created_bits: time.created.to_bits(),
+            created_bits: created.to_bits(),
             completed_bits: time.completed.map(f64::to_bits),
             model_id: model_id.clone(),
             provider_id: provider_id.clone(),
@@ -531,9 +607,13 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<Vec<UnifiedMessage>, Open
             let state = &mut dedup_states[index];
             if message_id.is_some() && !state.has_embedded_message_id {
                 state.has_embedded_message_id = true;
-                messages[index].dedup_key = unified.dedup_key;
+                scanned.messages[index].dedup_key = unified.dedup_key;
             }
-            merge_duplicate_workspace(&mut messages[index], state, workspace_root.as_deref());
+            merge_duplicate_workspace(
+                &mut scanned.messages[index],
+                state,
+                workspace_root.as_deref(),
+            );
             continue;
         }
 
@@ -541,11 +621,11 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<Vec<UnifiedMessage>, Open
             has_embedded_message_id: message_id.is_some(),
             has_workspace_conflict: false,
         });
-        fingerprint_indices.insert(fingerprint, messages.len());
-        messages.push(unified);
+        fingerprint_indices.insert(fingerprint, scanned.messages.len());
+        scanned.messages.push(unified);
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 #[cfg(test)]
@@ -666,6 +746,87 @@ mod tests {
     }
 
     #[test]
+    fn keeps_good_rows_around_a_malformed_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = create_current_db(&path);
+        for (row_id, data) in [
+            ("01-good", assistant_data(None, 10, "build")),
+            (
+                "02-bad",
+                r#"{"role":"assistant","modelID":{"invalid":true}}"#.to_string(),
+            ),
+            ("03-good", assistant_data(None, 20, "build")),
+        ] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_id, "ses_1", data],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert_eq!(scanned.messages[1].tokens.input, 20);
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn all_bad_rows_complete_with_structured_rejection_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = create_current_db(&path);
+        let rows = [
+            (
+                "01-missing-model",
+                r#"{"role":"assistant","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+            ),
+            (
+                "02-missing-provider",
+                r#"{"role":"assistant","modelID":"gpt-5.5","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+            ),
+            (
+                "03-missing-time",
+                r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}}}"#,
+            ),
+            ("04-malformed", r#"{"role":"assistant","modelID":42}"#),
+        ];
+        for (row_id, data) in rows {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_id, "ses_1", data],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.interrupted.is_none());
+        let reasons: std::collections::BTreeMap<_, _> = scanned
+            .rejections
+            .entries()
+            .map(|entry| (entry.key, entry.count))
+            .collect();
+        assert_eq!(
+            reasons,
+            std::collections::BTreeMap::from([
+                ("malformed-record", 1),
+                ("missing-model", 1),
+                ("missing-provider", 1),
+                ("missing-timestamp", 1),
+            ])
+        );
+    }
+
+    #[test]
     fn parses_current_schema_and_uses_session_directory() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
@@ -680,9 +841,18 @@ mod tests {
             rusqlite::params!["row_1", "ses_1", assistant_data(None, 10, "build")],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "null-unattributed",
+                "",
+                r#"{"role":"assistant","tokens":null}"#
+            ],
+        )
+        .unwrap();
         drop(conn);
 
-        let messages = parse_opencode_sqlite(&path).unwrap();
+        let messages = parse_opencode_sqlite(&path).unwrap().messages;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 10);
@@ -738,27 +908,31 @@ mod tests {
     }
 
     #[test]
-    fn reports_query_row_failure() {
+    fn row_id_failure_is_rejected_without_losing_later_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
-             CREATE TABLE message (id BLOB, session_id TEXT NOT NULL, data TEXT NOT NULL);
-             INSERT INTO message VALUES (x'FF', 'ses_1', '{\"role\":\"assistant\",\"tokens\":{}}');",
+             CREATE TABLE message (id, session_id TEXT NOT NULL, data TEXT NOT NULL);
+             INSERT INTO message VALUES (42, 'ses_1', '{\"role\":\"assistant\"}');
+             INSERT INTO message VALUES ('01-good', 'ses_1', '{\"role\":\"assistant\",\"modelID\":\"gpt-5.5\",\"providerID\":\"openai\",\"tokens\":{\"input\":10,\"output\":5,\"cache\":{\"read\":0,\"write\":0}},\"time\":{\"created\":1766000000000}}');
+             INSERT INTO message VALUES ('02-good', 'ses_2', '{\"role\":\"assistant\",\"modelID\":\"gpt-5.5\",\"providerID\":\"openai\",\"tokens\":{\"input\":20,\"output\":5,\"cache\":{\"read\":0,\"write\":0}},\"time\":{\"created\":1766000000001}}');",
         )
         .unwrap();
         drop(conn);
 
-        let error = parse_opencode_sqlite(&path).unwrap_err();
-        match error {
-            OpenCodeSqliteError::RowId { db_path, .. } => assert_eq!(db_path, path),
-            error => panic!("expected row-read error, got {error:?}"),
-        }
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "ses_1");
+        assert_eq!(scanned.messages[1].session_id.as_ref(), "ses_2");
+        assert!(scanned.interrupted.is_none());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
     }
 
     #[test]
-    fn row_failure_after_id_carries_database_and_row_context() {
+    fn row_failure_after_id_is_rejected_without_interrupting() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = create_current_db(&path);
@@ -769,22 +943,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        match parse_opencode_sqlite(&path).unwrap_err() {
-            OpenCodeSqliteError::Row {
-                db_path,
-                row_id,
-                source,
-            } => {
-                assert_eq!(db_path, path);
-                assert_eq!(row_id, "bad-data-column");
-                assert!(!source.to_string().is_empty());
-            }
-            error => panic!("expected contextual row-read error, got {error:?}"),
-        }
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+        assert!(scanned.interrupted.is_none());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
     }
 
     #[test]
-    fn payload_decode_error_carries_database_row_and_source() {
+    fn payload_decode_error_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = create_current_db(&path);
@@ -799,23 +965,13 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let error = parse_opencode_sqlite(&path).unwrap_err();
-        match error {
-            OpenCodeSqliteError::PayloadDecode {
-                db_path,
-                row_id,
-                source,
-            } => {
-                assert_eq!(db_path, path);
-                assert_eq!(row_id, "bad-model-type");
-                assert!(!source.to_string().is_empty());
-            }
-            error => panic!("expected payload-decode error, got {error:?}"),
-        }
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
     }
 
     #[test]
-    fn malformed_json_is_a_payload_error_with_database_and_row_context() {
+    fn malformed_json_is_a_record_rejection() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = create_current_db(&path);
@@ -826,70 +982,72 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        match parse_opencode_sqlite(&path).unwrap_err() {
-            OpenCodeSqliteError::PayloadDecode {
-                db_path,
-                row_id,
-                source,
-            } => {
-                assert_eq!(db_path, path);
-                assert_eq!(row_id, "malformed-json");
-                assert!(!source.to_string().is_empty());
-            }
-            error => panic!("expected payload-decode error, got {error:?}"),
-        }
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
     }
 
     #[test]
-    fn missing_current_payload_fields_are_decode_errors() {
+    fn missing_current_payload_fields_are_structured_rejections() {
         let cases = [
             (
                 "missing-role",
                 r#"{"modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+                "malformed-record",
             ),
             (
                 "missing-model",
                 r#"{"role":"assistant","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+                "missing-model",
             ),
             (
                 "missing-provider",
                 r#"{"role":"assistant","modelID":"gpt-5.5","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+                "missing-provider",
             ),
             (
                 "missing-tokens",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","time":{"created":1766000000000}}"#,
+                "malformed-record",
             ),
             (
                 "missing-input",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+                "malformed-record",
             ),
             (
                 "missing-output",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+                "malformed-record",
             ),
             (
                 "missing-time",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}}}"#,
+                "missing-timestamp",
             ),
             (
                 "missing-created",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{}}"#,
+                "missing-timestamp",
             ),
             (
                 "missing-cache",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5},"time":{"created":1766000000000}}"#,
+                "malformed-record",
             ),
             (
                 "missing-cache-read",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"write":0}},"time":{"created":1766000000000}}"#,
+                "malformed-record",
             ),
             (
                 "missing-cache-write",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0}},"time":{"created":1766000000000}}"#,
+                "malformed-record",
             ),
         ];
 
-        for (row_id, payload) in cases {
+        for (row_id, payload, expected_reason) in cases {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("opencode.db");
             let conn = create_current_db(&path);
@@ -900,17 +1058,10 @@ mod tests {
             .unwrap();
             drop(conn);
 
-            match parse_opencode_sqlite(&path).unwrap_err() {
-                OpenCodeSqliteError::PayloadDecode {
-                    db_path,
-                    row_id: actual_row_id,
-                    ..
-                } => {
-                    assert_eq!(db_path, path);
-                    assert_eq!(actual_row_id, row_id);
-                }
-                error => panic!("expected payload-decode error for {row_id}, got {error:?}"),
-            }
+            let scanned = parse_opencode_sqlite(&path).unwrap();
+            assert!(scanned.interrupted.is_none());
+            let rejection = scanned.rejections.entries().next().unwrap();
+            assert_eq!(rejection.key, expected_reason, "row {row_id}");
         }
     }
 
@@ -922,58 +1073,67 @@ mod tests {
                 "ses_1",
                 r#"{"role":"assistant","modelID":"","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
                 "modelID",
+                "missing-model",
             ),
             (
                 "whitespace-model",
                 "ses_1",
                 r#"{"role":"assistant","modelID":"   ","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
                 "modelID",
+                "missing-model",
             ),
             (
                 "empty-provider",
                 "ses_1",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
                 "providerID",
+                "missing-provider",
             ),
             (
                 "whitespace-provider",
                 "ses_1",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":" ","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
                 "providerID",
+                "missing-provider",
             ),
             (
                 "empty-session",
                 "",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
                 "session_id",
+                "malformed-record",
             ),
             (
                 "whitespace-session",
                 "  ",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
                 "session_id",
+                "malformed-record",
             ),
             (
                 "zero-created",
                 "ses_1",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":0}}"#,
                 "time.created",
+                "missing-timestamp",
             ),
             (
                 "fractional-created",
                 "ses_1",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000.5}}"#,
                 "time.created",
+                "missing-timestamp",
             ),
             (
                 "out-of-range-created",
                 "ses_1",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":9223372036854775808}}"#,
                 "time.created",
+                "missing-timestamp",
             ),
         ];
 
-        for (row_id, session_id, payload, expected_field) in cases {
+        for (row_id, session_id, payload, _expected_field, expected_reason) in cases {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("opencode.db");
             let conn = create_current_db(&path);
@@ -984,18 +1144,10 @@ mod tests {
             .unwrap();
             drop(conn);
 
-            match parse_opencode_sqlite(&path).unwrap_err() {
-                OpenCodeSqliteError::Semantic {
-                    db_path,
-                    row_id: actual_row_id,
-                    source,
-                } => {
-                    assert_eq!(db_path, path);
-                    assert_eq!(actual_row_id, row_id);
-                    assert!(source.to_string().contains(expected_field));
-                }
-                error => panic!("expected semantic error for {row_id}, got {error:?}"),
-            }
+            let scanned = parse_opencode_sqlite(&path).unwrap();
+            assert!(scanned.interrupted.is_none());
+            let rejection = scanned.rejections.entries().next().unwrap();
+            assert_eq!(rejection.key, expected_reason, "row {row_id}");
         }
     }
 
@@ -1039,7 +1191,36 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        assert!(parse_opencode_sqlite(&path).unwrap().is_empty());
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert!(
+            scanned.rejections.is_empty(),
+            "null/zero tokens and non-assistant rows are intentional filters"
+        );
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn zero_usage_is_filtered_before_attribution_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = create_current_db(&path);
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "zero-unattributed",
+                "",
+                r#"{"role":"assistant","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -1074,10 +1255,20 @@ mod tests {
 
         let assistant = decode_opencode_assistant(payload).unwrap().unwrap();
 
-        assert_eq!(assistant.model_id, "gpt-5.5");
-        assert_eq!(assistant.provider_id, "openai");
-        assert_eq!(assistant.tokens.0.unwrap().input, 10);
-        assert_eq!(assistant.time.created, 1_766_000_000_000.0);
+        assert_eq!(assistant.model_id.as_deref(), Some("gpt-5.5"));
+        assert_eq!(assistant.provider_id.as_deref(), Some("openai"));
+        assert_eq!(
+            assistant
+                .tokens
+                .as_ref()
+                .and_then(|tokens| tokens.0.as_ref())
+                .map(|tokens| tokens.input),
+            Some(10)
+        );
+        assert_eq!(
+            assistant.time.as_ref().and_then(|time| time.created),
+            Some(1_766_000_000_000.0)
+        );
         assert_eq!(assistant.mode.as_deref(), Some("build"));
     }
 
@@ -1145,7 +1336,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         drop(create_current_db(&path));
-        assert!(parse_opencode_sqlite(&path).unwrap().is_empty());
+        assert!(parse_opencode_sqlite(&path).unwrap().messages.is_empty());
     }
 
     #[test]
@@ -1170,7 +1361,7 @@ mod tests {
         }
         drop(conn);
 
-        let messages = parse_opencode_sqlite(&path).unwrap();
+        let messages = parse_opencode_sqlite(&path).unwrap().messages;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].workspace_key, None);
         assert_eq!(messages[0].workspace_label, None);
@@ -1192,7 +1383,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let messages = parse_opencode_sqlite(&path).unwrap();
+        let messages = parse_opencode_sqlite(&path).unwrap().messages;
         assert_eq!(
             messages[0].dedup_key,
             Some(crate::sessions::dedup_hash_str("embedded_1"))
@@ -1212,7 +1403,11 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let message = parse_opencode_sqlite(&path).unwrap().pop().unwrap();
+        let message = parse_opencode_sqlite(&path)
+            .unwrap()
+            .messages
+            .pop()
+            .unwrap();
         assert_eq!(message.tokens.input, 0);
         assert_eq!(message.tokens.output, 5);
         assert_eq!(message.tokens.reasoning, 0);
@@ -1230,7 +1425,7 @@ mod integration_tests {
     fn parses_real_current_database() {
         let home = std::env::var("HOME").unwrap();
         let db_path = Path::new(&home).join(".local/share/opencode/opencode.db");
-        let messages = parse_opencode_sqlite(&db_path).unwrap();
+        let messages = parse_opencode_sqlite(&db_path).unwrap().messages;
         assert!(!messages.is_empty());
     }
 }

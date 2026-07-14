@@ -7,14 +7,19 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, CodeBuddyLogSource, FingerprintPolicy, FoldContext, LocalSourceAdapter,
-    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError,
-    SourceParseError, SourceUnit, SourceUnitMeta,
+    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    SourceUnitMeta,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 use crate::UnifiedMessage;
 
 const MIRROR_DEDUP_WINDOW_MS: i64 = 1000;
+const CODEBUDDY_JSONL_RECORD_REJECTION_REVISION: u32 =
+    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
+const CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION: u32 =
+    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 pub(crate) struct CodeBuddyAdapter;
 
@@ -46,7 +51,13 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
             FingerprintPolicy::PlainFile,
         )?
         .into_iter()
-        .map(|unit| unit.with_meta(SourceUnitMeta::CodeBuddyJsonl))
+        .map(|unit| {
+            unit.with_meta(SourceUnitMeta::CodeBuddyJsonl)
+                .with_parser_version(ParserVersion::new(
+                    ParserId::CodeBuddy,
+                    CODEBUDDY_JSONL_RECORD_REJECTION_REVISION,
+                ))
+        })
         .collect::<Vec<_>>();
 
         units.extend(codebuddy_extension_log_units(
@@ -58,21 +69,17 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
                 SourceUnitMeta::CodeBuddyJsonl => {
-                    adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
+                    adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                         sessions::codebuddy::parse_codebuddy_jsonl_file(path)
                     })
                 }
                 SourceUnitMeta::CodeBuddyExtensionLog { .. } => {
-                    adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
+                    adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                         sessions::codebuddy::parse_codebuddy_extension_log_file(path)
                     })
                 }
@@ -185,7 +192,13 @@ fn codebuddy_extension_log_units(
                 FingerprintPolicy::PlainFile,
             )?
             .into_iter()
-            .map(|unit| unit.with_meta(SourceUnitMeta::CodeBuddyExtensionLog { source })),
+            .map(|unit| {
+                unit.with_meta(SourceUnitMeta::CodeBuddyExtensionLog { source })
+                    .with_parser_version(ParserVersion::new(
+                        ParserId::CodeBuddy,
+                        CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
+                    ))
+            }),
         );
     }
     Ok(units)
@@ -325,19 +338,10 @@ mod tests {
 
     fn fold_with_units(units: Vec<SourceUnit>) -> Vec<crate::UnifiedMessage> {
         let mut cache = message_cache::SourceMessageCache::default();
-        let parsed = CODEBUDDY_ADAPTER
-            .parse_checked(units, &ParseContext { pricing: None })
-            .unwrap();
+        let parsed = CODEBUDDY_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
         CODEBUDDY_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut sink,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
             .unwrap();
         sink
     }
@@ -368,6 +372,19 @@ mod tests {
         expected.sort_unstable();
 
         assert_eq!(paths, expected);
+        for unit in &units {
+            let revision = match unit.meta {
+                SourceUnitMeta::CodeBuddyJsonl => CODEBUDDY_JSONL_RECORD_REJECTION_REVISION,
+                SourceUnitMeta::CodeBuddyExtensionLog { .. } => {
+                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                unit.parser_version,
+                ParserVersion::new(ParserId::CodeBuddy, revision)
+            );
+        }
         assert_eq!(
             metas,
             vec![
@@ -443,7 +460,11 @@ mod tests {
             .with_meta(SourceUnitMeta::CodeBuddyJsonl)];
 
         let actual = fold_with_units(units);
-        let expected = finalized(sessions::codebuddy::parse_codebuddy_jsonl_file(&path).unwrap());
+        let expected = finalized(
+            sessions::codebuddy::parse_codebuddy_jsonl_file(&path)
+                .unwrap()
+                .messages,
+        );
 
         assert_eq!(actual, expected);
     }

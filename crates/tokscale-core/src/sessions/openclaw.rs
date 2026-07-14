@@ -5,6 +5,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -52,9 +53,7 @@ struct OpenClawUsage {
     total_tokens: Option<i64>,
 }
 
-pub fn parse_openclaw_transcript(
-    transcript_path: &Path,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_openclaw_transcript(transcript_path: &Path) -> SessionParseResult<ScannedSource> {
     let session_id = match transcript_path
         .file_name()
         .and_then(|n| {
@@ -79,7 +78,7 @@ pub fn parse_openclaw_transcript(
 fn parse_openclaw_session(
     session_path: &Path,
     session_id: &str,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+) -> SessionParseResult<ScannedSource> {
     if session_id.trim().is_empty() {
         return Err(SessionParseError::invalid(
             "validate OpenClaw session",
@@ -90,14 +89,26 @@ fn parse_openclaw_session(
         .map_err(|error| SessionParseError::new("open OpenClaw transcript", error))?;
 
     let reader = BufReader::new(file);
-    let mut messages = Vec::with_capacity(64);
+    let mut scanned = ScannedSource {
+        messages: Vec::with_capacity(64),
+        ..ScannedSource::default()
+    };
     let mut current_model: Option<String> = None;
     let mut current_provider: Option<String> = None;
     let mut buffer = Vec::with_capacity(4096);
 
-    for line in reader.lines() {
-        let line =
-            line.map_err(|error| SessionParseError::new("read OpenClaw JSONL line", error))?;
+    for (line_index, line) in reader.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read OpenClaw JSONL line",
+                    format!("{} line {line_number}: {error}", session_path.display()),
+                ));
+                break;
+            }
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -106,29 +117,53 @@ fn parse_openclaw_session(
 
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
-        let entry: OpenClawEntry = simd_json::from_slice(&mut buffer)
-            .map_err(|error| SessionParseError::new("decode OpenClaw JSONL line", error))?;
+        let entry: OpenClawEntry = match simd_json::from_slice(&mut buffer) {
+            Ok(entry) => entry,
+            Err(_error) => {
+                current_model = None;
+                current_provider = None;
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
         match entry.entry_type.as_str() {
-            "model_change" => {
-                if let Some(model) = entry.model_id {
-                    current_model = Some(canonicalize_openclaw_model(&model));
-                }
-                if let Some(provider) = entry.provider {
+            "model_change" => match explicit_openclaw_identity(entry.model_id, entry.provider) {
+                Ok((model, provider)) => {
+                    current_model = Some(model);
                     current_provider = Some(provider);
                 }
-            }
+                Err(reason) => {
+                    current_model = None;
+                    current_provider = None;
+                    scanned.rejections.record(reason);
+                }
+            },
             "custom" => {
                 if entry.custom_type.as_deref() != Some("model-snapshot") {
                     continue;
                 }
 
-                if let Some(data) = entry.data {
-                    if let Some(model) = data.model_id {
-                        current_model = Some(canonicalize_openclaw_model(&model));
-                    }
-                    if let Some(provider) = data.provider {
-                        current_provider = Some(provider);
+                match entry.data {
+                    Some(data) => match explicit_openclaw_identity(data.model_id, data.provider) {
+                        Ok((model, provider)) => {
+                            current_model = Some(model);
+                            current_provider = Some(provider);
+                        }
+                        Err(reason) => {
+                            current_model = None;
+                            current_provider = None;
+                            scanned.rejections.record(reason);
+                        }
+                    },
+                    None => {
+                        current_model = None;
+                        current_provider = None;
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MalformedRecord);
                     }
                 }
             }
@@ -143,61 +178,76 @@ fn parse_openclaw_session(
                         None => continue,
                     };
 
-                    let model = msg
+                    let tokens = match openclaw_token_breakdown(&usage) {
+                        Ok(Some(tokens)) => tokens,
+                        Ok(None) => continue,
+                        Err(_detail) => {
+                            scanned
+                                .rejections
+                                .record(RecordRejectionReason::MalformedRecord);
+                            continue;
+                        }
+                    };
+
+                    let explicit_model = msg
                         .model
                         .clone()
                         .filter(|m| !m.is_empty())
-                        .map(|model| canonicalize_openclaw_model(&model))
-                        .or_else(|| current_model.clone().filter(|m| !m.is_empty()));
-                    let model = model.ok_or_else(|| {
-                        SessionParseError::invalid(
-                            "validate OpenClaw assistant message",
-                            "assistant message has no model",
-                        )
-                    })?;
-                    let provider = msg
+                        .map(|model| canonicalize_openclaw_model(&model));
+                    let explicit_provider = msg
                         .provider
                         .clone()
-                        .filter(|provider| !provider.trim().is_empty())
-                        .or_else(|| {
-                            current_provider
+                        .filter(|provider| !provider.trim().is_empty());
+                    let model = explicit_model
+                        .clone()
+                        .or_else(|| current_model.clone().filter(|m| !m.is_empty()));
+                    let provider = model.as_deref().and_then(|model| {
+                        if explicit_model.is_some() {
+                            explicit_provider.clone().or_else(|| {
+                                provider_identity::inferred_provider_from_model(model)
+                                    .map(str::to_string)
+                            })
+                        } else {
+                            explicit_provider
                                 .clone()
-                                .filter(|provider| !provider.trim().is_empty())
-                        })
-                        .or_else(|| {
-                            provider_identity::inferred_provider_from_model(&model)
-                                .map(str::to_string)
-                        })
-                        .ok_or_else(|| {
-                            SessionParseError::invalid(
-                                "validate OpenClaw assistant message",
-                                format!("cannot determine provider for model `{model}`"),
-                            )
-                        })?;
+                                .or_else(|| {
+                                    current_provider
+                                        .clone()
+                                        .filter(|provider| !provider.trim().is_empty())
+                                })
+                                .or_else(|| {
+                                    provider_identity::inferred_provider_from_model(model)
+                                        .map(str::to_string)
+                                })
+                        }
+                    });
+
+                    let Some(model) = model else {
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingModel);
+                        continue;
+                    };
+                    let Some(provider) = provider else {
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingProvider);
+                        continue;
+                    };
+
+                    let timestamp = msg.timestamp.filter(|timestamp| *timestamp > 0);
+
+                    let Some(timestamp) = timestamp else {
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingTimestamp);
+                        continue;
+                    };
 
                     current_model = Some(model.clone());
                     current_provider = Some(provider.clone());
-                    let timestamp = msg
-                        .timestamp
-                        .filter(|timestamp| *timestamp > 0)
-                        .ok_or_else(|| {
-                            SessionParseError::invalid(
-                                "validate OpenClaw assistant message",
-                                "assistant message is missing a positive timestamp",
-                            )
-                        })?;
-                    let tokens = TokenBreakdown {
-                        input: usage.input.unwrap_or(0).max(0),
-                        output: usage.output.unwrap_or(0).max(0),
-                        cache_read: usage.cache_read.unwrap_or(0).max(0),
-                        cache_write: usage.cache_write.unwrap_or(0).max(0),
-                        reasoning: 0,
-                    };
-                    if crate::positive_token_total(&tokens) == 0 {
-                        continue;
-                    }
 
-                    messages.push(UnifiedMessage::new(
+                    scanned.messages.push(UnifiedMessage::new(
                         "openclaw", model, provider, session_id, timestamp, tokens, 0.0,
                     ));
                 }
@@ -206,11 +256,56 @@ fn parse_openclaw_session(
         }
     }
 
-    Ok(messages)
+    Ok(scanned)
+}
+
+fn openclaw_token_breakdown(usage: &OpenClawUsage) -> Result<Option<TokenBreakdown>, &'static str> {
+    for value in [
+        usage.input,
+        usage.output,
+        usage.cache_read,
+        usage.cache_write,
+        usage.total_tokens,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value < 0 {
+            return Err("assistant usage contains a negative token count");
+        }
+    }
+
+    let tokens = TokenBreakdown {
+        input: usage.input.unwrap_or(0),
+        output: usage.output.unwrap_or(0),
+        cache_read: usage.cache_read.unwrap_or(0),
+        cache_write: usage.cache_write.unwrap_or(0),
+        reasoning: 0,
+    };
+    let total = tokens
+        .checked_total()
+        .ok_or("assistant usage token total exceeds i64::MAX")?;
+
+    Ok((total > 0).then_some(tokens))
 }
 
 fn canonicalize_openclaw_model(model: &str) -> String {
     model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
+}
+
+fn explicit_openclaw_identity(
+    model: Option<String>,
+    provider: Option<String>,
+) -> Result<(String, String), RecordRejectionReason> {
+    let model = model
+        .filter(|model| !model.trim().is_empty())
+        .map(|model| canonicalize_openclaw_model(&model))
+        .ok_or(RecordRejectionReason::MissingModel)?;
+    let provider = provider
+        .filter(|provider| !provider.trim().is_empty())
+        .or_else(|| provider_identity::inferred_provider_from_model(&model).map(str::to_string))
+        .ok_or(RecordRejectionReason::MissingProvider)?;
+    Ok((model, provider))
 }
 
 #[cfg(test)]
@@ -221,11 +316,13 @@ mod tests {
     use tempfile::TempDir;
 
     fn parse_openclaw_session(path: &Path, session_id: &str) -> Vec<UnifiedMessage> {
-        super::parse_openclaw_session(path, session_id).unwrap()
+        super::parse_openclaw_session(path, session_id)
+            .unwrap()
+            .messages
     }
 
     fn parse_openclaw_transcript(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_openclaw_transcript(path).unwrap()
+        super::parse_openclaw_transcript(path).unwrap().messages
     }
 
     fn create_test_session(dir: &TempDir, filename: &str, content: &str) -> String {
@@ -273,9 +370,9 @@ mod tests {
         let content = r#"{"type":"message","id":"msg1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50},"timestamp":1700000000000}}"#;
 
         let session_path = create_test_session(&dir, "session.jsonl", content);
-        let error =
-            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap_err();
-        assert_eq!(error.operation(), "validate OpenClaw assistant message");
+        let scanned =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap();
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -380,6 +477,23 @@ mod tests {
     }
 
     #[test]
+    fn model_change_commits_model_and_provider_as_one_pair() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"openai","modelId":"gpt-5"}
+{"type":"model_change","modelId":"claude-sonnet-4.6"}
+{"type":"message","message":{"role":"assistant","usage":{"input":10,"output":5},"timestamp":1700000000000}}"#;
+        let session_path = create_test_session(&dir, "pair.jsonl", content);
+
+        let scanned =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "claude-sonnet-4.6");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "anthropic");
+        assert!(scanned.rejections.is_empty());
+    }
+
+    #[test]
     fn test_parse_openclaw_session_empty_embedded_values_fall_back_to_current_model_state() {
         let dir = TempDir::new().unwrap();
         let content = r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4.6"}
@@ -391,5 +505,97 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+    }
+
+    #[test]
+    fn bad_assistant_record_does_not_hide_later_messages() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"openai","modelId":"gpt-5"}
+{"type":"message","message":{"role":"assistant","usage":{"input":10,"output":2},"timestamp":1700000000000}}
+{"type":"message","message":{"role":"assistant","usage":{"input":11,"output":2}}}
+{"type":"message","message":{"role":"assistant","usage":{"input":20,"output":3},"timestamp":1700000002000}}"#;
+        let session_path = create_test_session(&dir, "mixed.jsonl", content);
+
+        let scanned =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn negative_tokens_are_rejected_without_hiding_later_messages() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"openai","modelId":"gpt-5"}
+{"type":"message","message":{"role":"assistant","usage":{"input":10,"output":2},"timestamp":1700000000000}}
+{"type":"message","message":{"role":"assistant","usage":{"input":-1,"output":2},"timestamp":1700000001000}}
+{"type":"message","message":{"role":"assistant","usage":{"input":20,"output":3},"timestamp":1700000002000}}"#;
+        let session_path = create_test_session(&dir, "negative.jsonl", content);
+
+        let scanned =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn overflowing_token_total_is_rejected_without_panicking() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"openai","modelId":"gpt-5"}
+{"type":"message","message":{"role":"assistant","usage":{"input":9223372036854775807,"output":1},"timestamp":1700000000000}}"#;
+        let session_path = create_test_session(&dir, "overflow.jsonl", content);
+
+        let scanned =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn zero_usage_without_identity_is_filtered_without_rejection() {
+        let dir = TempDir::new().unwrap();
+        let content =
+            r#"{"type":"message","message":{"role":"assistant","usage":{"input":0,"output":0}}}"#;
+        let session_path = create_test_session(&dir, "zero.jsonl", content);
+
+        let scanned =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn malformed_state_clears_identity_and_later_state_resyncs() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","provider":"openai","modelId":"gpt-5"}
+{"type":"message","message":{"role":"assistant","usage":{"input":10,"output":2},"timestamp":1700000000000}}
+{"type":"model_change","provider":"anthropic"
+{"type":"message","message":{"role":"assistant","usage":{"input":20,"output":3},"timestamp":1700000001000}}
+{"type":"model_change","provider":"anthropic","modelId":"claude-sonnet-4.6"}
+{"type":"message","message":{"role":"assistant","usage":{"input":30,"output":4},"timestamp":1700000002000}}"#;
+        let session_path = create_test_session(&dir, "state.jsonl", content);
+
+        let scanned =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[1].model_id.as_ref(), "claude-sonnet-4.6");
+        assert_eq!(scanned.rejections.total(), 2);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn missing_transcript_remains_a_source_error() {
+        let dir = TempDir::new().unwrap();
+
+        let error =
+            super::parse_openclaw_transcript(&dir.path().join("missing.jsonl")).unwrap_err();
+
+        assert_eq!(error.operation(), "open OpenClaw transcript");
     }
 }

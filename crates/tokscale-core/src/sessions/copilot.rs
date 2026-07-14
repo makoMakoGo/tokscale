@@ -7,23 +7,37 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
 use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
+use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-pub fn parse_copilot_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
-    let trace_contexts = collect_trace_contexts(path)?;
+pub fn parse_copilot_file(path: &Path) -> SessionParseResult<ScannedSource> {
+    let mut scanned = ScannedSource::default();
+    let (trace_contexts, first_pass_interruption, confirmed_records) =
+        collect_trace_contexts(path, &mut scanned.rejections)?;
 
     let mut candidates = Vec::new();
-    for_each_json_record(path, |index, record| {
-        if let Some(candidate) = usage_candidate_from_record(path, record, index, &trace_contexts)?
-        {
-            candidates.push(candidate);
-        }
-        Ok(())
-    })?;
+    let mut ignored_second_pass_rejections = RejectionSummary::default();
+    let mut candidate_rejections = RejectionSummary::default();
+    let (second_pass_interruption, _) = for_each_json_record(
+        path,
+        false,
+        &mut ignored_second_pass_rejections,
+        first_pass_interruption.as_ref().map(|_| confirmed_records),
+        |index, record| {
+            match usage_candidate_from_record(path, record, index, &trace_contexts) {
+                Ok(Some(candidate)) => candidates.push(candidate),
+                Ok(None) => {}
+                Err(error) => record_copilot_rejection(&mut candidate_rejections, index, &error),
+            }
+            Ok(())
+        },
+    )?;
+    scanned.interrupted = first_pass_interruption.or(second_pass_interruption);
+    scanned.rejections.merge(&candidate_rejections);
 
     let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::ChatSpan);
     let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::InferenceLog);
@@ -34,7 +48,7 @@ pub fn parse_copilot_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>
     let agent_turn_response_ids =
         candidate_response_ids(&candidates, CopilotUsageSource::AgentTurnLog);
 
-    Ok(candidates
+    scanned.messages = candidates
         .into_iter()
         .filter(|candidate| {
             should_emit_candidate(
@@ -48,33 +62,78 @@ pub fn parse_copilot_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>
             )
         })
         .map(CopilotUsageCandidate::into_message)
-        .collect())
+        .collect();
+    Ok(scanned)
+}
+
+fn record_copilot_rejection(
+    rejections: &mut RejectionSummary,
+    _index: usize,
+    error: &SessionParseError,
+) {
+    let reason = match error.operation() {
+        "validate Copilot usage model" => RecordRejectionReason::MissingModel,
+        "validate Copilot usage provider" => RecordRejectionReason::MissingProvider,
+        "validate Copilot usage timestamp" => RecordRejectionReason::MissingTimestamp,
+        _ => RecordRejectionReason::MalformedRecord,
+    };
+    rejections.record(reason);
 }
 
 fn for_each_json_record(
     path: &Path,
+    record_malformed: bool,
+    rejections: &mut RejectionSummary,
+    record_limit: Option<usize>,
     mut handle: impl FnMut(usize, &Value) -> SessionParseResult<()>,
-) -> SessionParseResult<()> {
+) -> SessionParseResult<(Option<SourceFailure>, usize)> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let mut record_index = 0;
-    for line in BufReader::new(file).lines() {
-        let line =
-            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        if record_limit == Some(record_index) {
+            return Ok((None, record_index));
+        }
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                return Ok((
+                    Some(SourceFailure::new(
+                        "read JSONL line",
+                        format!("{} line {line_number}: {error}", path.display()),
+                    )),
+                    record_index,
+                ))
+            }
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let record = serde_json::from_str::<Value>(trimmed)
-            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
+        let record = match serde_json::from_str::<Value>(trimmed) {
+            Ok(record) => record,
+            Err(error) => {
+                if record_malformed {
+                    rejections.record(RecordRejectionReason::MalformedRecord);
+                }
+                return Ok((
+                    Some(SourceFailure::new(
+                        "decode JSONL line",
+                        format!("{} line {line_number}: {error}", path.display()),
+                    )),
+                    record_index,
+                ));
+            }
+        };
         handle(record_index, &record)?;
         record_index += 1;
     }
 
-    Ok(())
+    Ok((None, record_index))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -133,52 +192,57 @@ impl CopilotUsageCandidate {
     }
 }
 
-fn collect_trace_contexts(path: &Path) -> SessionParseResult<HashMap<String, TraceContext>> {
+fn collect_trace_contexts(
+    path: &Path,
+    rejections: &mut RejectionSummary,
+) -> SessionParseResult<(HashMap<String, TraceContext>, Option<SourceFailure>, usize)> {
     let mut contexts = HashMap::new();
 
-    for_each_json_record(path, |_, record| {
-        let Some(trace_id) = trace_id_from_record(record) else {
-            return Ok(());
-        };
+    let (interrupted, confirmed_records) =
+        for_each_json_record(path, true, rejections, None, |_, record| {
+            let Some(trace_id) = trace_id_from_record(record) else {
+                return Ok(());
+            };
 
-        let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
-            return Ok(());
-        };
+            let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
+                return Ok(());
+            };
 
-        let context = contexts
-            .entry(trace_id.to_string())
-            .or_insert(TraceContext {
-                model: None,
-                provider: None,
-                session_id: None,
-                session_id_priority: SessionIdPriority::Missing,
-                agent_name: None,
-            });
+            let context = contexts
+                .entry(trace_id.to_string())
+                .or_insert(TraceContext {
+                    model: None,
+                    provider: None,
+                    session_id: None,
+                    session_id_priority: SessionIdPriority::Missing,
+                    agent_name: None,
+                });
 
-        if context.model.is_none() {
-            context.model = first_non_empty_attr(attributes, MODEL_ATTRS).map(str::to_string);
-        }
-
-        if context.provider.is_none() {
-            context.provider = first_non_empty_attr(attributes, PROVIDER_ATTRS).map(str::to_string);
-        }
-
-        if let Some((session_id, priority)) = best_session_attr(attributes) {
-            if priority > context.session_id_priority {
-                context.session_id = Some(session_id.to_string());
-                context.session_id_priority = priority;
+            if context.model.is_none() {
+                context.model = first_non_empty_attr(attributes, MODEL_ATTRS).map(str::to_string);
             }
-        }
 
-        if context.agent_name.is_none() {
-            if let Some(agent_name) = first_non_empty_attr(attributes, AGENT_NAME_ATTRS) {
-                context.agent_name = Some(super::normalize_copilot_agent_name(agent_name));
+            if context.provider.is_none() {
+                context.provider =
+                    first_non_empty_attr(attributes, PROVIDER_ATTRS).map(str::to_string);
             }
-        }
-        Ok(())
-    })?;
 
-    Ok(contexts)
+            if let Some((session_id, priority)) = best_session_attr(attributes) {
+                if priority > context.session_id_priority {
+                    context.session_id = Some(session_id.to_string());
+                    context.session_id_priority = priority;
+                }
+            }
+
+            if context.agent_name.is_none() {
+                if let Some(agent_name) = first_non_empty_attr(attributes, AGENT_NAME_ATTRS) {
+                    context.agent_name = Some(super::normalize_copilot_agent_name(agent_name));
+                }
+            }
+            Ok(())
+        })?;
+
+    Ok((contexts, interrupted, confirmed_records))
 }
 
 fn usage_candidate_from_record(
@@ -255,16 +319,19 @@ fn candidate_from_attributes(
     trace_context: Option<&TraceContext>,
     index: usize,
 ) -> SessionParseResult<Option<CopilotUsageCandidate>> {
-    let input = attr_i64_first(attributes, &["gen_ai.usage.input_tokens"]);
-    let output = attr_i64_first(attributes, &["gen_ai.usage.output_tokens"]);
-    let cache_read = attr_i64_first(
+    let input =
+        attr_token_i64_first(attributes, &["gen_ai.usage.input_tokens"])?.unwrap_or_default();
+    let output =
+        attr_token_i64_first(attributes, &["gen_ai.usage.output_tokens"])?.unwrap_or_default();
+    let cache_read = attr_token_i64_first(
         attributes,
         &[
             "gen_ai.usage.cache_read.input_tokens",
             "gen_ai.usage.cache_read_input_tokens",
         ],
-    );
-    let cache_write = attr_i64_first(
+    )?
+    .unwrap_or_default();
+    let cache_write = attr_token_i64_first(
         attributes,
         &[
             "gen_ai.usage.cache_write.input_tokens",
@@ -272,17 +339,26 @@ fn candidate_from_attributes(
             "gen_ai.usage.cache_write_input_tokens",
             "gen_ai.usage.cache_creation_input_tokens",
         ],
-    );
-    let reasoning = attr_i64_first(
+    )?
+    .unwrap_or_default();
+    let reasoning = attr_token_i64_first(
         attributes,
         &[
             "gen_ai.usage.reasoning.output_tokens",
             "gen_ai.usage.reasoning_tokens",
         ],
-    );
+    )?
+    .unwrap_or_default();
 
     let tokens = normalize_input_tokens(input, output, cache_read, cache_write, reasoning);
-    if tokens.total() == 0 {
+    let token_total = tokens.checked_total().ok_or_else(|| {
+        invalid_at_path(
+            path,
+            "validate Copilot usage tokens",
+            format!("usage record {index} token total exceeds i64"),
+        )
+    })?;
+    if token_total == 0 {
         return Ok(None);
     }
 
@@ -608,19 +684,38 @@ fn attr_str<'a>(attributes: &'a Map<String, Value>, key: &str) -> Option<&'a str
     attributes.get(key).and_then(Value::as_str)
 }
 
-fn attr_i64(attributes: &Map<String, Value>, key: &str) -> i64 {
-    attributes
-        .get(key)
-        .and_then(value_as_i64)
-        .unwrap_or(0)
-        .max(0)
-}
-
-fn attr_i64_first(attributes: &Map<String, Value>, keys: &[&str]) -> i64 {
-    keys.iter()
-        .map(|key| attr_i64(attributes, key))
-        .find(|value| *value > 0)
-        .unwrap_or(0)
+fn attr_token_i64_first(
+    attributes: &Map<String, Value>,
+    keys: &[&str],
+) -> SessionParseResult<Option<i64>> {
+    for key in keys {
+        let Some(value) = attributes.get(*key) else {
+            continue;
+        };
+        let tokens = if let Some(tokens) = value.as_i64() {
+            tokens
+        } else if let Some(tokens) = value.as_u64() {
+            i64::try_from(tokens).map_err(|_| {
+                SessionParseError::invalid(
+                    "validate Copilot usage tokens",
+                    format!("Copilot token field `{key}` exceeds i64"),
+                )
+            })?
+        } else {
+            return Err(SessionParseError::invalid(
+                "validate Copilot usage tokens",
+                format!("Copilot token field `{key}` must be an integer"),
+            ));
+        };
+        if tokens < 0 {
+            return Err(SessionParseError::invalid(
+                "validate Copilot usage tokens",
+                format!("Copilot token field `{key}` must be non-negative"),
+            ));
+        }
+        return Ok(Some(tokens));
+    }
+    Ok(None)
 }
 
 fn normalize_input_tokens(
@@ -773,7 +868,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_copilot_file(path).unwrap()
+        super::parse_copilot_file(path).unwrap().messages
     }
 
     const LARGE_COPILOT_FIXTURE_BYTES: usize = 50 * 1024 * 1024;
@@ -889,6 +984,113 @@ mod tests {
     }
 
     #[test]
+    fn mixed_spans_reject_bad_record_and_keep_later_usage() {
+        let content = r#"{"type":"span","traceId":"good-1","spanId":"span-1","name":"chat gpt-5.4","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":10}}
+{"type":"span","traceId":"bad","spanId":"span-bad","name":"chat","endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.usage.input_tokens":20}}
+{"type":"span","traceId":"good-2","spanId":"span-2","name":"chat claude-sonnet-4","endTime":[1775934266,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"claude-sonnet-4","gen_ai.usage.output_tokens":30}}"#;
+        let file = create_test_file(content);
+
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn negative_span_tokens_are_malformed_instead_of_clamped() {
+        let content = r#"{"type":"span","traceId":"good-1","spanId":"span-1","name":"chat gpt-5.4","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":10}}
+{"type":"span","traceId":"bad","spanId":"span-bad","name":"chat gpt-5.4","endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":-20,"gen_ai.usage.output_tokens":5}}
+{"type":"span","traceId":"good-2","spanId":"span-2","name":"chat gpt-5.4","endTime":[1775934266,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.output_tokens":30}}"#;
+        let file = create_test_file(content);
+
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn invalid_token_field_forms_are_malformed_and_later_span_survives() {
+        let content = r#"{"type":"span","traceId":"bad-type","spanId":"span-1","name":"chat gpt-5.4","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":"bad","gen_ai.usage.output_tokens":5}}
+{"type":"span","traceId":"bad-fraction","spanId":"span-2","name":"chat gpt-5.4","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":1.5,"gen_ai.usage.output_tokens":5}}
+{"type":"span","traceId":"bad-range","spanId":"span-3","name":"chat gpt-5.4","endTime":[1775934263,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":9223372036854775808,"gen_ai.usage.output_tokens":5}}
+{"type":"span","traceId":"bad-negative","spanId":"span-4","name":"chat gpt-5.4","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":-1,"gen_ai.usage.output_tokens":5}}
+{"type":"span","traceId":"good","spanId":"span-5","name":"chat gpt-5.4","endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.output_tokens":30}}"#;
+        let file = create_test_file(content);
+
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.output, 30);
+        assert_eq!(scanned.rejections.total(), 4);
+        assert!(scanned
+            .rejections
+            .entries()
+            .all(|entry| entry.key == "malformed-record"));
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn overflowing_span_tokens_are_malformed_and_later_span_survives() {
+        let content = r#"{"type":"span","traceId":"bad","spanId":"span-bad","name":"chat gpt-5.4","endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":9223372036854775807,"gen_ai.usage.output_tokens":1}}
+{"type":"span","traceId":"good","spanId":"span-good","name":"chat gpt-5.4","endTime":[1775934266,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.output_tokens":30}}"#;
+        let file = create_test_file(content);
+
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.output, 30);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn malformed_json_keeps_prefix_marks_partial_and_ignores_suffix() {
+        let content = r#"{"type":"span","traceId":"good-1","spanId":"span-1","name":"chat gpt-5.4","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":10}}
+not-json
+{"type":"span","traceId":"good-2","spanId":"span-2","name":"chat gpt-5.4","endTime":[1775934266,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.output_tokens":30}}"#;
+        let file = create_test_file(content);
+
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_some());
+    }
+
+    #[test]
+    fn read_error_keeps_prefix_marks_partial_and_ignores_suffix() {
+        let prefix = r#"{"type":"span","traceId":"good-1","spanId":"span-1","name":"chat gpt-5.4","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":10}}
+"#;
+        let suffix = r#"{"type":"span","traceId":"good-2","spanId":"span-2","name":"chat gpt-5.4","endTime":[1775934266,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.output_tokens":30}}
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(prefix.as_bytes()).unwrap();
+        file.write_all(b"\xff\n").unwrap();
+        file.write_all(suffix.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(
+            scanned.interrupted.as_ref().unwrap().operation,
+            "read JSONL line"
+        );
+    }
+
+    #[test]
     fn test_parse_copilot_large_jsonl_matches_small_fixture() {
         let usage_line = r#"{"type":"span","traceId":"trace-large","spanId":"span-large","name":"chat claude-sonnet-4","startTime":[1775934260,133000000],"endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"claude-sonnet-4","gen_ai.response.model":"claude-sonnet-4","gen_ai.conversation.id":"conv-large","gen_ai.usage.input_tokens":19452,"gen_ai.usage.output_tokens":281,"gen_ai.usage.cache_read.input_tokens":123,"gen_ai.usage.reasoning.output_tokens":128,"github.copilot.interaction_id":"interaction-large"}}"#;
         let small = create_test_file(usage_line);
@@ -922,13 +1124,17 @@ mod tests {
 
     #[test]
     fn test_parse_copilot_rejects_model_without_provider_identity() {
-        let content = r#"{"type":"span","traceId":"trace-provider","spanId":"span-provider","name":"chat custom-model","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"custom-model","gen_ai.usage.input_tokens":"7","gen_ai.usage.output_tokens":"9"}}"#;
+        let content = r#"{"type":"span","traceId":"trace-provider","spanId":"span-provider","name":"chat custom-model","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"custom-model","gen_ai.usage.input_tokens":7,"gen_ai.usage.output_tokens":9}}"#;
         let file = create_test_file(content);
 
-        let error = super::parse_copilot_file(file.path()).unwrap_err();
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
 
-        assert_eq!(error.operation(), "validate Copilot usage provider");
-        assert_eq!(error.path(), Some(file.path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-provider"
+        );
     }
 
     #[test]
@@ -936,10 +1142,14 @@ mod tests {
         let content = r#"{"type":"span","traceId":"trace-model","spanId":"span-model","name":"chat","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.conversation.id":"conv-model","gen_ai.provider.name":"github","gen_ai.usage.input_tokens":7}}"#;
         let file = create_test_file(content);
 
-        let error = super::parse_copilot_file(file.path()).unwrap_err();
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
 
-        assert_eq!(error.operation(), "validate Copilot usage model");
-        assert_eq!(error.path(), Some(file.path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
     }
 
     #[test]
@@ -947,10 +1157,14 @@ mod tests {
         let content = r#"{"type":"span","spanId":"span-session","name":"chat gpt-5.4","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4","gen_ai.usage.input_tokens":7}}"#;
         let file = create_test_file(content);
 
-        let error = super::parse_copilot_file(file.path()).unwrap_err();
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
 
-        assert_eq!(error.operation(), "validate Copilot usage session");
-        assert_eq!(error.path(), Some(file.path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -1268,10 +1482,14 @@ mod tests {
         let content = r#"{"timeUnixNano":-1,"spanContext":{"traceId":"trace-bad","spanId":"span-bad","traceFlags":1},"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-bad","gen_ai.usage.input_tokens":5,"gen_ai.usage.output_tokens":2},"_body":"GenAI inference: gpt-5.4-mini"}"#;
         let file = create_test_file(content);
 
-        let error = super::parse_copilot_file(file.path()).unwrap_err();
+        let scanned = super::parse_copilot_file(file.path()).unwrap();
 
-        assert_eq!(error.operation(), "validate Copilot usage timestamp");
-        assert_eq!(error.path(), Some(file.path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
     }
 
     #[test]

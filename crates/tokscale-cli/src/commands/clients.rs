@@ -9,7 +9,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     use tokscale_core::scanner::{
         built_in_extra_scan_paths_for, copilot_exporter_path_with_env_strategy,
         discover_opencode_dbs, extra_scan_paths_for, opencode_data_dir_with_env_strategy,
-        parse_extra_dirs,
+        parse_extra_dirs, ScannerError,
     };
     use tokscale_core::{
         count_local_client_messages, warp_sqlite_roots_with_env_strategy, ClientId,
@@ -40,6 +40,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
         scanner_settings: scanner_settings.clone(),
     })
     .map_err(|e| anyhow::anyhow!(e))?;
+    let mut health = client_counts.health.clone();
 
     let headless_roots =
         tokscale_core::scanner::headless_roots_with_env_strategy(&home_dir, use_env_roots);
@@ -113,11 +114,24 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     } else {
         Vec::new()
     };
-    let built_in_extra_paths = built_in_extra_scan_paths_for(&home_dir, &all_clients)?;
+    let built_in_extra_paths = match built_in_extra_scan_paths_for(&home_dir, &all_clients) {
+        Ok(paths) => paths,
+        Err(ScannerError::ClaudeMirror(_)) => {
+            health.record_unavailable_source(ClientId::Claude.as_str());
+            vec![(ClientId::Claude, home_dir.join(".claude/transcripts"))]
+        }
+        Err(error) => return Err(error.into()),
+    };
     let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients)?;
     let copilot_exporter_path = copilot_exporter_path_with_env_strategy(use_env_roots);
     let opencode_data_root = opencode_data_dir_with_env_strategy(&home_dir_str, use_env_roots);
-    let opencode_auto_dbs = discover_opencode_dbs(&opencode_data_root)?;
+    let opencode_auto_dbs = match discover_opencode_dbs(&opencode_data_root) {
+        Ok(paths) => paths,
+        Err(_) => {
+            health.record_unavailable_source(ClientId::OpenCode.as_str());
+            Vec::new()
+        }
+    };
 
     let clients: Vec<ClientRow> =
         ClientId::iter()
@@ -269,13 +283,16 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
             })
             .collect();
 
+    crate::commands::shared::emit_health_summary(&health);
+
     if json {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct Output {
+        struct Output<'a> {
             headless_roots: Vec<String>,
             clients: Vec<ClientRow>,
             note: String,
+            health: &'a tokscale_core::source_health::HealthReport,
         }
 
         let output = Output {
@@ -285,6 +302,7 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                 .collect(),
             clients,
             note: "Headless capture is supported for Codex CLI only.".to_string(),
+            health: &health,
         };
 
         println!("{}", serde_json::to_string_pretty(&output)?);

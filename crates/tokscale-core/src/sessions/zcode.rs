@@ -7,6 +7,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -70,6 +71,48 @@ struct ZcodePromptTokensDetails {
 }
 
 impl ZcodeUsage {
+    fn has_negative_tokens(&self) -> bool {
+        [
+            self.input,
+            self.prompt_tokens,
+            self.output,
+            self.cache_read,
+            self.cache_write,
+            self.reasoning,
+            self.total,
+            self.prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|tokens| tokens < 0)
+    }
+
+    fn token_total_overflows(&self) -> bool {
+        let nested_cache_read = self
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+            .unwrap_or(0)
+            .max(0);
+        let raw_cache_read = self.cache_read.unwrap_or(0).max(0).max(nested_cache_read);
+        let cache_read = if let Some(prompt_tokens) = self.prompt_tokens {
+            raw_cache_read.min(prompt_tokens.max(0))
+        } else {
+            raw_cache_read
+        };
+        TokenBreakdown {
+            input: self.prompt_tokens.or(self.input).unwrap_or(0).max(0),
+            output: self.output.unwrap_or(0).max(0),
+            cache_read,
+            cache_write: self.cache_write.unwrap_or(0).max(0),
+            reasoning: self.reasoning.unwrap_or(0).max(0),
+        }
+        .checked_total()
+        .is_none()
+    }
+
     fn to_breakdown(&self) -> Option<TokenBreakdown> {
         let nested_cache_read = self
             .prompt_tokens_details
@@ -154,60 +197,98 @@ fn normalize_input_and_output(
     }
 }
 
-pub fn parse_zcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let workspace_key = workspace_key_from_path(path);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
-    let mut messages = Vec::new();
+    let mut scanned = ScannedSource::default();
     let mut session_id: Option<String> = None;
     let mut model_id: Option<String> = None;
     let mut context_chars: usize = 0;
     let mut pending_turn_start = false;
     let mut assistant_index = 0usize;
 
-    for line in BufReader::new(file).lines() {
-        let line =
-            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let entry = serde_json::from_str::<ZcodeEntry>(trimmed)
-            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
-
-        if session_id.is_none() {
-            if let Some(id) = entry.session_id.as_deref().filter(|id| !id.is_empty()) {
-                session_id = Some(id.to_string());
+        let entry = match serde_json::from_str::<ZcodeEntry>(trimmed) {
+            Ok(entry) => entry,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "decode JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
             }
-        }
+        };
 
-        if let Some(model) = entry
+        let record_session_id = entry
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let record_model_id = entry
             .model
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty())
-        {
-            model_id = Some(model.to_string());
-        }
+            .map(str::to_string);
 
         let chars = entry.content.as_ref().map(content_chars).unwrap_or(0);
-        let breakdown_from_usage = entry
+        let has_negative_usage = entry
             .usage
             .as_ref()
-            .and_then(ZcodeUsage::to_breakdown)
-            .or_else(|| {
-                entry
-                    .token_usage
-                    .as_ref()
-                    .and_then(ZcodeUsage::to_breakdown)
-            });
+            .is_some_and(ZcodeUsage::has_negative_tokens)
+            || entry
+                .token_usage
+                .as_ref()
+                .is_some_and(ZcodeUsage::has_negative_tokens);
+        let has_overflowing_usage = entry
+            .usage
+            .as_ref()
+            .is_some_and(ZcodeUsage::token_total_overflows)
+            || entry
+                .token_usage
+                .as_ref()
+                .is_some_and(ZcodeUsage::token_total_overflows);
 
         match entry.role.as_deref() {
             Some("assistant") => {
+                if has_negative_usage || has_overflowing_usage {
+                    pending_turn_start = false;
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+                let breakdown_from_usage = entry
+                    .usage
+                    .as_ref()
+                    .and_then(ZcodeUsage::to_breakdown)
+                    .or_else(|| {
+                        entry
+                            .token_usage
+                            .as_ref()
+                            .and_then(ZcodeUsage::to_breakdown)
+                    });
                 let breakdown = if let Some(usage) = breakdown_from_usage {
                     usage
                 } else {
@@ -215,6 +296,12 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
                     let output = estimate_tokens(chars);
                     if input == 0 && output == 0 {
                         context_chars += chars;
+                        if session_id.is_none() {
+                            session_id = record_session_id;
+                        }
+                        if record_model_id.is_some() {
+                            model_id = record_model_id;
+                        }
                         continue;
                     }
                     TokenBreakdown {
@@ -225,36 +312,56 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
                         reasoning: 0,
                     }
                 };
-                let resolved_model = model_id.clone().ok_or_else(|| {
-                    SessionParseError::invalid(
-                        "validate assistant model",
-                        "ZCode assistant turn is missing a non-empty model",
-                    )
-                })?;
-
-                context_chars += chars;
-                let resolved_session = session_id.clone().ok_or_else(|| {
-                    SessionParseError::invalid(
-                        "validate assistant session",
-                        "ZCode assistant turn is missing a non-empty sessionId",
-                    )
-                })?;
+                if breakdown.checked_total().is_none() {
+                    pending_turn_start = false;
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+                let Some(resolved_model) = record_model_id.clone().or_else(|| model_id.clone())
+                else {
+                    pending_turn_start = false;
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MissingModel);
+                    continue;
+                };
+                let Some(resolved_session) =
+                    session_id.clone().or_else(|| record_session_id.clone())
+                else {
+                    pending_turn_start = false;
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                };
                 let timestamp = match entry.timestamp.as_deref() {
                     Some(timestamp) => parse_timestamp_str(timestamp)
                         .filter(|timestamp| *timestamp > 0)
-                        .ok_or_else(|| {
-                            SessionParseError::invalid(
-                                "validate assistant timestamp",
-                                format!("invalid ZCode timestamp `{timestamp}`"),
-                            )
-                        })?,
+                        .unwrap_or(0),
                     None => {
-                        return Err(SessionParseError::invalid(
-                            "validate assistant timestamp",
-                            "ZCode assistant turn is missing a timestamp",
-                        ))
+                        pending_turn_start = false;
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingTimestamp);
+                        continue;
                     }
                 };
+                if timestamp <= 0 {
+                    pending_turn_start = false;
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MissingTimestamp);
+                    continue;
+                }
+                if session_id.is_none() {
+                    session_id = record_session_id;
+                }
+                if record_model_id.is_some() {
+                    model_id = record_model_id;
+                }
+                context_chars += chars;
                 let dedup_key =
                     dedup_hash_str(&format!("zcode:{resolved_session}:{assistant_index}"));
 
@@ -271,22 +378,34 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
                 message.message_count = 1;
                 message.is_turn_start = pending_turn_start;
                 message.set_workspace(workspace_key.clone(), workspace_label.clone());
-                messages.push(message);
+                scanned.messages.push(message);
 
                 assistant_index += 1;
                 pending_turn_start = false;
             }
             Some("user") => {
+                if session_id.is_none() {
+                    session_id = record_session_id;
+                }
+                if record_model_id.is_some() {
+                    model_id = record_model_id;
+                }
                 pending_turn_start = true;
                 context_chars += chars;
             }
             _ => {
+                if session_id.is_none() {
+                    session_id = record_session_id;
+                }
+                if record_model_id.is_some() {
+                    model_id = record_model_id;
+                }
                 context_chars += chars;
             }
         }
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn content_chars(content: &serde_json::Value) -> usize {
@@ -327,7 +446,7 @@ mod tests {
     use super::*;
 
     fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_zcode_file(path).unwrap()
+        super::parse_zcode_file(path).unwrap().messages
     }
     use serde_json::json;
     use std::io::Write;
@@ -772,6 +891,101 @@ mod tests {
     }
 
     #[test]
+    fn explicit_negative_usage_is_malformed_instead_of_text_estimated() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = concat!(
+            r#"{"role":"user","sessionId":"s","model":"glm-5.2","content":"context that would otherwise be estimated"}"#,
+            "\n",
+            r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-20T10:00:05Z","content":"response that would otherwise be estimated","usage":{"input_tokens":-1}}"#
+        );
+        let path = write_session(&dir, "p", "negative", jsonl);
+
+        let scanned = super::parse_zcode_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn overflowing_usage_is_malformed_and_later_assistant_survives() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = concat!(
+            r#"{"role":"user","sessionId":"s","model":"glm-5.2","content":"first"}"#,
+            "\n",
+            r#"{"role":"assistant","sessionId":"s","model":"glm-5.2","timestamp":"2026-06-20T10:00:05Z","content":"bad","usage":{"input_tokens":9223372036854775807,"output_tokens":1}}"#,
+            "\n",
+            r#"{"role":"user","sessionId":"s","model":"glm-5.2","content":"second"}"#,
+            "\n",
+            r#"{"role":"assistant","sessionId":"s","model":"glm-5.2","timestamp":"2026-06-20T10:00:15Z","content":"good","usage":{"output_tokens":3}}"#
+        );
+        let path = write_session(&dir, "p", "overflow", jsonl);
+
+        let scanned = super::parse_zcode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.output, 3);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn rejected_usage_does_not_commit_identity_or_context() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = concat!(
+            r#"{"role":"assistant","sessionId":"poison-session","model":"poison-model","timestamp":"2026-06-20T10:00:00Z","content":"poison context that must not be estimated","usage":{"input_tokens":-1}}"#,
+            "\n",
+            r#"{"role":"assistant","timestamp":"2026-06-20T10:00:05Z","content":"identityless rejected turn"}"#,
+            "\n",
+            r#"{"role":"assistant","sessionId":"legitimate-session","model":"glm-5.2","timestamp":"2026-06-20T10:00:10Z","content":"good"}"#
+        );
+        let path = write_session(&dir, "p", "state-pollution", jsonl);
+
+        let scanned = super::parse_zcode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(
+            scanned.messages[0].session_id.as_ref(),
+            "legitimate-session"
+        );
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "glm-5.2");
+        assert_eq!(scanned.messages[0].tokens.input, 0);
+        assert_eq!(scanned.rejections.total(), 2);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn mixed_assistant_turns_reject_bad_record_and_keep_later_usage() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = concat!(
+            r#"{"role":"user","sessionId":"s","model":"glm-5.2","content":"first"}"#,
+            "\n",
+            r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-20T10:00:05Z","content":"good"}"#,
+            "\n",
+            r#"{"role":"user","sessionId":"s","content":"second"}"#,
+            "\n",
+            r#"{"role":"assistant","sessionId":"s","content":"bad"}"#,
+            "\n",
+            r#"{"role":"user","sessionId":"s","content":"third"}"#,
+            "\n",
+            r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-20T10:00:15Z","content":"good again"}"#
+        );
+        let path = write_session(&dir, "p", "s", jsonl);
+
+        let scanned = super::parse_zcode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
     fn rejects_positive_assistant_turns_without_required_identity_or_timestamp() {
         let dir = TempDir::new().unwrap();
         let missing_model = write_session(
@@ -780,11 +994,12 @@ mod tests {
             "missing-model",
             r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-20T10:00:05Z","content":"response"}"#,
         );
+        let missing_model_scan = super::parse_zcode_file(&missing_model).unwrap();
+        assert!(missing_model_scan.messages.is_empty());
+        assert_eq!(missing_model_scan.rejections.total(), 1);
         assert_eq!(
-            super::parse_zcode_file(&missing_model)
-                .unwrap_err()
-                .operation(),
-            "validate assistant model"
+            missing_model_scan.rejections.entries().next().unwrap().key,
+            "missing-model"
         );
 
         let missing_session = write_session(
@@ -793,11 +1008,17 @@ mod tests {
             "missing-session",
             r#"{"role":"assistant","model":"glm-5.2","timestamp":"2026-06-20T10:00:05Z","content":"response"}"#,
         );
+        let missing_session_scan = super::parse_zcode_file(&missing_session).unwrap();
+        assert!(missing_session_scan.messages.is_empty());
+        assert_eq!(missing_session_scan.rejections.total(), 1);
         assert_eq!(
-            super::parse_zcode_file(&missing_session)
-                .unwrap_err()
-                .operation(),
-            "validate assistant session"
+            missing_session_scan
+                .rejections
+                .entries()
+                .next()
+                .unwrap()
+                .key,
+            "malformed-record"
         );
 
         let missing_timestamp = write_session(
@@ -806,11 +1027,17 @@ mod tests {
             "missing-timestamp",
             r#"{"role":"assistant","sessionId":"s","model":"glm-5.2","content":"response"}"#,
         );
+        let missing_timestamp_scan = super::parse_zcode_file(&missing_timestamp).unwrap();
+        assert!(missing_timestamp_scan.messages.is_empty());
+        assert_eq!(missing_timestamp_scan.rejections.total(), 1);
         assert_eq!(
-            super::parse_zcode_file(&missing_timestamp)
-                .unwrap_err()
-                .operation(),
-            "validate assistant timestamp"
+            missing_timestamp_scan
+                .rejections
+                .entries()
+                .next()
+                .unwrap()
+                .key,
+            "missing-timestamp"
         );
     }
 }

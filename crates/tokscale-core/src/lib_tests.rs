@@ -3,12 +3,13 @@ use super::{
     finalize_token_priced_messages, generate_graph_with_loaded_pricing,
     load_aggregated_views_with_pricing, load_cache_only_pricing_with_diagnostics,
     load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
+    parse_all_messages_with_health, parse_all_messages_with_health_with_env_strategy,
     parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-    parse_prepared_local_unified_messages, positive_token_total, pricing,
-    retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
-    AggregationConfig, ClientContribution, ClientCounts, ClientId, DailyTotals, DateRange,
-    GraphResult, GroupBy, LocalParseOptions, ReportOptions, SessionContribution, TimeMetricsReport,
-    TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
+    positive_token_total, pricing, retain_for_requested_clients, scanner,
+    select_local_parse_pricing, AggregatedViews, AggregationConfig, ClientContribution,
+    ClientCounts, ClientId, DailyTotals, DateRange, GraphResult, GroupBy, LocalParseOptions,
+    ReportOptions, SessionContribution, TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
+    UNKNOWN_WORKSPACE_LABEL,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -21,15 +22,23 @@ use std::sync::Arc;
 struct LocalMessagesForTest {
     messages: Vec<UnifiedMessage>,
     counts: ClientCounts,
+    health: super::DataHealth,
 }
 
 fn load_local_messages_for_test(
     options: LocalParseOptions,
 ) -> Result<LocalMessagesForTest, String> {
     let counts = super::count_local_client_messages(options.clone())?.counts;
-    let prepared = super::prepare_local_sources(options)?;
-    let messages = parse_prepared_local_unified_messages(prepared, None)?;
-    Ok(LocalMessagesForTest { messages, counts })
+    let prepared = super::prepare_local_sources(options.clone())?;
+    let mut messages = Vec::new();
+    let (_, health) =
+        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages)?;
+    let messages = super::filter_unified_messages(messages, &options);
+    Ok(LocalMessagesForTest {
+        messages,
+        counts,
+        health,
+    })
 }
 
 struct HomeEnvGuard(Option<OsString>);
@@ -49,6 +58,13 @@ struct TestEnvGuard {
 
 impl TestEnvGuard {
     fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
+
+    #[cfg(unix)]
+    fn set_os(key: &'static str, value: &OsString) -> Self {
         let original = std::env::var_os(key);
         std::env::set_var(key, value);
         Self { key, original }
@@ -402,15 +418,22 @@ fn test_batched_tui_and_model_views_match_individual_outputs() {
     };
 
     let batched = streaming_views(&report_options, ViewSet::TUI | ViewSet::MODEL);
-    let tui = load_usage_data_with_pricing(local_options, GroupBy::ClientModel, None).unwrap();
+    let mut tui = load_usage_data_with_pricing(local_options, GroupBy::ClientModel, None).unwrap();
     let model = streaming_views(&report_options, ViewSet::MODEL)
         .model_report
         .unwrap();
+    let batched_health = batched.health.to_report();
+    let mut batched_tui = batched.tui_usage.unwrap();
 
-    assert_eq!(
-        format!("{:?}", batched.tui_usage.unwrap()),
-        format!("{tui:?}")
-    );
+    // `AggregatedViews` carries fold health beside its internal materialized
+    // views. The public TUI loader projects that health into `UsageData` at
+    // its API boundary, so compare the projection separately from aggregate
+    // payload parity.
+    assert_eq!(batched_health, tui.health);
+    batched_tui.health = Default::default();
+    tui.health = Default::default();
+
+    assert_eq!(format!("{batched_tui:?}"), format!("{tui:?}"));
     assert_eq!(
         json_value(&batched.model_report.unwrap()),
         json_value(&model)
@@ -513,10 +536,17 @@ fn test_streaming_tui_usage_matches_vec_compat() {
     };
     let report_options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
 
-    let streaming = load_usage_data_with_pricing(options, GroupBy::ClientModel, None).unwrap();
-    let compat = vec_compat_views(&report_options, ViewSet::TUI)
+    let mut streaming = load_usage_data_with_pricing(options, GroupBy::ClientModel, None).unwrap();
+    let mut compat = vec_compat_views(&report_options, ViewSet::TUI)
         .tui_usage
         .unwrap();
+
+    // The vec-compat harness exercises aggregation from a bare message list,
+    // which intentionally has no source-health envelope. Health propagation
+    // is covered by the local loader; normalize it out for payload parity.
+    assert!(streaming.health.complete);
+    streaming.health = Default::default();
+    compat.health = Default::default();
 
     assert_eq!(format!("{streaming:?}"), format!("{compat:?}"));
 }
@@ -2130,6 +2160,66 @@ fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
     }
 }
 
+#[test]
+#[serial_test::serial]
+fn prepare_local_sources_rejects_invalid_extra_dirs_configuration() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _extra_dirs_guard = TestEnvGuard::set("TOKSCALE_EXTRA_DIRS", "missing-separator");
+    let mut options = inventory_options(home.path(), &["amp"]);
+    options.use_env_roots = true;
+
+    let error = super::prepare_local_sources(options)
+        .err()
+        .expect("invalid extra-dir syntax must fail source preparation");
+
+    assert!(error.contains("TOKSCALE_EXTRA_DIRS"));
+    assert!(error.contains("parse environment variable"));
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn prepare_local_sources_rejects_non_utf8_extra_dirs_configuration() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let home = tempfile::TempDir::new().unwrap();
+    let value = OsString::from_vec(b"amp:/tmp/non-utf8-\xff".to_vec());
+    let _extra_dirs_guard = TestEnvGuard::set_os("TOKSCALE_EXTRA_DIRS", &value);
+    let mut options = inventory_options(home.path(), &["amp"]);
+    options.use_env_roots = true;
+
+    let error = super::prepare_local_sources(options)
+        .err()
+        .expect("non-UTF-8 extra-dir configuration must fail source preparation");
+
+    assert!(error.contains("TOKSCALE_EXTRA_DIRS"));
+    assert!(error.contains("read environment variable"));
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_local_sources_isolates_ordinary_discovery_source_failure() {
+    let home = tempfile::TempDir::new().unwrap();
+    let goose_root = home.path().join("configured-goose-root");
+    let invalid_db_candidate = goose_root.join("data/sessions/sessions.db");
+    std::fs::create_dir_all(&invalid_db_candidate).unwrap();
+    let _goose_root_guard = TestEnvGuard::set("GOOSE_PATH_ROOT", goose_root.to_str().unwrap());
+    let mut options = inventory_options(home.path(), &["goose"]);
+    options.use_env_roots = true;
+
+    let prepared = super::prepare_local_sources(options)
+        .expect("a source discovery failure must remain isolated as health");
+
+    assert_eq!(prepared.health.failed_sources(), 1);
+    let failure = &prepared.health.sources()[0];
+    assert_eq!(failure.client, ClientId::Goose);
+    assert_eq!(failure.path, invalid_db_candidate);
+    assert!(matches!(
+        failure.status,
+        crate::source_health::SourceStatus::Unavailable { .. }
+    ));
+}
+
 fn signature_for_test_units(
     requested_clients: &[String],
     client: ClientId,
@@ -2151,6 +2241,42 @@ fn prepared_test_group(
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
     }
+}
+
+#[test]
+fn source_data_size_counts_related_inputs_once_by_file_identity() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let source = dir.path().join("source.jsonl");
+    let dependency = dir.path().join("dependency.json");
+    std::fs::write(&source, b"12345678").unwrap();
+    std::fs::write(&dependency, b"12345").unwrap();
+
+    let with_dependency = crate::adapters::SourceUnit::plain_file(ClientId::Amp, source.clone())
+        .with_dependency(dependency)
+        .prepare_snapshot()
+        .unwrap();
+    let duplicate = crate::adapters::SourceUnit::plain_file(ClientId::Amp, source)
+        .prepare_snapshot()
+        .unwrap();
+
+    assert_eq!(super::source_data_bytes([&with_dependency, &duplicate]), 13);
+}
+
+#[test]
+fn inventory_probe_refreshes_source_data_size_from_metadata() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let source = amp_dir.join("T-first.json");
+    std::fs::write(&source, b"12345678").unwrap();
+
+    let mut prepared =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    assert_eq!(prepared.health.source_data_bytes(), 8);
+
+    std::fs::write(&source, b"1234567890123").unwrap();
+    prepared.refresh_source_inventory_signature().unwrap();
+    assert_eq!(prepared.health.source_data_bytes(), 13);
 }
 
 #[test]
@@ -2255,6 +2381,43 @@ fn inventory_probe_revalidates_identity_without_rediscovery_or_source_reads() {
         message_cache::SourceReadStats::default(),
         "inventory revalidation must not read or hash source bodies"
     );
+}
+
+#[test]
+#[serial_test::serial]
+fn inventory_probe_isolates_a_source_that_disappears_after_prepare() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let retained = amp_dir.join("T-retained.json");
+    let removed = amp_dir.join("T-removed.json");
+    let source = |session: &str, input: u64| {
+        format!(
+            r#"{{"id":"{session}","created":1747800000000,"messages":[{{"role":"assistant","messageId":1,"usage":{{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":{input},"outputTokens":2}}}}]}}"#
+        )
+    };
+    std::fs::write(&retained, source("retained", 10)).unwrap();
+    std::fs::write(&removed, source("removed", 20)).unwrap();
+
+    let mut prepared =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    std::fs::remove_file(&removed).unwrap();
+
+    prepared
+        .refresh_source_inventory_signature()
+        .expect("a vanished third-party source must not abort the inventory probe");
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::load_prepared_usage_data_with_diagnostics(
+            prepared,
+            GroupBy::Model,
+        ))
+        .unwrap();
+
+    assert_eq!(result.data.total_tokens, 12);
+    assert_eq!(result.health.failed_sources(), 1);
+    assert_eq!(result.health.sources()[0].path, removed);
 }
 
 #[test]
@@ -2695,23 +2858,32 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
             ..scanner::ScannerSettings::default()
         };
 
-        let first_error = parse_all_messages_with_pricing_with_env_strategy(
+        let (first_messages, first_health) = parse_all_messages_with_health_with_env_strategy(
             source_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
             false,
             &scanner_settings,
         )
-        .unwrap_err();
+        .unwrap();
+        assert!(first_messages.is_empty());
+        assert_eq!(first_health.failed_sources(), 1);
+        let source = &first_health.sources()[0];
+        assert_eq!(source.path, path);
+        let failure = source.status.failure().unwrap();
         assert!(
-            first_error.contains(path.to_str().unwrap()),
-            "{first_error}"
-        );
-        assert!(
-            first_error.contains("snapshot source metadata and content")
-                || first_error.contains("read source metadata and file identity")
-                || first_error.contains("open current OpenCode SQLite database"),
-            "error must identify the failed source operation: {first_error}"
+            failure.message.contains("snapshot source metadata")
+                || failure
+                    .message
+                    .contains("read source metadata and file identity")
+                || failure
+                    .message
+                    .contains("open current OpenCode SQLite database")
+                || failure.operation.contains("snapshot source metadata")
+                || failure
+                    .operation
+                    .contains("open current OpenCode SQLite database"),
+            "failure must identify the failed source operation: {failure:?}"
         );
 
         let cache = message_cache::SourceMessageCache::load().unwrap();
@@ -2750,7 +2922,7 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
 
 #[test]
 #[serial_test::serial]
-fn test_empty_opencode_sqlite_cache_entries_are_reparsed() {
+fn test_clean_empty_opencode_scan_result_is_not_cached() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -2759,46 +2931,37 @@ fn test_empty_opencode_sqlite_cache_entries_are_reparsed() {
     {
         let path = source_home.path().join(".local/share/opencode/opencode.db");
         let conn = create_opencode_sqlite_db(&path);
-        insert_opencode_sqlite_message(
-            &conn,
-            "msg-1",
-            "session-1",
-            "",
-            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        );
         drop(conn);
 
         let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
             .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
-        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
-        let mut cache = message_cache::SourceMessageCache::load().unwrap();
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
-            &path,
-            unit.parser_version,
-            fingerprint,
-            Vec::new(),
-            None,
-        ));
-        cache.save_if_dirty().unwrap();
 
-        let messages = parse_all_messages_with_pricing(
+        let first_messages = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
         .unwrap();
-        assert_eq!(messages.len(), 1);
+        assert!(first_messages.is_empty());
 
-        let mut loaded = message_cache::SourceMessageCache::load().unwrap();
-        let repaired_fingerprint = unit.source_input_policy().fingerprint().unwrap();
-        let repaired_messages = loaded
-            .take_messages(&message_cache::CacheReadPlan::new(
-                &path,
-                unit.parser_version,
-                repaired_fingerprint,
-            ))
-            .unwrap();
-        assert_eq!(repaired_messages.len(), 1);
+        let cache = message_cache::SourceMessageCache::load().unwrap();
+        assert!(cache
+            .get_meta(&path, unit.parser_version)
+            .unwrap()
+            .is_none());
+
+        message_cache::reset_source_read_stats(&path);
+        let second_messages = parse_all_messages_with_pricing(
+            source_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+        assert!(second_messages.is_empty());
+        assert!(
+            message_cache::get_source_read_stats(&path).hash_passes > 0,
+            "a clean empty source has no shard and must be scanned again"
+        );
     }
 
     match original_home {
@@ -3532,7 +3695,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3581,7 +3744,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
+fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -3602,19 +3765,32 @@ fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
         )
         .unwrap();
 
-        let error = parse_all_messages_with_pricing(
+        let (messages, health) = parse_all_messages_with_health(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap_err();
-        assert!(error.contains("codex parser `codex`"), "{error}");
-        assert!(
-            error.contains("validate Codex token-count event"),
-            "{error}"
+        .unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(health.partial_sources(), 1);
+        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.rejected_records(), 1);
+        let source = &health.sources()[0];
+        assert_eq!(source.path, path);
+        assert!(matches!(
+            source.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(
+            source.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
         );
-        assert!(error.contains(path.to_str().unwrap()), "{error}");
-        assert!(error.contains("timestamp is missing"), "{error}");
+        let failure = source.status.failure().unwrap();
+        assert_eq!(failure.operation, "validate Codex token-count event");
+        assert!(
+            failure.message.contains("timestamp is missing"),
+            "{failure:?}"
+        );
 
         assert!(message_cache::SourceMessageCache::load()
             .unwrap()
@@ -3622,7 +3798,7 @@ fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3637,7 +3813,7 @@ fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_malformed_json_suffix_returns_error_without_cache_shard() {
+fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -3660,22 +3836,37 @@ fn test_codex_malformed_json_suffix_returns_error_without_cache_shard() {
         )
         .unwrap();
 
-        let error = parse_all_messages_with_pricing(
+        let (messages, health) = parse_all_messages_with_health(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap_err();
-        assert!(error.contains("codex parser `codex`"), "{error}");
-        assert!(error.contains("decode Codex headless line"), "{error}");
-        assert!(error.contains(path.to_str().unwrap()), "{error}");
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(health.partial_sources(), 1);
+        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.rejected_records(), 1);
+        let source = &health.sources()[0];
+        assert_eq!(source.path, path);
+        assert!(matches!(
+            source.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(
+            source.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        let failure = source.status.failure().unwrap();
+        assert_eq!(failure.operation, "decode Codex headless line");
         assert!(message_cache::SourceMessageCache::load()
             .unwrap()
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3690,7 +3881,7 @@ fn test_codex_malformed_json_suffix_returns_error_without_cache_shard() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
+fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -3715,15 +3906,27 @@ fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
         file.write_all(&[0xff, b'\n']).unwrap();
         file.flush().unwrap();
 
-        let error = parse_all_messages_with_pricing(
+        let (messages, health) = parse_all_messages_with_health(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap_err();
-        assert!(error.contains("codex parser `codex`"), "{error}");
-        assert!(error.contains("read Codex JSONL line"), "{error}");
-        assert!(error.contains(path.to_str().unwrap()), "{error}");
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(health.partial_sources(), 1);
+        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.rejected_records(), 0);
+        let source = &health.sources()[0];
+        assert_eq!(source.path, path);
+        assert!(matches!(
+            source.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert!(source.rejections.is_empty());
+        let failure = source.status.failure().unwrap();
+        assert_eq!(failure.operation, "read Codex JSONL line");
 
         let cache = message_cache::SourceMessageCache::load().unwrap();
         assert!(cache
@@ -3731,7 +3934,7 @@ fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3746,7 +3949,7 @@ fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_unknown_model_prefix_errors_without_shard_then_parses_when_completed() {
+fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let fresh_cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
@@ -3768,23 +3971,31 @@ fn test_codex_unknown_model_prefix_errors_without_shard_then_parses_when_complet
         )
         .unwrap();
 
-        let initial_error = parse_all_messages_with_pricing(
+        let (initial_messages, initial_health) = parse_all_messages_with_health(
             source_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
-        .unwrap_err();
-        assert!(
-            initial_error.contains("resolve Codex token-count model"),
-            "{initial_error}"
+        .unwrap();
+        assert!(initial_messages.is_empty());
+        assert_eq!(initial_health.partial_sources(), 1);
+        assert_eq!(initial_health.failed_sources(), 0);
+        assert_eq!(initial_health.rejected_records(), 1);
+        let source = &initial_health.sources()[0];
+        assert_eq!(source.path, path);
+        assert!(matches!(
+            source.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(
+            source.rejections.entries().next().unwrap().key,
+            "missing-model"
         );
+        let failure = source.status.failure().unwrap();
+        assert_eq!(failure.operation, "resolve Codex token-count model");
         assert!(
-            initial_error.contains(path.to_str().unwrap()),
-            "{initial_error}"
-        );
-        assert!(
-            initial_error.contains("model was never identified"),
-            "{initial_error}"
+            failure.message.contains("model was never identified"),
+            "{failure:?}"
         );
         assert!(message_cache::SourceMessageCache::load()
             .unwrap()
@@ -3792,7 +4003,7 @@ fn test_codex_unknown_model_prefix_errors_without_shard_then_parses_when_complet
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3838,7 +4049,7 @@ fn test_codex_unknown_model_prefix_errors_without_shard_then_parses_when_complet
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3887,7 +4098,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -5622,7 +5833,7 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
     let _home_guard = HomeEnvGuard::set(temp_dir.path());
     let missing_db = temp_dir.path().join("missing/custom-current.db");
 
-    let error = load_local_messages_for_test(LocalParseOptions {
+    let loaded = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
         use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
@@ -5632,13 +5843,22 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
         },
         ..LocalParseOptions::default()
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains(missing_db.to_str().unwrap()), "{error}");
+    assert!(loaded.messages.is_empty());
+    assert_eq!(loaded.health.failed_sources(), 1);
+    let source = &loaded.health.sources()[0];
+    assert_eq!(source.path, missing_db);
+    let failure = source.status.failure().unwrap();
     assert!(
-        error.contains("read source metadata and file identity")
-            || error.contains("open current OpenCode SQLite database"),
-        "error must identify the failed source operation: {error}"
+        failure
+            .message
+            .contains("read source metadata and file identity")
+            || failure
+                .message
+                .contains("open current OpenCode SQLite database")
+            || failure.operation.contains("snapshot source metadata"),
+        "failure must identify the failed source operation: {failure:?}"
     );
 
     let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, missing_db.clone())
@@ -5652,22 +5872,122 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
 
 #[test]
 #[serial_test::serial]
+fn time_metrics_report_preserves_source_health() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/custom-current.db");
+
+    let report = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::get_time_metrics_report(ReportOptions {
+            home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string()]),
+            scanner_settings: scanner::ScannerSettings {
+                opencode_db_paths: vec![missing_db.clone()],
+                ..Default::default()
+            },
+            ..ReportOptions::default()
+        }))
+        .expect("a broken third-party source must not abort time-metrics");
+
+    assert_eq!(report.metrics.session_count, 0);
+    assert!(!report.health.complete);
+    assert_eq!(report.health.failed_sources, 1);
+    assert_eq!(report.health.issues[0].source, "opencode");
+    assert_eq!(report.health.issues[0].issue, "source-unavailable");
+}
+
+#[test]
+#[serial_test::serial]
+fn local_client_counts_preserve_source_health() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/client-counts.db");
+
+    let report = super::count_local_client_messages(LocalParseOptions {
+        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        use_env_roots: false,
+        clients: Some(vec!["opencode".to_string()]),
+        scanner_settings: scanner::ScannerSettings {
+            opencode_db_paths: vec![missing_db.clone()],
+            ..Default::default()
+        },
+        ..LocalParseOptions::default()
+    })
+    .expect("a broken third-party source must not abort client counts");
+
+    assert_eq!(report.counts.get(ClientId::OpenCode), 0);
+    assert!(!report.health.complete);
+    assert_eq!(report.health.failed_sources, 1);
+    assert_eq!(report.health.issues[0].source, "opencode");
+    assert_eq!(report.health.issues[0].issue, "source-unavailable");
+}
+
+#[test]
+#[serial_test::serial]
+fn public_raw_message_report_preserves_source_health_and_metadata() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/raw-report.db");
+
+    let report = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::parse_local_unified_messages_with_pricing(
+            LocalParseOptions {
+                home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+                use_env_roots: false,
+                clients: Some(vec!["opencode".to_string()]),
+                scanner_settings: scanner::ScannerSettings {
+                    opencode_db_paths: vec![missing_db.clone()],
+                    ..Default::default()
+                },
+                ..LocalParseOptions::default()
+            },
+            None,
+        ))
+        .expect("a broken source must produce a degraded raw-message report");
+
+    assert!(report.data.is_empty());
+    assert!(!report.health.complete);
+    assert_eq!(report.health.failed_sources, 1);
+    assert_eq!(report.health.issues[0].source, "opencode");
+    assert_eq!(report.health.issues[0].issue, "source-unavailable");
+    assert_ne!(
+        report.metadata.source_inventory_signature.as_bytes(),
+        &[0_u8; 32]
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn test_opencode_auto_discovery_error_reaches_public_loader() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let data_root = temp_dir.path().join(".local/share/opencode");
     std::fs::create_dir_all(data_root.parent().unwrap()).unwrap();
     std::fs::write(&data_root, "not a directory").unwrap();
 
-    let error = load_local_messages_for_test(LocalParseOptions {
+    let loaded = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
         use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
         ..LocalParseOptions::default()
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("failed to read OpenCode data directory"));
-    assert!(error.contains(data_root.to_str().unwrap()));
+    assert!(loaded.messages.is_empty());
+    assert_eq!(loaded.health.failed_sources(), 1);
+    let failure = loaded.health.sources()[0].status.failure().unwrap();
+    assert!(
+        failure
+            .message
+            .contains("failed to read OpenCode data directory"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.message.contains(data_root.to_str().unwrap()),
+        "{failure:?}"
+    );
 }
 
 #[test]
@@ -5802,7 +6122,7 @@ fn test_default_graph_includes_antigravity_cache_rows() {
     std::fs::create_dir_all(&sessions_dir).unwrap();
     std::fs::write(
         sessions_dir.join("ag-local.jsonl"),
-        r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
+        r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","providerId":"antigravity","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
 "#,
     )
     .unwrap();

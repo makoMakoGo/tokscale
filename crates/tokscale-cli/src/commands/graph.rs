@@ -103,6 +103,7 @@ pub(crate) struct GraphExportData {
     contributions: Vec<GraphDailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     time_metrics: Option<GraphTimeMetrics>,
+    health: tokscale_core::source_health::HealthReport,
 }
 
 pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphExportData {
@@ -187,6 +188,7 @@ pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphE
             max_concurrent_sessions: tm.max_concurrent_sessions,
             session_count: tm.session_count,
         }),
+        health: graph.health.clone(),
     }
 }
 
@@ -242,6 +244,7 @@ pub(crate) fn run_graph_command(
         had_cursor_cache,
         explicit_cursor_filter,
     );
+    super::shared::emit_health_summary(&graph_result.health);
     emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
@@ -301,4 +304,54 @@ pub(crate) fn run_graph_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graph_export_includes_data_health() {
+        let graph = tokscale_core::GraphResult {
+            meta: tokscale_core::GraphMeta {
+                generated_at: "2026-07-14T00:00:00Z".to_string(),
+                version: "test".to_string(),
+                date_range_start: "2026-07-14".to_string(),
+                date_range_end: "2026-07-14".to_string(),
+                processing_time_ms: 0,
+            },
+            summary: tokscale_core::DataSummary {
+                total_tokens: 0,
+                total_cost: 0.0,
+                total_days: 0,
+                active_days: 0,
+                average_per_day: 0.0,
+                max_cost_in_single_day: 0.0,
+                clients: Vec::new(),
+                models: Vec::new(),
+            },
+            years: Vec::new(),
+            contributions: Vec::new(),
+            time_metrics: None,
+            health: tokscale_core::source_health::HealthReport {
+                complete: false,
+                clean_sources: 4,
+                degraded_sources: 1,
+                rejected_records: 2,
+                partial_sources: 1,
+                failed_sources: 0,
+                source_data_bytes: 12_345,
+                issues: Vec::new(),
+            },
+        };
+
+        let json = serde_json::to_value(to_graph_export_data(&graph)).unwrap();
+
+        assert_eq!(json["health"]["complete"], false);
+        assert_eq!(json["health"]["cleanSources"], 4);
+        assert_eq!(json["health"]["degradedSources"], 1);
+        assert_eq!(json["health"]["rejectedRecords"], 2);
+        assert_eq!(json["health"]["partialSources"], 1);
+        assert_eq!(json["health"]["sourceDataBytes"], 12_345);
+    }
 }

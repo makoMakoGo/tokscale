@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 use rayon::prelude::*;
@@ -7,14 +8,14 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
-    SourceUnit, MODEL_ID_CANONICALIZATION_REVISION,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
 
-const CLAUDE_WORKFLOW_AND_AGENT_IDENTITY_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
+const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
 
 pub(crate) struct ClaudeAdapter;
 
@@ -63,33 +64,34 @@ impl LocalSourceAdapter for ClaudeAdapter {
             FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir: PathBuf::from(ctx.home_dir),
                 variant_path: None,
+                parent_session_path: None,
             },
         )?
         .into_iter()
+        .map(configure_claude_parent_dependency)
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
                 ParserId::Claude,
-                CLAUDE_WORKFLOW_AND_AGENT_IDENTITY_REVISION,
+                CLAUDE_RECORD_HEALTH_REVISION,
             ))
         })
         .collect();
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
                 let home_dir = match &unit.fingerprint_policy {
-                    FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => home_dir.clone(),
+                    FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
+                        Some(home_dir.clone())
+                    }
+                    FingerprintPolicy::NoMessageCache => None,
                     _ => unreachable!("unexpected Claude source fingerprint policy"),
                 };
-                adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
-                    sessions::claudecode::parse_claude_file_with_home(path, Some(&home_dir))
+                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
+                    sessions::claudecode::parse_claude_file_with_home(path, home_dir.as_deref())
                 })
             })
             .collect()
@@ -127,6 +129,89 @@ impl LocalSourceAdapter for ClaudeAdapter {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FlatParentResolution {
+    NotSidechain,
+    Parent(PathBuf),
+    Unresolved,
+}
+
+fn configure_claude_parent_dependency(mut unit: SourceUnit) -> SourceUnit {
+    let Some(stem) = unit.path.file_stem().and_then(|stem| stem.to_str()) else {
+        return unit;
+    };
+    if !stem.starts_with("agent-") {
+        return unit;
+    }
+
+    let meta_path = unit.path.with_file_name(format!("{stem}.meta.json"));
+    match std::fs::metadata(&meta_path) {
+        Ok(_) => return unit,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        // The normal fingerprint snapshot will surface an unreadable Tier 1
+        // sidecar. Do not add an unrelated parent dependency in that case.
+        Err(_) => return unit,
+    }
+
+    if let Some(parent_path) = sessions::claudecode::nested_parent_session_path(&unit.path) {
+        return unit.with_claude_parent_session(parent_path);
+    }
+
+    match resolve_flat_parent_dependency(&unit.path) {
+        FlatParentResolution::NotSidechain => unit,
+        FlatParentResolution::Parent(parent_path) => unit.with_claude_parent_session(parent_path),
+        FlatParentResolution::Unresolved => {
+            unit.fingerprint_policy = FingerprintPolicy::NoMessageCache;
+            unit
+        }
+    }
+}
+
+fn resolve_flat_parent_dependency(path: &std::path::Path) -> FlatParentResolution {
+    let Ok(file) = std::fs::File::open(path) else {
+        return FlatParentResolution::Unresolved;
+    };
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            return FlatParentResolution::Unresolved;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<sessions::claudecode::ClaudeEntry>(&line) else {
+            continue;
+        };
+        if entry.entry_type.trim().is_empty() {
+            continue;
+        }
+        if !entry.is_sidechain {
+            return FlatParentResolution::NotSidechain;
+        }
+        let Some(parent_session_id) = entry
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+        else {
+            return FlatParentResolution::Unresolved;
+        };
+        let parent_component = std::path::Path::new(parent_session_id);
+        let mut components = parent_component.components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return FlatParentResolution::Unresolved;
+        }
+        let Some(project_dir) = path.parent() else {
+            return FlatParentResolution::Unresolved;
+        };
+        return FlatParentResolution::Parent(
+            project_dir.join(format!("{parent_session_id}.jsonl")),
+        );
+    }
+    FlatParentResolution::Unresolved
+}
+
 fn fold_claude_units(
     parsed: Vec<ParsedUnit>,
     ctx: &mut FoldContext<'_>,
@@ -139,7 +224,15 @@ fn fold_claude_units(
             messages,
             cache_write,
             invalidate_cache,
+            status,
+            rejections,
         } = adapter_cache::resolve_unit(parsed_unit, ctx)?;
+        ctx.health.record(crate::source_health::SourceHealth {
+            client: unit.client,
+            path: unit.path.clone(),
+            status,
+            rejections,
+        });
         let path = unit.path.clone();
         let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
         if cache_write_outcome.is_err() && invalidate_cache {
@@ -169,6 +262,7 @@ mod tests {
 
     use super::*;
     use crate::message_cache;
+    use crate::source_health::SourceHealth;
 
     fn write_file(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -184,6 +278,58 @@ mod tests {
             use_env_roots: false,
             scanner_settings: settings,
         }
+    }
+
+    fn discover_unit(home_dir: &Path, path: &Path) -> SourceUnit {
+        let settings = crate::scanner::ScannerSettings::default();
+        CLAUDE_ADAPTER
+            .discover_checked(&scan_context(home_dir, &settings))
+            .unwrap()
+            .into_iter()
+            .find(|unit| unit.path == path)
+            .unwrap_or_else(|| panic!("Claude source was not discovered: {}", path.display()))
+    }
+
+    fn scan_and_fold(
+        unit: SourceUnit,
+        cache: &mut message_cache::SourceMessageCache,
+    ) -> (Vec<crate::UnifiedMessage>, SourceHealth) {
+        let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
+        let health = parsed[0].source_health();
+        let mut messages = Vec::new();
+        CLAUDE_ADAPTER
+            .fold(parsed, &mut FoldContext::new(cache, None), &mut messages)
+            .unwrap();
+        (messages, health)
+    }
+
+    fn fold_cache_hit(
+        parsed: ParsedUnit,
+        cache: &mut message_cache::SourceMessageCache,
+    ) -> (Vec<crate::UnifiedMessage>, SourceHealth) {
+        let health = parsed.source_health();
+        let mut messages = Vec::new();
+        CLAUDE_ADAPTER
+            .fold(
+                vec![parsed],
+                &mut FoldContext::new(cache, None),
+                &mut messages,
+            )
+            .unwrap();
+        (messages, health)
+    }
+
+    fn explore_parent(agent_id: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_explore","name":"Agent","input":{{"subagent_type":"explore"}}}}]}}}}
+{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_explore","content":[{{"type":"text","text":"agentId: {agent_id}"}}]}}]}}}}"#
+        )
+    }
+
+    fn sidechain(parent_session_id: &str, agent_id: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":true,"sessionId":"{parent_session_id}","agentId":"{agent_id}","timestamp":"2026-07-14T00:00:00Z","message":{{"id":"msg-{agent_id}","model":"claude-sonnet-4.6","usage":{{"input_tokens":2,"output_tokens":3}}}}}}"#
+        )
     }
 
     #[test]
@@ -268,6 +414,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_tier2_digest_paths_keep_meta_and_cc_mirror_variant() {
+        let home = tempfile::TempDir::new().unwrap();
+        let variant_dir = home.path().join(".cc-mirror/kimi-code");
+        let project = variant_dir.join("config/projects/project-a");
+        let session_path = project.join("parent-mirror/subagents/agent-mirror1.jsonl");
+        let parent_path = project.join("parent-mirror.jsonl");
+        let variant_path = variant_dir.join("variant.json");
+        write_file(&session_path, &sidechain("parent-mirror", "mirror1"));
+        write_file(&variant_path, r#"{"name":"Kimi Code"}"#);
+
+        let unit = discover_unit(home.path(), &session_path);
+        let mut digest_paths = unit.digest_paths();
+        digest_paths.sort_unstable();
+        let mut expected = vec![
+            session_path.clone(),
+            session_path.with_file_name("agent-mirror1.meta.json"),
+            parent_path,
+            variant_path,
+        ];
+        expected.sort_unstable();
+
+        assert_eq!(digest_paths, expected);
+    }
+
+    #[test]
     fn claude_adapter_output_matches_parser_and_dedupes_keys() {
         let home = tempfile::TempDir::new().unwrap();
         let session_path = home.path().join(".claude/projects/project-a/session.jsonl");
@@ -284,49 +455,299 @@ mod tests {
             home.path().to_path_buf(),
         )
         .unwrap();
-        let parsed = CLAUDE_ADAPTER
-            .parse_checked(vec![unit], &ParseContext { pricing: None })
-            .unwrap();
+        let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         let mut actual = Vec::new();
         CLAUDE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut actual,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut actual)
             .unwrap();
 
         let expected =
             sessions::claudecode::parse_claude_file_with_home(&session_path, Some(home.path()))
-                .unwrap();
+                .unwrap()
+                .messages;
         assert_eq!(actual, expected);
         assert_eq!(actual.len(), 1);
     }
 
     #[test]
-    fn claude_adapter_retains_client_path_parser_and_session_operation() {
+    fn claude_adapter_marks_unknown_malformed_event_partial() {
         let home = tempfile::TempDir::new().unwrap();
         let session_path = home.path().join(".claude/projects/project-a/broken.jsonl");
-        write_file(&session_path, "{not-json\n");
+        write_file(
+            &session_path,
+            r#"{"type":"assistant","timestamp":"2026-07-14T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":1}}}
+{not-json
+"#,
+        );
         let unit = SourceUnit::claude_code(
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
         )
         .unwrap();
+        let parser_version = unit.parser_version;
 
-        let error = CLAUDE_ADAPTER
-            .parse_checked(vec![unit], &ParseContext { pricing: None })
-            .unwrap_err();
+        let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
 
-        assert_eq!(error.client, ClientId::Claude);
-        assert_eq!(error.path, session_path);
-        assert_eq!(error.parser, ParserId::Claude);
-        assert_eq!(error.operation, "decode Claude session line");
-        assert!(error.to_string().contains("line 1"));
-        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert_eq!(health.client, ClientId::Claude);
+        assert_eq!(health.path, session_path);
+        assert!(matches!(
+            health.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(health.rejections.total(), 1);
+        assert_eq!(
+            health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        let failure = health.status.failure().expect("source must be partial");
+        assert_eq!(failure.operation, "decode Claude session line");
+        assert!(failure.message.contains("line 2"));
+
+        let mut cache = message_cache::SourceMessageCache::default();
+        let mut messages = Vec::new();
+        CLAUDE_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext::new(&mut cache, None),
+                &mut messages,
+            )
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 10);
+        assert!(cache
+            .get_meta(&session_path, parser_version)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn claude_warm_cache_hit_restores_record_rejections() {
+        let home = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let session_path = home.path().join(".claude/projects/project-a/health.jsonl");
+        write_file(
+            &session_path,
+            r#"{"type":"assistant","timestamp":"2026-07-14T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":1}}}
+{"type":"assistant","timestamp":"2026-07-14T00:00:01Z","message":{"usage":{"input_tokens":99,"output_tokens":9}}}
+{"type":"assistant","timestamp":"2026-07-14T00:00:02Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":20,"output_tokens":2}}}"#,
+        );
+        let unit = SourceUnit::claude_code(
+            ClientId::Claude,
+            session_path.clone(),
+            home.path().to_path_buf(),
+        )
+        .unwrap()
+        .with_parser_version(ParserVersion::new(
+            ParserId::Claude,
+            CLAUDE_RECORD_HEALTH_REVISION,
+        ))
+        .prepare_snapshot()
+        .unwrap();
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+
+        let cold =
+            CLAUDE_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
+        assert_eq!(cold[0].source_health().rejections.total(), 1);
+        let mut messages = Vec::new();
+        CLAUDE_ADAPTER
+            .fold(cold, &mut FoldContext::new(&mut cache, None), &mut messages)
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        cache.save_if_dirty().unwrap();
+
+        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let planned = CLAUDE_ADAPTER.plan_cache_hit(unit, &warm_cache).unwrap();
+        let crate::adapters::CacheHitPlan::Hit(warm) = planned else {
+            panic!("unchanged Claude source must use its complete cached scan");
+        };
+        let health = warm.source_health();
+        assert!(matches!(
+            health.status,
+            crate::source_health::SourceStatus::Complete
+        ));
+        assert_eq!(health.rejections.total(), 1);
+        assert_eq!(
+            health.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
+    }
+
+    #[test]
+    fn nested_tier2_parent_change_invalidates_child_then_hits_warm() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join(".claude/projects/project-a");
+        let parent_path = project.join("parent-nested.jsonl");
+        let child_path = project.join("parent-nested/subagents/agent-nested1.jsonl");
+        write_file(&parent_path, "{not-json");
+        write_file(&child_path, &sidechain("parent-nested", "nested1"));
+
+        let unit = discover_unit(home.path(), &child_path);
+        assert!(unit.digest_paths().contains(&parent_path));
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let (cold_messages, cold_health) = scan_and_fold(unit.clone(), &mut cache);
+        assert_eq!(cold_messages[0].agent.as_deref(), Some("Claude Subagent"));
+        assert_eq!(cold_health.rejections.total(), 1);
+
+        write_file(&parent_path, &explore_parent("nested1"));
+        let crate::adapters::CacheHitPlan::Miss(miss) =
+            CLAUDE_ADAPTER.plan_cache_hit(unit.clone(), &cache).unwrap()
+        else {
+            panic!("changing a Tier 2 parent must invalidate the child cache shard");
+        };
+        let (fresh_messages, fresh_health) = scan_and_fold(miss, &mut cache);
+        assert_eq!(fresh_messages[0].agent.as_deref(), Some("Claude Explore"));
+        assert_eq!(fresh_health.rejections.total(), 0);
+
+        let crate::adapters::CacheHitPlan::Hit(warm) =
+            CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap()
+        else {
+            panic!("unchanged child and Tier 2 parent must hit the cache");
+        };
+        let (warm_messages, warm_health) = fold_cache_hit(warm, &mut cache);
+        assert_eq!(warm_messages[0].agent.as_deref(), Some("Claude Explore"));
+        assert_eq!(warm_health.rejections.total(), 0);
+    }
+
+    #[test]
+    fn flat_tier2_parent_change_invalidates_child_then_hits_warm() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join(".claude/projects/project-a");
+        let parent_path = project.join("parent-flat.jsonl");
+        let child_path = project.join("agent-flat1.jsonl");
+        write_file(&parent_path, "{not-json");
+        write_file(&child_path, &sidechain("parent-flat", "flat1"));
+
+        let unit = discover_unit(home.path(), &child_path);
+        assert!(unit.digest_paths().contains(&parent_path));
+        let mut cache = message_cache::SourceMessageCache::default();
+        let (cold_messages, cold_health) = scan_and_fold(unit.clone(), &mut cache);
+        assert_eq!(cold_messages[0].agent.as_deref(), Some("Claude Subagent"));
+        assert_eq!(cold_health.rejections.total(), 1);
+
+        write_file(&parent_path, &explore_parent("flat1"));
+        let crate::adapters::CacheHitPlan::Miss(miss) =
+            CLAUDE_ADAPTER.plan_cache_hit(unit.clone(), &cache).unwrap()
+        else {
+            panic!("changing a flat Tier 2 parent must invalidate the child cache shard");
+        };
+        let (fresh_messages, fresh_health) = scan_and_fold(miss, &mut cache);
+        assert_eq!(fresh_messages[0].agent.as_deref(), Some("Claude Explore"));
+        assert_eq!(fresh_health.rejections.total(), 0);
+
+        assert!(matches!(
+            CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
+            crate::adapters::CacheHitPlan::Hit(_)
+        ));
+    }
+
+    #[test]
+    fn missing_tier2_parent_addition_invalidates_child() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join(".claude/projects/project-a");
+        let parent_path = project.join("parent-later.jsonl");
+        let child_path = project.join("parent-later/subagents/agent-later1.jsonl");
+        write_file(&child_path, &sidechain("parent-later", "later1"));
+
+        let unit = discover_unit(home.path(), &child_path);
+        let mut inventory_unit = unit.clone();
+        inventory_unit
+            .refresh_prepared_snapshot_for_inventory_probe()
+            .unwrap();
+        let parent_absent_inventory = inventory_unit.inventory_signature_digest();
+        let mut cache = message_cache::SourceMessageCache::default();
+        let (cold_messages, cold_health) = scan_and_fold(unit.clone(), &mut cache);
+        assert_eq!(cold_messages[0].agent.as_deref(), Some("Claude Subagent"));
+        assert_eq!(cold_health.rejections.total(), 0);
+
+        write_file(&parent_path, &explore_parent("later1"));
+        inventory_unit
+            .refresh_prepared_snapshot_for_inventory_probe()
+            .unwrap();
+        assert_ne!(
+            parent_absent_inventory,
+            inventory_unit.inventory_signature_digest()
+        );
+        assert!(matches!(
+            CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
+            crate::adapters::CacheHitPlan::Miss(_)
+        ));
+    }
+
+    #[test]
+    fn tier1_meta_excludes_parent_from_fingerprint() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join(".claude/projects/project-a");
+        let parent_path = project.join("parent-meta.jsonl");
+        let child_path = project.join("parent-meta/subagents/agent-meta1.jsonl");
+        let meta_path = child_path.with_file_name("agent-meta1.meta.json");
+        write_file(&parent_path, &explore_parent("meta1"));
+        write_file(&child_path, &sidechain("parent-meta", "meta1"));
+        write_file(&meta_path, r#"{"agentType":"plan"}"#);
+
+        let unit = discover_unit(home.path(), &child_path);
+        assert!(!unit.digest_paths().contains(&parent_path));
+        let mut cache = message_cache::SourceMessageCache::default();
+        let (cold_messages, _) = scan_and_fold(unit.clone(), &mut cache);
+        assert_eq!(cold_messages[0].agent.as_deref(), Some("Claude Plan"));
+
+        write_file(&parent_path, "{malformed-after-tier1");
+        assert!(matches!(
+            CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
+            crate::adapters::CacheHitPlan::Hit(_)
+        ));
+    }
+
+    #[test]
+    fn tier2_warm_hit_reads_no_parent_bytes() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join(".claude/projects/project-a");
+        let parent_path = project.join("parent-warm.jsonl");
+        let child_path = project.join("parent-warm/subagents/agent-warm1.jsonl");
+        write_file(&parent_path, &explore_parent("warm1"));
+        write_file(&child_path, &sidechain("parent-warm", "warm1"));
+
+        let unit = discover_unit(home.path(), &child_path);
+        let mut cache = message_cache::SourceMessageCache::default();
+        let _ = scan_and_fold(unit.clone(), &mut cache);
+        message_cache::reset_source_read_stats(&parent_path);
+
+        assert!(matches!(
+            CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
+            crate::adapters::CacheHitPlan::Hit(_)
+        ));
+        assert_eq!(
+            message_cache::get_source_read_stats(&parent_path),
+            message_cache::SourceReadStats::default()
+        );
+    }
+
+    #[test]
+    fn unresolved_flat_sidechain_disables_only_its_message_cache() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join(".claude/projects/project-a");
+        let unresolved = project.join("agent-unresolved.jsonl");
+        let regular = project.join("regular.jsonl");
+        write_file(&unresolved, "{not-json");
+        write_file(&regular, "{not-json");
+
+        let settings = crate::scanner::ScannerSettings::default();
+        let units = CLAUDE_ADAPTER
+            .discover_checked(&scan_context(home.path(), &settings))
+            .expect("one unresolved flat sidechain must not fail Claude discovery");
+        let unresolved_unit = units.iter().find(|unit| unit.path == unresolved).unwrap();
+        let regular_unit = units.iter().find(|unit| unit.path == regular).unwrap();
+
+        assert_eq!(
+            unresolved_unit.fingerprint_policy,
+            FingerprintPolicy::NoMessageCache
+        );
+        assert!(matches!(
+            regular_unit.fingerprint_policy,
+            FingerprintPolicy::ClaudeCodeWithHome { .. }
+        ));
     }
 }

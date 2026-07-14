@@ -8,6 +8,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
@@ -50,7 +51,7 @@ pub struct KiloTime {
     pub completed: Option<f64>,
 }
 
-pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
     let conn = open_readonly_sqlite(db_path)?;
 
     let query = r#"
@@ -63,72 +64,102 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessag
         .prepare(query)
         .map_err(|error| SessionParseError::new("prepare Kilo message query", error))?;
 
-    let rows = stmt
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let session_id: String = row.get(1)?;
-            let data_json: String = row.get(2)?;
-            Ok((id, session_id, data_json))
-        })
+    let mut rows = stmt
+        .query([])
         .map_err(|error| SessionParseError::new("execute Kilo message query", error))?;
 
-    let mut messages = Vec::new();
+    let mut scanned = ScannedSource::default();
 
-    for row_result in rows {
-        let (row_id, row_session_id, data_json) =
-            row_result.map_err(|error| SessionParseError::new("decode Kilo message row", error))?;
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(error) => {
+                let error = SessionParseError::new("iterate Kilo message rows", error);
+                scanned.interrupted = Some(SourceFailure::from(&error));
+                break;
+            }
+        };
+        let row_id = match row.get::<_, String>(0) {
+            Ok(value) => value,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let row_session_id = match row.get::<_, String>(1) {
+            Ok(value) => value,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let data_json = match row.get::<_, String>(2) {
+            Ok(value) => value,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
         let mut bytes = data_json.into_bytes();
-        let msg: KiloMessage = simd_json::from_slice(&mut bytes)
-            .map_err(|error| SessionParseError::new("decode Kilo message JSON", error))?;
+        let value: serde_json::Value = match simd_json::from_slice(&mut bytes) {
+            Ok(value) => value,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        match value.get("role").and_then(serde_json::Value::as_str) {
+            Some("assistant") => {}
+            Some(_) => continue,
+            None => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        }
+        let msg: KiloMessage = match serde_json::from_value(value) {
+            Ok(message) => message,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
-        if msg.role != "assistant" {
+        let Some(tokens) = msg.tokens else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+
+        if [
+            tokens.input,
+            tokens.output,
+            tokens.cache.read,
+            tokens.cache.write,
+            tokens.reasoning.unwrap_or(0),
+        ]
+        .into_iter()
+        .any(|tokens| tokens < 0)
+        {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
-
-        let tokens = msg.tokens.ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate Kilo assistant message",
-                format!("assistant message `{row_id}` is missing tokens"),
-            )
-        })?;
-
-        let dedup_key = msg
-            .id
-            .or(Some(row_id.clone()))
-            .map(|key| crate::sessions::dedup_hash_str(&key));
-
-        let model_id = msg
-            .model_id
-            .filter(|model| !model.trim().is_empty())
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate Kilo assistant message",
-                    format!("assistant message `{row_id}` is missing modelID"),
-                )
-            })?;
-
-        let agent = msg.agent.or(msg.mode);
-        let session_id = msg.session_id.unwrap_or(row_session_id);
-        let timestamp = msg
-            .time
-            .map(|time| time.created)
-            .filter(|timestamp| timestamp.is_finite() && *timestamp > 0.0)
-            .filter(|timestamp| *timestamp <= i64::MAX as f64)
-            .map(|timestamp| timestamp as i64)
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate Kilo assistant message",
-                    format!("assistant message `{row_id}` is missing a valid created timestamp"),
-                )
-            })?;
-
-        let provider = msg
-            .provider_id
-            .as_deref()
-            .or_else(|| provider_identity::inferred_provider_from_model(&model_id))
-            .unwrap_or("kilo")
-            .to_string();
 
         let token_breakdown = TokenBreakdown {
             input: tokens.input.max(0),
@@ -137,9 +168,74 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessag
             cache_write: tokens.cache.write.max(0),
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         };
-        if crate::positive_token_total(&token_breakdown) == 0 {
+        let Some(token_total) = token_breakdown.checked_total() else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        if token_total == 0 {
             continue;
         }
+
+        let dedup_key = msg
+            .id
+            .or(Some(row_id.clone()))
+            .map(|key| crate::sessions::dedup_hash_str(&key));
+
+        let Some(model_id) = msg
+            .model_id
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
+        };
+
+        let agent = msg.agent.or(msg.mode);
+        let session_id = msg
+            .session_id
+            .map(|session| session.trim().to_string())
+            .filter(|session| !session.is_empty())
+            .or_else(|| {
+                let session = row_session_id.trim();
+                (!session.is_empty()).then(|| session.to_string())
+            });
+        let Some(session_id) = session_id else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        let timestamp = msg
+            .time
+            .map(|time| time.created)
+            .filter(|timestamp| timestamp.is_finite() && *timestamp > 0.0)
+            .filter(|timestamp| *timestamp <= i64::MAX as f64)
+            .map(|timestamp| timestamp as i64)
+            .filter(|timestamp| *timestamp > 0);
+        let Some(timestamp) = timestamp else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        };
+
+        let provider = msg
+            .provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .or_else(|| provider_identity::inferred_provider_from_model(&model_id))
+            .map(str::to_string);
+        let Some(provider) = provider else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingProvider);
+            continue;
+        };
 
         let mut unified = UnifiedMessage::new_with_agent(
             "kilo",
@@ -153,10 +249,10 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessag
         );
         unified.dedup_key = dedup_key;
 
-        messages.push(unified);
+        scanned.messages.push(unified);
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 #[cfg(test)]
@@ -237,7 +333,7 @@ mod tests {
         insert_kilo_message(&conn, "row-msg-1", "sess-1", data_json);
         drop(conn);
 
-        let messages = parse_kilo_sqlite(&db_path).unwrap();
+        let messages = parse_kilo_sqlite(&db_path).unwrap().messages;
         assert_eq!(messages.len(), 1);
 
         let msg = &messages[0];
@@ -307,22 +403,212 @@ mod tests {
                 "cost": -0.75,
                 "mode": "debug",
                 "tokens": {
-                    "input": -100,
+                    "input": 0,
                     "output": 50,
-                    "reasoning": -5,
-                    "cache": {"read": -20, "write": -10}
-                }
+                    "reasoning": 0,
+                    "cache": {"read": 0, "write": 0}
+                },
+                "time": {"created": 1700000000000.0}
             }"#,
         );
         drop(conn);
 
-        let error = parse_kilo_sqlite(&db_path).unwrap_err();
-        assert_eq!(error.operation(), "decode Kilo message JSON");
+        let scanned = parse_kilo_sqlite(&db_path).unwrap();
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.rejections.total(), 3);
     }
 
     #[test]
     fn test_parse_kilo_sqlite_reports_missing_db() {
         let error = parse_kilo_sqlite(std::path::Path::new("/nonexistent/kilo.db")).unwrap_err();
         assert_eq!(error.operation(), "open SQLite source read-only");
+    }
+
+    #[test]
+    fn parse_kilo_sqlite_reports_missing_schema_as_source_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("kilo.db");
+        drop(Connection::open(&path).unwrap());
+
+        let error = parse_kilo_sqlite(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "prepare Kilo message query");
+    }
+
+    #[test]
+    fn parse_kilo_sqlite_keeps_good_rows_around_a_bad_row() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        for (row_id, model) in [
+            ("01-good", Some("gpt-5.4")),
+            ("02-bad", None),
+            ("03-good", Some("claude-sonnet-4")),
+        ] {
+            let data = serde_json::json!({
+                "role": "assistant",
+                "modelID": model,
+                "tokens": {"input": 1, "output": 1, "cache": {"read": 0, "write": 0}},
+                "time": {"created": 1_700_000_000_000_f64}
+            });
+            insert_kilo_message(&conn, row_id, "session", &data.to_string());
+        }
+        drop(conn);
+
+        let scanned = parse_kilo_sqlite(&db_path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn zero_token_row_without_identity_is_an_intentional_filter() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_kilo_message(
+            &conn,
+            "zero",
+            "session",
+            r#"{
+                "role": "assistant",
+                "tokens": {"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}
+            }"#,
+        );
+        drop(conn);
+
+        let scanned = parse_kilo_sqlite(&db_path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+    }
+
+    #[test]
+    fn token_bearing_row_without_resolvable_provider_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_kilo_message(
+            &conn,
+            "unknown-provider",
+            "session",
+            r#"{
+                "role": "assistant",
+                "modelID": "vendor-private-model",
+                "tokens": {"input": 1, "output": 0, "cache": {"read": 0, "write": 0}},
+                "time": {"created": 1700000000000.0}
+            }"#,
+        );
+        drop(conn);
+
+        let scanned = parse_kilo_sqlite(&db_path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-provider");
+        assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn non_assistant_row_is_filtered_before_decoding_assistant_fields() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_kilo_message(
+            &conn,
+            "user",
+            "session",
+            r#"{"role":"user","tokens":"not-an-assistant-token-object"}"#,
+        );
+        drop(conn);
+
+        let scanned = parse_kilo_sqlite(&db_path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+    }
+
+    #[test]
+    fn negative_token_count_is_rejected_instead_of_clamped() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_kilo_message(
+            &conn,
+            "negative",
+            "session",
+            r#"{
+                "role": "assistant",
+                "modelID": "gpt-5",
+                "providerID": "openai",
+                "tokens": {"input": -1, "output": 1, "cache": {"read": 0, "write": 0}},
+                "time": {"created": 1700000000000.0}
+            }"#,
+        );
+        drop(conn);
+
+        let scanned = parse_kilo_sqlite(&db_path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn sub_millisecond_timestamp_is_rejected_after_integer_conversion() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_kilo_message(
+            &conn,
+            "tiny-time",
+            "session",
+            r#"{
+                "role": "assistant",
+                "modelID": "gpt-5",
+                "providerID": "openai",
+                "tokens": {"input": 1, "output": 0, "cache": {"read": 0, "write": 0}},
+                "time": {"created": 0.5}
+            }"#,
+        );
+        drop(conn);
+
+        let scanned = parse_kilo_sqlite(&db_path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-timestamp");
+        assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn overflowing_token_total_is_rejected_and_later_row_is_kept() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        for (id, input, output) in [("01-overflow", i64::MAX, 1), ("02-good", 1, 1)] {
+            let data = serde_json::json!({
+                "role": "assistant",
+                "modelID": "gpt-5",
+                "providerID": "openai",
+                "tokens": {"input": input, "output": output, "cache": {"read": 0, "write": 0}},
+                "time": {"created": 1700000000000.0}
+            });
+            insert_kilo_message(&conn, id, "session", &data.to_string());
+        }
+        drop(conn);
+
+        let scanned = parse_kilo_sqlite(&db_path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
     }
 }

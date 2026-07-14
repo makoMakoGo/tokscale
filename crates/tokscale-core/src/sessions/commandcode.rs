@@ -9,6 +9,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -31,13 +32,13 @@ struct CommandCodeConfig {
     model: String,
 }
 
-pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
     if path
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".checkpoints.jsonl"))
     {
-        return Ok(Vec::new());
+        return Ok(ScannedSource::default());
     }
 
     let file = std::fs::File::open(path)
@@ -49,31 +50,49 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMess
     let workspace_key = workspace_key_from_path(path);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
-    let mut messages = Vec::new();
+    let mut scanned = ScannedSource::default();
     let mut session_id: Option<String> = None;
     let mut turn_input_chars = 0usize;
     let mut pending_turn_start = false;
     let mut assistant_index = 0usize;
 
-    for line in BufReader::new(file).lines() {
-        let line =
-            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let entry = serde_json::from_str::<CommandCodeEntry>(trimmed)
-            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
-
-        if session_id.is_none() {
-            if let Some(id) = entry.session_id.as_deref().filter(|id| !id.is_empty()) {
-                session_id = Some(id.to_string());
+        let entry = match serde_json::from_str::<CommandCodeEntry>(trimmed) {
+            Ok(entry) => entry,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
             }
-        }
+        };
 
         let chars = match entry.content.as_ref() {
-            Some(content) => content_chars(content)?,
+            Some(content) => match content_chars(content) {
+                Ok(chars) => chars,
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            },
             None => 0,
         };
         match entry.role.as_deref() {
@@ -86,54 +105,70 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMess
                     pending_turn_start = false;
                     continue;
                 }
+                let is_turn_start = std::mem::take(&mut pending_turn_start);
+                let tokens = TokenBreakdown {
+                    input,
+                    output,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                };
+                if tokens.checked_total().is_none() {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
 
-                let resolved_session = session_id.clone().ok_or_else(|| {
-                    SessionParseError::invalid(
-                        "validate assistant session",
-                        "Command Code assistant turn is missing a non-empty sessionId",
-                    )
-                })?;
+                let Some(resolved_session) = entry
+                    .session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| session_id.clone())
+                else {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                };
                 let timestamp = match entry.timestamp.as_deref() {
                     Some(timestamp) => parse_timestamp_str(timestamp)
                         .filter(|timestamp| *timestamp > 0)
-                        .ok_or_else(|| {
-                            SessionParseError::invalid(
-                                "validate assistant timestamp",
-                                format!("invalid Command Code timestamp `{timestamp}`"),
-                            )
-                        })?,
+                        .unwrap_or(0),
                     None => {
-                        return Err(SessionParseError::invalid(
-                            "validate assistant timestamp",
-                            "Command Code assistant turn is missing a timestamp",
-                        ))
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingTimestamp);
+                        continue;
                     }
                 };
+                if timestamp <= 0 {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MissingTimestamp);
+                    continue;
+                }
                 let dedup_key = crate::sessions::dedup_hash_str(&format!(
                     "commandcode:{resolved_session}:{assistant_index}"
                 ));
+                session_id = Some(resolved_session.clone());
                 let mut message = UnifiedMessage::new_with_dedup(
                     CLIENT_ID,
                     model_id.clone(),
                     provider_id,
                     resolved_session,
                     timestamp,
-                    TokenBreakdown {
-                        input,
-                        output,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
+                    tokens,
                     0.0,
                     Some(dedup_key),
                 );
-                message.is_turn_start = pending_turn_start;
+                message.is_turn_start = is_turn_start;
                 message.set_workspace(workspace_key.clone(), workspace_label.clone());
-                messages.push(message);
+                scanned.messages.push(message);
 
                 assistant_index += 1;
-                pending_turn_start = false;
             }
             Some("user") => {
                 pending_turn_start = true;
@@ -145,7 +180,7 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMess
         }
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn content_chars(content: &serde_json::Value) -> SessionParseResult<usize> {
@@ -229,7 +264,7 @@ mod tests {
     use std::io::Write;
 
     fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_commandcode_file(path).unwrap()
+        super::parse_commandcode_file(path).unwrap().messages
     }
 
     fn write_config(root: &Path, model: &str) {
@@ -377,6 +412,113 @@ mod tests {
     }
 
     #[test]
+    fn mixed_assistant_turns_reject_bad_record_and_keep_later_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "model-x");
+        let path = write_session(
+            dir.path(),
+            "proj",
+            "s",
+            concat!(
+                r#"{"role":"user","sessionId":"s","content":"first"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-16T05:58:20Z","content":"good"}"#,
+                "\n",
+                r#"{"role":"user","sessionId":"s","content":"second"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"s","content":"bad"}"#,
+                "\n",
+                r#"{"role":"user","sessionId":"s","content":"third"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-16T05:58:30Z","content":"good again"}"#
+            ),
+        );
+
+        let scanned = super::parse_commandcode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn malformed_jsonl_record_does_not_discard_later_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "model-x");
+        let path = write_session(
+            dir.path(),
+            "proj",
+            "s",
+            concat!(
+                r#"{"role":"user","sessionId":"s","content":"first"}"#,
+                "\n",
+                "{not-json",
+                "\n",
+                r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-16T05:58:30Z","content":"accepted"}"#
+            ),
+        );
+
+        let scanned = super::parse_commandcode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn rejected_assistant_clears_pending_turn_start_before_next_assistant() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "model-x");
+        let path = write_session(
+            dir.path(),
+            "proj",
+            "s",
+            concat!(
+                r#"{"role":"user","sessionId":"s","content":"user turn"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"s","content":"rejected"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-16T05:58:30Z","content":"accepted"}"#
+            ),
+        );
+
+        let scanned = super::parse_commandcode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert!(!scanned.messages[0].is_turn_start);
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn rejected_assistant_does_not_commit_sticky_session_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "model-x");
+        let path = write_session(
+            dir.path(),
+            "proj",
+            "s",
+            concat!(
+                r#"{"role":"assistant","sessionId":"poison","content":"bad timestamp"}"#,
+                "\n",
+                r#"{"role":"assistant","timestamp":"2026-06-16T05:58:25Z","content":"must not inherit poison"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"legitimate","timestamp":"2026-06-16T05:58:30Z","content":"accepted"}"#
+            ),
+        );
+
+        let scanned = super::parse_commandcode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "legitimate");
+        assert_eq!(scanned.rejections.total(), 2);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
     fn rejects_missing_required_session_model_and_timestamp() {
         let dir = tempfile::tempdir().unwrap();
         write_config(dir.path(), "MiniMaxAI/MiniMax-M3-Free");
@@ -386,11 +528,17 @@ mod tests {
             "missing-session",
             r#"{"role":"assistant","timestamp":"2026-06-16T05:58:20Z","content":"response"}"#,
         );
+        let missing_session_scan = super::parse_commandcode_file(&missing_session).unwrap();
+        assert!(missing_session_scan.messages.is_empty());
+        assert_eq!(missing_session_scan.rejections.total(), 1);
         assert_eq!(
-            super::parse_commandcode_file(&missing_session)
-                .unwrap_err()
-                .operation(),
-            "validate assistant session"
+            missing_session_scan
+                .rejections
+                .entries()
+                .next()
+                .unwrap()
+                .key,
+            "malformed-record"
         );
 
         let missing_timestamp = write_session(
@@ -399,11 +547,17 @@ mod tests {
             "missing-timestamp",
             r#"{"role":"assistant","sessionId":"s","content":"response"}"#,
         );
+        let missing_timestamp_scan = super::parse_commandcode_file(&missing_timestamp).unwrap();
+        assert!(missing_timestamp_scan.messages.is_empty());
+        assert_eq!(missing_timestamp_scan.rejections.total(), 1);
         assert_eq!(
-            super::parse_commandcode_file(&missing_timestamp)
-                .unwrap_err()
-                .operation(),
-            "validate assistant timestamp"
+            missing_timestamp_scan
+                .rejections
+                .entries()
+                .next()
+                .unwrap()
+                .key,
+            "missing-timestamp"
         );
 
         std::fs::write(dir.path().join("config.json"), r#"{"provider":"minimax"}"#).unwrap();

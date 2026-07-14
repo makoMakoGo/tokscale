@@ -7,70 +7,62 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource};
 use crate::TokenBreakdown;
-use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Deserialize)]
-struct UiMessageEntry {
-    #[serde(rename = "type")]
-    entry_type: Option<String>,
-    say: Option<String>,
-    text: Option<String>,
-    ts: Option<Value>,
-}
-
-pub fn parse_roocode_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_roocode_file(path: &Path) -> SessionParseResult<ScannedSource> {
     parse_roo_kilo_file(path, "roocode")
 }
 
-pub(crate) fn parse_roo_kilo_file(
-    path: &Path,
-    source: &str,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResult<ScannedSource> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read Roo Code UI messages", error))?;
 
     let mut bytes = data;
-    let entries: Vec<UiMessageEntry> = simd_json::from_slice(&mut bytes).map_err(|error| {
+    let envelope: Value = simd_json::from_slice(&mut bytes).map_err(|error| {
         SessionParseError::at_path(path, "decode Roo Code UI messages JSON", error)
+    })?;
+    let entries = envelope.as_array().ok_or_else(|| {
+        SessionParseError::at_path(
+            path,
+            "validate Roo Code UI messages JSON envelope",
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "UI messages JSON must be an array",
+            ),
+        )
     })?;
 
     let mut usage_events = Vec::new();
+    let mut rejections = RejectionSummary::default();
     for entry in entries {
-        if entry.entry_type.as_deref() != Some("say")
-            || entry.say.as_deref() != Some("api_req_started")
+        let Some(entry) = entry.as_object() else {
+            rejections.record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("say")
+            || entry.get("say").and_then(Value::as_str) != Some("api_req_started")
         {
             continue;
         }
 
-        let text = match entry.text {
-            Some(t) => t,
+        let text = match entry.get("text").and_then(Value::as_str) {
+            Some(text) => text,
             None => {
-                return Err(SessionParseError::at_path(
-                    path,
-                    "validate api_req_started event",
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "api_req_started event is missing text",
-                    ),
-                ));
+                rejections.record(RecordRejectionReason::MalformedRecord);
+                continue;
             }
         };
 
-        let timestamp = parse_entry_timestamp(entry.ts.as_ref()).ok_or_else(|| {
-            SessionParseError::at_path(
-                path,
-                "validate event timestamp",
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "api_req_started event has no valid timestamp",
-                ),
-            )
-        })?;
-
-        let payload = parse_api_req_started_payload(path, &text)?;
+        let payload = match parse_api_req_started_payload(text) {
+            Some(payload) => payload,
+            None => {
+                rejections.record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
         let token_breakdown = TokenBreakdown {
             input: payload.tokens_in,
@@ -82,16 +74,37 @@ pub(crate) fn parse_roo_kilo_file(
         if crate::positive_token_total(&token_breakdown) == 0 {
             continue;
         }
-        let provider = provider_from_api_protocol(path, payload.api_protocol.as_deref())?;
+        let Some(timestamp) = parse_entry_timestamp(entry.get("ts")) else {
+            rejections.record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        };
+        let Some(provider) = provider_from_api_protocol(payload.api_protocol.as_deref()) else {
+            rejections.record(RecordRejectionReason::MissingProvider);
+            continue;
+        };
         usage_events.push((timestamp, token_breakdown, provider));
     }
 
     if usage_events.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ScannedSource {
+            messages: Vec::new(),
+            rejections,
+            interrupted: None,
+        });
     }
 
     let session_id = extract_session_id(path)?;
     let (model_id, agent) = read_task_metadata(path)?;
+    let Some(model_id) = model_id else {
+        for _ in 0..usage_events.len() {
+            rejections.record(RecordRejectionReason::MissingModel);
+        }
+        return Ok(ScannedSource {
+            messages: Vec::new(),
+            rejections,
+            interrupted: None,
+        });
+    };
     let mut messages = Vec::with_capacity(usage_events.len());
     for (timestamp, token_breakdown, provider) in usage_events {
         messages.push(UnifiedMessage::new_with_agent(
@@ -106,7 +119,11 @@ pub(crate) fn parse_roo_kilo_file(
         ));
     }
 
-    Ok(messages)
+    Ok(ScannedSource {
+        messages,
+        rejections,
+        interrupted: None,
+    })
 }
 
 fn extract_session_id(path: &Path) -> SessionParseResult<String> {
@@ -127,13 +144,15 @@ fn extract_session_id(path: &Path) -> SessionParseResult<String> {
         })
 }
 
-fn read_task_metadata(ui_messages_path: &Path) -> SessionParseResult<(String, Option<String>)> {
+fn read_task_metadata(
+    ui_messages_path: &Path,
+) -> SessionParseResult<(Option<String>, Option<String>)> {
     let history_path = sibling_history_path(ui_messages_path);
     let content = std::fs::read_to_string(&history_path).map_err(|error| {
         SessionParseError::at_path(&history_path, "read Roo Code task metadata", error)
     })?;
 
-    extract_model_and_agent(&history_path, &content)
+    Ok(extract_optional_model_and_agent(&content))
 }
 
 fn sibling_history_path(ui_messages_path: &Path) -> PathBuf {
@@ -143,10 +162,26 @@ fn sibling_history_path(ui_messages_path: &Path) -> PathBuf {
         .join("api_conversation_history.json")
 }
 
+#[cfg(test)]
 fn extract_model_and_agent(
     history_path: &Path,
     content: &str,
 ) -> SessionParseResult<(String, Option<String>)> {
+    let (model, agent) = extract_optional_model_and_agent(content);
+    let model = model.ok_or_else(|| {
+        SessionParseError::at_path(
+            history_path,
+            "validate Roo Code task metadata",
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "task metadata has no non-empty model",
+            ),
+        )
+    })?;
+    Ok((model, agent))
+}
+
+fn extract_optional_model_and_agent(content: &str) -> (Option<String>, Option<String>) {
     const ENV_START: &str = "<environment_details>";
     const ENV_END: &str = "</environment_details>";
 
@@ -178,18 +213,8 @@ fn extract_model_and_agent(
         offset = end_idx + ENV_END.len();
     }
 
-    let model = last_model.ok_or_else(|| {
-        SessionParseError::at_path(
-            history_path,
-            "validate Roo Code task metadata",
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "task metadata has no non-empty model",
-            ),
-        )
-    })?;
     let agent = last_slug.or(last_name);
-    Ok((model, agent))
+    (last_model, agent)
 }
 
 fn extract_tag_value(block: &str, tag: &str) -> Option<String> {
@@ -228,25 +253,23 @@ struct ApiReqStartedPayload {
     api_protocol: Option<String>,
 }
 
-fn parse_api_req_started_payload(
-    source_path: &Path,
-    text: &str,
-) -> SessionParseResult<ApiReqStartedPayload> {
+fn parse_api_req_started_payload(text: &str) -> Option<ApiReqStartedPayload> {
     let mut bytes = text.as_bytes().to_vec();
-    let value: Value = simd_json::from_slice(&mut bytes).map_err(|error| {
-        SessionParseError::at_path(source_path, "decode api_req_started payload", error)
-    })?;
+    let value: Value = simd_json::from_slice(&mut bytes).ok()?;
+    if !value.is_object() {
+        return None;
+    }
 
-    let tokens_in = parse_token_field(source_path, &value, "tokensIn")?;
-    let tokens_out = parse_token_field(source_path, &value, "tokensOut")?;
-    let cache_reads = parse_token_field(source_path, &value, "cacheReads")?;
-    let cache_writes = parse_token_field(source_path, &value, "cacheWrites")?;
+    let tokens_in = parse_token_field(&value, "tokensIn")?;
+    let tokens_out = parse_token_field(&value, "tokensOut")?;
+    let cache_reads = parse_token_field(&value, "cacheReads")?;
+    let cache_writes = parse_token_field(&value, "cacheWrites")?;
     let api_protocol = value
         .get("apiProtocol")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    Ok(ApiReqStartedPayload {
+    Some(ApiReqStartedPayload {
         tokens_in,
         tokens_out,
         cache_reads,
@@ -255,45 +278,21 @@ fn parse_api_req_started_payload(
     })
 }
 
-fn parse_token_field(path: &Path, value: &Value, field: &'static str) -> SessionParseResult<i64> {
+fn parse_token_field(value: &Value, field: &'static str) -> Option<i64> {
     let Some(value) = value.get(field) else {
-        return Ok(0);
+        return Some(0);
     };
-    let parsed = value
+    value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
         .filter(|value| *value >= 0)
-        .ok_or_else(|| {
-            SessionParseError::at_path(
-                path,
-                "validate api_req_started token fields",
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("{field} must be a non-negative integer"),
-                ),
-            )
-        })?;
-    Ok(parsed)
 }
 
-fn provider_from_api_protocol(
-    path: &Path,
-    api_protocol: Option<&str>,
-) -> SessionParseResult<String> {
+fn provider_from_api_protocol(api_protocol: Option<&str>) -> Option<String> {
     api_protocol
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| {
-            SessionParseError::at_path(
-                path,
-                "validate api_req_started provider",
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "positive usage is missing a non-empty apiProtocol",
-                ),
-            )
-        })
 }
 
 #[cfg(test)]
@@ -303,7 +302,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn parse_roocode_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_roocode_file(path).unwrap()
+        super::parse_roocode_file(path).unwrap().messages
     }
 
     fn setup_task(
@@ -362,9 +361,15 @@ after"#;
     }
 
     #[test]
-    fn test_parse_roocode_rejects_malformed_payload_entry() {
+    fn malformed_payload_rejects_only_that_event_and_keeps_later_usage() {
         let dir = TempDir::new().unwrap();
         let ui_messages = r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T11:59:59Z",
+    "text": "{\"tokensIn\":4,\"apiProtocol\":\"anthropic\"}"
+  },
   {
     "type": "say",
     "say": "api_req_started",
@@ -378,10 +383,18 @@ after"#;
     "text": "{\"cost\":0.03,\"tokensIn\":10,\"tokensOut\":2,\"cacheReads\":1,\"cacheWrites\":0,\"apiProtocol\":\"openai\"}"
   }
 ]"#;
-        let path = setup_task(&dir, "task-def", ui_messages, None);
+        let history = "<environment_details><model>claude-sonnet-4</model></environment_details>";
+        let path = setup_task(&dir, "task-def", ui_messages, Some(history));
 
-        let error = super::parse_roocode_file(&path).unwrap_err();
-        assert_eq!(error.operation(), "decode api_req_started payload");
+        let scanned = super::parse_roocode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].tokens.input, 4);
+        assert_eq!(scanned.messages[1].tokens.input, 10);
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -420,8 +433,13 @@ after"#;
 ]"#;
         let path = setup_task(&dir, "task-time", ui_messages, None);
 
-        let error = super::parse_roocode_file(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate event timestamp");
+        let scanned = super::parse_roocode_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-timestamp");
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -454,7 +472,7 @@ after"#;
     }
 
     #[test]
-    fn positive_usage_requires_current_metadata_provider_and_token_types() {
+    fn source_io_errors_remain_source_errors_while_bad_usage_fields_are_rejections() {
         let dir = TempDir::new().unwrap();
         let missing_metadata = setup_task(
             &dir,
@@ -476,11 +494,11 @@ after"#;
             r#"[{"type":"say","say":"api_req_started","ts":"2026-02-18T12:00:00Z","text":"{\"tokensIn\":1}"}]"#,
             Some(history),
         );
+        let scanned = super::parse_roocode_file(&missing_provider).unwrap();
+        assert!(scanned.messages.is_empty());
         assert_eq!(
-            super::parse_roocode_file(&missing_provider)
-                .unwrap_err()
-                .operation(),
-            "validate api_req_started provider"
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-provider"
         );
 
         let malformed_tokens = setup_task(
@@ -489,11 +507,90 @@ after"#;
             r#"[{"type":"say","say":"api_req_started","ts":"2026-02-18T12:00:00Z","text":"{\"tokensIn\":\"1\",\"apiProtocol\":\"anthropic\"}"}]"#,
             Some(history),
         );
+        let scanned = super::parse_roocode_file(&malformed_tokens).unwrap();
+        assert!(scanned.messages.is_empty());
         assert_eq!(
-            super::parse_roocode_file(&malformed_tokens)
-                .unwrap_err()
-                .operation(),
-            "validate api_req_started token fields"
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
         );
+    }
+
+    #[test]
+    fn malformed_array_element_does_not_erase_valid_usage() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:00:00Z",
+    "text": "{\"tokensIn\":3,\"apiProtocol\":\"anthropic\"}"
+  },
+  "not-an-event",
+  {
+    "type": "say",
+    "say": "api_req_started",
+    "ts": "2026-02-18T12:00:02Z",
+    "text": "{\"tokensOut\":5,\"apiProtocol\":\"openai\"}"
+  }
+]"#;
+        let history = "<environment_details><model>gpt-5</model></environment_details>";
+        let path = setup_task(&dir, "typed-entry", ui_messages, Some(history));
+
+        let scanned = super::parse_roocode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+    }
+
+    #[test]
+    fn all_bad_usage_is_complete_and_counts_each_rejection_reason() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {"type":"say","say":"api_req_started","ts":"bad","text":"{\"tokensIn\":1,\"apiProtocol\":\"anthropic\"}"},
+  {"type":"say","say":"api_req_started","ts":1766000000000,"text":"{\"tokensIn\":1}"},
+  {"type":"say","say":"api_req_started","ts":1766000000001,"text":"{\"tokensIn\":\"1\",\"apiProtocol\":\"openai\"}"},
+  {"type":"say","say":"api_req_started","ts":1766000000002,"text":"{\"tokensIn\":1,\"apiProtocol\":\"openai\"}"}
+]"#;
+        let history = "<environment_details><name>Builder</name></environment_details>";
+        let path = setup_task(&dir, "all-bad", ui_messages, Some(history));
+
+        let scanned = super::parse_roocode_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.interrupted.is_none());
+        assert_eq!(scanned.rejections.total(), 4);
+        let reasons: Vec<_> = scanned
+            .rejections
+            .entries()
+            .map(|entry| (entry.key, entry.count))
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                ("malformed-record", 1),
+                ("missing-model", 1),
+                ("missing-provider", 1),
+                ("missing-timestamp", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn intentional_filters_and_zero_token_usage_are_not_rejections() {
+        let dir = TempDir::new().unwrap();
+        let ui_messages = r#"[
+  {"type":"say","say":"assistant_message","ts":1766000000000,"text":"{}"},
+  {"type":"say","say":"api_req_started","ts":1766000000001,"text":"{}"},
+  {"type":"say","say":"api_req_started","text":"{}"}
+]"#;
+        let path = setup_task(&dir, "filtered", ui_messages, None);
+
+        let scanned = super::parse_roocode_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
     }
 }

@@ -19,10 +19,10 @@ compile_error!("source-message cache requires stable Unix or Windows file identi
 // Source-message cache shards split serialization layout from parser/source
 // semantics. Bump this only when the shard bincode layout changes; parser-only
 // fixes should bump the relevant SourceUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 4;
+const CACHE_FORMAT_VERSION: u32 = 6;
 #[cfg(test)]
-const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 3;
-const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 2] = [2, 3];
+const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 5;
+const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 4] = [2, 3, 4, 5];
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const SHARD_KEY_FORMAT_VERSION: u32 = 1;
 const SHARDS_DIRNAME: &str = "shards";
@@ -285,6 +285,7 @@ pub(crate) enum ParserId {
     Zcode,
     Warp,
     CodeBuddy,
+    OmpParentHealth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -315,6 +316,7 @@ impl ParserId {
             Self::OpenClaw => "openclaw",
             Self::Pi => "pi",
             Self::Omp => "omp",
+            Self::OmpParentHealth => "omp-parent-health",
             Self::Kimi => "kimi",
             Self::Qwen => "qwen",
             Self::RooCode => "roo-code",
@@ -369,6 +371,11 @@ fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+fn initialize_source_shards(cache_dir: &Path) -> std::io::Result<()> {
+    ensure_cache_dir(cache_dir)?;
+    ensure_cache_dir(&cache_dir.join(SHARDS_DIRNAME))
 }
 
 #[cfg(unix)]
@@ -474,7 +481,7 @@ impl SourceStamp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum SourceFileIdentity {
     Unix {
         device: u64,
@@ -584,6 +591,27 @@ impl SourceInputSnapshot {
             .map(|file| file.size)
     }
 
+    pub(crate) fn input_matches_single_file_snapshot(
+        &self,
+        input_index: usize,
+        single_file_snapshot: &Self,
+    ) -> bool {
+        single_file_snapshot.files.len() == 1
+            && self.files.get(input_index) == single_file_snapshot.files.first()
+    }
+
+    pub(crate) fn visit_present_files(&self, mut visit: impl FnMut(SourceFileIdentity, u64)) {
+        for file in &self.files {
+            if file.present {
+                visit(
+                    file.identity
+                        .expect("present source input must carry a stable file identity"),
+                    file.size,
+                );
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn primary_modified_ms(&self) -> Option<i64> {
         self.files.first().filter(|file| file.present).map(|file| {
@@ -623,7 +651,15 @@ impl SourceInputPolicy {
         )
     }
 
-    pub(crate) fn claude_code(path: &Path, variant_path: Option<PathBuf>) -> Self {
+    pub(crate) fn with_dependency(path: &Path, dependency_path: PathBuf) -> Self {
+        Self::with_related(path, [("dependency".to_string(), dependency_path)])
+    }
+
+    pub(crate) fn claude_code(
+        path: &Path,
+        variant_path: Option<PathBuf>,
+        parent_session_path: Option<PathBuf>,
+    ) -> Self {
         let mut related = Vec::new();
         if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
             related.push((
@@ -633,6 +669,9 @@ impl SourceInputPolicy {
         }
         if let Some(variant_path) = variant_path {
             related.push(("cc-mirror/variant.json".to_string(), variant_path));
+        }
+        if let Some(parent_session_path) = parent_session_path {
+            related.push(("parent-session".to_string(), parent_session_path));
         }
         Self::with_related(path, related)
     }
@@ -748,6 +787,46 @@ impl SourceInputPolicy {
         self.fingerprint_from_stamp(self.stamp_from_snapshot(snapshot)?)
     }
 
+    pub(crate) fn fingerprint_from_snapshot_with_primary_hash(
+        &self,
+        snapshot: &SourceInputSnapshot,
+        primary_hash: [u8; 32],
+    ) -> Result<SourceFingerprint, SourceSnapshotError> {
+        self.fingerprint_from_stamp_with(
+            self.stamp_from_snapshot(snapshot)?,
+            |index, path, size| {
+                if index == 0 {
+                    Ok(primary_hash)
+                } else {
+                    hash_prefix(path, size)
+                }
+            },
+        )
+    }
+
+    pub(crate) fn fingerprint_from_snapshot_with_dependency_hash(
+        &self,
+        snapshot: &SourceInputSnapshot,
+        dependency_hash: [u8; 32],
+    ) -> Result<SourceFingerprint, SourceSnapshotError> {
+        if self.inputs.len() != 2 || self.inputs[1].0 != "dependency" {
+            return Err(SourceSnapshotError::invalid(
+                &self.inputs[0].1,
+                "precomputed dependency hash requires one dependency input",
+            ));
+        }
+        self.fingerprint_from_stamp_with(
+            self.stamp_from_snapshot(snapshot)?,
+            |index, path, size| {
+                if index == 1 {
+                    Ok(dependency_hash)
+                } else {
+                    hash_prefix(path, size)
+                }
+            },
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn fingerprint(&self) -> Result<SourceFingerprint, SourceSnapshotError> {
         let stamp = self.stamp()?;
@@ -757,6 +836,14 @@ impl SourceInputPolicy {
     pub(crate) fn fingerprint_from_stamp(
         &self,
         stamp: SourceStamp,
+    ) -> Result<SourceFingerprint, SourceSnapshotError> {
+        self.fingerprint_from_stamp_with(stamp, |_, path, size| hash_prefix(path, size))
+    }
+
+    fn fingerprint_from_stamp_with(
+        &self,
+        stamp: SourceStamp,
+        mut hash_input: impl FnMut(usize, &Path, u64) -> Result<[u8; 32], SourceSnapshotError>,
     ) -> Result<SourceFingerprint, SourceSnapshotError> {
         if stamp.files.len() != self.inputs.len()
             || self
@@ -775,13 +862,17 @@ impl SourceInputPolicy {
         let size = stamp.primary_size().ok_or_else(|| {
             SourceSnapshotError::invalid(&self.inputs[0].1, "primary source is absent")
         })?;
-        let content_hash = hash_prefix(&self.inputs[0].1, size)?;
+        let content_hash = hash_input(0, &self.inputs[0].1, size)?;
         let mut related_files = Vec::with_capacity(self.inputs.len().saturating_sub(1));
-        for ((label, path), file_stamp) in
-            self.inputs.iter().skip(1).zip(stamp.files.iter().skip(1))
+        for (index, ((label, path), file_stamp)) in self
+            .inputs
+            .iter()
+            .skip(1)
+            .zip(stamp.files.iter().skip(1))
+            .enumerate()
         {
             let content_hash = if file_stamp.present {
-                Some(hash_prefix(path, file_stamp.size)?)
+                Some(hash_input(index + 1, path, file_stamp.size)?)
             } else {
                 None
             };
@@ -885,7 +976,7 @@ impl SourceFingerprint {
                 path: source.path().unwrap_or(path).to_path_buf(),
                 source,
             })?;
-        SourceInputPolicy::claude_code(path, variant_path).fingerprint()
+        SourceInputPolicy::claude_code(path, variant_path, None).fingerprint()
     }
 
     pub(crate) fn from_main_digest(
@@ -975,10 +1066,8 @@ pub(crate) enum CacheReadFailureReason {
     },
     #[error("unrecognized shard magic {actual:?}")]
     InvalidMagic { actual: [u8; 8] },
-    #[error("shard format version {actual} is a known legacy format; current format is {current}")]
-    PreviousFormat { actual: u32, current: u32 },
-    #[error("unsupported shard format version {actual}")]
-    UnsupportedFormat { actual: u32 },
+    #[error("shard format version {actual} does not match current format {current}")]
+    FormatMismatch { actual: u32, current: u32 },
     #[error("invalid shard header length {actual}")]
     InvalidHeaderLength { actual: u64 },
     #[error("failed to decode shard header: {source}")]
@@ -1010,8 +1099,7 @@ impl CacheReadFailureReason {
                 | Self::TooLarge { .. }
                 | Self::HeaderRead { .. }
                 | Self::InvalidMagic { .. }
-                | Self::PreviousFormat { .. }
-                | Self::UnsupportedFormat { .. }
+                | Self::FormatMismatch { .. }
                 | Self::InvalidHeaderLength { .. }
                 | Self::HeaderDecode { .. }
                 | Self::SourcePathMismatch
@@ -1029,8 +1117,25 @@ pub(crate) struct CacheReadFailure {
 }
 
 impl CacheReadFailure {
-    pub(crate) fn is_recoverable_body_fault(&self) -> bool {
-        self.requires_shard_removal()
+    pub(crate) fn can_reparse_source(&self) -> bool {
+        match self.reason {
+            CacheReadFailureReason::Invalidated
+            | CacheReadFailureReason::AlreadyConsumed
+            | CacheReadFailureReason::FingerprintMismatch => false,
+            CacheReadFailureReason::Open { .. }
+            | CacheReadFailureReason::Metadata { .. }
+            | CacheReadFailureReason::TooLarge { .. }
+            | CacheReadFailureReason::HeaderRead { .. }
+            | CacheReadFailureReason::InvalidMagic { .. }
+            | CacheReadFailureReason::FormatMismatch { .. }
+            | CacheReadFailureReason::InvalidHeaderLength { .. }
+            | CacheReadFailureReason::HeaderDecode { .. }
+            | CacheReadFailureReason::SourcePathMismatch
+            | CacheReadFailureReason::ParserVersionMismatch
+            | CacheReadFailureReason::ShardFingerprintMismatch
+            | CacheReadFailureReason::BodyDecode { .. }
+            | CacheReadFailureReason::MessageCountMismatch { .. } => true,
+        }
     }
 
     pub(crate) fn requires_shard_removal(&self) -> bool {
@@ -1050,8 +1155,7 @@ impl CacheReadFailure {
             | CacheReadFailureReason::TooLarge { .. }
             | CacheReadFailureReason::HeaderRead { .. }
             | CacheReadFailureReason::InvalidMagic { .. }
-            | CacheReadFailureReason::PreviousFormat { .. }
-            | CacheReadFailureReason::UnsupportedFormat { .. }
+            | CacheReadFailureReason::FormatMismatch { .. }
             | CacheReadFailureReason::InvalidHeaderLength { .. }
             | CacheReadFailureReason::HeaderDecode { .. }
             | CacheReadFailureReason::SourcePathMismatch
@@ -1153,6 +1257,7 @@ pub(crate) struct CachedSourceEntry {
     pub fingerprint: SourceFingerprint,
     pub messages: Vec<UnifiedMessage>,
     pub codex_incremental: Option<CodexIncrementalCache>,
+    pub rejections: crate::source_health::RejectionSummary,
 }
 
 impl CachedSourceEntry {
@@ -1197,6 +1302,7 @@ impl CachedSourceEntry {
             fingerprint,
             messages,
             codex_incremental,
+            rejections: Default::default(),
         }
     }
 
@@ -1206,6 +1312,7 @@ impl CachedSourceEntry {
             parser_version: self.parser_version,
             fingerprint: self.fingerprint.clone(),
             codex_incremental: self.codex_incremental.clone(),
+            rejections: self.rejections.clone(),
         }
     }
 
@@ -1224,6 +1331,7 @@ pub(crate) struct CacheWritePlan {
     parser_version: ParserVersion,
     fingerprint: SourceFingerprint,
     codex_incremental: Option<CodexIncrementalCache>,
+    rejections: crate::source_health::RejectionSummary,
 }
 
 impl CacheWritePlan {
@@ -1238,7 +1346,18 @@ impl CacheWritePlan {
             parser_version,
             fingerprint,
             codex_incremental,
+            rejections: Default::default(),
         }
+    }
+
+    /// Attach the scan's rejection summary so it persists with the shard and
+    /// is restored on warm hits.
+    pub(crate) fn with_rejections(
+        mut self,
+        rejections: crate::source_health::RejectionSummary,
+    ) -> Self {
+        self.rejections = rejections;
+        self
     }
 
     fn key(&self) -> CachedSourceKey {
@@ -1256,6 +1375,7 @@ struct CachedShardHeader {
     fingerprint: SourceFingerprint,
     codex_incremental: Option<CodexIncrementalCache>,
     message_count: usize,
+    rejections: crate::source_health::RejectionSummary,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1271,8 +1391,8 @@ struct BorrowedCachedShardBody<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct CachedSourceMeta {
     pub fingerprint: SourceFingerprint,
-    pub has_messages: bool,
     pub codex_incremental: Option<CodexIncrementalCache>,
+    pub rejections: crate::source_health::RejectionSummary,
 }
 
 pub(crate) struct SourceMessageCache {
@@ -1304,7 +1424,7 @@ impl SourceMessageCache {
     pub(crate) fn load() -> Result<Self, SourceCacheError> {
         let cache_dir =
             cache_dir().map_err(|source| SourceCacheError::CacheDirectoryUnavailable { source })?;
-        ensure_cache_dir(&cache_dir).map_err(|source| {
+        initialize_source_shards(&cache_dir).map_err(|source| {
             SourceCacheError::io("initialize source cache directory", &cache_dir, source)
         })?;
 
@@ -1321,7 +1441,7 @@ impl SourceMessageCache {
 
     #[cfg(test)]
     pub(crate) fn with_cache_dir(cache_dir: &Path) -> Self {
-        ensure_cache_dir(cache_dir).expect("test source cache directory must be usable");
+        initialize_source_shards(cache_dir).expect("test source cache directory must be usable");
         Self {
             cache_dir: cache_dir.to_path_buf(),
             dirty_entries: HashMap::new(),
@@ -1772,16 +1892,16 @@ pub fn prune_source_message_cache() -> Result<SourceCachePruneStats, SourceCache
 fn meta_from_entry(entry: &CachedSourceEntry) -> CachedSourceMeta {
     CachedSourceMeta {
         fingerprint: entry.fingerprint.clone(),
-        has_messages: !entry.messages.is_empty(),
         codex_incremental: entry.codex_incremental.clone(),
+        rejections: entry.rejections.clone(),
     }
 }
 
 fn meta_from_header(header: CachedShardHeader) -> CachedSourceMeta {
     CachedSourceMeta {
         fingerprint: header.fingerprint,
-        has_messages: header.message_count > 0,
         codex_incremental: header.codex_incremental,
+        rejections: header.rejections,
     }
 }
 
@@ -1845,6 +1965,25 @@ pub(crate) fn mark_current_key_shard_as_previous_format_for_test(
     file.seek(SeekFrom::Start(SHARD_MAGIC.len() as u64))
         .expect("test shard format field must be seekable");
     file.write_all(&PREVIOUS_CACHE_FORMAT_VERSION.to_le_bytes())
+        .expect("test shard format field must be writable");
+    file.flush().expect("test shard format rewrite must flush");
+    shard_path
+}
+
+#[cfg(test)]
+pub(crate) fn mark_current_key_shard_as_future_format_for_test(
+    cache_dir: &Path,
+    source_path: &Path,
+    parser_version: ParserVersion,
+) -> PathBuf {
+    let shard_path = shard_path_for_test(cache_dir, source_path, parser_version);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&shard_path)
+        .expect("test cache shard must exist");
+    file.seek(SeekFrom::Start(SHARD_MAGIC.len() as u64))
+        .expect("test shard format field must be seekable");
+    file.write_all(&(CACHE_FORMAT_VERSION + 1).to_le_bytes())
         .expect("test shard format field must be writable");
     file.flush().expect("test shard format rewrite must flush");
     shard_path
@@ -1924,6 +2063,7 @@ fn header_from_plan(plan: &CacheWritePlan, message_count: usize) -> CachedShardH
         fingerprint: plan.fingerprint.clone(),
         codex_incremental: plan.codex_incremental.clone(),
         message_count,
+        rejections: plan.rejections.clone(),
     }
 }
 
@@ -1989,6 +2129,7 @@ fn read_shard_entry_with_plan(
         parser_version: header.parser_version,
         fingerprint: header.fingerprint,
         messages: body.messages,
+        rejections: header.rejections,
         codex_incremental: header.codex_incremental,
     })
 }
@@ -2013,13 +2154,10 @@ fn read_current_shard_envelope(file: &mut File) -> Result<(), CacheReadFailureRe
         .map_err(|source| CacheReadFailureReason::HeaderRead { source })?;
     let version = u32::from_le_bytes(version_bytes);
     if version != CACHE_FORMAT_VERSION {
-        if LEGACY_MAGIC_FORMAT_VERSIONS.contains(&version) {
-            return Err(CacheReadFailureReason::PreviousFormat {
-                actual: version,
-                current: CACHE_FORMAT_VERSION,
-            });
-        }
-        return Err(CacheReadFailureReason::UnsupportedFormat { actual: version });
+        return Err(CacheReadFailureReason::FormatMismatch {
+            actual: version,
+            current: CACHE_FORMAT_VERSION,
+        });
     }
     Ok(())
 }
@@ -2332,6 +2470,14 @@ fn hash_prefix(path: &Path, len: u64) -> Result<[u8; 32], SourceSnapshotError> {
     Ok(hasher.finalize().into())
 }
 
+#[cfg(test)]
+fn hash_file_contents(path: &Path) -> Result<[u8; 32], SourceSnapshotError> {
+    let metadata = fs::metadata(path).map_err(|source| {
+        SourceSnapshotError::io("read source metadata for hashing", path, source)
+    })?;
+    hash_prefix(path, metadata.len())
+}
+
 pub(crate) fn build_codex_incremental_cache(
     consumed_offset: u64,
     state: CodexParseState,
@@ -2538,12 +2684,13 @@ mod tests {
             CacheReadFailureReason::InvalidMagic {
                 actual: *b"notmagic",
             },
-            CacheReadFailureReason::PreviousFormat {
+            CacheReadFailureReason::FormatMismatch {
                 actual: PREVIOUS_CACHE_FORMAT_VERSION,
                 current: CACHE_FORMAT_VERSION,
             },
-            CacheReadFailureReason::UnsupportedFormat {
+            CacheReadFailureReason::FormatMismatch {
                 actual: CACHE_FORMAT_VERSION + 1,
+                current: CACHE_FORMAT_VERSION,
             },
             CacheReadFailureReason::InvalidHeaderLength { actual: 0 },
             CacheReadFailureReason::HeaderDecode {
@@ -2585,6 +2732,37 @@ mod tests {
                 test_cache_read_failure(reason).requires_shard_removal(),
                 "structural corruption must remove the derived shard"
             );
+        }
+    }
+
+    #[test]
+    fn cache_read_faults_reparse_sources_but_in_memory_contract_faults_do_not() {
+        for reason in [
+            CacheReadFailureReason::Open {
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            CacheReadFailureReason::InvalidMagic {
+                actual: *b"notmagic",
+            },
+            CacheReadFailureReason::FormatMismatch {
+                actual: CACHE_FORMAT_VERSION + 1,
+                current: CACHE_FORMAT_VERSION,
+            },
+            CacheReadFailureReason::ShardFingerprintMismatch,
+            CacheReadFailureReason::MessageCountMismatch {
+                declared: 2,
+                actual: 1,
+            },
+        ] {
+            assert!(test_cache_read_failure(reason).can_reparse_source());
+        }
+
+        for reason in [
+            CacheReadFailureReason::Invalidated,
+            CacheReadFailureReason::AlreadyConsumed,
+            CacheReadFailureReason::FingerprintMismatch,
+        ] {
+            assert!(!test_cache_read_failure(reason).can_reparse_source());
         }
     }
 
@@ -2765,7 +2943,7 @@ mod tests {
         std::fs::write(&source, b"session!").unwrap();
         std::fs::write(&meta, b"meta-one").unwrap();
         std::fs::write(&variant, b"variant1").unwrap();
-        let policy = SourceInputPolicy::claude_code(&source, Some(variant.clone()));
+        let policy = SourceInputPolicy::claude_code(&source, Some(variant.clone()), None);
         let before = policy.stamp().unwrap();
 
         replace_preserving_size_and_mtime(&meta, &dir.path().join("replacement-meta"), b"meta-two");
@@ -2832,6 +3010,61 @@ mod tests {
 
         assert_ne!(sibling_before, sibling_after);
         assert_eq!(plain_before, plain_after);
+    }
+
+    #[test]
+    fn fingerprint_with_dynamic_dependency_tracks_content_and_existence() {
+        let dir = TempDir::new().unwrap();
+        let child_dir = dir.path().join("parent-session");
+        let primary = child_dir.join("0-ReviewFindings.jsonl");
+        let dependency = dir.path().join("parent-session.jsonl");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(&primary, b"child").unwrap();
+
+        let policy = SourceInputPolicy::with_dependency(&primary, dependency.clone());
+        assert_eq!(policy.paths(), vec![primary.clone(), dependency.clone()]);
+        let absent = policy.fingerprint().unwrap();
+
+        std::fs::write(&dependency, b"reviewer").unwrap();
+        let reviewer = policy.fingerprint().unwrap();
+        assert_ne!(absent, reviewer);
+
+        std::fs::write(&dependency, b"oracle!!").unwrap();
+        let oracle = policy.fingerprint().unwrap();
+        assert_ne!(reviewer, oracle);
+
+        std::fs::remove_file(&dependency).unwrap();
+        assert_eq!(policy.fingerprint().unwrap(), absent);
+    }
+
+    #[test]
+    fn precomputed_primary_and_dependency_hashes_preserve_fingerprint_identity() {
+        let dir = TempDir::new().unwrap();
+        let child_dir = dir.path().join("parent-session");
+        let primary = child_dir.join("0-ReviewFindings.jsonl");
+        let dependency = dir.path().join("parent-session.jsonl");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(&primary, b"child").unwrap();
+        std::fs::write(&dependency, b"parent").unwrap();
+        let policy = SourceInputPolicy::with_dependency(&primary, dependency.clone());
+        let snapshot = policy.snapshot().unwrap();
+
+        let ordinary = policy.fingerprint_from_snapshot(&snapshot).unwrap();
+        let with_primary = policy
+            .fingerprint_from_snapshot_with_primary_hash(
+                &snapshot,
+                hash_file_contents(&primary).unwrap(),
+            )
+            .unwrap();
+        let with_dependency = policy
+            .fingerprint_from_snapshot_with_dependency_hash(
+                &snapshot,
+                hash_file_contents(&dependency).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(with_primary, ordinary);
+        assert_eq!(with_dependency, ordinary);
     }
 
     #[test]
@@ -3128,7 +3361,7 @@ mod tests {
 
         let file = write_temp_file(b"{}\n");
         let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
-        let entry = CachedSourceEntry::new(
+        let mut entry = CachedSourceEntry::new(
             file.path(),
             fingerprint,
             vec![UnifiedMessage::new(
@@ -3148,6 +3381,7 @@ mod tests {
             )],
             None,
         );
+        entry.rejections.record_key("future-rejection");
 
         let expected_fingerprint = entry.fingerprint.clone();
         let mut cache = SourceMessageCache::load().unwrap();
@@ -3173,7 +3407,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(meta.fingerprint, expected_fingerprint);
-        assert!(meta.has_messages);
+        let rejection = meta.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "future-rejection");
+        assert_eq!(rejection.count, 1);
         let messages = loaded
             .take_messages(&CacheReadPlan::new(
                 file.path(),
@@ -3592,8 +3828,8 @@ mod tests {
         let source = write_temp_file(b"source");
         let parser_version = test_parser_version(31);
         let shard_path = shard_path_for_test(cache_home.path(), source.path(), parser_version);
-        ensure_cache_dir(&shard_path).unwrap();
         let mut cache = SourceMessageCache::with_cache_dir(cache_home.path());
+        ensure_cache_dir(&shard_path).unwrap();
         cache.remove(source.path(), parser_version);
 
         let error = cache
@@ -3654,6 +3890,7 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
 
         let source = write_temp_file(b"source\n");
+        let _initialized = SourceMessageCache::load().unwrap();
         let shard = shard_path(source.path(), test_parser_version(1)).unwrap();
         ensure_cache_dir(shard.parent().unwrap()).unwrap();
         let header = CachedShardHeader {
@@ -3662,6 +3899,7 @@ mod tests {
             fingerprint: SourceFingerprint::from_path(source.path()).unwrap(),
             codex_incremental: None,
             message_count: 0,
+            rejections: Default::default(),
         };
         let header_bytes = bincode::options().serialize(&header).unwrap();
         let mut file = File::create(&shard).unwrap();
@@ -3772,6 +4010,7 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
         let source = write_temp_file(b"source\n");
         let parser_version = test_parser_version(1);
+        let _initialized = SourceMessageCache::load().unwrap();
         let current_shard = shard_path(source.path(), parser_version).unwrap();
         let v2_shard = legacy_v2_amp_shard_path(cache_dir().unwrap().as_path(), source.path(), 1);
         assert_ne!(v2_shard, current_shard);
@@ -3828,6 +4067,7 @@ mod tests {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
         let source = write_temp_file(b"source\n");
+        let _initialized = SourceMessageCache::load().unwrap();
 
         for (parser_version, bytes) in [
             (test_parser_version(11), b"raw-v1??".to_vec()),
@@ -3860,6 +4100,7 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
         let source = write_temp_file(b"source\n");
         let parser_version = test_parser_version(13);
+        let _initialized = SourceMessageCache::load().unwrap();
         let shard = shard_path(source.path(), parser_version).unwrap();
         ensure_cache_dir(shard.parent().unwrap()).unwrap();
         let unknown_bytes = b"unknown!";

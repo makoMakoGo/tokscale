@@ -4,13 +4,14 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
-    EXPLICIT_TOKEN_OVERFLOW_REVISION,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{sessions, ClientId};
 
 pub(crate) struct JunieAdapter;
+
+const JUNIE_RECORD_REJECTION_REVISION: u32 = EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
 
 impl LocalSourceAdapter for JunieAdapter {
     fn client(&self) -> ClientId {
@@ -30,22 +31,18 @@ impl LocalSourceAdapter for JunieAdapter {
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
                 ParserId::Junie,
-                EXPLICIT_TOKEN_OVERFLOW_REVISION,
+                JUNIE_RECORD_REJECTION_REVISION,
             ))
         })
         .collect();
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
+                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                     sessions::junie::parse_junie_file(path)
                 })
             })
@@ -118,19 +115,10 @@ mod tests {
         cache: &mut message_cache::SourceMessageCache,
         pricing: Option<&PricingService>,
     ) -> Vec<sessions::UnifiedMessage> {
-        let parsed = JUNIE_ADAPTER
-            .parse_checked(units, &ParseContext { pricing })
-            .unwrap();
+        let parsed = JUNIE_ADAPTER.parse_checked(units, &ParseContext { pricing });
         let mut messages = Vec::new();
         JUNIE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: cache,
-                    pricing,
-                },
-                &mut messages,
-            )
+            .fold(parsed, &mut FoldContext::new(cache, pricing), &mut messages)
             .unwrap();
         messages
     }
@@ -164,6 +152,10 @@ mod tests {
         assert_eq!(units[0].client, ClientId::Junie);
         assert_eq!(units[0].path, path);
         assert_eq!(units[0].fingerprint_policy, FingerprintPolicy::PlainFile);
+        assert_eq!(
+            units[0].parser_version,
+            ParserVersion::new(ParserId::Junie, JUNIE_RECORD_REJECTION_REVISION)
+        );
     }
 
     #[test]
@@ -177,7 +169,7 @@ mod tests {
             &mut cache,
             None,
         );
-        let expected = sessions::junie::parse_junie_file(&path).unwrap();
+        let expected = sessions::junie::parse_junie_file(&path).unwrap().messages;
 
         assert_eq!(actual, expected);
     }
@@ -205,14 +197,7 @@ mod tests {
 
         let mut cached = Vec::new();
         JUNIE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut cached,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut cached)
             .unwrap();
 
         assert_eq!(cached, fresh);

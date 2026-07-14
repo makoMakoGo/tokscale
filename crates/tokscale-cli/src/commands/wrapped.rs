@@ -67,6 +67,7 @@ pub struct WrappedOptions {
 
 #[derive(Debug, Clone)]
 struct WrappedData {
+    health: tokscale_core::source_health::HealthReport,
     year: String,
     active_days: i32,
     total_tokens: i64,
@@ -127,6 +128,7 @@ pub fn run(options: WrappedOptions) -> Result<String> {
 
 async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
     let data = load_wrapped_data(&options).await?;
+    crate::commands::shared::emit_health_summary(&data.health);
 
     let agents_requested = options.include_agents;
     let has_agent_data = data
@@ -269,6 +271,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         Some(pricing.as_ref()),
     )
     .map_err(anyhow::Error::msg)?;
+    let health = wrapped_health_report(&aggregated);
     let graph = aggregated.graph.expect("graph view requested");
 
     let mut model_map: HashMap<String, WrappedRankedEntry> = HashMap::new();
@@ -329,6 +332,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .unwrap_or_else(|| format!("{}-01-01", year));
 
     Ok(WrappedData {
+        health,
         year,
         active_days: graph.summary.active_days,
         total_tokens: graph.summary.total_tokens,
@@ -340,6 +344,12 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         contributions,
         total_messages,
     })
+}
+
+fn wrapped_health_report(
+    aggregated: &tokscale_core::AggregatedViews,
+) -> tokscale_core::source_health::HealthReport {
+    aggregated.health.to_report()
 }
 
 fn accumulate_wrapped_contribution(
@@ -1718,6 +1728,7 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
+    use tokscale_core::{DataHealth, RejectionSummary, SourceFailure, SourceHealth, SourceStatus};
 
     fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
         unsafe {
@@ -1726,6 +1737,30 @@ mod tests {
                 None => env::remove_var(key),
             }
         }
+    }
+
+    #[test]
+    fn wrapped_health_report_preserves_failed_sources() {
+        let mut health = DataHealth::default();
+        health.record(SourceHealth {
+            client: ClientId::OpenCode,
+            path: PathBuf::from("/tmp/broken-opencode.db"),
+            status: SourceStatus::Unavailable {
+                failure: SourceFailure::new("open database", "invalid database"),
+            },
+            rejections: RejectionSummary::default(),
+        });
+        let aggregated = tokscale_core::AggregatedViews {
+            health,
+            ..Default::default()
+        };
+
+        let report = wrapped_health_report(&aggregated);
+
+        assert!(!report.complete);
+        assert_eq!(report.failed_sources, 1);
+        assert_eq!(report.issues[0].source, "opencode");
+        assert_eq!(report.issues[0].issue, "source-unavailable");
     }
 
     // ========== format_tokens_short tests ==========

@@ -5,8 +5,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::{
     AdapterScanContext, FoldContext, LocalSourceAdapter, MessageSink, ParseContext,
-    ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError, SourcePipelineError,
-    SourceUnit, SourceUnitMeta,
+    ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourcePipelineError, SourceUnit,
+    SourceUnitMeta,
 };
 use crate::clients::ClientId;
 use crate::{scanner, sessions};
@@ -47,16 +47,12 @@ impl LocalSourceAdapter for OpenCodeAdapter {
             .collect())
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
                 SourceUnitMeta::OpenCodeSqlite => {
-                    adapter_cache::load_or_parse_unit_with_result(unit, ctx, |path| {
+                    adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                         sessions::opencode::parse_opencode_sqlite(path).map_err(|error| {
                             crate::sessions::error::SessionParseError::new(
                                 "parse OpenCode SQLite",
@@ -128,7 +124,15 @@ fn fold_opencode_unit(
         messages,
         cache_write,
         invalidate_cache,
+        status,
+        rejections,
     } = adapter_cache::resolve_unit(parsed, ctx)?;
+    ctx.health.record(crate::source_health::SourceHealth {
+        client: unit.client,
+        path: unit.path.clone(),
+        status,
+        rejections,
+    });
     let path = unit.path.clone();
     let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
     if cache_write_outcome.is_err() && invalidate_cache {
@@ -231,10 +235,8 @@ mod tests {
         let parsed = ["opencode.db", "opencode-stable.db"]
             .into_iter()
             .enumerate()
-            .map(|(index, name)| ParsedUnit {
-                unit: SourceUnit::sqlite_with_wal(ClientId::OpenCode, dir.path().join(name))
-                    .with_meta(SourceUnitMeta::OpenCodeSqlite),
-                messages: UnitMessageSource::Fresh(vec![UnifiedMessage::new_with_dedup(
+            .map(|(index, name)| {
+                let message = UnifiedMessage::new_with_dedup(
                     "opencode",
                     "gpt-5.5",
                     "openai",
@@ -247,23 +249,21 @@ mod tests {
                     },
                     0.0,
                     Some(key),
-                )]),
-                cache_write: None,
-                invalidate_cache: false,
+                );
+                ParsedUnit::healthy(
+                    SourceUnit::sqlite_with_wal(ClientId::OpenCode, dir.path().join(name))
+                        .with_meta(SourceUnitMeta::OpenCodeSqlite),
+                    UnitMessageSource::Fresh(vec![message]),
+                    None,
+                    false,
+                )
             })
             .collect();
         let mut cache = message_cache::SourceMessageCache::default();
         let mut sink = Vec::new();
 
         OPENCODE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
-                &mut sink,
-            )
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
             .unwrap();
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].session_id.as_ref(), "session-0");
@@ -297,10 +297,7 @@ mod tests {
                 OPENCODE_ADAPTER
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext {
-                            source_cache: &mut cache,
-                            pricing: None,
-                        },
+                        &mut FoldContext::new(&mut cache, None),
                         &mut sink,
                     )
                     .unwrap();
@@ -346,20 +343,18 @@ mod tests {
             None,
         ));
 
-        let error = OPENCODE_ADAPTER
-            .parse_checked(vec![unit], &ParseContext { pricing: None })
-            .unwrap_err();
-        assert_eq!(error.operation, "parse OpenCode SQLite");
-        assert_eq!(error.path, path);
-        assert!(std::error::Error::source(&error)
-            .unwrap()
-            .to_string()
-            .contains("current session schema"));
+        let parsed = OPENCODE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert_eq!(health.path, path);
+        let failure = health.status.failure().expect("source must be unavailable");
+        assert_eq!(failure.operation, "parse OpenCode SQLite");
+        assert!(failure.message.contains("current session schema"));
         assert!(cache.get_meta(&path, parser_version).unwrap().is_none());
     }
 
     #[test]
-    fn checked_parse_surfaces_payload_error_without_caching_empty_success() {
+    fn all_bad_source_is_complete_and_restores_rejections_from_warm_cache() {
         let dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("opencode.db");
@@ -389,17 +384,92 @@ mod tests {
             .prepare_snapshot()
             .unwrap();
         let parser_version = unit.parser_version;
-        let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
 
-        let error = OPENCODE_ADAPTER
-            .parse_checked(vec![unit], &ParseContext { pricing: None })
-            .unwrap_err();
-        assert_eq!(error.path, path);
-        assert_eq!(error.operation, "parse OpenCode SQLite");
-        assert!(std::error::Error::source(&error)
-            .unwrap()
-            .to_string()
-            .contains("bad-payload-row"));
-        assert!(cache.get_meta(&path, parser_version).unwrap().is_none());
+        let parsed =
+            OPENCODE_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert_eq!(health.path, path);
+        assert!(matches!(
+            health.status,
+            crate::source_health::SourceStatus::Complete
+        ));
+        assert_eq!(health.rejections.total(), 1);
+        let rejection = health.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+
+        let mut sink = Vec::new();
+        OPENCODE_ADAPTER
+            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
+            .unwrap();
+        assert!(sink.is_empty());
+        cache.save_if_dirty().unwrap();
+        let cached = cache.get_meta(&path, parser_version).unwrap().unwrap();
+        assert_eq!(cached.rejections.total(), 1);
+
+        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let warm = OPENCODE_ADAPTER.plan_cache_hit(unit, &warm_cache).unwrap();
+        let crate::adapters::CacheHitPlan::Hit(warm) = warm else {
+            panic!("unchanged all-bad source must use the complete cached scan");
+        };
+        let warm_health = warm.source_health();
+        assert!(matches!(
+            warm_health.status,
+            crate::source_health::SourceStatus::Complete
+        ));
+        assert_eq!(warm_health.rejections.total(), 1);
+        assert_eq!(
+            warm_health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn malformed_row_id_keeps_later_message_and_is_cacheable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+             CREATE TABLE message (id, session_id TEXT NOT NULL, data TEXT NOT NULL);
+             INSERT INTO message VALUES (42, 'bad-session', '{\"role\":\"assistant\"}');
+             INSERT INTO message VALUES ('01-good', 'session-1', '{\"role\":\"assistant\",\"modelID\":\"gpt-5.5\",\"providerID\":\"openai\",\"tokens\":{\"input\":10,\"output\":5,\"cache\":{\"read\":0,\"write\":0}},\"time\":{\"created\":1766000000000}}');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(SourceUnitMeta::OpenCodeSqlite)
+            .prepare_snapshot()
+            .unwrap();
+        let parser_version = unit.parser_version;
+        let parsed = OPENCODE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
+        assert_eq!(parsed.len(), 1);
+        let health = parsed[0].source_health();
+        assert!(matches!(
+            health.status,
+            crate::source_health::SourceStatus::Complete
+        ));
+        assert_eq!(health.rejections.total(), 1);
+        assert_eq!(
+            health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+
+        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut sink = Vec::new();
+        let mut fold_ctx = FoldContext::new(&mut cache, None);
+        OPENCODE_ADAPTER
+            .fold(parsed, &mut fold_ctx, &mut sink)
+            .unwrap();
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].session_id.as_ref(), "session-1");
+        assert_eq!(fold_ctx.health.partial_sources(), 0);
+        assert_eq!(fold_ctx.health.rejected_records(), 1);
+        let cached = cache.get_meta(&path, parser_version).unwrap().unwrap();
+        assert_eq!(cached.rejections.total(), 1);
     }
 }

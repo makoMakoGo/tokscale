@@ -126,6 +126,7 @@ pub(crate) fn finish_graph_result(
         .unwrap_or_default();
 
     GraphResult {
+        health: Default::default(),
         meta: GraphMeta {
             generated_at: chrono::Utc::now().to_rfc3339(),
             version: env!("CARGO_PKG_VERSION").to_string(),

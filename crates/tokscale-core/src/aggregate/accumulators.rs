@@ -809,6 +809,7 @@ pub(super) fn finish_graph_and_time_from_events(
         .then_some(TimeMetricsReport {
             metrics: time_metrics_value,
             processing_time_ms: 0,
+            health: Default::default(),
         });
 
     TimeBufferedViews {

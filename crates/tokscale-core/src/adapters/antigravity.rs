@@ -7,14 +7,18 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceParseError,
-    SourceUnit, SourceUnitMeta,
+    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit, SourceUnitMeta,
 };
 use crate::clients::{ClientId, PathRoot};
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
 const CLI_RELATIVE_PATH: &str = "antigravity-cli/conversations";
 const CLI_PATTERN: &str = "*.db";
+const ANTIGRAVITY_CACHE_RECORD_REJECTION_REVISION: u32 =
+    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
+const ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION: u32 =
+    crate::adapters::EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
 
 pub(crate) struct AntigravityAdapter;
 
@@ -41,7 +45,13 @@ impl LocalSourceAdapter for AntigravityAdapter {
             FingerprintPolicy::NoMessageCache,
         )?
         .into_iter()
-        .map(|unit| unit.with_meta(SourceUnitMeta::AntigravityCacheJsonl))
+        .map(|unit| {
+            unit.with_meta(SourceUnitMeta::AntigravityCacheJsonl)
+                .with_parser_version(ParserVersion::new(
+                    ParserId::AntigravityCacheJsonl,
+                    ANTIGRAVITY_CACHE_RECORD_REJECTION_REVISION,
+                ))
+        })
         .collect::<Vec<_>>();
 
         let cli_root = PathRoot::EnvVar {
@@ -59,26 +69,28 @@ impl LocalSourceAdapter for AntigravityAdapter {
                 FingerprintPolicy::SqliteWithWal,
             )?
             .into_iter()
-            .map(|unit| unit.with_meta(SourceUnitMeta::AntigravityCliSqlite)),
+            .map(|unit| {
+                unit.with_meta(SourceUnitMeta::AntigravityCliSqlite)
+                    .with_parser_version(ParserVersion::new(
+                        ParserId::AntigravityCliSqlite,
+                        ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
+                    ))
+            }),
         );
 
         Ok(units)
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
-                SourceUnitMeta::AntigravityCacheJsonl => adapter_cache::load_or_parse_unit_with(
+                SourceUnitMeta::AntigravityCacheJsonl => adapter_cache::load_or_scan_unit_with(
                     unit,
                     ctx,
                     sessions::antigravity::parse_antigravity_file,
                 ),
-                SourceUnitMeta::AntigravityCliSqlite => adapter_cache::load_or_parse_unit_with(
+                SourceUnitMeta::AntigravityCliSqlite => adapter_cache::load_or_scan_unit_with(
                     unit,
                     ctx,
                     sessions::antigravity_cli::parse_antigravity_cli_file,
@@ -141,7 +153,15 @@ fn fold_antigravity_units(
             messages,
             cache_write,
             invalidate_cache,
+            status,
+            rejections,
         } = adapter_cache::resolve_unit(parsed_unit, ctx)?;
+        ctx.health.record(crate::source_health::SourceHealth {
+            client: unit.client,
+            path: unit.path.clone(),
+            status,
+            rejections,
+        });
         let path = unit.path.clone();
         let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
         if cache_write_outcome.is_err() && invalidate_cache {
@@ -244,12 +264,22 @@ mod tests {
             unit.client == ClientId::Antigravity
                 && unit.path == cache_path
                 && unit.fingerprint_policy == FingerprintPolicy::NoMessageCache
+                && unit.parser_version
+                    == ParserVersion::new(
+                        ParserId::AntigravityCacheJsonl,
+                        ANTIGRAVITY_CACHE_RECORD_REJECTION_REVISION,
+                    )
                 && matches!(unit.meta, SourceUnitMeta::AntigravityCacheJsonl)
         }));
         assert!(units.iter().any(|unit| {
             unit.client == ClientId::Antigravity
                 && unit.path == cli_path
                 && unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal
+                && unit.parser_version
+                    == ParserVersion::new(
+                        ParserId::AntigravityCliSqlite,
+                        ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
+                    )
                 && matches!(unit.meta, SourceUnitMeta::AntigravityCliSqlite)
         }));
     }
@@ -304,12 +334,12 @@ mod tests {
     }
 
     fn parsed_unit(path: &Path, meta: SourceUnitMeta, message: UnifiedMessage) -> ParsedUnit {
-        ParsedUnit {
-            unit: SourceUnit::plain_file(ClientId::Antigravity, path.to_path_buf()).with_meta(meta),
-            messages: UnitMessageSource::Fresh(vec![message]),
-            cache_write: None,
-            invalidate_cache: false,
-        }
+        ParsedUnit::healthy(
+            SourceUnit::plain_file(ClientId::Antigravity, path.to_path_buf()).with_meta(meta),
+            UnitMessageSource::Fresh(vec![message]),
+            None,
+            false,
+        )
     }
 
     fn antigravity_message(session_id: &str, dedup_key: Option<u64>) -> UnifiedMessage {
@@ -351,10 +381,7 @@ mod tests {
         ANTIGRAVITY_ADAPTER
             .fold(
                 vec![ide, cli],
-                &mut FoldContext {
-                    source_cache: &mut cache,
-                    pricing: None,
-                },
+                &mut FoldContext::new(&mut cache, None),
                 &mut messages,
             )
             .unwrap();

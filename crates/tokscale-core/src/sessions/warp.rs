@@ -8,6 +8,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::{model_aliases, provider_identity, token_imputation};
 use chrono::TimeZone;
 use rusqlite::Connection;
@@ -35,12 +36,13 @@ struct PendingWarpMessage {
     dedup_key: u64,
 }
 
-pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
     let conn = open_readonly_sqlite(db_path).map_err(|source| {
         SessionParseError::at_path(db_path, "open Warp database read-only", source)
     })?;
 
-    let query_metadata = load_query_metadata(&conn, db_path)?;
+    let mut scanned = ScannedSource::default();
+    let query_metadata = load_query_metadata(&conn, db_path, &mut scanned);
     let query = r#"
         SELECT conversation_id, conversation_data, last_modified_at
         FROM agent_conversations
@@ -52,98 +54,135 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessag
         SessionParseError::at_path(db_path, "prepare Warp conversation query", error)
     })?;
 
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
-        .map_err(|error| {
-            SessionParseError::at_path(db_path, "execute Warp conversation query", error)
-        })?;
+    let mut rows = stmt.query([]).map_err(|error| {
+        SessionParseError::at_path(db_path, "execute Warp conversation query", error)
+    })?;
 
     let mut pending_messages = Vec::new();
-    for row in rows {
-        let (conversation_id, conversation_data, last_modified_at) = row.map_err(|error| {
-            SessionParseError::at_path(db_path, "decode Warp conversation row", error)
-        })?;
-        let value = serde_json::from_str::<Value>(&conversation_data).map_err(|error| {
-            SessionParseError::at_path(db_path, "decode Warp conversation JSON", error)
-        })?;
-        let Some(token_usage) = conversation_token_usage(db_path, &value)? else {
-            continue;
+    let mut pending_total = 0_i64;
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(error) => {
+                let error =
+                    SessionParseError::at_path(db_path, "iterate Warp conversation rows", error);
+                if scanned.interrupted.is_none() {
+                    scanned.interrupted = Some(SourceFailure::from(&error));
+                }
+                break;
+            }
+        };
+        let decoded = (|| -> rusqlite::Result<(String, String, Option<String>)> {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })();
+        let (conversation_id, conversation_data, last_modified_at) = match decoded {
+            Ok(decoded) => decoded,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let value = match serde_json::from_str::<Value>(&conversation_data) {
+            Ok(value) => value,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let token_usage = match conversation_token_usage(db_path, &value) {
+            Ok(Some(token_usage)) => token_usage,
+            Ok(None) => continue,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
         };
 
-        let meta = query_metadata.get(&conversation_id);
+        let conversation_id = conversation_id.trim();
+        if conversation_id.is_empty() {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        }
+        let timestamp = last_modified_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|timestamp| !timestamp.is_empty())
+            .and_then(parse_warp_timestamp)
+            .filter(|timestamp| *timestamp > 0);
 
+        let meta = query_metadata.get(conversation_id);
+
+        let mut row_pending_messages = Vec::new();
+        let mut row_total = 0_i64;
+        let mut row_total_overflowed = false;
         for (index, item) in token_usage.iter().enumerate() {
-            let total = warp_token_total(db_path, item, &conversation_id, index)?;
+            let total = match warp_token_total(db_path, item, conversation_id, index) {
+                Ok(total) => total,
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            };
             if total <= 0 {
                 continue;
             }
 
-            let conversation_id = conversation_id.trim();
-            if conversation_id.is_empty() {
-                return Err(invalid_at_path(
-                    db_path,
-                    "validate Warp conversation row",
-                    "token-bearing conversation has an empty conversation_id",
-                ));
-            }
-            let raw_timestamp = last_modified_at
-                .as_deref()
-                .map(str::trim)
-                .filter(|timestamp| !timestamp.is_empty())
-                .ok_or_else(|| {
-                    invalid_at_path(
-                        db_path,
-                        "validate Warp conversation row",
-                        format!("conversation `{conversation_id}` is missing last_modified_at"),
-                    )
-                })?;
-            let timestamp = parse_warp_timestamp(raw_timestamp)
-                .filter(|timestamp| *timestamp > 0)
-                .ok_or_else(|| {
-                    invalid_at_path(
-                        db_path,
-                        "validate Warp conversation row",
-                        format!("invalid last_modified_at `{raw_timestamp}`"),
-                    )
-                })?;
+            let Some(timestamp) = timestamp else {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingTimestamp);
+                continue;
+            };
 
-            let raw_model_id = item
-                .get("model_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .ok_or_else(|| {
-                    invalid_at_path(
-                        db_path,
-                        "validate Warp token usage",
-                        format!(
-                            "conversation `{conversation_id}` usage row {index} is missing model_id"
-                        ),
-                    )
-                })?;
+            let raw_model_id = match item.get("model_id") {
+                Some(Value::String(model)) if !model.trim().is_empty() => model.trim(),
+                None | Some(Value::Null) | Some(Value::String(_)) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MissingModel);
+                    continue;
+                }
+                Some(_) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            };
             let model_id = model_aliases::canonicalize_source_model_id(raw_model_id)
                 .unwrap_or_else(|| raw_model_id.to_string());
-            let provider_id = provider_identity::inferred_provider_from_model(&model_id)
-                .ok_or_else(|| {
-                    invalid_at_path(
-                        db_path,
-                        "validate Warp token usage",
-                        format!("cannot infer provider for model `{raw_model_id}`"),
-                    )
-                })?
-                .to_string();
+            let Some(provider_id) = provider_identity::inferred_provider_from_model(&model_id)
+            else {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingProvider);
+                continue;
+            };
             let dedup_key =
                 super::dedup_hash_str(&format!("warp:{conversation_id}:{index}:{model_id}"));
-            pending_messages.push(PendingWarpMessage {
+            let Some(next_row_total) = row_total.checked_add(total) else {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                row_total_overflowed = true;
+                break;
+            };
+            row_total = next_row_total;
+            row_pending_messages.push(PendingWarpMessage {
                 conversation_id: conversation_id.to_string(),
                 model_id,
-                provider_id,
+                provider_id: provider_id.to_string(),
                 timestamp,
                 workspace_key: meta.and_then(|meta| meta.workspace_key.clone()),
                 workspace_label: meta.and_then(|meta| meta.workspace_label.clone()),
@@ -151,6 +190,18 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessag
                 dedup_key,
             });
         }
+
+        if row_total_overflowed {
+            continue;
+        }
+        let Some(next_pending_total) = pending_total.checked_add(row_total) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        pending_total = next_pending_total;
+        pending_messages.extend(row_pending_messages);
     }
 
     let totals: Vec<i64> = pending_messages
@@ -159,7 +210,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessag
         .collect();
     let token_rows = token_imputation::impute_total_only_token_breakdowns(&totals);
 
-    Ok(pending_messages
+    scanned.messages = pending_messages
         .into_iter()
         .zip(token_rows)
         .map(|(pending, tokens)| {
@@ -176,40 +227,66 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessag
             message.set_workspace(pending.workspace_key, pending.workspace_label);
             message
         })
-        .collect())
+        .collect();
+    Ok(scanned)
 }
 
 fn load_query_metadata(
     conn: &Connection,
     db_path: &Path,
-) -> SessionParseResult<HashMap<String, ConversationMeta>> {
-    let mut stmt = conn
-        .prepare(
-            r#"
+    scanned: &mut ScannedSource,
+) -> HashMap<String, ConversationMeta> {
+    let mut stmt = match conn.prepare(
+        r#"
         SELECT conversation_id, working_directory
         FROM ai_queries
         WHERE conversation_id IS NOT NULL
           AND TRIM(conversation_id) != ''
         ORDER BY conversation_id
         "#,
-        )
-        .map_err(|error| {
-            SessionParseError::at_path(db_path, "prepare Warp query metadata query", error)
-        })?;
+    ) {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            let error =
+                SessionParseError::at_path(db_path, "prepare Warp query metadata query", error);
+            scanned.interrupted = Some(SourceFailure::from(&error));
+            return HashMap::new();
+        }
+    };
 
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
-        .map_err(|error| {
-            SessionParseError::at_path(db_path, "execute Warp query metadata query", error)
-        })?;
+    let mut rows = match stmt.query([]) {
+        Ok(rows) => rows,
+        Err(error) => {
+            let error =
+                SessionParseError::at_path(db_path, "execute Warp query metadata query", error);
+            scanned.interrupted = Some(SourceFailure::from(&error));
+            return HashMap::new();
+        }
+    };
 
     let mut metadata = HashMap::new();
-    for row in rows {
-        let (conversation_id, working_directory) = row.map_err(|error| {
-            SessionParseError::at_path(db_path, "decode Warp query metadata row", error)
-        })?;
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(error) => {
+                let error =
+                    SessionParseError::at_path(db_path, "iterate Warp query metadata rows", error);
+                scanned.interrupted = Some(SourceFailure::from(&error));
+                break;
+            }
+        };
+        let decoded =
+            (|| -> rusqlite::Result<(String, Option<String>)> { Ok((row.get(0)?, row.get(1)?)) })();
+        let (conversation_id, working_directory) = match decoded {
+            Ok(decoded) => decoded,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
         let entry: &mut ConversationMeta = metadata.entry(conversation_id).or_default();
 
         if entry.workspace_key.is_none() {
@@ -222,7 +299,7 @@ fn load_query_metadata(
         }
     }
 
-    Ok(metadata)
+    metadata
 }
 
 fn conversation_token_usage<'a>(
@@ -420,7 +497,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut messages = parse_warp_sqlite(&db_path).unwrap();
+        let mut messages = parse_warp_sqlite(&db_path).unwrap().messages;
         crate::finalize_token_priced_messages(&mut messages, None);
 
         assert_eq!(messages.len(), 2);
@@ -465,6 +542,98 @@ mod tests {
     }
 
     #[test]
+    fn parse_warp_sqlite_reports_missing_conversation_schema_as_source_error() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        drop(Connection::open(&db_path).unwrap());
+
+        let error = parse_warp_sqlite(&db_path).unwrap_err();
+
+        assert_eq!(error.operation(), "prepare Warp conversation query");
+    }
+
+    #[test]
+    fn parse_warp_sqlite_keeps_usage_when_query_metadata_schema_is_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE agent_conversations (
+                id INTEGER PRIMARY KEY NOT NULL,
+                conversation_id TEXT NOT NULL,
+                conversation_data TEXT NOT NULL,
+                last_modified_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            "#,
+        )
+        .unwrap();
+        let data = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [{"model_id":"gpt-5","warp_tokens":10}]
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+            params!["conversation-1", data, "2026-07-04T10:20:30Z"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "conversation-1");
+        assert_eq!(scanned.messages[0].tokens.total(), 10);
+        assert!(scanned.messages[0].workspace_key.is_none());
+        let failure = scanned.interrupted.as_ref().unwrap();
+        assert_eq!(failure.operation, "prepare Warp query metadata query");
+    }
+
+    #[test]
+    fn malformed_query_metadata_row_is_rejected_without_losing_usage() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        let data = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [{"model_id":"gpt-5","warp_tokens":10}]
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+            params!["conversation-1", data, "2026-07-04T10:20:30Z"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_queries
+             (exchange_id, conversation_id, start_ts, input, working_directory, output_status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "exchange-1",
+                "conversation-1",
+                "2026-07-04T10:20:30Z",
+                "prompt",
+                vec![0_u8, 159, 146, 150],
+                "success"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert!(scanned.messages[0].workspace_key.is_none());
+        assert!(scanned.interrupted.is_none());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
     fn token_usage_with_invalid_timestamp_is_rejected() {
         let temp = tempfile::TempDir::new().unwrap();
         let db_path = temp.path().join("warp.sqlite");
@@ -482,10 +651,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let error = parse_warp_sqlite(&db_path).unwrap_err();
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
 
-        assert_eq!(error.operation(), "validate Warp conversation row");
-        assert_eq!(error.path(), Some(db_path.as_path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
     }
 
     #[test]
@@ -506,10 +679,40 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let error = parse_warp_sqlite(&db_path).unwrap_err();
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
 
-        assert_eq!(error.operation(), "validate Warp token usage");
-        assert_eq!(error.path(), Some(db_path.as_path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn non_string_model_id_is_malformed_not_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        let data = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [{"model_id":42,"warp_tokens":1}]
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+            params!["conversation-1", data, "2026-07-04T10:20:30Z"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
     }
 
     #[test]
@@ -528,8 +731,119 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let messages = parse_warp_sqlite(&db_path).unwrap();
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
 
-        assert!(messages.is_empty());
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+    }
+
+    #[test]
+    fn parse_warp_sqlite_keeps_good_usage_records_around_a_bad_record() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        let data = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [
+                    {"model_id":"gpt-5","warp_tokens":10},
+                    {"model_id":"gpt-5","warp_tokens":"bad"},
+                    {"model_id":"claude-sonnet-4","warp_tokens":20}
+                ]
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+            params!["conversation-1", data, "2026-07-04T10:20:30Z"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn overflowing_conversation_total_is_rejected_and_later_row_is_kept() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        let overflow = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [
+                    {"model_id":"gpt-5","warp_tokens":i64::MAX},
+                    {"model_id":"gpt-5","warp_tokens":1}
+                ]
+            }
+        })
+        .to_string();
+        let good = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [{"model_id":"gpt-5","warp_tokens":10}]
+            }
+        })
+        .to_string();
+        for (conversation_id, data) in [("01-overflow", overflow), ("02-good", good)] {
+            conn.execute(
+                "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+                params![conversation_id, data, "2026-07-04T10:20:30Z"],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "02-good");
+        assert_eq!(scanned.messages[0].tokens.total(), 10);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn batch_overflow_rejects_current_row_without_discarding_confirmed_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        for (conversation_id, total) in [
+            ("01-confirmed", 5_i64),
+            ("02-overflow", i64::MAX),
+            ("03-later-good", 1_i64),
+        ] {
+            let data = serde_json::json!({
+                "conversation_usage_metadata": {
+                    "token_usage": [{"model_id":"gpt-5","warp_tokens":total}]
+                }
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at) VALUES (?1, ?2, ?3)",
+                params![conversation_id, data, "2026-07-04T10:20:30Z"],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "01-confirmed");
+        assert_eq!(scanned.messages[0].tokens.total(), 5);
+        assert_eq!(scanned.messages[1].session_id.as_ref(), "03-later-good");
+        assert_eq!(scanned.messages[1].tokens.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
+        assert!(scanned.interrupted.is_none());
     }
 }

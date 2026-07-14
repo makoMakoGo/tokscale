@@ -4,6 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{dedup_hash_str, UnifiedMessage};
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
 use serde_json::Value;
@@ -20,24 +21,42 @@ const SKIP_EVENT_KINDS: &[&str] = &[
     "AgentPatchCreatedEvent",
 ];
 
-pub fn parse_junie_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::new("open Junie events file", error))?;
 
     let session_id = session_id_from_path(path)?;
     let default_timestamp = session_timestamp_from_id(&session_id);
     let mut pending_turn_start = false;
-    let mut messages = Vec::new();
+    let mut scanned = ScannedSource::default();
     let mut seen = HashSet::new();
 
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|error| SessionParseError::new("read Junie JSONL line", error))?;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read Junie JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
         if !line.contains(USAGE_EVENT_KIND) && !line.contains(USER_PROMPT_KIND) {
             continue;
         }
 
-        let value = serde_json::from_str::<Value>(&line)
-            .map_err(|error| SessionParseError::new("decode Junie JSONL line", error))?;
+        let value = match serde_json::from_str::<Value>(&line) {
+            Ok(value) => value,
+            Err(_error) => {
+                pending_turn_start = false;
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
         if let Some(kind) = parsed_event_kind(&value) {
             if SKIP_EVENT_KINDS.contains(&kind) {
                 continue;
@@ -55,17 +74,6 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
             continue;
         };
 
-        let timestamp = number_field(&value, "timestampMs")?
-            .filter(|timestamp| *timestamp > 0)
-            .or(default_timestamp)
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate Junie usage timestamp",
-                    format!(
-                        "usage event has no timestampMs and session id `{session_id}` has no timestamp"
-                    ),
-                )
-            })?;
         let agent = agent_name(agent_event);
         let Some(usages) = agent_event.get("modelUsage").and_then(Value::as_array) else {
             continue;
@@ -73,16 +81,61 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
 
         let mut turn_start_assigned = false;
         for (usage_index, usage) in usages.iter().enumerate() {
+            let tokens = match tokens_from_usage(usage) {
+                Ok(tokens) => tokens,
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            };
+            let token_total = match checked_token_total(&tokens) {
+                Ok(total) => total,
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            };
+            if token_total == 0 {
+                continue;
+            }
+            let timestamp = match number_field(&value, "timestampMs") {
+                Ok(timestamp) => timestamp,
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            }
+            .filter(|timestamp| *timestamp > 0)
+            .or(default_timestamp);
+            let Some(timestamp) = timestamp else {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingTimestamp);
+                continue;
+            };
             let Some(model_raw) = string_field(usage, "model") else {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingModel);
                 continue;
             };
             let model_id = model_aliases::canonicalize_source_model_id(model_raw)
                 .unwrap_or_else(|| model_raw.trim().to_string());
-            let provider_id = provider_from_usage(usage, &model_id)?;
-            let tokens = tokens_from_usage(usage)?;
-            if tokens.total() == 0 {
-                continue;
-            }
+            let provider_id = match provider_from_usage(usage, &model_id) {
+                Ok(provider_id) => provider_id,
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MissingProvider);
+                    continue;
+                }
+            };
 
             let dedup_key = format!(
                 "{CLIENT_ID}:{session_id}:{timestamp}:{model_id}:{}:{}:{}:{}:{}:{usage_index}",
@@ -92,7 +145,7 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
                 tokens.cache_write,
                 tokens.reasoning
             );
-            if !seen.insert(dedup_key.clone()) {
+            if seen.contains(&dedup_key) {
                 continue;
             }
 
@@ -107,17 +160,26 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
                 agent.clone(),
             );
             message.dedup_key = Some(dedup_hash_str(&dedup_key));
-            message.duration_ms = number_field(usage, "time")?.filter(|duration| *duration > 0);
+            message.duration_ms = match number_field(usage, "time") {
+                Ok(duration) => duration.filter(|duration| *duration > 0),
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            };
+            seen.insert(dedup_key);
             if pending_turn_start && !turn_start_assigned {
                 message.is_turn_start = true;
                 turn_start_assigned = true;
             }
-            messages.push(message);
+            scanned.messages.push(message);
         }
         pending_turn_start = false;
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn session_id_from_path(path: &Path) -> SessionParseResult<String> {
@@ -208,6 +270,25 @@ fn tokens_from_usage(usage: &Value) -> SessionParseResult<TokenBreakdown> {
             usage,
             &["reasoningTokens", "reasoningOutputTokens", "thinkingTokens"],
         )?,
+    })
+}
+
+fn checked_token_total(tokens: &TokenBreakdown) -> SessionParseResult<i64> {
+    [
+        tokens.input,
+        tokens.output,
+        tokens.cache_read,
+        tokens.cache_write,
+        tokens.reasoning,
+    ]
+    .into_iter()
+    .try_fold(0_i64, |total, value| {
+        total.checked_add(value).ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate Junie token count",
+                "token bucket total exceeds i64::MAX",
+            )
+        })
     })
 }
 
@@ -318,7 +399,7 @@ mod tests {
         assert_eq!(error.operation(), "validate Junie token count");
     }
 
-    fn parse_events_result(content: &str) -> SessionParseResult<Vec<UnifiedMessage>> {
+    fn parse_events_result(content: &str) -> SessionParseResult<ScannedSource> {
         let dir = TempDir::new().unwrap();
         let session_dir = dir.path().join("session-250622-101010");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -330,7 +411,7 @@ mod tests {
     }
 
     fn parse_events(content: &str) -> Vec<UnifiedMessage> {
-        parse_events_result(content).unwrap()
+        parse_events_result(content).unwrap().messages
     }
 
     fn usage_event(timestamp_ms: i64, model: &str, input: i64, output: i64) -> String {
@@ -367,21 +448,24 @@ mod tests {
 
     #[test]
     fn cost_only_usage_is_dropped() {
-        let messages = parse_events(
+        let scanned = parse_events_result(
             r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"gpt-5","cost":1.23}]}}}"#,
-        );
+        )
+        .unwrap();
 
-        assert!(messages.is_empty());
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
     }
 
     #[test]
     fn rejects_usage_whose_provider_cannot_be_determined() {
-        let error = parse_events_result(
+        let scanned = parse_events_result(
             r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"claude-opus-4-8","inputTokens":10,"outputTokens":2},{"model":"local-router","inputTokens":3,"outputTokens":4}]}}}"#,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.operation(), "validate Junie usage row");
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -477,5 +561,75 @@ mod tests {
         let messages = parse_events(&content);
 
         assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn bad_usage_event_does_not_hide_later_events() {
+        let content = format!(
+            "{}\n{}\n{}\n",
+            usage_event(1_750_000_000_000, "gpt-5", 10, 2),
+            usage_event(1_750_000_001_000, "local-router", 11, 2),
+            usage_event(1_750_000_002_000, "gpt-5", 20, 3),
+        );
+
+        let scanned = parse_events_result(&content).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn negative_usage_sibling_is_rejected_without_hiding_good_sibling() {
+        let scanned = parse_events_result(
+            r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"gpt-5","inputTokens":-1,"outputTokens":2},{"model":"gpt-5","inputTokens":10,"outputTokens":3}]}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn overflowing_usage_total_is_rejected_without_panicking() {
+        let scanned = parse_events_result(
+            r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"gpt-5","inputTokens":9223372036854775807,"outputTokens":1}]}}}"#,
+        )
+        .unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn malformed_candidate_clears_turn_state_and_later_prompt_resyncs() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            usage_event(1_750_000_000_000, "gpt-5", 10, 2),
+            r#"{"kind":"UserPromptEvent"#,
+            usage_event(1_750_000_001_000, "gpt-5", 20, 3),
+            r#"{"kind":"UserPromptEvent"}"#,
+            usage_event(1_750_000_002_000, "gpt-5", 30, 4),
+        );
+
+        let scanned = parse_events_result(&content).unwrap();
+
+        assert_eq!(scanned.messages.len(), 3);
+        assert!(!scanned.messages[1].is_turn_start);
+        assert!(scanned.messages[2].is_turn_start);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn missing_events_file_remains_a_source_error() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join("session-250622-101010");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let error = parse_junie_file(&session_dir.join("events.jsonl")).unwrap_err();
+
+        assert_eq!(error.operation(), "open Junie events file");
     }
 }

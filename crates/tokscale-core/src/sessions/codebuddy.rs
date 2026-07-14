@@ -6,6 +6,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::{provider_identity, TokenBreakdown};
 use chrono::TimeZone;
 use serde::Deserialize;
@@ -91,7 +92,49 @@ struct CodeBuddyUsage {
 }
 
 impl CodeBuddyUsage {
-    fn to_breakdown(&self) -> Option<TokenBreakdown> {
+    fn to_breakdown(&self) -> SessionParseResult<Option<(TokenBreakdown, i64)>> {
+        for (field, value) in [
+            ("cachedMissTokens", self.cached_miss_tokens),
+            ("cacheMissTokens", self.cache_miss_tokens),
+            ("input_tokens", self.input_tokens),
+            ("inputTokens", self.input_tokens_camel),
+            ("prompt_tokens", self.prompt_tokens),
+            ("output_tokens", self.output_tokens),
+            ("outputTokens", self.output_tokens_camel),
+            ("completion_tokens", self.completion_tokens),
+            ("cache_read_input_tokens", self.cache_read_input_tokens),
+            ("cacheReadInputTokens", self.cache_read_input_tokens_camel),
+            ("cacheTokens", self.cache_tokens),
+            ("prompt_cache_hit_tokens", self.prompt_cache_hit_tokens),
+            ("cached_tokens", self.cached_tokens),
+            (
+                "cache_creation_input_tokens",
+                self.cache_creation_input_tokens,
+            ),
+            (
+                "cacheCreationInputTokens",
+                self.cache_creation_input_tokens_camel,
+            ),
+            ("cachedWriteTokens", self.cached_write_tokens),
+            ("prompt_cache_write_tokens", self.prompt_cache_write_tokens),
+            (
+                "completion_thinking_tokens",
+                self.completion_thinking_tokens,
+            ),
+            (
+                "completionThinkingTokens",
+                self.completion_thinking_tokens_camel,
+            ),
+            ("reasoningTokens", self.reasoning_tokens),
+        ] {
+            if value.is_some_and(|value| value < 0) {
+                return Err(SessionParseError::invalid(
+                    "validate CodeBuddy token count",
+                    format!("`{field}` must be non-negative"),
+                ));
+            }
+        }
+
         let tokens = TokenBreakdown {
             input: first_present(&[
                 self.cached_miss_tokens,
@@ -125,27 +168,64 @@ impl CodeBuddyUsage {
             ]),
         };
 
-        (tokens.total() > 0).then_some(tokens)
+        let total = checked_codebuddy_token_total(&tokens)?;
+        Ok((total > 0).then_some((tokens, total)))
     }
 }
 
-pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+fn checked_codebuddy_token_total(tokens: &TokenBreakdown) -> SessionParseResult<i64> {
+    [
+        tokens.input,
+        tokens.output,
+        tokens.cache_read,
+        tokens.cache_write,
+        tokens.reasoning,
+    ]
+    .into_iter()
+    .try_fold(0_i64, |total, value| {
+        total.checked_add(value).ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate CodeBuddy token count",
+                "token bucket total exceeds i64::MAX",
+            )
+        })
+    })
+}
+
+pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::new("open CodeBuddy JSONL file", error))?;
     let mut keyed_indices: HashMap<u64, usize> = HashMap::new();
-    let mut messages: Vec<UnifiedMessage> = Vec::new();
+    let mut keyed_totals: HashMap<u64, i64> = HashMap::new();
+    let mut scanned = ScannedSource::default();
 
-    for line in BufReader::new(file).lines() {
-        let line =
-            line.map_err(|error| SessionParseError::new("read CodeBuddy JSONL line", error))?;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read CodeBuddy JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
         let mut bytes = trimmed.as_bytes().to_vec();
-        let item = simd_json::from_slice::<CodeBuddyLine>(&mut bytes)
-            .map_err(|error| SessionParseError::new("decode CodeBuddy JSONL line", error))?;
+        let item = match simd_json::from_slice::<CodeBuddyLine>(&mut bytes) {
+            Ok(item) => item,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
         let is_assistant_message = item.line_type.as_deref() == Some("message")
             && item.role.as_deref() == Some("assistant");
@@ -176,12 +256,22 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Vec<
                     .as_ref()
                     .and_then(|provider| provider.raw_usage.as_ref())
             });
-        let Some(tokens) = usage.and_then(CodeBuddyUsage::to_breakdown) else {
+        let Some(usage) = usage else {
             continue;
+        };
+        let (tokens, token_total) = match usage.to_breakdown() {
+            Ok(Some(tokens)) => tokens,
+            Ok(None) => continue,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
         };
 
         let provider_data = item.provider_data.as_ref();
-        let model_id = provider_data
+        let Some(model_id) = provider_data
             .and_then(|provider| provider.model.as_deref())
             .or_else(|| provider_data.and_then(|provider| provider.request_model_id.as_deref()))
             .or_else(|| {
@@ -190,39 +280,35 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Vec<
                     .and_then(|message| message.model.as_deref())
             })
             .filter(|model| !model.trim().is_empty())
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate CodeBuddy usage row",
-                    "usage row is missing model id",
-                )
-            })?
-            .to_string();
-        let provider_id = provider_identity::inferred_provider_from_model(&model_id)
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate CodeBuddy usage row",
-                    format!("cannot infer provider for model `{model_id}`"),
-                )
-            })?
-            .to_string();
-        let session_id = item
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
+        };
+        let model_id = model_id.to_string();
+        let Some(provider_id) = provider_identity::inferred_provider_from_model(&model_id) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingProvider);
+            continue;
+        };
+        let provider_id = provider_id.to_string();
+        let Some(session_id) = item
             .session_id
             .filter(|session_id| !session_id.trim().is_empty())
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate CodeBuddy usage row",
-                    "usage row is missing sessionId",
-                )
-            })?;
-        let timestamp = item
-            .timestamp
-            .filter(|timestamp| *timestamp > 0)
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate CodeBuddy usage row",
-                    "usage row is missing a positive timestamp",
-                )
-            })?;
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        let Some(timestamp) = item.timestamp.filter(|timestamp| *timestamp > 0) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        };
 
         let dedup_key = provider_data
             .and_then(|provider| provider.message_id.as_deref())
@@ -248,40 +334,54 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Vec<
 
         if let Some(key) = dedup_key {
             if let Some(existing_index) = keyed_indices.get(&key).copied() {
-                if message.tokens.total() >= messages[existing_index].tokens.total() {
-                    messages[existing_index] = message;
+                if token_total >= keyed_totals[&key] {
+                    scanned.messages[existing_index] = message;
+                    keyed_totals.insert(key, token_total);
                 }
                 continue;
             }
-            keyed_indices.insert(key, messages.len());
+            keyed_indices.insert(key, scanned.messages.len());
+            keyed_totals.insert(key, token_total);
         }
 
-        messages.push(message);
+        scanned.messages.push(message);
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
-pub(crate) fn parse_codebuddy_extension_log_file(
-    path: &Path,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::new("open CodeBuddy extension log", error))?;
 
     let mut models_by_agent: HashMap<String, String> = HashMap::new();
-    let mut messages = Vec::new();
+    let mut scanned = ScannedSource::default();
 
-    for line in BufReader::new(file).lines() {
-        let line = line
-            .map_err(|error| SessionParseError::new("read CodeBuddy extension log line", error))?;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read CodeBuddy extension log line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
 
         if line.contains("[CraftInvokableAgent]") && line.contains("Model prepared:") {
-            let (agent_id, model_id) = parse_model_prepared_line(&line).ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate CodeBuddy model log line",
-                    "Model prepared line is missing agent or model id",
-                )
-            })?;
+            let Some((agent_id, model_id)) = parse_model_prepared_line(&line) else {
+                if let Some(agent_id) = bracket_value_after(&line, "[CraftInvokableAgent]") {
+                    models_by_agent.remove(&agent_id);
+                } else {
+                    models_by_agent.clear();
+                }
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            };
             models_by_agent.insert(agent_id, model_id);
             continue;
         }
@@ -292,55 +392,65 @@ pub(crate) fn parse_codebuddy_extension_log_file(
             continue;
         }
 
-        let agent_id = bracket_value_after(&line, "[AgentReporter]").ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate CodeBuddy usage log line",
-                "usage line is missing AgentReporter id",
-            )
-        })?;
-        let usage_json = line
-            .split("Agent execution successful with usage:")
-            .nth(1)
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate CodeBuddy usage log line",
-                    "usage line is missing JSON payload",
-                )
-            })?;
-        let usage_json = usage_json.trim();
-        let usage_json = first_json_object(usage_json).ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate CodeBuddy usage log line",
-                "usage line contains no complete JSON object",
-            )
-        })?;
-        let mut bytes = usage_json.as_bytes().to_vec();
-        let usage = simd_json::from_slice::<CodeBuddyUsage>(&mut bytes)
-            .map_err(|error| SessionParseError::new("decode CodeBuddy usage log JSON", error))?;
-        let Some(tokens) = usage.to_breakdown() else {
+        let Some(agent_id) = bracket_value_after(&line, "[AgentReporter]") else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
+        let Some(usage_json) = line.split("Agent execution successful with usage:").nth(1) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        let usage_json = usage_json.trim();
+        let Some(usage_json) = first_json_object(usage_json) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
+            continue;
+        };
+        let mut bytes = usage_json.as_bytes().to_vec();
+        let usage = match simd_json::from_slice::<CodeBuddyUsage>(&mut bytes) {
+            Ok(usage) => usage,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
+        let tokens = match usage.to_breakdown() {
+            Ok(Some((tokens, _))) => tokens,
+            Ok(None) => continue,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
-        let timestamp = parse_log_timestamp_ms(&line).ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate CodeBuddy usage log line",
-                "usage line has no valid timestamp",
-            )
-        })?;
-        let model_id = models_by_agent.get(&agent_id).cloned().ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate CodeBuddy usage log line",
-                format!("agent `{agent_id}` has no preceding model selection"),
-            )
-        })?;
-        let provider_id = provider_identity::inferred_provider_from_model(&model_id)
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate CodeBuddy usage log line",
-                    format!("cannot infer provider for model `{model_id}`"),
-                )
-            })?
-            .to_string();
+        let Some(timestamp) = parse_log_timestamp_ms(&line) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp);
+            continue;
+        };
+        let Some(model_id) = models_by_agent.get(&agent_id).cloned() else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
+        };
+        let Some(provider_id) = provider_identity::inferred_provider_from_model(&model_id) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingProvider);
+            continue;
+        };
+        let provider_id = provider_id.to_string();
         let mut message = UnifiedMessage::new_with_dedup(
             CLIENT_ID,
             model_id,
@@ -357,10 +467,10 @@ pub(crate) fn parse_codebuddy_extension_log_file(
             message.set_workspace(Some(workspace_key), workspace_label);
         }
 
-        messages.push(message);
+        scanned.messages.push(message);
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn first_json_object(value: &str) -> Option<&str> {
@@ -401,7 +511,7 @@ fn first_json_object(value: &str) -> Option<&str> {
 }
 
 fn first_present(values: &[Option<i64>]) -> i64 {
-    values.iter().copied().flatten().next().unwrap_or(0).max(0)
+    values.iter().copied().flatten().next().unwrap_or(0)
 }
 
 fn first_positive(values: &[Option<i64>]) -> i64 {
@@ -412,7 +522,6 @@ fn first_positive(values: &[Option<i64>]) -> i64 {
         .find(|count| *count > 0)
         .or_else(|| values.iter().copied().flatten().next())
         .unwrap_or(0)
-        .max(0)
 }
 
 fn parse_model_prepared_line(line: &str) -> Option<(String, String)> {
@@ -425,7 +534,7 @@ fn parse_model_prepared_line(line: &str) -> Option<(String, String)> {
         .filter(|model| !model.is_empty())
         .unwrap_or(after_marker)
         .to_string();
-    Some((agent_id, model_id))
+    (!model_id.is_empty()).then_some((agent_id, model_id))
 }
 
 fn bracket_value_after(line: &str, marker: &str) -> Option<String> {
@@ -486,11 +595,13 @@ mod tests {
     use super::*;
 
     fn parse_codebuddy_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_codebuddy_jsonl_file(path).unwrap()
+        super::parse_codebuddy_jsonl_file(path).unwrap().messages
     }
 
     fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_codebuddy_extension_log_file(path).unwrap()
+        super::parse_codebuddy_extension_log_file(path)
+            .unwrap()
+            .messages
     }
 
     #[test]
@@ -648,8 +759,8 @@ mod tests {
         )
         .unwrap();
 
-        let error = super::parse_codebuddy_jsonl_file(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate CodeBuddy usage row");
+        let scanned = super::parse_codebuddy_jsonl_file(&path).unwrap();
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -662,7 +773,150 @@ mod tests {
         )
         .unwrap();
 
-        let error = super::parse_codebuddy_extension_log_file(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate CodeBuddy usage log line");
+        let scanned = super::parse_codebuddy_extension_log_file(&path).unwrap();
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn jsonl_bad_row_does_not_hide_later_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"id":"good-1","timestamp":1780000000100,"type":"message","role":"assistant","sessionId":"session","providerData":{"model":"glm-5.2"},"message":{"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                "\nnot-json\n",
+                r#"{"id":"good-2","timestamp":1780000000200,"type":"message","role":"assistant","sessionId":"session","providerData":{"model":"glm-5.2"},"message":{"usage":{"input_tokens":20,"output_tokens":3}}}"#,
+            ),
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuddy_jsonl_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn jsonl_negative_tokens_are_rejected_without_hiding_later_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("negative.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"id":"good-1","timestamp":1780000000100,"type":"message","role":"assistant","sessionId":"session","providerData":{"model":"glm-5.2"},"message":{"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                "\n",
+                r#"{"id":"bad","timestamp":1780000000150,"type":"message","role":"assistant","sessionId":"session","providerData":{"model":"glm-5.2"},"message":{"usage":{"input_tokens":-1,"output_tokens":2}}}"#,
+                "\n",
+                r#"{"id":"good-2","timestamp":1780000000200,"type":"message","role":"assistant","sessionId":"session","providerData":{"model":"glm-5.2"},"message":{"usage":{"input_tokens":20,"output_tokens":3}}}"#,
+            ),
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuddy_jsonl_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn jsonl_overflowing_token_total_is_rejected_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overflow.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"bad","timestamp":1780000000100,"type":"message","role":"assistant","sessionId":"session","providerData":{"model":"glm-5.2"},"message":{"usage":{"input_tokens":9223372036854775807,"output_tokens":1}}}"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuddy_jsonl_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn extension_bad_usage_does_not_hide_later_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.log");
+        std::fs::write(
+            &path,
+            concat!(
+                "[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)\n",
+                "[2026/7/1 16:56:02.100] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {\"inputTokens\":10,\"outputTokens\":2}\n",
+                "[2026/7/1 16:56:03.100] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {broken}\n",
+                "[2026/7/1 16:56:04.100] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {\"inputTokens\":20,\"outputTokens\":3}\n",
+            ),
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuddy_extension_log_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn malformed_model_state_removes_agent_mapping_and_later_prepare_resyncs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.log");
+        std::fs::write(
+            &path,
+            concat!(
+                "[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)\n",
+                "[2026/7/1 16:56:02.100] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {\"inputTokens\":10,\"outputTokens\":2}\n",
+                "[2026/7/1 16:56:03.100] [info] [CraftInvokableAgent] [agent-1] Model prepared:\n",
+                "[2026/7/1 16:56:04.100] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {\"inputTokens\":20,\"outputTokens\":3}\n",
+                "[2026/7/1 16:56:05.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GPT-5 (gpt-5)\n",
+                "[2026/7/1 16:56:06.100] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {\"inputTokens\":30,\"outputTokens\":4}\n",
+            ),
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuddy_extension_log_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[1].model_id.as_ref(), "gpt-5");
+        assert_eq!(scanned.rejections.total(), 2);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn unidentifiable_malformed_model_state_clears_all_agent_mappings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("global-state.log");
+        std::fs::write(
+            &path,
+            concat!(
+                "[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)\n",
+                "[2026/7/1 16:56:02.100] [info] [CraftInvokableAgent] [agent-2] Model prepared: GPT-5 (gpt-5)\n",
+                "[2026/7/1 16:56:03.100] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {\"inputTokens\":10,\"outputTokens\":2}\n",
+                "[2026/7/1 16:56:04.100] [info] [AgentReporter] [agent-2] Agent execution successful with usage: {\"inputTokens\":20,\"outputTokens\":3}\n",
+                "[2026/7/1 16:56:05.100] [info] [CraftInvokableAgent] Model prepared:\n",
+                "[2026/7/1 16:56:06.100] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {\"inputTokens\":30,\"outputTokens\":4}\n",
+                "[2026/7/1 16:56:07.100] [info] [AgentReporter] [agent-2] Agent execution successful with usage: {\"inputTokens\":40,\"outputTokens\":5}\n",
+                "[2026/7/1 16:56:08.100] [info] [CraftInvokableAgent] [agent-2] Model prepared: Claude Sonnet (claude-sonnet-4.6)\n",
+                "[2026/7/1 16:56:09.100] [info] [AgentReporter] [agent-2] Agent execution successful with usage: {\"inputTokens\":50,\"outputTokens\":6}\n",
+            ),
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuddy_extension_log_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 3);
+        assert_eq!(scanned.messages[2].model_id.as_ref(), "claude-sonnet-4.6");
+        assert_eq!(scanned.rejections.total(), 3);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn missing_files_remain_source_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::parse_codebuddy_jsonl_file(&dir.path().join("missing.jsonl")).is_err());
+        assert!(
+            super::parse_codebuddy_extension_log_file(&dir.path().join("missing.log")).is_err()
+        );
     }
 }

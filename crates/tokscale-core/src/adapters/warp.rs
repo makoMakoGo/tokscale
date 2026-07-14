@@ -1,14 +1,17 @@
 use rayon::prelude::*;
 
+use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceParseError, SourceUnit,
-    UnitMessageSource,
+    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
 use crate::local_clients;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
+
+const WARP_RECORD_REJECTION_REVISION: u32 = 4;
 
 pub(crate) struct WarpAdapter;
 
@@ -36,37 +39,27 @@ impl LocalSourceAdapter for WarpAdapter {
             def.pattern,
         )?);
 
-        adapter_discover::source_units_from_paths(
+        let units = adapter_discover::source_units_from_paths(
             ClientId::Warp,
             paths,
             FingerprintPolicy::SqliteWithWal,
-        )
+        )?;
+        Ok(units
+            .into_iter()
+            .map(|unit| {
+                unit.with_parser_version(ParserVersion::new(
+                    ParserId::Warp,
+                    WARP_RECORD_REJECTION_REVISION,
+                ))
+            })
+            .collect())
     }
 
-    fn parse_checked(
-        &self,
-        units: Vec<SourceUnit>,
-        ctx: &ParseContext<'_>,
-    ) -> Result<Vec<ParsedUnit>, SourceParseError> {
+    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                let mut messages =
-                    sessions::warp::parse_warp_sqlite(&unit.path).map_err(|source| {
-                        SourceParseError::from_session(
-                            unit.client,
-                            &unit.path,
-                            unit.parser_version.parser_id,
-                            source,
-                        )
-                    })?;
-                crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-                Ok(ParsedUnit {
-                    unit,
-                    messages: UnitMessageSource::Fresh(messages),
-                    cache_write: None,
-                    invalidate_cache: false,
-                })
+                adapter_cache::parse_uncached_unit(unit, ctx, sessions::warp::parse_warp_sqlite)
             })
             .collect()
     }
@@ -74,10 +67,11 @@ impl LocalSourceAdapter for WarpAdapter {
     fn fold(
         &self,
         parsed: Vec<ParsedUnit>,
-        _ctx: &mut FoldContext<'_>,
+        ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
     ) -> Result<(), crate::adapters::SourcePipelineError> {
         for unit in parsed {
+            ctx.health.record(unit.source_health());
             if let UnitMessageSource::Fresh(messages) = unit.messages {
                 sink.extend_messages(messages);
             }
@@ -122,5 +116,9 @@ mod tests {
         assert!(units
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal));
+        assert!(units.iter().all(|unit| {
+            unit.parser_version
+                == ParserVersion::new(ParserId::Warp, WARP_RECORD_REJECTION_REVISION)
+        }));
     }
 }

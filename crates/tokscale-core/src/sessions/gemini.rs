@@ -6,6 +6,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_i64, extract_string, parse_timestamp_value};
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
 use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -40,6 +41,13 @@ pub struct GeminiMessage {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GeminiSessionEnvelope {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    messages: Vec<Value>,
+}
+
 fn first_i64(value: &Value, keys: &[&str]) -> SessionParseResult<Option<i64>> {
     for key in keys {
         if let Some(field) = value.get(key) {
@@ -64,7 +72,7 @@ fn deserialize_tokens(value: &Value) -> SessionParseResult<Option<GeminiTokens>>
             "Gemini tokens must be an object or null",
         ));
     }
-    Ok(Some(GeminiTokens {
+    let tokens = GeminiTokens {
         input: first_i64(
             value,
             &[
@@ -92,7 +100,38 @@ fn deserialize_tokens(value: &Value) -> SessionParseResult<Option<GeminiTokens>>
         thoughts: first_i64(value, &["thoughts", "reasoning", "thoughts_tokens"])?,
         tool: first_i64(value, &["tool", "tool_tokens"])?,
         total: first_i64(value, &["total", "totalTokenCount", "total_tokens"])?,
-    }))
+    };
+    if [
+        tokens.input,
+        tokens.output,
+        tokens.cached,
+        tokens.thoughts,
+        tokens.tool,
+        tokens.total,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|token| token < 0)
+    {
+        return Err(SessionParseError::invalid(
+            "validate token counts",
+            "Gemini token fields must be non-negative",
+        ));
+    }
+    let additive_tokens = TokenBreakdown {
+        input: tokens.input.unwrap_or(0),
+        output: tokens.output.unwrap_or(0),
+        cache_read: tokens.cached.unwrap_or(0),
+        cache_write: tokens.tool.unwrap_or(0),
+        reasoning: tokens.thoughts.unwrap_or(0),
+    };
+    if additive_tokens.checked_total().is_none() {
+        return Err(SessionParseError::invalid(
+            "validate token counts",
+            "Gemini token total exceeds i64",
+        ));
+    }
+    Ok(Some(tokens))
 }
 
 #[derive(Debug)]
@@ -107,11 +146,11 @@ pub struct GeminiTokens {
 }
 
 /// Parse a Gemini session file.
-pub fn parse_gemini_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_gemini_file(path: &Path) -> SessionParseResult<ScannedSource> {
     parse_gemini_file_inner(path)
 }
 
-fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedSource> {
     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
         return parse_gemini_headless_jsonl(path);
     }
@@ -146,7 +185,7 @@ fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<Vec<UnifiedMessage
         }
     }
     if !is_current_chat {
-        return Ok(Vec::new());
+        return Ok(ScannedSource::default());
     }
 
     let data = std::fs::read(path)
@@ -156,17 +195,20 @@ fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<Vec<UnifiedMessage
     let value = simd_json::from_slice::<Value>(&mut bytes)
         .map_err(|error| SessionParseError::at_path(path, "decode JSON", error))?;
     if value.get("messages").is_some() || value.get("sessionId").is_some() {
-        let session = serde_json::from_value::<GeminiSession>(value)
+        let session = serde_json::from_value::<GeminiSessionEnvelope>(value)
             .map_err(|error| SessionParseError::at_path(path, "decode Gemini session", error))?;
         return parse_gemini_session(session);
     }
 
     let session_id = extract_string(value.get("session_id").or_else(|| value.get("sessionId")));
-    parse_gemini_headless_value(&value, session_id.as_deref())
+    Ok(parse_gemini_headless_value(&value, session_id.as_deref()))
 }
 
-fn parse_gemini_session(session: GeminiSession) -> SessionParseResult<Vec<UnifiedMessage>> {
-    let mut messages = Vec::with_capacity(session.messages.len());
+fn parse_gemini_session(session: GeminiSessionEnvelope) -> SessionParseResult<ScannedSource> {
+    let mut scanned = ScannedSource {
+        messages: Vec::with_capacity(session.messages.len()),
+        ..ScannedSource::default()
+    };
     let session_id = session.session_id.trim();
     if session_id.is_empty() {
         return Err(SessionParseError::invalid(
@@ -175,12 +217,25 @@ fn parse_gemini_session(session: GeminiSession) -> SessionParseResult<Vec<Unifie
         ));
     }
 
-    for msg in session.messages {
+    for value in session.messages {
+        let msg = match serde_json::from_value::<GeminiMessage>(value) {
+            Ok(message) => message,
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
         // Only process messages with token data
         let tokens = match msg.tokens.as_ref() {
-            Some(value) => match deserialize_tokens(value)? {
-                Some(tokens) => tokens,
-                None => continue,
+            Some(value) => match deserialize_tokens(value) {
+                Ok(Some(tokens)) => tokens,
+                Ok(None) => continue,
+                Err(error) => {
+                    record_gemini_rejection(&mut scanned.rejections, &error);
+                    continue;
+                }
             },
             None => continue,
         };
@@ -188,44 +243,58 @@ fn parse_gemini_session(session: GeminiSession) -> SessionParseResult<Vec<Unifie
             continue;
         }
 
-        let model = msg
-            .model
-            .filter(|model| !model.trim().is_empty())
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate token message",
-                    "Gemini token message is missing a non-empty model",
-                )
-            })?;
+        let Some(model) = msg.model.filter(|model| !model.trim().is_empty()) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel);
+            continue;
+        };
 
         let timestamp = match msg.timestamp {
             Some(timestamp) => {
-                let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp)
-                    .map_err(|error| {
-                        SessionParseError::new("decode token message timestamp", error)
-                    })?
-                    .timestamp_millis();
+                let timestamp = match chrono::DateTime::parse_from_rfc3339(&timestamp) {
+                    Ok(timestamp) => timestamp.timestamp_millis(),
+                    Err(_error) => {
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingTimestamp);
+                        continue;
+                    }
+                };
                 if timestamp <= 0 {
-                    return Err(SessionParseError::invalid(
-                        "validate token message timestamp",
-                        "Gemini token message timestamp must be positive",
-                    ));
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MissingTimestamp);
+                    continue;
                 }
                 timestamp
             }
             None => {
-                return Err(SessionParseError::invalid(
-                    "validate token message timestamp",
-                    "Gemini token message is missing a timestamp",
-                ))
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingTimestamp);
+                continue;
             }
         };
-        messages.push(build_gemini_token_message(
+        scanned.messages.push(build_gemini_token_message(
             model, session_id, timestamp, tokens,
         ));
     }
 
-    Ok(messages)
+    Ok(scanned)
+}
+
+fn record_gemini_rejection(rejections: &mut RejectionSummary, error: &SessionParseError) {
+    let reason = match error.operation() {
+        "validate token message model" | "validate stats model" => {
+            RecordRejectionReason::MissingModel
+        }
+        "validate token message timestamp" | "validate stats timestamp" => {
+            RecordRejectionReason::MissingTimestamp
+        }
+        _ => RecordRejectionReason::MalformedRecord,
+    };
+    rejections.record(reason);
 }
 
 fn build_gemini_token_message(
@@ -319,26 +388,38 @@ fn parse_direct_gemini_token_message(
     )))
 }
 
-fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let mut session_id: Option<String> = None;
     let mut current_model: Option<String> = None;
     let mut reader = BufReader::new(file);
-    let mut messages = Vec::with_capacity(64);
+    let mut scanned = ScannedSource {
+        messages: Vec::with_capacity(64),
+        ..ScannedSource::default()
+    };
     let mut direct_message_indices: HashMap<String, usize> = HashMap::new();
     let mut line_buffer = Vec::with_capacity(4096);
     let mut json_buffer = Vec::with_capacity(4096);
+    let mut line_number = 0usize;
 
     loop {
         line_buffer.clear();
-        let bytes_read = reader
-            .read_until(b'\n', &mut line_buffer)
-            .map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
+        let bytes_read = match reader.read_until(b'\n', &mut line_buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read JSONL line",
+                    format!("{} after line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
         if bytes_read == 0 {
             break;
         }
+        line_number += 1;
 
         let trimmed = trim_ascii_bytes(&line_buffer);
         if trimmed.is_empty() {
@@ -347,8 +428,16 @@ fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<Vec<UnifiedMes
 
         json_buffer.clear();
         json_buffer.extend_from_slice(trimmed);
-        let value: Value = simd_json::from_slice(&mut json_buffer)
-            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
+        let value: Value = match simd_json::from_slice(&mut json_buffer) {
+            Ok(value) => value,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "decode JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
 
         let event_type = value.get("type").and_then(|val| val.as_str());
         if event_type.is_none()
@@ -375,31 +464,46 @@ fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<Vec<UnifiedMes
             continue;
         }
 
-        if let Some(id) = extract_string(value.get("session_id").or_else(|| value.get("sessionId")))
-        {
-            session_id = Some(id);
-        }
+        let record_session =
+            extract_string(value.get("session_id").or_else(|| value.get("sessionId")));
+        let record_model = extract_string(value.get("model"));
+        let effective_session = record_session.clone().or_else(|| session_id.clone());
+        let effective_model = record_model.clone().or_else(|| current_model.clone());
 
         if event_type == Some("gemini") || value.get("tokens").is_some() {
-            if let Some(model) = extract_string(value.get("model")) {
-                current_model = Some(model);
-            }
-
-            if let Some(message) = parse_direct_gemini_token_message(
+            let parsed = parse_direct_gemini_token_message(
                 &value,
-                current_model.clone(),
-                session_id.as_deref(),
-            )? {
-                if let Some(id) = extract_string(value.get("id")) {
-                    if let Some(index) = direct_message_indices.get(&id).copied() {
-                        messages[index] = message;
-                    } else {
-                        direct_message_indices.insert(id, messages.len());
-                        messages.push(message);
+                effective_model,
+                effective_session.as_deref(),
+            );
+            match parsed {
+                Ok(Some(message)) => {
+                    if let Some(model) = record_model {
+                        current_model = Some(model);
                     }
-                } else {
-                    messages.push(message);
+                    if let Some(id) = record_session {
+                        session_id = Some(id);
+                    }
+                    if let Some(id) = extract_string(value.get("id")) {
+                        if let Some(index) = direct_message_indices.get(&id).copied() {
+                            scanned.messages[index] = message;
+                        } else {
+                            direct_message_indices.insert(id, scanned.messages.len());
+                            scanned.messages.push(message);
+                        }
+                    } else {
+                        scanned.messages.push(message);
+                    }
                 }
+                Ok(None) => {
+                    if let Some(model) = record_model {
+                        current_model = Some(model);
+                    }
+                    if let Some(id) = record_session {
+                        session_id = Some(id);
+                    }
+                }
+                Err(error) => record_gemini_rejection(&mut scanned.rejections, &error),
             }
             continue;
         }
@@ -408,33 +512,62 @@ fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<Vec<UnifiedMes
             .get("stats")
             .or_else(|| value.get("result").and_then(|result| result.get("stats")));
         if let Some(stats) = stats {
-            let usages = extract_gemini_usages(stats, current_model.clone())?;
+            let usage_scan = match extract_gemini_usages(stats, effective_model) {
+                Ok(scan) => scan,
+                Err(error) => {
+                    record_gemini_rejection(&mut scanned.rejections, &error);
+                    continue;
+                }
+            };
+            for error in usage_scan.rejections {
+                record_gemini_rejection(&mut scanned.rejections, &error);
+            }
+            let usages = usage_scan.usages;
             if usages.is_empty() {
+                if let Some(model) = record_model {
+                    current_model = Some(model);
+                }
+                if let Some(id) = record_session {
+                    session_id = Some(id);
+                }
                 continue;
             }
-            let resolved_session = session_id.as_deref().ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate stats session",
-                    "Gemini stats with positive tokens is missing a non-empty session identifier",
-                )
-            })?;
-            let timestamp = extract_timestamp_from_value(&value)
-                .filter(|timestamp| *timestamp > 0)
-                .ok_or_else(|| {
-                    SessionParseError::invalid(
-                        "validate stats timestamp",
-                        "Gemini stats with positive tokens is missing a timestamp",
-                    )
-                })?;
-            messages.extend(build_messages_from_usages(
+            let Some(resolved_session) = effective_session.as_deref() else {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            };
+            let Some(timestamp) =
+                extract_timestamp_from_value(&value).filter(|timestamp| *timestamp > 0)
+            else {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingTimestamp);
+                continue;
+            };
+            if let Some(model) = record_model {
+                current_model = Some(model);
+            }
+            if let Some(id) = record_session {
+                session_id = Some(id);
+            }
+            scanned.messages.extend(build_messages_from_usages(
                 usages,
                 resolved_session,
                 timestamp,
             ));
+        } else {
+            if let Some(model) = record_model {
+                current_model = Some(model);
+            }
+            if let Some(id) = record_session {
+                session_id = Some(id);
+            }
         }
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
@@ -452,15 +585,15 @@ fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-fn parse_gemini_headless_value(
-    value: &Value,
-    session_id: Option<&str>,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+fn parse_gemini_headless_value(value: &Value, session_id: Option<&str>) -> ScannedSource {
+    let mut scanned = ScannedSource::default();
     if value.get("tokens").is_some() {
-        if let Some(message) = parse_direct_gemini_token_message(value, None, session_id)? {
-            return Ok(vec![message]);
+        match parse_direct_gemini_token_message(value, None, session_id) {
+            Ok(Some(message)) => scanned.messages.push(message),
+            Ok(None) => {}
+            Err(error) => record_gemini_rejection(&mut scanned.rejections, &error),
         }
-        return Ok(Vec::new());
+        return scanned;
     }
 
     let stats = match value
@@ -468,34 +601,40 @@ fn parse_gemini_headless_value(
         .or_else(|| value.get("result").and_then(|result| result.get("stats")))
     {
         Some(s) => s,
-        None => return Ok(Vec::new()),
+        None => return scanned,
     };
 
     let model_hint = extract_string(value.get("model"));
-    let usages = extract_gemini_usages(stats, model_hint)?;
-    if usages.is_empty() {
-        return Ok(Vec::new());
+    let usage_scan = match extract_gemini_usages(stats, model_hint) {
+        Ok(scan) => scan,
+        Err(error) => {
+            record_gemini_rejection(&mut scanned.rejections, &error);
+            return scanned;
+        }
+    };
+    for error in usage_scan.rejections {
+        record_gemini_rejection(&mut scanned.rejections, &error);
     }
-    let resolved_session = session_id.ok_or_else(|| {
-        SessionParseError::invalid(
-            "validate stats session",
-            "Gemini stats with positive tokens is missing a non-empty session identifier",
-        )
-    })?;
-    let timestamp = extract_timestamp_from_value(value)
-        .filter(|timestamp| *timestamp > 0)
-        .ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate stats timestamp",
-                "Gemini stats with positive tokens is missing a timestamp",
-            )
-        })?;
+    let usages = usage_scan.usages;
+    if usages.is_empty() {
+        return scanned;
+    }
+    let Some(resolved_session) = session_id else {
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MalformedRecord);
+        return scanned;
+    };
+    let Some(timestamp) = extract_timestamp_from_value(value).filter(|timestamp| *timestamp > 0)
+    else {
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MissingTimestamp);
+        return scanned;
+    };
 
-    Ok(build_messages_from_usages(
-        usages,
-        resolved_session,
-        timestamp,
-    ))
+    scanned.messages = build_messages_from_usages(usages, resolved_session, timestamp);
+    scanned
 }
 
 fn build_messages_from_usages(
@@ -577,10 +716,15 @@ struct GeminiHeadlessUsage {
     input_includes_cache: bool,
 }
 
+struct GeminiUsageScan {
+    usages: Vec<GeminiHeadlessUsage>,
+    rejections: Vec<SessionParseError>,
+}
+
 fn extract_gemini_usages(
     stats: &Value,
     model_hint: Option<String>,
-) -> SessionParseResult<Vec<GeminiHeadlessUsage>> {
+) -> SessionParseResult<GeminiUsageScan> {
     if !stats.is_object() {
         return Err(SessionParseError::invalid(
             "validate stats",
@@ -595,19 +739,29 @@ fn extract_gemini_usages(
             )
         })?;
         let mut usages = Vec::new();
+        let mut rejections = Vec::new();
         for (model, data) in models {
-            if let Some(usage) = extract_gemini_usage_from_value(model.clone(), data)? {
-                usages.push(usage);
+            match extract_gemini_usage_from_value(model.clone(), data) {
+                Ok(Some(_usage)) if model.trim().is_empty() => {
+                    rejections.push(SessionParseError::invalid(
+                        "validate stats model",
+                        "Gemini model stats with positive tokens has an empty model key",
+                    ));
+                }
+                Ok(Some(usage)) => usages.push(usage),
+                Ok(None) => {}
+                Err(error) => rejections.push(error),
             }
         }
 
-        if !usages.is_empty() {
-            return Ok(usages);
-        }
+        return Ok(GeminiUsageScan { usages, rejections });
     }
 
     let Some(usage) = extract_gemini_usage_from_value(String::new(), stats)? else {
-        return Ok(Vec::new());
+        return Ok(GeminiUsageScan {
+            usages: Vec::new(),
+            rejections: Vec::new(),
+        });
     };
     let model = model_hint
         .filter(|model| !model.trim().is_empty())
@@ -617,7 +771,10 @@ fn extract_gemini_usages(
                 "Gemini stats with positive tokens is missing a non-empty model",
             )
         })?;
-    Ok(vec![GeminiHeadlessUsage { model, ..usage }])
+    Ok(GeminiUsageScan {
+        usages: vec![GeminiHeadlessUsage { model, ..usage }],
+        rejections: Vec::new(),
+    })
 }
 
 fn extract_gemini_usage_from_value(
@@ -671,6 +828,12 @@ fn extract_gemini_usage_from_value(
                     format!("Gemini stats token field `{key}` must be an integer"),
                 ));
             }
+            if field.as_i64().is_some_and(|token| token < 0) {
+                return Err(SessionParseError::invalid(
+                    "validate stats token counts",
+                    format!("Gemini stats token field `{key}` must be non-negative"),
+                ));
+            }
         }
     }
     let prompt_input = extract_i64(tokens.get("prompt"))
@@ -692,6 +855,22 @@ fn extract_gemini_usage_from_value(
         .or_else(|| extract_i64(tokens.get("reasoning")))
         .or_else(|| extract_i64(tokens.get("reasoning_tokens")))
         .unwrap_or(0);
+
+    if (TokenBreakdown {
+        input,
+        output,
+        cache_read: cached,
+        cache_write: 0,
+        reasoning,
+    })
+    .checked_total()
+    .is_none()
+    {
+        return Err(SessionParseError::invalid(
+            "validate stats token counts",
+            "Gemini stats token total exceeds i64",
+        ));
+    }
 
     if input == 0 && output == 0 && cached == 0 && reasoning == 0 {
         return Ok(None);
@@ -724,7 +903,7 @@ mod tests {
     use super::*;
 
     fn parse_gemini_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_gemini_file(path).unwrap()
+        super::parse_gemini_file(path).unwrap().messages
     }
     use std::io::Write;
     use tempfile::TempDir;
@@ -775,6 +954,69 @@ mod tests {
             session.messages[1].model,
             Some("gemini-2.0-flash".to_string())
         );
+    }
+
+    #[test]
+    fn mixed_session_messages_reject_bad_record_and_keep_later_usage() {
+        let (_directory, file) = write_current_json(
+            r#"{
+                "sessionId":"ses-mixed",
+                "projectHash":"project",
+                "startTime":"2026-05-01T00:00:00Z",
+                "lastUpdated":"2026-05-01T00:02:00Z",
+                "messages":[
+                    {"id":"good-1","type":"gemini","timestamp":"2026-05-01T00:00:10Z","model":"gemini-2.5-pro","tokens":{"input":10}},
+                    {"id":"bad","type":"gemini","timestamp":"2026-05-01T00:00:20Z","tokens":{"output":20}},
+                    {"id":"good-2","type":"gemini","timestamp":"2026-05-01T00:00:30Z","model":"gemini-2.5-flash","tokens":{"output":30}}
+                ]
+            }"#,
+        );
+
+        let scanned = super::parse_gemini_file(&file).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn overflowing_session_tokens_are_malformed_and_later_message_survives() {
+        let (_directory, file) = write_current_json(
+            r#"{
+                "sessionId":"ses-overflow",
+                "messages":[
+                    {"id":"bad","type":"gemini","timestamp":"2026-05-01T00:00:10Z","model":"gemini-2.5-pro","tokens":{"input":9223372036854775807,"output":1}},
+                    {"id":"good","type":"gemini","timestamp":"2026-05-01T00:00:30Z","model":"gemini-2.5-flash","tokens":{"output":30}}
+                ]
+            }"#,
+        );
+
+        let scanned = super::parse_gemini_file(&file).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.output, 30);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn session_envelope_does_not_require_unused_metadata_fields() {
+        let (_directory, file) = write_current_json(
+            r#"{
+                "sessionId":"ses-minimal",
+                "messages":[
+                    {"id":"good","type":"gemini","timestamp":"2026-05-01T00:00:10Z","model":"gemini-2.5-pro","tokens":{"input":10}}
+                ]
+            }"#,
+        );
+
+        let scanned = super::parse_gemini_file(&file).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert!(scanned.rejections.is_empty());
     }
 
     #[test]
@@ -904,6 +1146,52 @@ mod tests {
     }
 
     #[test]
+    fn headless_models_isolates_bad_model_and_keeps_siblings() {
+        let (_directory, file) = write_current_json(
+            r#"{
+                "session_id":"headless-mixed",
+                "timestamp":"2026-05-01T00:01:00Z",
+                "stats":{"models":{
+                    "gemini-2.5-flash":{"tokens":{"input":10}},
+                    "gemini-bad":{"tokens":{"input":"broken"}},
+                    "gemini-2.5-pro":{"tokens":{"output":30}}
+                }}
+            }"#,
+        );
+
+        let scanned = super::parse_gemini_file(&file).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn overflowing_headless_model_is_malformed_and_sibling_model_survives() {
+        let (_directory, file) = write_current_json(
+            r#"{
+                "session_id":"headless-overflow",
+                "timestamp":"2026-05-01T00:01:00Z",
+                "stats":{"models":{
+                    "gemini-bad":{"tokens":{"input":9223372036854775807,"output":1}},
+                    "gemini-good":{"tokens":{"output":30}}
+                }}
+            }"#,
+        );
+
+        let scanned = super::parse_gemini_file(&file).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gemini-good");
+        assert_eq!(scanned.messages[0].tokens.output, 30);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
     fn test_parse_headless_stream_jsonl() {
         let content = r#"{"type":"init","model":"gemini-2.5-pro","session_id":"session-1"}
 {"type":"result","timestamp":"2026-05-01T00:01:00Z","stats":{"input_tokens":10,"output_tokens":20}}"#;
@@ -920,6 +1208,26 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "gemini-2.5-pro");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 20);
+    }
+
+    #[test]
+    fn invalid_jsonl_record_does_not_commit_tentative_session_or_model() {
+        let content = r#"{"type":"init","model":"gemini-2.5-pro","session_id":"session-good"}
+{"type":"gemini","model":"poison-model","session_id":"session-poison","timestamp":"2026-05-01T00:00:30Z","tokens":{"input":"broken"}}
+{"type":"gemini","timestamp":"2026-05-01T00:01:00Z","tokens":{"output":20}}"#;
+        let mut file = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let scanned = super::parse_gemini_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "session-good");
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gemini-2.5-pro");
+        assert_eq!(scanned.rejections.total(), 1);
     }
 
     #[test]
@@ -1071,8 +1379,12 @@ not-json\n\
         let file_path = chats_dir.join("corrupt.jsonl");
         std::fs::write(&file_path, content).unwrap();
 
-        let error = super::parse_gemini_file(&file_path).unwrap_err();
-        assert_eq!(error.operation(), "decode JSONL line");
+        let scanned = super::parse_gemini_file(&file_path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(
+            scanned.interrupted.as_ref().unwrap().operation,
+            "decode JSONL line"
+        );
     }
 
     #[test]
@@ -1087,8 +1399,12 @@ not-json\n\
         let file_path = chats_dir.join("truncated.jsonl");
         std::fs::write(&file_path, content).unwrap();
 
-        let error = super::parse_gemini_file(&file_path).unwrap_err();
-        assert_eq!(error.operation(), "decode JSONL line");
+        let scanned = super::parse_gemini_file(&file_path).unwrap();
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(
+            scanned.interrupted.as_ref().unwrap().operation,
+            "decode JSONL line"
+        );
     }
 
     #[test]
@@ -1104,7 +1420,12 @@ not-json\n\
         let file_path = chats_dir.join("mixed.jsonl");
         std::fs::write(&file_path, content).unwrap();
 
-        assert!(super::parse_gemini_file(&file_path).is_err());
+        let scanned = super::parse_gemini_file(&file_path).unwrap();
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(
+            scanned.interrupted.as_ref().unwrap().operation,
+            "decode JSONL line"
+        );
     }
 
     #[test]
@@ -1133,6 +1454,22 @@ not-json\n\
         assert_eq!(messages[0].tokens.cache_read, 5);
         assert_eq!(messages[0].tokens.reasoning, 3);
         assert_eq!(messages[0].tokens.total(), 29);
+    }
+
+    #[test]
+    fn headless_negative_tokens_are_malformed_instead_of_clamped() {
+        let (_directory, file) = write_current_json(
+            r#"{"type":"gemini","session_id":"headless-negative","timestamp":"2026-05-01T00:01:00Z","model":"gemini-2.5-pro","tokens":{"input":-10,"output":20}}"#,
+        );
+
+        let scanned = super::parse_gemini_file(&file).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -1455,8 +1792,9 @@ not-json\n\
 
         for (json, expected_operation) in cases {
             let (_directory, file) = write_current_json(json);
-            let error = super::parse_gemini_file(&file).unwrap_err();
-            assert_eq!(error.operation(), expected_operation);
+            let scanned = super::parse_gemini_file(&file).unwrap();
+            assert!(scanned.messages.is_empty());
+            assert_eq!(scanned.rejections.total(), 1, "{expected_operation}");
         }
     }
 
