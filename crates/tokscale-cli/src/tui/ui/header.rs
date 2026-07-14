@@ -136,7 +136,7 @@ fn fitted_tabs(app: &App, tabs_area: Rect) -> (Vec<Tab>, TabLabelMode) {
     }
 
     if tab_row_width(app, &tabs, mode) > tabs_area.width && app.current_tab != Tab::Issues {
-        tabs.retain(|tab| *tab == Tab::Issues);
+        tabs.retain(|tab| *tab == app.current_tab);
     }
 
     (tabs, mode)
@@ -579,13 +579,14 @@ mod tests {
     }
 
     #[test]
-    fn issues_tab_wins_when_only_one_short_tab_fits() {
+    fn current_tab_wins_when_only_one_short_tab_fits() {
         let mut app = make_app(12);
         app.current_tab = Tab::Overview;
         let lines = render_header_symbols(&mut app, Rect::new(0, 0, 12, 3), 12, 4);
         let areas = registered_tab_areas(&app);
 
-        assert_eq!(areas, vec![(Rect::new(1, 1, 5, 1), Tab::Issues)]);
-        assert_eq!(symbols_at(&lines, 1, 1, 5), " Iss ");
+        assert_eq!(areas, vec![(Rect::new(1, 1, 5, 1), Tab::Overview)]);
+        assert_eq!(symbols_at(&lines, 1, 1, 5), " Ovw ");
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 }
