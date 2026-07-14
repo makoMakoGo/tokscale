@@ -591,13 +591,13 @@ impl SourceInputSnapshot {
             .map(|file| file.size)
     }
 
-    pub(crate) fn input_matches_primary_snapshot(
+    pub(crate) fn input_matches_single_file_snapshot(
         &self,
         input_index: usize,
-        primary_snapshot: &Self,
+        single_file_snapshot: &Self,
     ) -> bool {
-        primary_snapshot.files.len() == 1
-            && self.files.get(input_index) == primary_snapshot.files.first()
+        single_file_snapshot.files.len() == 1
+            && self.files.get(input_index) == single_file_snapshot.files.first()
     }
 
     pub(crate) fn visit_present_files(&self, mut visit: impl FnMut(SourceFileIdentity, u64)) {

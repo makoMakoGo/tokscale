@@ -192,14 +192,14 @@ where
         Some(PrecomputedContentHash::Primary {
             hash,
             snapshot: hash_snapshot,
-        }) if snapshot.input_matches_primary_snapshot(0, &hash_snapshot) => (
+        }) if snapshot.input_matches_single_file_snapshot(0, &hash_snapshot) => (
             Some(input_policy.fingerprint_from_snapshot_with_primary_hash(&snapshot, hash)),
             false,
         ),
         Some(PrecomputedContentHash::Dependency {
             hash,
             snapshot: hash_snapshot,
-        }) if snapshot.input_matches_primary_snapshot(1, &hash_snapshot) => (
+        }) if snapshot.input_matches_single_file_snapshot(1, &hash_snapshot) => (
             Some(input_policy.fingerprint_from_snapshot_with_dependency_hash(&snapshot, hash)),
             false,
         ),
