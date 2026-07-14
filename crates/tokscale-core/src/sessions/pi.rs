@@ -4,6 +4,9 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::message_cache::{
+    source_file_identity_from_open_file, SourceInputPolicy, SourceInputSnapshot,
+};
 use crate::source_health::{
     RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure, SourceStatus,
 };
@@ -81,11 +84,14 @@ impl OmpParentTaskAgentIndex {
 
     pub(crate) fn child_dependency_is_cacheable(&self, child_path: &Path) -> bool {
         self.parent_scan_for_child(child_path)
-            .is_none_or(|scan| matches!(scan.status, SourceStatus::Complete))
+            .is_none_or(|scan| scan.cache_input.is_some())
     }
 
-    pub(crate) fn child_dependency_content_hash(&self, child_path: &Path) -> Option<[u8; 32]> {
-        self.parent_scan_for_child(child_path)?.content_hash
+    pub(crate) fn child_dependency_cache_input(
+        &self,
+        child_path: &Path,
+    ) -> Option<OmpParentCacheInput> {
+        self.parent_scan_for_child(child_path)?.cache_input.clone()
     }
 
     pub(crate) fn unhealthy_parent_health(&self) -> Vec<OmpParentHealth> {
@@ -105,7 +111,7 @@ impl OmpParentTaskAgentIndex {
                 path: path.clone(),
                 status: scan.status.clone(),
                 rejections: scan.rejections.clone(),
-                content_hash: scan.content_hash,
+                cache_input: scan.cache_input.clone(),
             })
             .collect::<Vec<_>>();
         health.sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -118,7 +124,7 @@ struct OmpParentScan {
     task_agents: HashMap<String, String>,
     rejections: RejectionSummary,
     status: SourceStatus,
-    content_hash: Option<[u8; 32]>,
+    cache_input: Option<OmpParentCacheInput>,
 }
 
 struct HashingReader<R> {
@@ -152,7 +158,13 @@ pub(crate) struct OmpParentHealth {
     pub path: PathBuf,
     pub status: SourceStatus,
     pub rejections: RejectionSummary,
-    pub content_hash: Option<[u8; 32]>,
+    pub cache_input: Option<OmpParentCacheInput>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OmpParentCacheInput {
+    pub content_hash: [u8; 32],
+    pub snapshot: SourceInputSnapshot,
 }
 
 /// Pi session header (first line of JSONL)
@@ -592,6 +604,13 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
             ..OmpParentScan::default()
         };
     }
+    let input_policy = SourceInputPolicy::plain(parent_path);
+    let before_snapshot = input_policy.snapshot().map_err(|source| {
+        SourceFailure::new(
+            "snapshot OMP parent session",
+            format!("{}: {source}", parent_path.display()),
+        )
+    });
     let file = match std::fs::File::open(parent_path) {
         Ok(file) => file,
         Err(source) => {
@@ -604,10 +623,45 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
             };
         }
     };
+    let opened_identity = source_file_identity_from_open_file(&file).map_err(|source| {
+        SourceFailure::new(
+            "identify OMP parent session",
+            format!("{}: {source}", parent_path.display()),
+        )
+    });
     let mut reader = BufReader::new(HashingReader::new(file));
     let mut scan = omp_task_agent_scan_from_reader(parent_path, &mut reader);
     if matches!(scan.status, SourceStatus::Complete) {
-        scan.content_hash = Some(reader.into_inner().finish());
+        let content_hash = reader.into_inner().finish();
+        let cache_input = before_snapshot.and_then(|snapshot| {
+            let opened_identity = opened_identity?;
+            if snapshot.primary_identity() != Some(opened_identity) {
+                return Err(SourceFailure::new(
+                    "validate OMP parent session snapshot",
+                    format!("{} changed before it was opened", parent_path.display()),
+                ));
+            }
+            let current_snapshot = input_policy.snapshot().map_err(|source| {
+                SourceFailure::new(
+                    "snapshot OMP parent session after scan",
+                    format!("{}: {source}", parent_path.display()),
+                )
+            })?;
+            if current_snapshot != snapshot {
+                return Err(SourceFailure::new(
+                    "validate OMP parent session snapshot",
+                    format!("{} changed while it was scanned", parent_path.display()),
+                ));
+            }
+            Ok(OmpParentCacheInput {
+                content_hash,
+                snapshot,
+            })
+        });
+        match cache_input {
+            Ok(cache_input) => scan.cache_input = Some(cache_input),
+            Err(failure) => scan.status = SourceStatus::Partial { failure },
+        }
     }
     scan
 }
@@ -1337,7 +1391,13 @@ mod tests {
         let expected: [u8; 32] = Sha256::digest(parent_content.as_bytes()).into();
 
         assert_eq!(health.len(), 1);
-        assert_eq!(health[0].content_hash, Some(expected));
+        assert_eq!(
+            health[0]
+                .cache_input
+                .as_ref()
+                .map(|input| input.content_hash),
+            Some(expected)
+        );
     }
 
     #[test]

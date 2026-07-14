@@ -18,10 +18,10 @@ pub(crate) struct OmpAdapter;
 
 pub(crate) static OMP_ADAPTER: OmpAdapter = OmpAdapter;
 
-// Earlier OMP revisions emitted per-agent swarm labels instead of the shared
-// reporting identity used by the Agents tab.
-const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 6;
-const OMP_PARENT_HEALTH_REVISION: u32 = 1;
+// Earlier OMP revisions emitted per-agent swarm labels or could bind a
+// precomputed parent digest to a newer source snapshot.
+const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 7;
+const OMP_PARENT_HEALTH_REVISION: u32 = 2;
 
 impl LocalSourceAdapter for OmpAdapter {
     fn client(&self) -> ClientId {
@@ -377,14 +377,15 @@ fn parse_parent_health_cache_misses(
             let miss = misses_by_path.remove(&health.path)?;
             let mut parsed = match health.status {
                 crate::source_health::SourceStatus::Complete => {
-                    let content_hash = health
-                        .content_hash
-                        .expect("complete OMP parent health must carry its cache content hash");
+                    let cache_input = health
+                        .cache_input
+                        .expect("complete OMP parent health must carry its cache input");
                     let rejections = health.rejections;
                     adapter_cache::load_or_scan_empty_sentinel_with_primary_hash(
                         miss.unit,
                         ctx,
-                        content_hash,
+                        cache_input.content_hash,
+                        cache_input.snapshot,
                         move |_| {
                             Ok(crate::source_health::ScannedSource {
                                 messages: Vec::new(),
@@ -484,7 +485,7 @@ fn parse_omp_miss_units(
     units
         .into_par_iter()
         .map(|mut unit| {
-            let dependency_hash = parent_index.child_dependency_content_hash(&unit.path);
+            let dependency_cache_input = parent_index.child_dependency_cache_input(&unit.path);
             if !parent_index.child_dependency_is_cacheable(&unit.path) {
                 // The parent health is reported separately, but an unreadable
                 // dependency cannot produce an authoritative cache fingerprint.
@@ -494,11 +495,12 @@ fn parse_omp_miss_units(
                 unit.fingerprint_policy,
                 FingerprintPolicy::PrimaryWithDependency { .. }
             );
-            if let (true, Some(dependency_hash)) = (has_dependency_policy, dependency_hash) {
+            if let (true, Some(cache_input)) = (has_dependency_policy, dependency_cache_input) {
                 adapter_cache::load_or_scan_unit_with_dependency_hash(
                     unit,
                     ctx,
-                    dependency_hash,
+                    cache_input.content_hash,
+                    cache_input.snapshot,
                     |path| {
                         sessions::pi::parse_omp_file_with_parent_task_agent_index(
                             path,
@@ -828,6 +830,65 @@ mod tests {
             0,
             "the parent scan must hash its own bytes and children must reuse that digest"
         );
+    }
+
+    #[test]
+    fn parent_rewrite_after_index_prevents_child_cache_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session_root = dir.path().join("omp-extra/root-session");
+        let parent_path = session_root.with_extension("jsonl");
+        let child_path = session_root.join("0-ReviewFindings.jsonl");
+        write_file(&parent_path, OMP_PARENT_CONTENT);
+        write_file(&child_path, OMP_CHILD_CONTENT);
+
+        let parent_index =
+            sessions::pi::build_omp_parent_task_agent_index(std::slice::from_ref(&child_path));
+        write_file(
+            &parent_path,
+            &OMP_PARENT_CONTENT.replace(r#""agent":"reviewer""#, r#""agent":"new-reviewer""#),
+        );
+        let unit = SourceUnit::plain_file(ClientId::Omp, child_path)
+            .with_dependency(parent_path)
+            .with_parser_version(ParserVersion::new(
+                ParserId::Omp,
+                OMP_RECORD_REJECTION_REVISION,
+            ));
+
+        let parsed =
+            parse_omp_miss_units(vec![unit], &ParseContext { pricing: None }, &parent_index);
+
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].cache_write.is_none());
+        assert!(parsed[0].invalidate_cache);
+    }
+
+    #[test]
+    fn parent_rewrite_after_index_prevents_parent_health_cache_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session_root = dir.path().join("omp-extra/root-session");
+        let parent_path = session_root.with_extension("jsonl");
+        let child_path = session_root.join("0-ReviewFindings.jsonl");
+        write_file(&parent_path, &format!("{{not-json\n{OMP_PARENT_CONTENT}"));
+        write_file(&child_path, OMP_CHILD_CONTENT);
+
+        let parent_index =
+            sessions::pi::build_omp_parent_task_agent_index(std::slice::from_ref(&child_path));
+        write_file(&parent_path, OMP_PARENT_CONTENT);
+        let misses = vec![OmpParentHealthCacheMiss {
+            unit: omp_parent_health_unit(parent_path, true),
+            representative_child_path: child_path,
+            invalidate_cache: false,
+        }];
+
+        let parsed = parse_parent_health_cache_misses(
+            misses,
+            &ParseContext { pricing: None },
+            &parent_index,
+        );
+
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].cache_write.is_none());
+        assert!(parsed[0].invalidate_cache);
     }
 
     #[test]

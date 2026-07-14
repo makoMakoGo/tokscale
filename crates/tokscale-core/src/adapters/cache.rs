@@ -90,6 +90,7 @@ pub(crate) fn load_or_scan_empty_sentinel_with_primary_hash<F>(
     unit: SourceUnit,
     ctx: &ParseContext<'_>,
     primary_hash: [u8; 32],
+    primary_snapshot: message_cache::SourceInputSnapshot,
     scan: F,
 ) -> ParsedUnit
 where
@@ -100,7 +101,10 @@ where
         ctx,
         ScanCacheOptions {
             cache_clean_empty: true,
-            precomputed_content_hash: Some(PrecomputedContentHash::Primary(primary_hash)),
+            precomputed_content_hash: Some(PrecomputedContentHash::Primary {
+                hash: primary_hash,
+                snapshot: primary_snapshot,
+            }),
             ..ScanCacheOptions::default()
         },
         |path| scan(path).map(|scanned| (scanned, true)),
@@ -111,6 +115,7 @@ pub(crate) fn load_or_scan_unit_with_dependency_hash<F>(
     unit: SourceUnit,
     ctx: &ParseContext<'_>,
     dependency_hash: [u8; 32],
+    dependency_snapshot: message_cache::SourceInputSnapshot,
     scan: F,
 ) -> ParsedUnit
 where
@@ -120,20 +125,28 @@ where
         unit,
         ctx,
         ScanCacheOptions {
-            precomputed_content_hash: Some(PrecomputedContentHash::Dependency(dependency_hash)),
+            precomputed_content_hash: Some(PrecomputedContentHash::Dependency {
+                hash: dependency_hash,
+                snapshot: dependency_snapshot,
+            }),
             ..ScanCacheOptions::default()
         },
         |path| scan(path).map(|scanned| (scanned, true)),
     )
 }
 
-#[derive(Clone, Copy)]
 enum PrecomputedContentHash {
-    Primary([u8; 32]),
-    Dependency([u8; 32]),
+    Primary {
+        hash: [u8; 32],
+        snapshot: message_cache::SourceInputSnapshot,
+    },
+    Dependency {
+        hash: [u8; 32],
+        snapshot: message_cache::SourceInputSnapshot,
+    },
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 struct ScanCacheOptions {
     preserve_primary_on_fingerprint_failure: bool,
     cache_clean_empty: bool,
@@ -149,6 +162,11 @@ fn load_or_scan_unit_cacheable<F>(
 where
     F: Fn(&Path) -> crate::sessions::error::SessionParseResult<(ScannedSource, bool)>,
 {
+    let ScanCacheOptions {
+        preserve_primary_on_fingerprint_failure,
+        cache_clean_empty,
+        precomputed_content_hash,
+    } = options;
     let scan_source = |path: &Path| scan(path);
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
         unit.release_prepared_snapshot();
@@ -170,21 +188,34 @@ where
         Ok(snapshot) => snapshot,
         Err(source) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
     };
-    let fingerprint_result = match options.precomputed_content_hash {
-        Some(PrecomputedContentHash::Primary(hash)) => {
-            input_policy.fingerprint_from_snapshot_with_primary_hash(&snapshot, hash)
-        }
-        Some(PrecomputedContentHash::Dependency(hash)) => {
-            input_policy.fingerprint_from_snapshot_with_dependency_hash(&snapshot, hash)
-        }
-        None => input_policy.fingerprint_from_snapshot(&snapshot),
+    let (fingerprint_result, precomputed_snapshot_mismatch) = match precomputed_content_hash {
+        Some(PrecomputedContentHash::Primary {
+            hash,
+            snapshot: hash_snapshot,
+        }) if snapshot.input_matches_primary_snapshot(0, &hash_snapshot) => (
+            Some(input_policy.fingerprint_from_snapshot_with_primary_hash(&snapshot, hash)),
+            false,
+        ),
+        Some(PrecomputedContentHash::Dependency {
+            hash,
+            snapshot: hash_snapshot,
+        }) if snapshot.input_matches_primary_snapshot(1, &hash_snapshot) => (
+            Some(input_policy.fingerprint_from_snapshot_with_dependency_hash(&snapshot, hash)),
+            false,
+        ),
+        Some(_) => (None, true),
+        None => (
+            Some(input_policy.fingerprint_from_snapshot(&snapshot)),
+            false,
+        ),
     };
     let (fingerprint, fingerprint_failure) = match fingerprint_result {
-        Ok(fingerprint) => (Some(fingerprint), None),
-        Err(source) if options.preserve_primary_on_fingerprint_failure => {
+        Some(Ok(fingerprint)) => (Some(fingerprint), None),
+        Some(Err(source)) if preserve_primary_on_fingerprint_failure => {
             (None, Some(snapshot_failure(source)))
         }
-        Err(source) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
+        Some(Err(source)) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
+        None => (None, None),
     };
 
     let (mut scanned, cacheable) = match scan_source(&unit.path) {
@@ -204,7 +235,7 @@ where
     };
     let complete = scanned.interrupted.is_none();
     let cacheable_output =
-        options.cache_clean_empty || !scanned.messages.is_empty() || !scanned.rejections.is_empty();
+        cache_clean_empty || !scanned.messages.is_empty() || !scanned.rejections.is_empty();
     let cache_write = match fingerprint {
         Some(fingerprint) if complete && cacheable && source_unchanged && cacheable_output => {
             Some(Box::new(
@@ -228,7 +259,11 @@ where
         unit,
         messages: UnitMessageSource::Fresh(scanned.messages),
         cache_write,
-        invalidate_cache: fingerprint_failed || !complete || !cacheable || !source_unchanged,
+        invalidate_cache: precomputed_snapshot_mismatch
+            || fingerprint_failed
+            || !complete
+            || !cacheable
+            || !source_unchanged,
         health: Box::new(crate::adapters::UnitScanHealth {
             status,
             rejections: scanned.rejections,
