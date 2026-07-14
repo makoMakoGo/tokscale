@@ -106,12 +106,11 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let mut bytes = trimmed.as_bytes().to_vec();
         let wire_line = match simd_json::from_slice::<WireLine>(&mut bytes) {
             Ok(wire_line) => wire_line,
-            Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
-                    "decode JSONL line",
-                    format!("{} line {line_number}: {error}", path.display()),
-                ));
-                break;
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
             }
         };
 
@@ -576,6 +575,27 @@ model = "gpt-5.5"
 
         assert_eq!(scanned.messages.len(), 2);
         assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn malformed_jsonl_record_does_not_discard_later_usage() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009000,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}
+{not-json
+{"type":"usage.record","time":1780942009100,"model":"openai-pro/gpt-5.5","usage":{"output":3}}"#,
+        );
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
         assert!(scanned.interrupted.is_none());
     }
 

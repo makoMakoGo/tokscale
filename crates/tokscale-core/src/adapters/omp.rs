@@ -526,7 +526,7 @@ fn omp_parent_health_units(
         .map(|health| {
             let unit =
                 SourceUnit::no_message_cache(ClientId::Omp, health.path).with_parser_version(
-                    ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION),
+                    ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
                 );
             let mut parsed = ParsedUnit::healthy(
                 unit,
@@ -930,6 +930,25 @@ mod tests {
         assert_eq!(ctx.health.rejected_records(), 1);
         assert_eq!(ctx.health.partial_sources(), 0);
         assert_eq!(ctx.health.failed_sources(), 0);
+    }
+
+    #[test]
+    fn unowned_parent_health_uses_parent_health_parser_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session_root = dir.path().join(".omp/agent/sessions/project/root-session");
+        let parent_path = session_root.with_extension("jsonl");
+        let child_path = session_root.join("0-ReviewFindings.jsonl");
+        write_file(&parent_path, "{not-json\n");
+        write_file(&child_path, OMP_CHILD_CONTENT);
+
+        let parent_index = sessions::pi::build_omp_parent_task_agent_index(&[child_path]);
+        let units = omp_parent_health_units(&parent_index, &HashSet::new());
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(
+            units[0].unit.parser_version,
+            ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION)
+        );
     }
 
     #[test]

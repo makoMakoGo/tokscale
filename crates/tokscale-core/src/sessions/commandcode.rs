@@ -75,12 +75,11 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
 
         let entry = match serde_json::from_str::<CommandCodeEntry>(trimmed) {
             Ok(entry) => entry,
-            Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
-                    "decode JSONL line",
-                    format!("{} line {line_number}: {error}", path.display()),
-                ));
-                break;
+            Err(_error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
             }
         };
 
@@ -439,6 +438,34 @@ mod tests {
 
         assert_eq!(scanned.messages.len(), 2);
         assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn malformed_jsonl_record_does_not_discard_later_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "model-x");
+        let path = write_session(
+            dir.path(),
+            "proj",
+            "s",
+            concat!(
+                r#"{"role":"user","sessionId":"s","content":"first"}"#,
+                "\n",
+                "{not-json",
+                "\n",
+                r#"{"role":"assistant","sessionId":"s","timestamp":"2026-06-16T05:58:30Z","content":"accepted"}"#
+            ),
+        );
+
+        let scanned = super::parse_commandcode_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
         assert!(scanned.interrupted.is_none());
     }
 
