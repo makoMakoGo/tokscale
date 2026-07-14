@@ -54,10 +54,15 @@ Damage is contained to the smallest unit that owns it:
 
 ### Data health
 
-Every internal fold produces `DataHealth`: per-source status
-(`Complete`/`Partial`/`Unavailable` with a structured operation + message
-failure) and per-reason rejection counts with one sample each. Public reports
-classify every examined source into exactly one summary state:
+Parsers use source paths as input identity and may temporarily construct
+detailed errors while they classify damage. A source-message cache may retain
+the path solely as its cache key, but persistent health must not retain a
+representative path or parser error. Those diagnostics are transient scan state: they must not
+be written into rejection summaries, the TUI aggregate cache, `HealthReport`,
+or any public JSON payload. Persistent health stores only source identity,
+typed issue/status, handling outcome, and aggregate counts.
+
+Public reports classify every examined source into exactly one summary state:
 
 - `Clean`: the source completed with no rejected records;
 - `Degraded`: the source completed but rejected at least one record;
@@ -77,12 +82,14 @@ not double-counted; tokscale's own caches are excluded. The inventory already
 reads this metadata for identity and cache decisions, so producing the total
 does not add another filesystem scan.
 
-The bounded `HealthReport` projection groups record issues by client and
-reason, source failures by client, status, and operation, and retains only each
-group's count plus one sample path/detail.
-Rejection reasons serialize as stable string keys; unknown keys from newer
-parsers are preserved and displayed as-is. No raw record payloads, per-record
-error objects, or per-session issue lists cross the report boundary.
+The bounded `HealthReport` projection groups record issues by source and
+reason, and source failures by source and status. Each public issue contains
+only `level`, `source`, `issue`, `affectedSources`, optional
+`rejectedRecords`, and `handling`. Rejection reasons serialize as stable string
+keys; unknown keys from newer parsers are preserved and displayed as-is. Raw
+paths, parser operations and messages, representative samples, record
+payloads, per-record error objects, and per-session issue lists never cross the
+report boundary.
 
 For example, consider six sources:
 
@@ -120,9 +127,10 @@ stop the scan as `Partial` before they can pollute model or token state.
   migration or compatibility branch. Cache read faults do not enter
   `DataHealth`, emit terminal warnings, or block unrelated sources.
 - A `Complete` scan is cacheable even when it rejected records and even when
-  it produced zero messages; its rejection summary is part of the shard, so a
-  warm hit restores the Issues view without rescanning. A stable bad record
-  therefore never makes a cache permanently stale.
+  it produced zero messages; its per-reason rejection counts are part of the
+  shard, so a warm hit restores the Issues view without rescanning. Raw
+  rejection samples are never cached. A stable bad record therefore never
+  makes a cache permanently stale.
 - A completed shared-input health scan follows the same rule in its own cache
   namespace. The shard contains no usage messages and is keyed by the shared
   input path, so multiple dependants restore one health owner.
@@ -142,9 +150,11 @@ stop the scan as `Partial` before they can pollute model or token state.
   failed. A fixed, always-visible `Issues` tab carries the health detail;
   record-level problems render as warnings, source-level failures as errors.
   A full-screen error is reserved for tokscale's own failures.
-- CLI reports always emit their payload. JSON output carries a bounded,
-  aggregated `health` object; text output prints data to stdout and one health
-  summary line to stderr, never a per-source diagnostic stream.
+- CLI reports always emit their payload. JSON output carries the same bounded,
+  aggregate-only `health` projection used by the Issues tab; text output prints
+  data to stdout and one health summary line to stderr, never paths, parser
+  errors, samples, or a per-source diagnostic stream. TUI JSON export uses the
+  same projection.
   The exit code is `0` whenever a report was produced, degraded or not;
   nonzero exit codes are reserved for invalid usage and internal errors.
   Automation that must react to degradation reads `health` from the payload.

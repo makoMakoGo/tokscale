@@ -219,12 +219,10 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Scan
         let mut bytes = trimmed.as_bytes().to_vec();
         let item = match simd_json::from_slice::<CodeBuddyLine>(&mut bytes) {
             Ok(item) => item,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -264,12 +262,10 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Scan
         let (tokens, token_total) = match usage.to_breakdown() {
             Ok(Some(tokens)) => tokens,
             Ok(None) => continue,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -287,24 +283,14 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Scan
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!(
-                        "{} line {line_number}: usage row is missing model id",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         let model_id = model_id.to_string();
         let Some(provider_id) = provider_identity::inferred_provider_from_model(&model_id) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || {
-                    format!(
-                        "{} line {line_number}: cannot infer provider for model `{model_id}`",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         };
         let provider_id = provider_id.to_string();
@@ -314,23 +300,13 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Scan
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} line {line_number}: usage row is missing sessionId",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let Some(timestamp) = item.timestamp.filter(|timestamp| *timestamp > 0) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} line {line_number}: usage row is missing a positive timestamp",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
 
@@ -403,12 +379,7 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseRes
                 }
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!(
-                            "{} line {line_number}: Model prepared line is missing agent or model id",
-                            path.display()
-                        )
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             };
             models_by_agent.insert(agent_id, model_id);
@@ -424,58 +395,39 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseRes
         let Some(agent_id) = bracket_value_after(&line, "[AgentReporter]") else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} line {line_number}: usage line is missing AgentReporter id",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let Some(usage_json) = line.split("Agent execution successful with usage:").nth(1) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} line {line_number}: usage line is missing JSON payload",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let usage_json = usage_json.trim();
         let Some(usage_json) = first_json_object(usage_json) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} line {line_number}: usage line contains no complete JSON object",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let mut bytes = usage_json.as_bytes().to_vec();
         let usage = match simd_json::from_slice::<CodeBuddyUsage>(&mut bytes) {
             Ok(usage) => usage,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let tokens = match usage.to_breakdown() {
             Ok(Some((tokens, _))) => tokens,
             Ok(None) => continue,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -483,31 +435,19 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseRes
         let Some(timestamp) = parse_log_timestamp_ms(&line) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} line {line_number}: usage line has no valid timestamp",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let Some(model_id) = models_by_agent.get(&agent_id).cloned() else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!("{} line {line_number}: agent `{agent_id}` has no preceding model selection", path.display())
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         let Some(provider_id) = provider_identity::inferred_provider_from_model(&model_id) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || {
-                    format!(
-                        "{} line {line_number}: cannot infer provider for model `{model_id}`",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         };
         let provider_id = provider_id.to_string();

@@ -133,12 +133,7 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
         if usage.has_negative() {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} line {line_number}: Kimi token fields must be non-negative",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
 
@@ -156,12 +151,7 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(token_total) = tokens.checked_total() else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} line {line_number}: Kimi token total exceeds i64",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if token_total == 0 {
@@ -176,33 +166,21 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!(
-                        "{} line {line_number}: usage.record is missing a non-empty model",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         let Some(timestamp) = wire_line.time.filter(|timestamp| *timestamp > 0) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} line {line_number}: usage.record is missing a positive time",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let (provider_id, model_id) = match resolve_model(path, raw_model, &aliases) {
             Ok(resolved) => resolved,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };

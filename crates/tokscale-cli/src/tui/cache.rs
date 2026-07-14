@@ -23,7 +23,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 34;
+const CACHE_SCHEMA_VERSION: u32 = 35;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1971,8 +1971,6 @@ mod tests {
         let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
         let clients = make_filters(&[ClientId::Zed]);
         let scope = CacheReportScope::default();
-        let mut rejections = tokscale_core::RejectionSummary::default();
-        rejections.record_key("missing-model", || "thread bad".to_string());
         let data = UsageData {
             health: tokscale_core::source_health::HealthReport {
                 complete: false,
@@ -1982,13 +1980,13 @@ mod tests {
                 partial_sources: 0,
                 failed_sources: 0,
                 source_data_bytes: 4_096,
-                sources: vec![tokscale_core::source_health::SourceHealthReport {
-                    client: "zed".to_string(),
-                    path: "/tmp/threads.db".to_string(),
-                    status: "complete".to_string(),
+                issues: vec![tokscale_core::source_health::HealthIssueReport {
+                    level: "warning".to_string(),
+                    source: "zed".to_string(),
+                    issue: "missing-model".to_string(),
                     affected_sources: 1,
-                    failure: None,
-                    rejections,
+                    rejected_records: Some(1),
+                    handling: "record-skipped".to_string(),
                 }],
             },
             ..Default::default()
@@ -2008,8 +2006,10 @@ mod tests {
         let clients = make_filters(&[ClientId::OpenCode]);
         let scope = CacheReportScope::default();
 
-        for (status, partial_sources, failed_sources) in [("partial", 1, 0), ("unavailable", 0, 1)]
-        {
+        for (issue, handling, partial_sources, failed_sources) in [
+            ("partial-source", "confirmed-data-kept", 1, 0),
+            ("source-unavailable", "source-skipped", 0, 1),
+        ] {
             let data = UsageData {
                 health: tokscale_core::source_health::HealthReport {
                     complete: false,
@@ -2019,16 +2019,13 @@ mod tests {
                     partial_sources,
                     failed_sources,
                     source_data_bytes: 8_192,
-                    sources: vec![tokscale_core::source_health::SourceHealthReport {
-                        client: "opencode".to_string(),
-                        path: "/tmp/opencode.db".to_string(),
-                        status: status.to_string(),
+                    issues: vec![tokscale_core::source_health::HealthIssueReport {
+                        level: "error".to_string(),
+                        source: "opencode".to_string(),
+                        issue: issue.to_string(),
                         affected_sources: 1,
-                        failure: Some(tokscale_core::SourceFailure::new(
-                            "read SQLite",
-                            "database is locked",
-                        )),
-                        rejections: Default::default(),
+                        rejected_records: None,
+                        handling: handling.to_string(),
                     }],
                 },
                 ..Default::default()
@@ -2039,7 +2036,7 @@ mod tests {
 
             assert!(
                 matches!(result, CacheResult::Stale(_)),
-                "{status} health must force a retry"
+                "{issue} health must force a retry"
             );
         }
     }

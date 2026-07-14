@@ -46,23 +46,19 @@ pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedSource> {
         }
 
         let extracted = extract_assistant_usage(msg);
-        for detail in extracted.rejections {
+        for _detail in extracted.rejections {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("{} message {ordinal}: {detail}", path.display())
-                });
+                .record(RecordRejectionReason::MalformedRecord);
         }
         let usage = extracted.usage;
         let tokens = match usage.checked_token_breakdown() {
             Ok(Some(tokens)) => tokens,
             Ok(None) => continue,
-            Err(detail) => {
+            Err(_detail) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} message {ordinal}: {detail}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -75,29 +71,20 @@ pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(ts) = message_timestamp(msg).or(chat_id_fallback) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!("{} message {ordinal}: no valid timestamp", path.display())
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
 
         let Some(model) = usage.model.clone().filter(|model| !model.trim().is_empty()) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!("{} message {ordinal}: no model id", path.display())
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         let Some(provider) = provider_identity::inferred_provider_from_model(&model) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || {
-                    format!(
-                        "{} message {ordinal}: cannot infer provider for model `{model}`",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         };
 

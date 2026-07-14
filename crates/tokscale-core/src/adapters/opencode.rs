@@ -398,7 +398,6 @@ mod tests {
         assert_eq!(health.rejections.total(), 1);
         let rejection = health.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection.sample.unwrap().contains("bad-payload-row"));
 
         let mut sink = Vec::new();
         OPENCODE_ADAPTER
@@ -420,14 +419,10 @@ mod tests {
             crate::source_health::SourceStatus::Complete
         ));
         assert_eq!(warm_health.rejections.total(), 1);
-        assert!(warm_health
-            .rejections
-            .entries()
-            .next()
-            .unwrap()
-            .sample
-            .unwrap()
-            .contains("bad-payload-row"));
+        assert_eq!(
+            warm_health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]

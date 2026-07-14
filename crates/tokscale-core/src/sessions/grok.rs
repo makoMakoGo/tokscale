@@ -162,9 +162,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
             Err(error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 scanned.interrupted = Some(SourceFailure::new(
                     error.operation(),
                     format!("{} line {line_number}: {error}", path.display()),
@@ -179,12 +177,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} line {line_number}: Grok usage event is missing a timestamp",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             scanned.interrupted = Some(SourceFailure::new(
                 "validate usage timestamp",
                 format!(
@@ -214,16 +207,12 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
                         if error.operation() == "validate usage model" {
                             scanned
                                 .rejections
-                                .record(RecordRejectionReason::MissingModel, || {
-                                    format!("{} line {line_number}: {error}", path.display())
-                                });
+                                .record(RecordRejectionReason::MissingModel);
                             aggregate_replay_allowed = false;
                         } else {
                             scanned
                                 .rejections
-                                .record(RecordRejectionReason::MalformedRecord, || {
-                                    format!("{} line {line_number}: {error}", path.display())
-                                });
+                                .record(RecordRejectionReason::MalformedRecord);
                             scanned.interrupted = Some(SourceFailure::new(
                                 error.operation(),
                                 format!("{} line {line_number}: {error}", path.display()),
@@ -253,7 +242,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
             );
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || detail.clone());
+                .record(RecordRejectionReason::MalformedRecord);
             scanned.interrupted = Some(SourceFailure::new("validate total tokens", detail));
             break;
         }
@@ -302,16 +291,12 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
                     if error.operation() == "validate usage model" {
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MissingModel, || {
-                                format!("{}: {error}", path.display())
-                            });
+                            .record(RecordRejectionReason::MissingModel);
                         aggregate_replay_allowed = false;
                     } else {
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MalformedRecord, || {
-                                format!("{}: {error}", path.display())
-                            });
+                            .record(RecordRejectionReason::MalformedRecord);
                         scanned.interrupted = Some(SourceFailure::new(
                             error.operation(),
                             format!("{}: {error}", path.display()),
@@ -344,15 +329,11 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
                     if error.operation() == "validate usage model" {
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MissingModel, || {
-                                format!("{}: {error}", path.display())
-                            });
+                            .record(RecordRejectionReason::MissingModel);
                     } else {
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MalformedRecord, || {
-                                format!("{}: {error}", path.display())
-                            });
+                            .record(RecordRejectionReason::MalformedRecord);
                         scanned.interrupted = Some(SourceFailure::new(
                             error.operation(),
                             format!("{}: {error}", path.display()),
@@ -371,10 +352,10 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
         return Ok(scanned);
     }
     let Some(session_id) = session_id else {
-        for pending in pending_messages {
-            scanned.rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!("{} turn {}: Grok usage with positive tokens is missing a non-empty session identifier", path.display(), pending.turn_index)
-            });
+        for _ in pending_messages {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord);
         }
         return Ok(scanned);
     };
@@ -481,19 +462,15 @@ fn read_summary_metadata(
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(error) => {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!("{}: read related summary failed: {error}", path.display())
-            });
+        Err(_error) => {
+            rejections.record(RecordRejectionReason::MalformedRecord);
             return;
         }
     };
     let value = match serde_json::from_slice::<Value>(&data) {
         Ok(value) => value,
-        Err(error) => {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!("{}: decode related summary failed: {error}", path.display())
-            });
+        Err(_error) => {
+            rejections.record(RecordRejectionReason::MalformedRecord);
             return;
         }
     };
@@ -515,7 +492,7 @@ fn read_events_metadata(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
             let detail = format!("{}: open related events failed: {error}", path.display());
-            rejections.record(RecordRejectionReason::MalformedRecord, || detail.clone());
+            rejections.record(RecordRejectionReason::MalformedRecord);
             return Some(SourceFailure::new("open related events", detail));
         }
     };
@@ -529,7 +506,7 @@ fn read_events_metadata(
                     "{} line {line_number}: read related events line failed: {error}",
                     path.display()
                 );
-                rejections.record(RecordRejectionReason::MalformedRecord, || detail.clone());
+                rejections.record(RecordRejectionReason::MalformedRecord);
                 return Some(SourceFailure::new("read related events line", detail));
             }
         };
@@ -538,13 +515,8 @@ fn read_events_metadata(
         }
         let value = match serde_json::from_str::<Value>(&line) {
             Ok(value) => value,
-            Err(error) => {
-                rejections.record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} line {line_number}: decode related events line failed: {error}",
-                        path.display()
-                    )
-                });
+            Err(_error) => {
+                rejections.record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -729,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_summary_keeps_self_contained_usage_and_reports_its_path() {
+    fn malformed_summary_keeps_self_contained_usage_and_reports_rejection() {
         let (_temp, path) = write_fixture(
             r#"{"sessionId":"session-1","model":"grok-composer-2.5-fast","totalTokens":10,"timestamp":1700000000000}"#,
             Some("not-json"),
@@ -742,10 +714,6 @@ mod tests {
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection
-            .sample
-            .unwrap()
-            .contains(&path.with_file_name("summary.json").display().to_string()));
     }
 
     #[test]
@@ -769,7 +737,6 @@ not-json
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection.sample.unwrap().contains("events.jsonl line 2"));
     }
 
     #[test]

@@ -68,7 +68,7 @@ pub fn parse_copilot_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
 fn record_copilot_rejection(
     rejections: &mut RejectionSummary,
-    index: usize,
+    _index: usize,
     error: &SessionParseError,
 ) {
     let reason = match error.operation() {
@@ -77,7 +77,7 @@ fn record_copilot_rejection(
         "validate Copilot usage timestamp" => RecordRejectionReason::MissingTimestamp,
         _ => RecordRejectionReason::MalformedRecord,
     };
-    rejections.record(reason, || format!("Copilot record {index}: {error}"));
+    rejections.record(reason);
 }
 
 fn for_each_json_record(
@@ -118,9 +118,7 @@ fn for_each_json_record(
             Ok(record) => record,
             Err(error) => {
                 if record_malformed {
-                    rejections.record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    rejections.record(RecordRejectionReason::MalformedRecord);
                 }
                 return Ok((
                     Some(SourceFailure::new(

@@ -17,8 +17,8 @@ use crate::UnifiedMessage;
 
 /// Why a single record inside an otherwise readable source was rejected.
 ///
-/// Reasons intentionally stay coarse: the Issues surface needs "what kind of
-/// damage, how often, where", not a per-record forensic log.
+/// Reasons intentionally stay coarse: the Issues surface needs the kind and
+/// frequency of damage, not a per-record forensic log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordRejectionReason {
     MissingModel,
@@ -54,27 +54,26 @@ impl RecordRejectionReason {
 
 /// Aggregated record rejections for one source unit.
 ///
-/// Stores only per-reason counts and one sample detail per reason. Reasons
-/// are keyed by stable strings so shards written with reasons this build
-/// does not know still round-trip losslessly through the cache.
+/// Stores only per-reason counts. Raw paths, parser messages, and record
+/// samples are intentionally discarded once the parser classifies damage.
+/// Reasons are keyed by stable strings so shards written with reasons this
+/// build does not know still round-trip losslessly through the cache.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 // Field attributes stay plain: shards serialize this with bincode, which is
 // not self-describing, so `skip_serializing_if` would corrupt round-trips.
 pub struct RejectionSummary {
     counts: BTreeMap<String, u64>,
-    samples: BTreeMap<String, String>,
 }
 
 impl RejectionSummary {
-    pub fn record(&mut self, reason: RecordRejectionReason, sample: impl FnOnce() -> String) {
-        self.record_key(reason.key(), sample);
+    pub fn record(&mut self, reason: RecordRejectionReason) {
+        self.record_key(reason.key());
     }
 
     /// Record a rejection under a raw key. Used when rehydrating cached
     /// summaries whose keys may come from a newer parser.
-    pub fn record_key(&mut self, key: &str, sample: impl FnOnce() -> String) {
+    pub fn record_key(&mut self, key: &str) {
         *self.counts.entry(key.to_string()).or_insert(0) += 1;
-        self.samples.entry(key.to_string()).or_insert_with(sample);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -89,11 +88,6 @@ impl RejectionSummary {
         for (key, count) in &other.counts {
             *self.counts.entry(key.clone()).or_insert(0) += count;
         }
-        for (key, sample) in &other.samples {
-            self.samples
-                .entry(key.clone())
-                .or_insert_with(|| sample.clone());
-        }
     }
 
     pub fn entries(&self) -> impl Iterator<Item = RejectionEntry<'_>> {
@@ -104,7 +98,6 @@ impl RejectionSummary {
                 key,
                 label: RecordRejectionReason::label_for_key(key),
                 count: *count,
-                sample: self.samples.get(key).map(String::as_str),
             })
     }
 }
@@ -114,10 +107,10 @@ pub struct RejectionEntry<'a> {
     pub key: &'a str,
     pub label: &'a str,
     pub count: u64,
-    pub sample: Option<&'a str>,
 }
 
-/// A structured source-level failure: what operation failed and why.
+/// A transient source-level failure used while a parser or adapter classifies
+/// an interrupted scan. It is deliberately absent from `HealthReport`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceFailure {
     pub operation: String,
@@ -264,62 +257,62 @@ impl DataHealth {
         self.rejected_records() + (self.partial_sources() + self.failed_sources()) as u64
     }
 
-    /// Serializable summary for report payloads and exports.
+    /// Serializable summary for report payloads, exports, and the TUI cache.
+    ///
+    /// Detailed parser failures and representative source paths stop at this
+    /// boundary. User-visible health contains only stable issue classes and
+    /// aggregate counts.
     pub fn to_report(&self) -> HealthReport {
-        let mut grouped = BTreeMap::<(String, String, String), SourceHealthReport>::new();
+        let mut grouped = BTreeMap::<(String, String, String, String), HealthIssueReport>::new();
         for source in &self.sources {
-            let client = source.client.as_str().to_string();
-            let sample_path = source.path.display().to_string();
+            let source_name = source.client.as_str().to_string();
 
             for rejection in source.rejections.entries() {
                 let entry = grouped
                     .entry((
-                        "record".to_string(),
-                        client.clone(),
+                        "warning".to_string(),
+                        source_name.clone(),
                         rejection.key.to_string(),
+                        "record-skipped".to_string(),
                     ))
-                    .or_insert_with(|| SourceHealthReport {
-                        client: client.clone(),
-                        path: sample_path.clone(),
-                        status: "complete".to_string(),
+                    .or_insert_with(|| HealthIssueReport {
+                        level: "warning".to_string(),
+                        source: source_name.clone(),
+                        issue: rejection.key.to_string(),
                         affected_sources: 0,
-                        failure: None,
-                        rejections: RejectionSummary::default(),
+                        rejected_records: Some(0),
+                        handling: "record-skipped".to_string(),
                     });
                 entry.affected_sources += 1;
-                *entry
-                    .rejections
-                    .counts
-                    .entry(rejection.key.to_string())
-                    .or_insert(0) += rejection.count;
-                if let Some(sample) = rejection.sample {
-                    entry
-                        .rejections
-                        .samples
-                        .entry(rejection.key.to_string())
-                        .or_insert_with(|| sample.to_string());
-                }
+                let rejected_records = entry
+                    .rejected_records
+                    .as_mut()
+                    .expect("record issue must carry a rejected-record count");
+                *rejected_records = rejected_records
+                    .checked_add(rejection.count)
+                    .expect("aggregated rejected record count must fit in u64");
             }
 
-            if let Some(failure) = source.status.failure() {
-                let status = match source.status {
-                    SourceStatus::Partial { .. } => "partial",
-                    SourceStatus::Unavailable { .. } => "unavailable",
-                    SourceStatus::Complete => continue,
-                };
+            let source_issue = match source.status {
+                SourceStatus::Partial { .. } => Some(("partial-source", "confirmed-data-kept")),
+                SourceStatus::Unavailable { .. } => Some(("source-unavailable", "source-skipped")),
+                SourceStatus::Complete => None,
+            };
+            if let Some((issue, handling)) = source_issue {
                 let entry = grouped
                     .entry((
-                        "source".to_string(),
-                        client.clone(),
-                        format!("{status}:{}", failure.operation),
+                        "error".to_string(),
+                        source_name.clone(),
+                        issue.to_string(),
+                        handling.to_string(),
                     ))
-                    .or_insert_with(|| SourceHealthReport {
-                        client: client.clone(),
-                        path: sample_path.clone(),
-                        status: status.to_string(),
+                    .or_insert_with(|| HealthIssueReport {
+                        level: "error".to_string(),
+                        source: source_name.clone(),
+                        issue: issue.to_string(),
                         affected_sources: 0,
-                        failure: Some(failure.clone()),
-                        rejections: RejectionSummary::default(),
+                        rejected_records: None,
+                        handling: handling.to_string(),
                     });
                 entry.affected_sources += 1;
             }
@@ -333,13 +326,13 @@ impl DataHealth {
             partial_sources: self.partial_sources(),
             failed_sources: self.failed_sources(),
             source_data_bytes: self.source_data_bytes,
-            sources: grouped.into_values().collect(),
+            issues: grouped.into_values().collect(),
         }
     }
 }
 
 /// Serializable health summary carried by report payloads. `complete: true`
-/// with no sources means every scanned source was healthy.
+/// with no issues means every scanned source was healthy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HealthReport {
@@ -353,7 +346,7 @@ pub struct HealthReport {
     /// snapshot. Tokscale's own cache files are not included.
     pub source_data_bytes: u64,
     #[serde(default)]
-    pub sources: Vec<SourceHealthReport>,
+    pub issues: Vec<HealthIssueReport>,
 }
 
 impl Default for HealthReport {
@@ -366,7 +359,7 @@ impl Default for HealthReport {
             partial_sources: 0,
             failed_sources: 0,
             source_data_bytes: 0,
-            sources: Vec::new(),
+            issues: Vec::new(),
         }
     }
 }
@@ -384,61 +377,39 @@ impl HealthReport {
         self.partial_sources > 0 || self.failed_sources > 0
     }
 
-    pub fn record_unavailable_source(
-        &mut self,
-        client: &str,
-        path: impl Into<String>,
-        failure: SourceFailure,
-    ) {
-        let path = path.into();
-        if self.sources.iter().any(|source| {
-            source.client == client && source.status == "unavailable" && source.path == path
-        }) {
-            self.complete = false;
-            return;
-        }
-        if let Some(existing) = self.sources.iter_mut().find(|source| {
-            source.client == client
-                && source.status == "unavailable"
-                && source
-                    .failure
-                    .as_ref()
-                    .is_some_and(|existing| existing.operation == failure.operation)
-        }) {
-            if existing.path != path {
-                existing.affected_sources += 1;
-                self.failed_sources += 1;
-            }
-            self.complete = false;
-            return;
-        }
-
+    pub fn record_unavailable_source(&mut self, source: &str) {
         self.complete = false;
+        if self.issues.iter().any(|issue| {
+            issue.source == source
+                && issue.issue == "source-unavailable"
+                && issue.handling == "source-skipped"
+        }) {
+            return;
+        }
         self.failed_sources += 1;
-        self.sources.push(SourceHealthReport {
-            client: client.to_string(),
-            path,
-            status: "unavailable".to_string(),
+        self.issues.push(HealthIssueReport {
+            level: "error".to_string(),
+            source: source.to_string(),
+            issue: "source-unavailable".to_string(),
             affected_sources: 1,
-            failure: Some(failure),
-            rejections: RejectionSummary::default(),
+            rejected_records: None,
+            handling: "source-skipped".to_string(),
         });
     }
 }
 
+/// Stable, aggregate-only issue exposed by report JSON and the TUI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SourceHealthReport {
-    pub client: String,
-    /// One representative source path for this aggregated issue class.
-    pub path: String,
-    pub status: String,
+pub struct HealthIssueReport {
+    pub level: String,
+    pub source: String,
+    pub issue: String,
     /// Number of source units represented by this issue class.
     pub affected_sources: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure: Option<SourceFailure>,
-    #[serde(default, skip_serializing_if = "RejectionSummary::is_empty")]
-    pub rejections: RejectionSummary,
+    pub rejected_records: Option<u64>,
+    pub handling: String,
 }
 
 /// What a session parser produced from scanning one source unit.
@@ -479,11 +450,11 @@ mod tests {
     }
 
     #[test]
-    fn rejection_summary_counts_and_keeps_first_sample() {
+    fn rejection_summary_counts_by_reason() {
         let mut summary = RejectionSummary::default();
-        summary.record(RecordRejectionReason::MissingModel, || "thread-1".into());
-        summary.record(RecordRejectionReason::MissingModel, || "thread-2".into());
-        summary.record(RecordRejectionReason::MalformedRecord, || "row 9".into());
+        summary.record(RecordRejectionReason::MissingModel);
+        summary.record(RecordRejectionReason::MissingModel);
+        summary.record(RecordRejectionReason::MalformedRecord);
 
         assert_eq!(summary.total(), 3);
         let entries: Vec<_> = summary.entries().collect();
@@ -494,13 +465,12 @@ mod tests {
             .unwrap();
         assert_eq!(missing_model.count, 2);
         assert_eq!(missing_model.label, "Missing model");
-        assert_eq!(missing_model.sample, Some("thread-1"));
     }
 
     #[test]
     fn rejection_summary_round_trips_unknown_keys() {
         let mut summary = RejectionSummary::default();
-        summary.record_key("future-reason", || "sample".into());
+        summary.record_key("future-reason");
 
         let serialized = serde_json::to_string(&summary).unwrap();
         let restored: RejectionSummary = serde_json::from_str(&serialized).unwrap();
@@ -521,7 +491,7 @@ mod tests {
         assert_eq!(report.partial_sources, 0);
         assert_eq!(report.failed_sources, 0);
         assert_eq!(report.source_data_bytes, 0);
-        assert!(report.sources.is_empty());
+        assert!(report.issues.is_empty());
     }
 
     #[test]
@@ -532,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_health_json_keeps_a_stable_empty_sources_array() {
+    fn complete_health_json_keeps_a_stable_empty_issues_array() {
         let value = serde_json::to_value(HealthReport::default()).unwrap();
 
         assert_eq!(value["complete"], true);
@@ -543,7 +513,8 @@ mod tests {
         assert_eq!(value["partialSources"], 0);
         assert_eq!(value["failedSources"], 0);
         assert_eq!(value["sourceDataBytes"], 0);
-        assert_eq!(value["sources"], serde_json::json!([]));
+        assert_eq!(value["issues"], serde_json::json!([]));
+        assert!(value.get("sources").is_none());
     }
 
     #[test]
@@ -556,10 +527,22 @@ mod tests {
             partial_sources: 2,
             failed_sources: 1,
             source_data_bytes: 1_024,
-            sources: Vec::new(),
+            issues: Vec::new(),
         };
 
         assert_eq!(report.issue_count(), 6);
+    }
+
+    #[test]
+    fn supplementary_unavailable_source_does_not_duplicate_existing_issue() {
+        let mut report = HealthReport::default();
+
+        report.record_unavailable_source("claude");
+        report.record_unavailable_source("claude");
+
+        assert_eq!(report.failed_sources, 1);
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].affected_sources, 1);
     }
 
     #[test]
@@ -569,8 +552,8 @@ mod tests {
         assert!(data_health.is_empty());
 
         let mut rejections = RejectionSummary::default();
-        rejections.record(RecordRejectionReason::MissingModel, || "t".into());
-        rejections.record(RecordRejectionReason::MissingProvider, || "u".into());
+        rejections.record(RecordRejectionReason::MissingModel);
+        rejections.record(RecordRejectionReason::MissingProvider);
         data_health.record(health(SourceStatus::Complete, rejections));
         data_health.record(health(
             SourceStatus::Unavailable {
@@ -599,7 +582,7 @@ mod tests {
         left.set_source_data_bytes(1_024);
         left.record(health(SourceStatus::Complete, RejectionSummary::default()));
         let mut rejected = RejectionSummary::default();
-        rejected.record(RecordRejectionReason::MissingModel, || "bad".into());
+        rejected.record(RecordRejectionReason::MissingModel);
         left.record(health(SourceStatus::Complete, rejected));
 
         let mut right = DataHealth::default();
@@ -623,16 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn report_projection_aggregates_issue_classes_with_one_sample() {
+    fn report_projection_aggregates_issue_classes_without_raw_details() {
         let mut data_health = DataHealth::default();
-        for (path, sample) in [
-            ("/sessions/first.jsonl", "first"),
-            ("/sessions/second.jsonl", "second"),
-        ] {
+        for path in ["/sessions/first.jsonl", "/sessions/second.jsonl"] {
             let mut rejections = RejectionSummary::default();
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                sample.to_string()
-            });
+            rejections.record(RecordRejectionReason::MalformedRecord);
             data_health.record(SourceHealth {
                 client: ClientId::Codex,
                 path: PathBuf::from(path),
@@ -658,31 +636,59 @@ mod tests {
         assert_eq!(report.degraded_sources, 2);
         assert_eq!(report.rejected_records, 2);
         assert_eq!(report.failed_sources, 2);
-        assert_eq!(report.sources.len(), 2);
+        assert_eq!(report.issues.len(), 2);
 
         let records = report
-            .sources
+            .issues
             .iter()
-            .find(|source| !source.rejections.is_empty())
+            .find(|issue| issue.issue == "malformed-record")
             .unwrap();
+        assert_eq!(records.level, "warning");
+        assert_eq!(records.source, "codex");
         assert_eq!(records.affected_sources, 2);
-        assert_eq!(records.path, "/sessions/first.jsonl");
-        let rejection = records.rejections.entries().next().unwrap();
-        assert_eq!(rejection.count, 2);
-        assert_eq!(rejection.sample, Some("first"));
+        assert_eq!(records.rejected_records, Some(2));
+        assert_eq!(records.handling, "record-skipped");
 
         let failures = report
-            .sources
+            .issues
             .iter()
-            .find(|source| source.failure.is_some())
+            .find(|issue| issue.issue == "source-unavailable")
             .unwrap();
+        assert_eq!(failures.level, "error");
+        assert_eq!(failures.source, "codex");
         assert_eq!(failures.affected_sources, 2);
-        assert_eq!(failures.path, "/sessions/third.jsonl");
-        assert!(failures
-            .failure
-            .as_ref()
-            .unwrap()
-            .message
-            .contains("third.jsonl"));
+        assert_eq!(failures.rejected_records, None);
+        assert_eq!(failures.handling, "source-skipped");
+    }
+
+    #[test]
+    fn report_json_exposes_only_aggregated_health_issues() {
+        let mut data_health = DataHealth::default();
+        let mut rejections = RejectionSummary::default();
+        rejections.record(RecordRejectionReason::MissingModel);
+        data_health.record(SourceHealth {
+            client: ClientId::Zed,
+            path: PathBuf::from("/private/zed/threads.db"),
+            status: SourceStatus::Complete,
+            rejections,
+        });
+        data_health.record(SourceHealth {
+            client: ClientId::Kiro,
+            path: PathBuf::from("/private/kiro/session.jsonl"),
+            status: SourceStatus::Unavailable {
+                failure: SourceFailure::new("decode private source", "raw parser failure"),
+            },
+            rejections: RejectionSummary::default(),
+        });
+
+        let value = serde_json::to_value(data_health.to_report()).unwrap();
+        let encoded = serde_json::to_string(&value).unwrap();
+
+        assert!(value.get("sources").is_none());
+        assert_eq!(value["issues"].as_array().unwrap().len(), 2);
+        assert!(!encoded.contains("/private/"));
+        assert!(!encoded.contains("raw rejection detail"));
+        assert!(!encoded.contains("decode private source"));
+        assert!(!encoded.contains("raw parser failure"));
     }
 }

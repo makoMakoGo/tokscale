@@ -119,14 +119,12 @@ fn parse_openclaw_session(
         buffer.extend_from_slice(trimmed.as_bytes());
         let entry: OpenClawEntry = match simd_json::from_slice(&mut buffer) {
             Ok(entry) => entry,
-            Err(error) => {
+            Err(_error) => {
                 current_model = None;
                 current_provider = None;
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", session_path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -140,12 +138,7 @@ fn parse_openclaw_session(
                 Err(reason) => {
                     current_model = None;
                     current_provider = None;
-                    scanned.rejections.record(reason, || {
-                            format!(
-                                "{} line {line_number}: model_change lacks a consistent model/provider pair",
-                                session_path.display()
-                            )
-                        });
+                    scanned.rejections.record(reason);
                 }
             },
             "custom" => {
@@ -162,12 +155,7 @@ fn parse_openclaw_session(
                         Err(reason) => {
                             current_model = None;
                             current_provider = None;
-                            scanned.rejections.record(reason, || {
-                                    format!(
-                                        "{} line {line_number}: model snapshot lacks a consistent model/provider pair",
-                                        session_path.display()
-                                    )
-                                });
+                            scanned.rejections.record(reason);
                         }
                     },
                     None => {
@@ -175,12 +163,7 @@ fn parse_openclaw_session(
                         current_provider = None;
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MalformedRecord, || {
-                                format!(
-                                    "{} line {line_number}: model snapshot is missing data",
-                                    session_path.display()
-                                )
-                            });
+                            .record(RecordRejectionReason::MalformedRecord);
                     }
                 }
             }
@@ -198,16 +181,10 @@ fn parse_openclaw_session(
                     let tokens = match openclaw_token_breakdown(&usage) {
                         Ok(Some(tokens)) => tokens,
                         Ok(None) => continue,
-                        Err(detail) => {
-                            scanned.rejections.record(
-                                RecordRejectionReason::MalformedRecord,
-                                || {
-                                    format!(
-                                        "{} line {line_number}: {detail}",
-                                        session_path.display()
-                                    )
-                                },
-                            );
+                        Err(_detail) => {
+                            scanned
+                                .rejections
+                                .record(RecordRejectionReason::MalformedRecord);
                             continue;
                         }
                     };
@@ -248,23 +225,13 @@ fn parse_openclaw_session(
                     let Some(model) = model else {
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MissingModel, || {
-                                format!(
-                                    "{} line {line_number}: assistant message has no model",
-                                    session_path.display()
-                                )
-                            });
+                            .record(RecordRejectionReason::MissingModel);
                         continue;
                     };
                     let Some(provider) = provider else {
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MissingProvider, || {
-                                format!(
-                                    "{} line {line_number}: cannot determine provider for model `{model}`",
-                                    session_path.display()
-                                )
-                            });
+                            .record(RecordRejectionReason::MissingProvider);
                         continue;
                     };
 
@@ -273,12 +240,7 @@ fn parse_openclaw_session(
                     let Some(timestamp) = timestamp else {
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MissingTimestamp, || {
-                                format!(
-                                    "{} line {line_number}: assistant message is missing a positive timestamp",
-                                    session_path.display()
-                                )
-                            });
+                            .record(RecordRejectionReason::MissingTimestamp);
                         continue;
                     };
 

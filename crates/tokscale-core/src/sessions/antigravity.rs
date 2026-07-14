@@ -43,13 +43,11 @@ fn parse_antigravity_reader<R: BufRead>(mut reader: R, path: &Path) -> ScannedSo
 
         let value = match serde_json::from_str::<Value>(trimmed) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 session_model = None;
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -66,15 +64,9 @@ fn parse_antigravity_reader<R: BufRead>(mut reader: R, path: &Path) -> ScannedSo
                     Some(model_id) => session_model = Some(model_id.to_string()),
                     None => {
                         session_model = None;
-                        scanned.rejections.record(
-                            RecordRejectionReason::MalformedRecord,
-                            || {
-                                format!(
-                                    "{} line {line_number}: session metadata has no non-empty string modelId",
-                                    path.display()
-                                )
-                            },
-                        );
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MalformedRecord);
                     }
                 }
             }
@@ -83,9 +75,7 @@ fn parse_antigravity_reader<R: BufRead>(mut reader: R, path: &Path) -> ScannedSo
                 Ok(None) => {}
                 Err(error) => {
                     let reason = antigravity_rejection_reason(&error);
-                    scanned.rejections.record(reason, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    scanned.rejections.record(reason);
                 }
             },
             _ => {}

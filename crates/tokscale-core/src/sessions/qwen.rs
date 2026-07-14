@@ -76,12 +76,10 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let mut bytes = trimmed.as_bytes().to_vec();
         let qwen_line = match simd_json::from_slice::<QwenLine>(&mut bytes) {
             Ok(qwen_line) => qwen_line,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -111,34 +109,19 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(timestamp) = qwen_line.timestamp.as_deref() else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} line {line_number}: assistant record is missing timestamp",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let Some(timestamp_ms) = parse_timestamp_str(timestamp) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} line {line_number}: invalid Qwen timestamp `{timestamp}`",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         if timestamp_ms <= 0 {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} line {line_number}: Qwen timestamp `{timestamp}` must resolve after the Unix epoch",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         }
 
@@ -150,12 +133,7 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedSource> {
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!(
-                        "{} line {line_number}: assistant record is missing a non-empty model",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         let model = model_aliases::canonicalize_source_model_id(raw_model)
@@ -169,12 +147,7 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedSource> {
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} line {line_number}: assistant record is missing a non-empty sessionId",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let line_session_id = line_session_id.to_string();
@@ -387,7 +360,6 @@ not valid json at all
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
         assert_eq!(rejection.count, 1);
-        assert!(rejection.sample.unwrap().contains("line 2"));
     }
 
     #[test]
@@ -480,10 +452,6 @@ not valid json at all
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-model");
-        assert!(rejection
-            .sample
-            .unwrap()
-            .contains(file.path().to_str().unwrap()));
     }
 
     #[test]
@@ -496,10 +464,6 @@ not valid json at all
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-timestamp");
-        assert!(rejection
-            .sample
-            .unwrap()
-            .contains(file.path().to_str().unwrap()));
     }
 
     #[test]
@@ -524,7 +488,6 @@ not valid json at all
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection.sample.unwrap().contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -537,7 +500,6 @@ not valid json at all
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection.sample.unwrap().contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -550,7 +512,6 @@ not valid json at all
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection.sample.unwrap().contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -592,6 +553,5 @@ not valid json at all
         assert_eq!(scanned.rejections.total(), 2);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection.sample.unwrap().contains("line 2"));
     }
 }

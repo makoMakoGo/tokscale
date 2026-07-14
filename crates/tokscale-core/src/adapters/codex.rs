@@ -1384,10 +1384,9 @@ mod tests {
             raw_messages,
             meta.codex_incremental,
         );
-        entry.rejections.record(
-            crate::source_health::RecordRejectionReason::MalformedRecord,
-            || "cached Codex row".to_string(),
-        );
+        entry
+            .rejections
+            .record(crate::source_health::RecordRejectionReason::MalformedRecord);
         seed_cache.insert(entry);
         seed_cache.save_if_dirty().unwrap();
 
@@ -1432,10 +1431,9 @@ mod tests {
             raw_messages,
             meta.codex_incremental,
         );
-        entry.rejections.record(
-            crate::source_health::RecordRejectionReason::MalformedRecord,
-            || "cached Codex row".to_string(),
-        );
+        entry
+            .rejections
+            .record(crate::source_health::RecordRejectionReason::MalformedRecord);
         seed_cache.insert(entry);
         seed_cache.save_if_dirty().unwrap();
         append_file(&path, APPENDED_CODEX_ENTRY);

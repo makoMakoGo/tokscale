@@ -97,12 +97,10 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
     for (model_key, model_value) in by_model {
         let model_usage = match serde_json::from_value::<MuxModelUsage>(model_value) {
             Ok(model_usage) => model_usage,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} model `{model_key}`: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -122,12 +120,10 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
         })();
         let tokens: TokenBreakdown = match tokens {
             Ok(tokens) => tokens,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} model `{model_key}`: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -135,12 +131,7 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(token_total) = tokens.checked_total() else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} model `{model_key}`: Mux token total exceeds i64",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if token_total == 0 {
@@ -150,12 +141,7 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(timestamp) = timestamp else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} model `{model_key}`: token-bearing session is missing a positive lastRequest.timestamp",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
 
@@ -164,12 +150,7 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let Some((raw_provider, raw_model_id)) = model_key.split_once(':') else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{}: token-bearing model key `{model_key}` must be `provider:model`",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let raw_provider = raw_provider.trim();
@@ -177,23 +158,13 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
         if raw_provider.is_empty() {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || {
-                    format!(
-                        "{}: token-bearing model key `{model_key}` has an empty provider",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         }
         if raw_model_id.is_empty() {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!(
-                        "{}: token-bearing model key `{model_key}` has an empty model",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         }
         let provider = provider_identity::canonical_provider(raw_provider)

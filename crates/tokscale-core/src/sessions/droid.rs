@@ -159,17 +159,13 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
     {
         scanned
             .rejections
-            .record(RecordRejectionReason::MalformedRecord, || {
-                path.display().to_string()
-            });
+            .record(RecordRejectionReason::MalformedRecord);
         return Ok(scanned);
     }
     let Some(token_total) = tokens.checked_total() else {
         scanned
             .rejections
-            .record(RecordRejectionReason::MalformedRecord, || {
-                path.display().to_string()
-            });
+            .record(RecordRejectionReason::MalformedRecord);
         return Ok(scanned);
     };
     if token_total == 0 {
@@ -201,35 +197,27 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
     else {
         scanned
             .rejections
-            .record(RecordRejectionReason::MissingModel, || {
-                path.display().to_string()
-            });
+            .record(RecordRejectionReason::MissingModel);
         return Ok(scanned);
     };
     let model = normalize_model_name(raw_model);
     if model.is_empty() {
         scanned
             .rejections
-            .record(RecordRejectionReason::MissingModel, || {
-                path.display().to_string()
-            });
+            .record(RecordRejectionReason::MissingModel);
         return Ok(scanned);
     }
     let Some(provider) = get_provider_from_model_and_lock(&model, provider_lock) else {
         scanned
             .rejections
-            .record(RecordRejectionReason::MissingProvider, || {
-                path.display().to_string()
-            });
+            .record(RecordRejectionReason::MissingProvider);
         return Ok(scanned);
     };
 
     let Some(raw_timestamp) = settings.provider_lock_timestamp.as_deref() else {
         scanned
             .rejections
-            .record(RecordRejectionReason::MissingTimestamp, || {
-                path.display().to_string()
-            });
+            .record(RecordRejectionReason::MissingTimestamp);
         return Ok(scanned);
     };
     let timestamp = match chrono::DateTime::parse_from_rfc3339(raw_timestamp) {
@@ -237,18 +225,14 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
         Err(_) => {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    path.display().to_string()
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             return Ok(scanned);
         }
     };
     if timestamp <= 0 {
         scanned
             .rejections
-            .record(RecordRejectionReason::MalformedRecord, || {
-                path.display().to_string()
-            });
+            .record(RecordRejectionReason::MalformedRecord);
         return Ok(scanned);
     }
 

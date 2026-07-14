@@ -103,8 +103,7 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
     let account_id = account_id_from_cursor_cache_path(path);
 
-    for (row_index, line) in lines.enumerate() {
-        let row_number = row_index + 2;
+    for line in lines {
         if line.trim().is_empty() {
             continue;
         }
@@ -117,13 +116,7 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<ScannedSource> {
         if fields.len() < min_fields {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} row {row_number}: expected at least {min_fields} columns, found {}",
-                        path.display(),
-                        fields.len()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
 
@@ -148,9 +141,7 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<ScannedSource> {
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("{} row {row_number}: invalid token count", path.display())
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if [
@@ -164,23 +155,13 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<ScannedSource> {
         {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} row {row_number}: Cursor token counts must be non-negative",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
         if input_with_cache_write < input_without_cache_write {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} row {row_number}: input with cache write is smaller than input without cache write",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
 
@@ -198,12 +179,7 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(token_total) = tokens.checked_total() else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "{} row {row_number}: Cursor token total exceeds i64",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if token_total == 0 {
@@ -213,12 +189,7 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<ScannedSource> {
         if model.is_empty() {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!(
-                        "{} row {row_number}: token-bearing row has an empty model",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         }
 
@@ -227,12 +198,7 @@ pub fn parse_cursor_file(path: &Path) -> SessionParseResult<ScannedSource> {
         if timestamp == 0 {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} row {row_number}: invalid Cursor usage date `{date_str}`",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         }
 

@@ -1759,7 +1759,8 @@ mod tests {
 
         assert!(!report.complete);
         assert_eq!(report.failed_sources, 1);
-        assert_eq!(report.sources[0].client, "opencode");
+        assert_eq!(report.issues[0].source, "opencode");
+        assert_eq!(report.issues[0].issue, "source-unavailable");
     }
 
     // ========== format_tokens_short tests ==========

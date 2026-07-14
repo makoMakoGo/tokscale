@@ -72,18 +72,18 @@ pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         row_number += 1;
         let row = match decode_thread_row(row, row_number) {
             Ok(row) => row,
-            Err(sample) => {
+            Err(_sample) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || sample);
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         match parse_thread_row(row) {
             ThreadOutcome::Message(message) => scanned.messages.push(*message),
             ThreadOutcome::Filtered => {}
-            ThreadOutcome::Rejected(reason, sample) => {
-                scanned.rejections.record(reason, || sample);
+            ThreadOutcome::Rejected(reason, _sample) => {
+                scanned.rejections.record(reason);
             }
         }
     }
@@ -722,7 +722,6 @@ mod tests {
         assert_eq!(scanned.rejections.total(), 1);
         let entries: Vec<_> = scanned.rejections.entries().collect();
         assert_eq!(entries[0].key, "missing-model");
-        assert!(entries[0].sample.unwrap().contains("thread-bad"));
     }
 
     #[test]
@@ -846,7 +845,6 @@ mod tests {
         assert!(scanned.interrupted.is_none());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection.sample.unwrap().contains("row 2"));
     }
 
     #[test]

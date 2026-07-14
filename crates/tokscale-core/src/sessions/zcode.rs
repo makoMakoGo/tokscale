@@ -276,14 +276,7 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
                     pending_turn_start = false;
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            let detail = if has_negative_usage {
-                                "ZCode usage token fields must be non-negative"
-                            } else {
-                                "ZCode usage token total exceeds i64"
-                            };
-                            format!("{} line {line_number}: {detail}", path.display())
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
                 let breakdown_from_usage = entry
@@ -323,29 +316,24 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
                     pending_turn_start = false;
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            format!(
-                                "{} line {line_number}: ZCode token total exceeds i64",
-                                path.display()
-                            )
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
                 let Some(resolved_model) = record_model_id.clone().or_else(|| model_id.clone())
                 else {
                     pending_turn_start = false;
-                    scanned.rejections.record(RecordRejectionReason::MissingModel, || {
-                        format!("{} line {line_number}: ZCode assistant turn is missing a non-empty model", path.display())
-                    });
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MissingModel);
                     continue;
                 };
                 let Some(resolved_session) =
                     session_id.clone().or_else(|| record_session_id.clone())
                 else {
                     pending_turn_start = false;
-                    scanned.rejections.record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: ZCode assistant turn is missing a non-empty sessionId", path.display())
-                    });
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 };
                 let timestamp = match entry.timestamp.as_deref() {
@@ -354,23 +342,17 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
                         .unwrap_or(0),
                     None => {
                         pending_turn_start = false;
-                        scanned.rejections.record(RecordRejectionReason::MissingTimestamp, || {
-                            format!("{} line {line_number}: ZCode assistant turn is missing a timestamp", path.display())
-                        });
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingTimestamp);
                         continue;
                     }
                 };
                 if timestamp <= 0 {
                     pending_turn_start = false;
-                    let timestamp_text = entry.timestamp.as_deref().unwrap_or_default();
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MissingTimestamp, || {
-                            format!(
-                                "{} line {line_number}: invalid ZCode timestamp `{timestamp_text}`",
-                                path.display()
-                            )
-                        });
+                        .record(RecordRejectionReason::MissingTimestamp);
                     continue;
                 }
                 if session_id.is_none() {

@@ -19,10 +19,10 @@ compile_error!("source-message cache requires stable Unix or Windows file identi
 // Source-message cache shards split serialization layout from parser/source
 // semantics. Bump this only when the shard bincode layout changes; parser-only
 // fixes should bump the relevant SourceUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 5;
+const CACHE_FORMAT_VERSION: u32 = 6;
 #[cfg(test)]
-const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 4;
-const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 3] = [2, 3, 4];
+const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 5;
+const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 4] = [2, 3, 4, 5];
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const SHARD_KEY_FORMAT_VERSION: u32 = 1;
 const SHARDS_DIRNAME: &str = "shards";
@@ -3282,9 +3282,7 @@ mod tests {
             )],
             None,
         );
-        entry
-            .rejections
-            .record_key("future-rejection", || "future sample".to_string());
+        entry.rejections.record_key("future-rejection");
 
         let expected_fingerprint = entry.fingerprint.clone();
         let mut cache = SourceMessageCache::load().unwrap();
@@ -3313,7 +3311,6 @@ mod tests {
         let rejection = meta.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "future-rejection");
         assert_eq!(rejection.count, 1);
-        assert_eq!(rejection.sample, Some("future sample"));
         let messages = loaded
             .take_messages(&CacheReadPlan::new(
                 file.path(),

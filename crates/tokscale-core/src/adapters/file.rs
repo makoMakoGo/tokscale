@@ -403,14 +403,10 @@ not-json
             warm_health.rejections.entries().next().unwrap().key,
             "malformed-record"
         );
-        assert!(warm_health
-            .rejections
-            .entries()
-            .next()
-            .unwrap()
-            .sample
-            .unwrap()
-            .contains("line 2"));
+        assert_eq!(
+            warm_health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -436,14 +432,10 @@ not-json
             crate::source_health::SourceStatus::Complete
         ));
         assert_eq!(health.rejections.total(), 1);
-        assert!(health
-            .rejections
-            .entries()
-            .next()
-            .unwrap()
-            .sample
-            .unwrap()
-            .contains(&summary_path.display().to_string()));
+        assert_eq!(
+            health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
 
         let mut sink = Vec::new();
         let mut fold_ctx = FoldContext::new(&mut cache, None);
@@ -460,14 +452,10 @@ not-json
         };
         let warm_health = hit.source_health();
         assert_eq!(warm_health.rejections.total(), 1);
-        assert!(warm_health
-            .rejections
-            .entries()
-            .next()
-            .unwrap()
-            .sample
-            .unwrap()
-            .contains(&summary_path.display().to_string()));
+        assert_eq!(
+            warm_health.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]

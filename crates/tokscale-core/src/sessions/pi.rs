@@ -623,11 +623,9 @@ fn omp_task_agent_scan_from_reader(parent_path: &Path, reader: impl BufRead) -> 
 
         let entry: OmpParentLine = match serde_json::from_str(trimmed) {
             Ok(entry) => entry,
-            Err(source) => {
+            Err(_source) => {
                 scan.rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {source}", parent_path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -789,12 +787,10 @@ fn parse_pi_format_file(
                         Ok(None) => omp_parent_scan.and_then(|parent| {
                             omp_subagent_label_from_map(&parent.task_agents, stem)
                         }),
-                        Err(error) => {
+                        Err(_error) => {
                             scanned
                                 .rejections
-                                .record(RecordRejectionReason::MalformedRecord, || {
-                                    format!("{}: {error}", path.display())
-                                });
+                                .record(RecordRejectionReason::MalformedRecord);
                             None
                         }
                     }
@@ -838,12 +834,10 @@ fn parse_pi_format_file(
                 client == "omp" && !saw_omp_title_slot,
             ) {
                 Ok(parsed) => parsed,
-                Err(error) => {
+                Err(_error) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            format!("{} line {line_number}: {error}", path.display())
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             };
@@ -865,12 +859,10 @@ fn parse_pi_format_file(
         buffer.extend_from_slice(trimmed.as_bytes());
         let entry = match simd_json::from_slice::<PiSessionEntry>(&mut buffer) {
             Ok(entry) => entry,
-            Err(source) => {
+            Err(_source) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {source}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -895,8 +887,8 @@ fn parse_pi_format_file(
 
         let tokens = match token_breakdown_from_pi_usage(&usage, client) {
             Ok(tokens) => tokens,
-            Err(error) => {
-                record_pi_rejection(&mut scanned, path, line_number, &error);
+            Err(_) => {
+                record_pi_rejection(&mut scanned);
                 continue;
             }
         };
@@ -907,12 +899,7 @@ fn parse_pi_format_file(
         let Some(raw_model) = message.model.filter(|model| !model.trim().is_empty()) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!(
-                        "{} line {line_number}: positive-token usage is missing a non-empty model",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         let model = model_aliases::canonicalize_source_model_id(&raw_model)
@@ -927,37 +914,22 @@ fn parse_pi_format_file(
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || {
-                    format!(
-                        "{} line {line_number}: provider is missing and cannot be inferred for model `{model}`",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         };
 
         let Some(timestamp_text) = entry.timestamp else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} line {line_number}: timestamp is missing",
-                        path.display()
-                    )
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let timestamp = match chrono::DateTime::parse_from_rfc3339(&timestamp_text) {
             Ok(timestamp) => timestamp.timestamp_millis(),
-            Err(source) => {
+            Err(_source) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingTimestamp, || {
-                        format!(
-                            "{} line {line_number}: invalid timestamp `{timestamp_text}`: {source}",
-                            path.display()
-                        )
-                    });
+                    .record(RecordRejectionReason::MissingTimestamp);
                 continue;
             }
         };
@@ -990,17 +962,10 @@ fn parse_pi_format_file(
     Ok(scanned)
 }
 
-fn record_pi_rejection(
-    scanned: &mut ScannedSource,
-    path: &Path,
-    line_number: usize,
-    error: &SessionParseError,
-) {
+fn record_pi_rejection(scanned: &mut ScannedSource) {
     scanned
         .rejections
-        .record(RecordRejectionReason::MalformedRecord, || {
-            format!("{} line {line_number}: {error}", path.display())
-        });
+        .record(RecordRejectionReason::MalformedRecord);
 }
 
 #[cfg(test)]
@@ -1541,9 +1506,6 @@ mod tests {
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
         assert_eq!(rejection.count, 1);
-        let sample = rejection.sample.unwrap();
-        assert!(sample.contains(&path.display().to_string()));
-        assert!(sample.contains("validate OMP swarm artifact"));
     }
 
     #[test]

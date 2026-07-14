@@ -154,7 +154,6 @@ fn parse_amp_timestamp(timestamp: Option<String>) -> SessionParseResult<Option<i
 
 fn parse_amp_ledger_records(
     usage_ledger: Option<AmpUsageLedger>,
-    path: &Path,
     rejections: &mut RejectionSummary,
 ) -> Vec<AmpUsageRecord> {
     let Some(ledger) = usage_ledger else {
@@ -165,14 +164,11 @@ fn parse_amp_ledger_records(
     };
 
     let mut records = Vec::new();
-    for (event_index, value) in events.into_iter().enumerate() {
-        let event_number = event_index + 1;
+    for value in events {
         let event = match serde_json::from_value::<AmpUsageEvent>(value) {
             Ok(event) => event,
-            Err(error) => {
-                rejections.record(RecordRejectionReason::MalformedRecord, || {
-                    format!("{} ledger event {event_number}: {error}", path.display())
-                });
+            Err(_error) => {
+                rejections.record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -180,12 +176,7 @@ fn parse_amp_ledger_records(
             continue;
         };
         if tokens.has_negative() {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!(
-                    "{} ledger event {event_number}: Amp token fields must be non-negative",
-                    path.display()
-                )
-            });
+            rejections.record(RecordRejectionReason::MalformedRecord);
             continue;
         }
         let tokens = TokenBreakdown {
@@ -196,41 +187,24 @@ fn parse_amp_ledger_records(
             reasoning: 0,
         };
         let Some(token_total) = tokens.checked_total() else {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!(
-                    "{} ledger event {event_number}: Amp token total exceeds i64",
-                    path.display()
-                )
-            });
+            rejections.record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if token_total == 0 {
             continue;
         }
         let Some(model) = event.model.filter(|model| !model.trim().is_empty()) else {
-            rejections.record(RecordRejectionReason::MissingModel, || {
-                format!(
-                    "{} ledger event {event_number}: positive usage is missing a non-empty model",
-                    path.display()
-                )
-            });
+            rejections.record(RecordRejectionReason::MissingModel);
             continue;
         };
         let explicit_timestamp = match parse_amp_timestamp(event.timestamp) {
             Ok(Some(timestamp)) => timestamp,
             Ok(None) => {
-                rejections.record(RecordRejectionReason::MissingTimestamp, || {
-                    format!(
-                        "{} ledger event {event_number}: positive usage is missing a timestamp",
-                        path.display()
-                    )
-                });
+                rejections.record(RecordRejectionReason::MissingTimestamp);
                 continue;
             }
-            Err(error) => {
-                rejections.record(RecordRejectionReason::MissingTimestamp, || {
-                    format!("{} ledger event {event_number}: {error}", path.display())
-                });
+            Err(_error) => {
+                rejections.record(RecordRejectionReason::MissingTimestamp);
                 continue;
             }
         };
@@ -250,7 +224,6 @@ fn parse_amp_ledger_records(
 fn parse_amp_message_records(
     thread_messages: Option<Vec<serde_json::Value>>,
     thread_created_ms: Option<i64>,
-    path: &Path,
     rejections: &mut RejectionSummary,
 ) -> Vec<AmpUsageRecord> {
     let Some(thread_messages) = thread_messages else {
@@ -258,14 +231,11 @@ fn parse_amp_message_records(
     };
 
     let mut records = Vec::new();
-    for (message_index, value) in thread_messages.into_iter().enumerate() {
-        let message_number = message_index + 1;
+    for value in thread_messages {
         let msg = match serde_json::from_value::<AmpMessage>(value) {
             Ok(message) => message,
-            Err(error) => {
-                rejections.record(RecordRejectionReason::MalformedRecord, || {
-                    format!("{} message {message_number}: {error}", path.display())
-                });
+            Err(_error) => {
+                rejections.record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -276,12 +246,7 @@ fn parse_amp_message_records(
             continue;
         };
         if usage.has_negative() {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!(
-                    "{} message {message_number}: Amp token fields must be non-negative",
-                    path.display()
-                )
-            });
+            rejections.record(RecordRejectionReason::MalformedRecord);
             continue;
         }
         let tokens = TokenBreakdown {
@@ -292,51 +257,29 @@ fn parse_amp_message_records(
             reasoning: 0,
         };
         let Some(token_total) = tokens.checked_total() else {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!(
-                    "{} message {message_number}: Amp token total exceeds i64",
-                    path.display()
-                )
-            });
+            rejections.record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if token_total == 0 {
             continue;
         }
         let Some(model) = usage.model.filter(|model| !model.trim().is_empty()) else {
-            rejections.record(RecordRejectionReason::MissingModel, || {
-                format!(
-                    "{} message {message_number}: assistant usage is missing a non-empty model",
-                    path.display()
-                )
-            });
+            rejections.record(RecordRejectionReason::MissingModel);
             continue;
         };
         let Some(message_id) = msg.message_id.filter(|id| *id > 0) else {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!(
-                    "{} message {message_number}: assistant usage is missing a positive messageId",
-                    path.display()
-                )
-            });
+            rejections.record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let Some(base_timestamp) = thread_created_ms.filter(|timestamp| *timestamp > 0) else {
-            rejections.record(RecordRejectionReason::MissingTimestamp, || {
-                format!("{} message {message_number}: thread with assistant usage is missing a positive created timestamp", path.display())
-            });
+            rejections.record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let Some(timestamp) = message_id
             .checked_mul(1000)
             .and_then(|offset| base_timestamp.checked_add(offset))
         else {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!(
-                    "{} message {message_number}: derived Amp timestamp exceeds i64",
-                    path.display()
-                )
-            });
+            rejections.record(RecordRejectionReason::MalformedRecord);
             continue;
         };
 
@@ -401,16 +344,13 @@ fn merge_amp_records(
 fn build_amp_messages(
     records: Vec<AmpUsageRecord>,
     thread_id: &str,
-    path: &Path,
     rejections: &mut RejectionSummary,
 ) -> Vec<UnifiedMessage> {
     let mut messages = Vec::with_capacity(records.len());
     for record in records {
         match record.into_unified(thread_id) {
             Ok(message) => messages.push(message),
-            Err(error) => rejections.record(RecordRejectionReason::MissingProvider, || {
-                format!("{}: {error}", path.display())
-            }),
+            Err(_error) => rejections.record(RecordRejectionReason::MissingProvider),
         }
     }
     messages
@@ -434,15 +374,15 @@ pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
     let thread_created_ms = thread.created;
     let mut rejections = RejectionSummary::default();
-    let mut ledger_records = parse_amp_ledger_records(thread.usage_ledger, path, &mut rejections);
+    let mut ledger_records = parse_amp_ledger_records(thread.usage_ledger, &mut rejections);
     let message_records =
-        parse_amp_message_records(thread.messages, thread_created_ms, path, &mut rejections);
+        parse_amp_message_records(thread.messages, thread_created_ms, &mut rejections);
 
     if ledger_records.is_empty() {
         let mut message_records = message_records;
         message_records.sort_by_key(|record| record.timestamp);
         return Ok(ScannedSource {
-            messages: build_amp_messages(message_records, &thread_id, path, &mut rejections),
+            messages: build_amp_messages(message_records, &thread_id, &mut rejections),
             rejections,
             interrupted: None,
         });
@@ -468,7 +408,7 @@ pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedSource> {
     ledger_records.extend(unmatched_message_records);
     ledger_records.sort_by_key(|record| record.timestamp);
     Ok(ScannedSource {
-        messages: build_amp_messages(ledger_records, &thread_id, path, &mut rejections),
+        messages: build_amp_messages(ledger_records, &thread_id, &mut rejections),
         rejections,
         interrupted: None,
     })

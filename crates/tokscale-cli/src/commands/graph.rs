@@ -341,7 +341,7 @@ mod tests {
                 partial_sources: 1,
                 failed_sources: 0,
                 source_data_bytes: 12_345,
-                sources: Vec::new(),
+                issues: Vec::new(),
             },
         };
 

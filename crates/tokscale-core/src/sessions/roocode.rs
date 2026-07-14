@@ -37,12 +37,9 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
 
     let mut usage_events = Vec::new();
     let mut rejections = RejectionSummary::default();
-    for (index, entry) in entries.iter().enumerate() {
-        let event_number = index + 1;
+    for entry in entries {
         let Some(entry) = entry.as_object() else {
-            rejections.record(RecordRejectionReason::MalformedRecord, || {
-                format!("event {event_number}: entry is not an object")
-            });
+            rejections.record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if entry.get("type").and_then(Value::as_str) != Some("say")
@@ -54,19 +51,15 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
         let text = match entry.get("text").and_then(Value::as_str) {
             Some(text) => text,
             None => {
-                rejections.record(RecordRejectionReason::MalformedRecord, || {
-                    format!("event {event_number}: api_req_started is missing text")
-                });
+                rejections.record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
 
         let payload = match parse_api_req_started_payload(text) {
             Ok(payload) => payload,
-            Err(detail) => {
-                rejections.record(RecordRejectionReason::MalformedRecord, || {
-                    format!("event {event_number}: {detail}")
-                });
+            Err(_detail) => {
+                rejections.record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -82,15 +75,11 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
             continue;
         }
         let Some(timestamp) = parse_entry_timestamp(entry.get("ts")) else {
-            rejections.record(RecordRejectionReason::MissingTimestamp, || {
-                format!("event {event_number}: timestamp is missing or invalid")
-            });
+            rejections.record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let Some(provider) = provider_from_api_protocol(payload.api_protocol.as_deref()) else {
-            rejections.record(RecordRejectionReason::MissingProvider, || {
-                format!("event {event_number}: positive usage is missing apiProtocol")
-            });
+            rejections.record(RecordRejectionReason::MissingProvider);
             continue;
         };
         usage_events.push((timestamp, token_breakdown, provider));
@@ -107,10 +96,8 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
     let session_id = extract_session_id(path)?;
     let (model_id, agent) = read_task_metadata(path)?;
     let Some(model_id) = model_id else {
-        for event_number in 1..=usage_events.len() {
-            rejections.record(RecordRejectionReason::MissingModel, || {
-                format!("usage event {event_number}: task metadata has no non-empty model")
-            });
+        for _ in 0..usage_events.len() {
+            rejections.record(RecordRejectionReason::MissingModel);
         }
         return Ok(ScannedSource {
             messages: Vec::new(),
@@ -410,7 +397,6 @@ after"#;
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert_eq!(rejection.sample, Some("event 2: payload is not valid JSON"));
         assert!(scanned.interrupted.is_none());
     }
 
@@ -456,10 +442,6 @@ after"#;
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-timestamp");
-        assert_eq!(
-            rejection.sample,
-            Some("event 1: timestamp is missing or invalid")
-        );
         assert!(scanned.interrupted.is_none());
     }
 
@@ -563,7 +545,6 @@ after"#;
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert_eq!(rejection.sample, Some("event 2: entry is not an object"));
     }
 
     #[test]

@@ -71,6 +71,14 @@ mod tests {
         data.health.degraded_sources = 1;
         data.health.rejected_records = 2;
         data.health.failed_sources = 1;
+        data.health.issues = vec![tokscale_core::source_health::HealthIssueReport {
+            level: "warning".to_string(),
+            source: "zed".to_string(),
+            issue: "missing-model".to_string(),
+            affected_sources: 1,
+            rejected_records: Some(2),
+            handling: "record-skipped".to_string(),
+        }];
 
         let json: serde_json::Value =
             serde_json::from_str(&build_export_json(&data).unwrap()).unwrap();
@@ -79,5 +87,8 @@ mod tests {
         assert_eq!(json["health"]["degradedSources"], 1);
         assert_eq!(json["health"]["rejectedRecords"], 2);
         assert_eq!(json["health"]["failedSources"], 1);
+        assert_eq!(json["health"]["issues"][0]["source"], "zed");
+        assert_eq!(json["health"]["issues"][0]["issue"], "missing-model");
+        assert!(json["health"].get("sources").is_none());
     }
 }

@@ -147,78 +147,46 @@ fn render_details(frame: &mut Frame, app: &mut App, area: Rect, rows: Vec<IssueR
 }
 
 fn issue_rows(health: &HealthReport) -> Vec<IssueRow> {
-    let mut rows = Vec::new();
-    for source in &health.sources {
-        let source_name = get_client_display_name(&source.client);
-        for rejection in source.rejections.entries() {
-            push_or_merge_issue_row(
-                &mut rows,
-                IssueRow {
-                    level: "WARN",
-                    color: Color::Yellow,
-                    source: source_name.clone(),
-                    issue: rejection_issue_label(rejection.key, rejection.label).to_string(),
-                    affected_sources: source.affected_sources,
-                    rejected_records: Some(rejection.count),
-                    handling: "Record Skipped",
-                },
-            );
-        }
-        let source_issue = match source.status.as_str() {
-            "partial" => Some(("Partial Source", "Confirmed Data Kept")),
-            "unavailable" => Some(("Source Unavailable", "Source Skipped")),
-            _ => None,
-        };
-        if let Some((issue, handling)) = source_issue {
-            push_or_merge_issue_row(
-                &mut rows,
-                IssueRow {
-                    level: "ERROR",
-                    color: Color::Red,
-                    source: source_name,
-                    issue: issue.to_string(),
-                    affected_sources: source.affected_sources,
-                    rejected_records: None,
-                    handling,
-                },
-            );
-        }
-    }
-    rows
+    health
+        .issues
+        .iter()
+        .map(|issue| {
+            let (level, color) = match issue.level.as_str() {
+                "warning" => ("WARN", Color::Yellow),
+                "error" => ("ERROR", Color::Red),
+                other => panic!("unsupported health issue level `{other}`"),
+            };
+            IssueRow {
+                level,
+                color,
+                source: get_client_display_name(&issue.source),
+                issue: issue_label(&issue.issue).to_string(),
+                affected_sources: issue.affected_sources,
+                rejected_records: issue.rejected_records,
+                handling: handling_label(&issue.handling),
+            }
+        })
+        .collect()
 }
 
-fn rejection_issue_label<'a>(key: &str, stored_label: &'a str) -> &'a str {
+fn issue_label(key: &str) -> &str {
     match key {
         "missing-model" => "Missing Model",
         "missing-provider" => "Missing Provider",
         "missing-timestamp" => "Missing Timestamp",
         "malformed-record" => "Malformed Record",
-        _ => stored_label,
+        "partial-source" => "Partial Source",
+        "source-unavailable" => "Source Unavailable",
+        other => other,
     }
 }
 
-fn push_or_merge_issue_row(rows: &mut Vec<IssueRow>, candidate: IssueRow) {
-    if let Some(existing) = rows.iter_mut().find(|row| {
-        row.level == candidate.level
-            && row.source == candidate.source
-            && row.issue == candidate.issue
-            && row.handling == candidate.handling
-    }) {
-        existing.affected_sources = existing
-            .affected_sources
-            .checked_add(candidate.affected_sources)
-            .expect("aggregated health issue count must fit in u64");
-        match (&mut existing.rejected_records, candidate.rejected_records) {
-            (Some(existing), Some(candidate)) => {
-                *existing = existing
-                    .checked_add(candidate)
-                    .expect("aggregated rejected record count must fit in u64");
-            }
-            (None, None) => {}
-            _ => panic!("merged health issue rows must use the same count units"),
-        }
-    } else {
-        rows.push(candidate);
+fn handling_label(key: &str) -> &'static str {
+    match key {
+        "record-skipped" => "Record Skipped",
+        "confirmed-data-kept" => "Confirmed Data Kept",
+        "source-skipped" => "Source Skipped",
+        other => panic!("unsupported health issue handling `{other}`"),
     }
 }
 
@@ -628,8 +596,7 @@ fn shrink_column(column: &mut usize, minimum: usize, excess: &mut usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokscale_core::source_health::SourceHealthReport;
-    use tokscale_core::{RejectionSummary, SourceFailure};
+    use tokscale_core::source_health::HealthIssueReport;
 
     use crate::tui::config::TokscaleConfig;
     use crate::tui::themes::ThemeName;
@@ -643,8 +610,6 @@ mod tests {
 
     fn issue_report() -> HealthReport {
         TokscaleConfig::initialize_default_for_tests();
-        let mut rejections = RejectionSummary::default();
-        rejections.record_key("missing-model", || "thread bad-1".to_string());
         HealthReport {
             complete: false,
             clean_sources: 10_190,
@@ -653,30 +618,30 @@ mod tests {
             partial_sources: 1,
             failed_sources: 1,
             source_data_bytes: 2_684_354_560,
-            sources: vec![
-                SourceHealthReport {
-                    client: "zed".to_string(),
-                    path: "C:/Users/test/Zed/threads/threads.db".to_string(),
-                    status: "complete".to_string(),
+            issues: vec![
+                HealthIssueReport {
+                    level: "warning".to_string(),
+                    source: "zed".to_string(),
+                    issue: "missing-model".to_string(),
                     affected_sources: 1,
-                    failure: None,
-                    rejections,
+                    rejected_records: Some(1),
+                    handling: "record-skipped".to_string(),
                 },
-                SourceHealthReport {
-                    client: "opencode".to_string(),
-                    path: "/tmp/opencode.db".to_string(),
-                    status: "unavailable".to_string(),
+                HealthIssueReport {
+                    level: "error".to_string(),
+                    source: "opencode".to_string(),
+                    issue: "source-unavailable".to_string(),
                     affected_sources: 1,
-                    failure: Some(SourceFailure::new("open SQLite", "database is corrupt")),
-                    rejections: RejectionSummary::default(),
+                    rejected_records: None,
+                    handling: "source-skipped".to_string(),
                 },
-                SourceHealthReport {
-                    client: "claude".to_string(),
-                    path: "/tmp/session.jsonl".to_string(),
-                    status: "partial".to_string(),
+                HealthIssueReport {
+                    level: "error".to_string(),
+                    source: "claude".to_string(),
+                    issue: "partial-source".to_string(),
                     affected_sources: 1,
-                    failure: Some(SourceFailure::new("read line", "unexpected EOF")),
-                    rejections: RejectionSummary::default(),
+                    rejected_records: None,
+                    handling: "confirmed-data-kept".to_string(),
                 },
             ],
         }
@@ -730,29 +695,19 @@ mod tests {
     }
 
     #[test]
-    fn failures_with_hidden_operation_differences_merge_into_one_visible_row() {
+    fn preaggregated_failure_renders_as_one_visible_row() {
         TokscaleConfig::initialize_default_for_tests();
         let health = HealthReport {
             complete: false,
             failed_sources: 5,
-            sources: vec![
-                SourceHealthReport {
-                    client: "kiro".to_string(),
-                    path: "/tmp/first".to_string(),
-                    status: "unavailable".to_string(),
-                    affected_sources: 2,
-                    failure: Some(SourceFailure::new("open", "unreadable")),
-                    rejections: RejectionSummary::default(),
-                },
-                SourceHealthReport {
-                    client: "kiro".to_string(),
-                    path: "/tmp/second".to_string(),
-                    status: "unavailable".to_string(),
-                    affected_sources: 3,
-                    failure: Some(SourceFailure::new("decode", "invalid")),
-                    rejections: RejectionSummary::default(),
-                },
-            ],
+            issues: vec![HealthIssueReport {
+                level: "error".to_string(),
+                source: "kiro".to_string(),
+                issue: "source-unavailable".to_string(),
+                affected_sources: 5,
+                rejected_records: None,
+                handling: "source-skipped".to_string(),
+            }],
             ..HealthReport::default()
         };
 
@@ -773,21 +728,17 @@ mod tests {
     #[test]
     fn record_rows_keep_source_and_record_counts_separate() {
         TokscaleConfig::initialize_default_for_tests();
-        let mut rejections = RejectionSummary::default();
-        for index in 0..37 {
-            rejections.record_key("missing-model", || format!("record {index}"));
-        }
         let health = HealthReport {
             complete: false,
             degraded_sources: 5,
             rejected_records: 37,
-            sources: vec![SourceHealthReport {
-                client: "kiro".to_string(),
-                path: "/tmp/example".to_string(),
-                status: "complete".to_string(),
+            issues: vec![HealthIssueReport {
+                level: "warning".to_string(),
+                source: "kiro".to_string(),
+                issue: "missing-model".to_string(),
                 affected_sources: 5,
-                failure: None,
-                rejections,
+                rejected_records: Some(37),
+                handling: "record-skipped".to_string(),
             }],
             ..HealthReport::default()
         };

@@ -1107,7 +1107,7 @@ fn test_opencode_json_only_storage_is_not_reported() {
 }
 
 #[test]
-fn test_opencode_obsolete_sqlite_schema_is_an_explicit_cli_error() {
+fn test_opencode_obsolete_sqlite_schema_reports_aggregate_health_only() {
     let tmp = TempDir::new().unwrap();
     prime_pricing_cache(tmp.path());
     let data_dir = tmp.path().join(".local/share/opencode");
@@ -1129,8 +1129,9 @@ fn test_opencode_obsolete_sqlite_schema_is_an_explicit_cli_error() {
         .success()
         .stdout(predicate::str::contains("\"failedSources\": 1"))
         .stdout(predicate::str::contains(
-            "does not match the current session schema",
+            "\"issue\": \"source-unavailable\"",
         ))
+        .stdout(predicate::str::contains("does not match the current session schema").not())
         .stderr(predicate::str::contains("1 failed source(s)"));
 }
 
@@ -3232,14 +3233,13 @@ fn test_clients_json_reports_broken_claude_mirror_without_losing_payload() {
         .as_array()
         .is_some_and(|rows| !rows.is_empty()));
     assert_eq!(json["health"]["failedSources"], 1);
-    assert_eq!(json["health"]["sources"][0]["client"], "claude");
-    assert!(
-        json["health"]["sources"][0]["failure"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("variant.json")),
-        "health: {}",
-        json["health"]
-    );
+    assert_eq!(json["health"]["issues"][0]["source"], "claude");
+    assert_eq!(json["health"]["issues"][0]["issue"], "source-unavailable");
+    let health_json = serde_json::to_string(&json["health"]).unwrap();
+    assert!(!health_json.contains("variant.json"));
+    assert!(!health_json.contains("failure"));
+    assert!(!health_json.contains("path"));
+    assert!(json["health"].get("sources").is_none());
     assert!(!String::from_utf8_lossy(&output.stderr).contains("variant.json"));
 }
 

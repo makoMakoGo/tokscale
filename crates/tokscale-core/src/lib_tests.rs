@@ -5896,10 +5896,8 @@ fn time_metrics_report_preserves_source_health() {
     assert_eq!(report.metrics.session_count, 0);
     assert!(!report.health.complete);
     assert_eq!(report.health.failed_sources, 1);
-    assert_eq!(
-        report.health.sources[0].path,
-        missing_db.display().to_string()
-    );
+    assert_eq!(report.health.issues[0].source, "opencode");
+    assert_eq!(report.health.issues[0].issue, "source-unavailable");
 }
 
 #[test]
@@ -5924,10 +5922,8 @@ fn local_client_counts_preserve_source_health() {
     assert_eq!(report.counts.get(ClientId::OpenCode), 0);
     assert!(!report.health.complete);
     assert_eq!(report.health.failed_sources, 1);
-    assert_eq!(
-        report.health.sources[0].path,
-        missing_db.display().to_string()
-    );
+    assert_eq!(report.health.issues[0].source, "opencode");
+    assert_eq!(report.health.issues[0].issue, "source-unavailable");
 }
 
 #[test]
@@ -5957,10 +5953,8 @@ fn public_raw_message_report_preserves_source_health_and_metadata() {
     assert!(report.data.is_empty());
     assert!(!report.health.complete);
     assert_eq!(report.health.failed_sources, 1);
-    assert_eq!(
-        report.health.sources[0].path,
-        missing_db.display().to_string()
-    );
+    assert_eq!(report.health.issues[0].source, "opencode");
+    assert_eq!(report.health.issues[0].issue, "source-unavailable");
     assert_ne!(
         report.metadata.source_inventory_signature.as_bytes(),
         &[0_u8; 32]

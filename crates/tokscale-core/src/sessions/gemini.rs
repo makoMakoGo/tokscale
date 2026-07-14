@@ -197,21 +197,14 @@ fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedSource> {
     if value.get("messages").is_some() || value.get("sessionId").is_some() {
         let session = serde_json::from_value::<GeminiSessionEnvelope>(value)
             .map_err(|error| SessionParseError::at_path(path, "decode Gemini session", error))?;
-        return parse_gemini_session(path, session);
+        return parse_gemini_session(session);
     }
 
     let session_id = extract_string(value.get("session_id").or_else(|| value.get("sessionId")));
-    Ok(parse_gemini_headless_value(
-        path,
-        &value,
-        session_id.as_deref(),
-    ))
+    Ok(parse_gemini_headless_value(&value, session_id.as_deref()))
 }
 
-fn parse_gemini_session(
-    path: &Path,
-    session: GeminiSessionEnvelope,
-) -> SessionParseResult<ScannedSource> {
+fn parse_gemini_session(session: GeminiSessionEnvelope) -> SessionParseResult<ScannedSource> {
     let mut scanned = ScannedSource {
         messages: Vec::with_capacity(session.messages.len()),
         ..ScannedSource::default()
@@ -224,15 +217,13 @@ fn parse_gemini_session(
         ));
     }
 
-    for (message_index, value) in session.messages.into_iter().enumerate() {
+    for value in session.messages {
         let msg = match serde_json::from_value::<GeminiMessage>(value) {
             Ok(message) => message,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} message {}: {error}", path.display(), message_index + 1)
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -242,12 +233,7 @@ fn parse_gemini_session(
                 Ok(Some(tokens)) => tokens,
                 Ok(None) => continue,
                 Err(error) => {
-                    record_gemini_rejection(
-                        &mut scanned.rejections,
-                        path,
-                        Some(message_index + 1),
-                        &error,
-                    );
+                    record_gemini_rejection(&mut scanned.rejections, &error);
                     continue;
                 }
             },
@@ -260,13 +246,7 @@ fn parse_gemini_session(
         let Some(model) = msg.model.filter(|model| !model.trim().is_empty()) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!(
-                        "{} message {}: Gemini token message is missing a non-empty model",
-                        path.display(),
-                        message_index + 1
-                    )
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
 
@@ -274,25 +254,17 @@ fn parse_gemini_session(
             Some(timestamp) => {
                 let timestamp = match chrono::DateTime::parse_from_rfc3339(&timestamp) {
                     Ok(timestamp) => timestamp.timestamp_millis(),
-                    Err(error) => {
+                    Err(_error) => {
                         scanned
                             .rejections
-                            .record(RecordRejectionReason::MissingTimestamp, || {
-                                format!("{} message {}: {error}", path.display(), message_index + 1)
-                            });
+                            .record(RecordRejectionReason::MissingTimestamp);
                         continue;
                     }
                 };
                 if timestamp <= 0 {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MissingTimestamp, || {
-                            format!(
-                                "{} message {}: Gemini token message timestamp must be positive",
-                                path.display(),
-                                message_index + 1
-                            )
-                        });
+                        .record(RecordRejectionReason::MissingTimestamp);
                     continue;
                 }
                 timestamp
@@ -300,13 +272,7 @@ fn parse_gemini_session(
             None => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingTimestamp, || {
-                        format!(
-                            "{} message {}: Gemini token message is missing a timestamp",
-                            path.display(),
-                            message_index + 1
-                        )
-                    });
+                    .record(RecordRejectionReason::MissingTimestamp);
                 continue;
             }
         };
@@ -318,12 +284,7 @@ fn parse_gemini_session(
     Ok(scanned)
 }
 
-fn record_gemini_rejection(
-    rejections: &mut RejectionSummary,
-    path: &Path,
-    record_number: Option<usize>,
-    error: &SessionParseError,
-) {
+fn record_gemini_rejection(rejections: &mut RejectionSummary, error: &SessionParseError) {
     let reason = match error.operation() {
         "validate token message model" | "validate stats model" => {
             RecordRejectionReason::MissingModel
@@ -333,12 +294,7 @@ fn record_gemini_rejection(
         }
         _ => RecordRejectionReason::MalformedRecord,
     };
-    rejections.record(reason, || match record_number {
-        Some(record_number) => {
-            format!("{} record {record_number}: {error}", path.display())
-        }
-        None => format!("{}: {error}", path.display()),
-    });
+    rejections.record(reason);
 }
 
 fn build_gemini_token_message(
@@ -547,12 +503,7 @@ fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<ScannedSource>
                         session_id = Some(id);
                     }
                 }
-                Err(error) => record_gemini_rejection(
-                    &mut scanned.rejections,
-                    path,
-                    Some(line_number),
-                    &error,
-                ),
+                Err(error) => record_gemini_rejection(&mut scanned.rejections, &error),
             }
             continue;
         }
@@ -564,17 +515,12 @@ fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<ScannedSource>
             let usage_scan = match extract_gemini_usages(stats, effective_model) {
                 Ok(scan) => scan,
                 Err(error) => {
-                    record_gemini_rejection(
-                        &mut scanned.rejections,
-                        path,
-                        Some(line_number),
-                        &error,
-                    );
+                    record_gemini_rejection(&mut scanned.rejections, &error);
                     continue;
                 }
             };
             for error in usage_scan.rejections {
-                record_gemini_rejection(&mut scanned.rejections, path, Some(line_number), &error);
+                record_gemini_rejection(&mut scanned.rejections, &error);
             }
             let usages = usage_scan.usages;
             if usages.is_empty() {
@@ -587,17 +533,17 @@ fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<ScannedSource>
                 continue;
             }
             let Some(resolved_session) = effective_session.as_deref() else {
-                scanned.rejections.record(RecordRejectionReason::MalformedRecord, || {
-                    format!("{} line {line_number}: Gemini stats with positive tokens is missing a non-empty session identifier", path.display())
-                });
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             };
             let Some(timestamp) =
                 extract_timestamp_from_value(&value).filter(|timestamp| *timestamp > 0)
             else {
-                scanned.rejections.record(RecordRejectionReason::MissingTimestamp, || {
-                        format!("{} line {line_number}: Gemini stats with positive tokens is missing a timestamp", path.display())
-                    });
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingTimestamp);
                 continue;
             };
             if let Some(model) = record_model {
@@ -639,17 +585,13 @@ fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-fn parse_gemini_headless_value(
-    path: &Path,
-    value: &Value,
-    session_id: Option<&str>,
-) -> ScannedSource {
+fn parse_gemini_headless_value(value: &Value, session_id: Option<&str>) -> ScannedSource {
     let mut scanned = ScannedSource::default();
     if value.get("tokens").is_some() {
         match parse_direct_gemini_token_message(value, None, session_id) {
             Ok(Some(message)) => scanned.messages.push(message),
             Ok(None) => {}
-            Err(error) => record_gemini_rejection(&mut scanned.rejections, path, None, &error),
+            Err(error) => record_gemini_rejection(&mut scanned.rejections, &error),
         }
         return scanned;
     }
@@ -666,33 +608,28 @@ fn parse_gemini_headless_value(
     let usage_scan = match extract_gemini_usages(stats, model_hint) {
         Ok(scan) => scan,
         Err(error) => {
-            record_gemini_rejection(&mut scanned.rejections, path, None, &error);
+            record_gemini_rejection(&mut scanned.rejections, &error);
             return scanned;
         }
     };
     for error in usage_scan.rejections {
-        record_gemini_rejection(&mut scanned.rejections, path, None, &error);
+        record_gemini_rejection(&mut scanned.rejections, &error);
     }
     let usages = usage_scan.usages;
     if usages.is_empty() {
         return scanned;
     }
     let Some(resolved_session) = session_id else {
-        scanned.rejections.record(RecordRejectionReason::MalformedRecord, || {
-            format!("{}: Gemini stats with positive tokens is missing a non-empty session identifier", path.display())
-        });
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MalformedRecord);
         return scanned;
     };
     let Some(timestamp) = extract_timestamp_from_value(value).filter(|timestamp| *timestamp > 0)
     else {
         scanned
             .rejections
-            .record(RecordRejectionReason::MissingTimestamp, || {
-                format!(
-                    "{}: Gemini stats with positive tokens is missing a timestamp",
-                    path.display()
-                )
-            });
+            .record(RecordRejectionReason::MissingTimestamp);
         return scanned;
     };
 

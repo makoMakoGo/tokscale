@@ -256,7 +256,6 @@ mod tests {
         assert_eq!(source.path, db_path);
         let entries: Vec<_> = source.rejections.entries().collect();
         assert_eq!(entries[0].key, "missing-model");
-        assert!(entries[0].sample.unwrap().contains("zed-thread-bad"));
     }
 
     #[test]
@@ -308,7 +307,6 @@ mod tests {
         assert_eq!(health.rejections.total(), 1);
         let entries: Vec<_> = health.rejections.entries().collect();
         assert_eq!(entries[0].key, "missing-model");
-        assert!(entries[0].sample.unwrap().contains("zed-thread-bad"));
     }
 
     #[test]

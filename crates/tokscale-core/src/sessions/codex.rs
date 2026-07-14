@@ -319,7 +319,6 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
 
     'records: loop {
         line.clear();
-        let record_offset = consumed_offset;
         let bytes_read = match reader.read_line(&mut line) {
             Ok(bytes_read) => bytes_read,
             Err(source) => {
@@ -346,14 +345,12 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
         let pending_before = pending_model_messages.clone();
 
         macro_rules! reject_record {
-            ($reason:expr, $error:expr) => {{
+            ($reason:expr) => {{
                 let reason = $reason;
-                let error = $error;
-                let sample = format!("Codex JSONL byte offset {record_offset}: {error}");
                 state = state_before.clone();
                 messages.truncate(messages_len_before);
                 pending_model_messages = pending_before.clone();
-                rejections.record(reason, || sample);
+                rejections.record(reason);
                 continue 'records;
             }};
         }
@@ -362,11 +359,10 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
             ($reason:expr, $error:expr) => {{
                 let reason = $reason;
                 let error = $error;
-                let sample = format!("Codex JSONL byte offset {record_offset}: {error}");
                 state = state_before.clone();
                 messages.truncate(messages_len_before);
                 pending_model_messages = pending_before.clone();
-                rejections.record(reason, || sample);
+                rejections.record(reason);
                 interrupted = Some(SourceFailure::from(&error));
                 break 'records;
             }};
@@ -755,15 +751,12 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
             if codex_schema_invalid_value_may_affect_state(&value) {
                 interrupt_on_record!(RecordRejectionReason::MalformedRecord, error);
             }
-            reject_record!(RecordRejectionReason::MalformedRecord, error);
+            reject_record!(RecordRejectionReason::MalformedRecord);
         }
 
         let mut json_probe = trimmed.as_bytes().to_vec();
-        if let Err(source) = simd_json::from_slice::<Value>(&mut json_probe) {
-            reject_record!(
-                RecordRejectionReason::MalformedRecord,
-                SessionParseError::new("decode Codex JSONL line", source)
-            );
+        if simd_json::from_slice::<Value>(&mut json_probe).is_err() {
+            reject_record!(RecordRejectionReason::MalformedRecord);
         }
     }
 
@@ -772,8 +765,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
             "resolve Codex token-count model",
             "source ended with token-count rows whose model was never identified",
         );
-        let sample = format!("Codex JSONL byte offset {consumed_offset}: {error}");
-        rejections.record(RecordRejectionReason::MissingModel, || sample);
+        rejections.record(RecordRejectionReason::MissingModel);
         interrupted = Some(SourceFailure::from(&error));
     }
 

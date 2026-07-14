@@ -216,9 +216,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
     if context_window < 0 {
         scanned
             .rejections
-            .record(RecordRejectionReason::MalformedRecord, || {
-                "context_window_tokens must not be negative".to_string()
-            });
+            .record(RecordRejectionReason::MalformedRecord);
     }
     let turns = header
         .session_state
@@ -234,7 +232,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
             let reader = BufReader::new(jsonl_file);
             let mut pending_prompt: Option<(usize, Option<i64>)> = None;
 
-            for (line_index, line) in reader.lines().enumerate() {
+            for line in reader.lines() {
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
@@ -320,11 +318,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
                     Ok(Some(parsed)) => parsed,
                     Ok(None) => continue,
                     Err(error) => {
-                        scanned
-                            .rejections
-                            .record(kiro_rejection_reason(&error), || {
-                                format!("JSONL line {}: {error}", line_index + 1)
-                            });
+                        scanned.rejections.record(kiro_rejection_reason(&error));
                         scanned.interrupted = Some(SourceFailure::from(&error));
                         break;
                     }
@@ -538,8 +532,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
             Ok(Some(message)) => scanned.messages.push(message),
             Ok(None) => {}
             Err(error) => scanned
-                .rejections
-                .record(kiro_rejection_reason(&error), || error.to_string()),
+                .rejections.record(kiro_rejection_reason(&error)),
         }
     }
     Ok(scanned)
@@ -669,12 +662,10 @@ fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<ScannedSour
     let mut scanned = ScannedSource::default();
     let snapshot: KiroGlobalStorageSnapshot = match serde_json::from_str(&json) {
         Ok(snapshot) => snapshot,
-        Err(error) => {
+        Err(_error) => {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("invalid Kiro global storage record: {error}")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             return Ok(scanned);
         }
     };
@@ -706,9 +697,7 @@ fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<ScannedSour
     let Some(session_id) = session_id else {
         scanned
             .rejections
-            .record(RecordRejectionReason::MalformedRecord, || {
-                "Kiro global storage record is missing a non-empty session_id".to_string()
-            });
+            .record(RecordRejectionReason::MalformedRecord);
         return Ok(scanned);
     };
     let session_id = session_id.to_string();
@@ -720,9 +709,7 @@ fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<ScannedSour
     let Some(model_id) = model_id else {
         scanned
             .rejections
-            .record(RecordRejectionReason::MissingModel, || {
-                "Kiro global storage record is missing a concrete model".to_string()
-            });
+            .record(RecordRejectionReason::MissingModel);
         return Ok(scanned);
     };
     let model_id = model_id.to_string();
@@ -733,9 +720,7 @@ fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<ScannedSour
     let Some(timestamp) = timestamp else {
         scanned
             .rejections
-            .record(RecordRejectionReason::MissingTimestamp, || {
-                "Kiro global storage record is missing a valid positive timestamp".to_string()
-            });
+            .record(RecordRejectionReason::MissingTimestamp);
         return Ok(scanned);
     };
     let workspace = kiro_global_storage_workspace(path);
@@ -780,7 +765,6 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
     })?;
 
     let mut scanned = ScannedSource::default();
-    let mut row_index = 0_u64;
 
     loop {
         let row = match rows.next() {
@@ -793,29 +777,24 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 break;
             }
         };
-        row_index += 1;
         let decoded = (|| -> rusqlite::Result<(String, String, String)> {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })();
         let (cwd, conversation_id, json_str) = match decoded {
             Ok(decoded) => decoded,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("conversation row {row_index} could not be decoded: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let parsed = match serde_json::from_str::<KiroDbConversation>(&json_str) {
             Ok(parsed) => parsed,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("conversation `{conversation_id}` has invalid JSON: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -828,9 +807,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         if context_window < 0 {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("conversation `{conversation_id}` has negative context_window_tokens")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
         }
         let model_id = parsed
             .model_info
@@ -845,15 +822,10 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         for (index, turn) in history.into_iter().enumerate() {
             let turn = match serde_json::from_str::<KiroDbTurn>(turn.get()) {
                 Ok(turn) => turn,
-                Err(error) => {
-                    scanned.rejections.record(
-                        RecordRejectionReason::MalformedRecord,
-                        || {
-                            format!(
-                                "conversation `{conversation_id}` turn {index} has invalid JSON: {error}"
-                            )
-                        },
-                    );
+                Err(_error) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             };
@@ -864,38 +836,23 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             let ctx_pct = meta.context_usage_percentage.unwrap_or(0.0);
             let response_size = meta.response_size.unwrap_or(0);
             if !ctx_pct.is_finite() || ctx_pct < 0.0 {
-                scanned.rejections.record(
-                    RecordRejectionReason::MalformedRecord,
-                    || {
-                        format!(
-                            "conversation `{conversation_id}` turn {index} has invalid context usage"
-                        )
-                    },
-                );
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
             if context_window < 0 && ctx_pct > 0.0 {
-                scanned.rejections.record(
-                    RecordRejectionReason::MalformedRecord,
-                    || {
-                        format!(
-                            "conversation `{conversation_id}` turn {index} requires negative context_window_tokens for its context estimate"
-                        )
-                    },
-                );
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
 
             let input = if context_window > 0 && ctx_pct > 0.0 {
                 let Some(input) = checked_context_token_estimate(context_window, ctx_pct) else {
-                    scanned.rejections.record(
-                        RecordRejectionReason::MalformedRecord,
-                        || {
-                            format!(
-                                "conversation `{conversation_id}` turn {index} context token estimate exceeds i64"
-                            )
-                        },
-                    );
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 };
                 input
@@ -903,14 +860,9 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 0
             };
             let Some(output) = checked_estimate_tokens(response_size) else {
-                scanned.rejections.record(
-                    RecordRejectionReason::MalformedRecord,
-                    || {
-                        format!(
-                            "conversation `{conversation_id}` turn {index} response token estimate exceeds i64"
-                        )
-                    },
-                );
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             };
 
@@ -922,17 +874,13 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             if conversation_id.is_empty() {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        "token-bearing conversation has an empty conversation_id".to_string()
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
             let Some(model_id) = model_id else {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingModel, || {
-                        format!("conversation `{conversation_id}` is missing a concrete model id")
-                    });
+                    .record(RecordRejectionReason::MissingModel);
                 continue;
             };
 
@@ -945,14 +893,9 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 .or(meta.stream_end_timestamp_ms)
                 .filter(|timestamp| *timestamp > 0);
             let Some(timestamp) = timestamp else {
-                scanned.rejections.record(
-                    RecordRejectionReason::MissingTimestamp,
-                    || {
-                        format!(
-                            "conversation `{conversation_id}` turn {index} has no positive timestamp"
-                        )
-                    },
-                );
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingTimestamp);
                 continue;
             };
 
@@ -966,11 +909,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             if tokens.checked_total().is_none() {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!(
-                            "conversation `{conversation_id}` turn {index} token total exceeds i64"
-                        )
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
 

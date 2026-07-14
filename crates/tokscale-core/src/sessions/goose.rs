@@ -100,7 +100,6 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
     })?;
 
     let mut scanned = ScannedSource::default();
-    let mut row_index = 0_u64;
     loop {
         let row = match rows.next() {
             Ok(Some(row)) => row,
@@ -112,7 +111,6 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 break;
             }
         };
-        row_index += 1;
         type GooseRow = (
             String,
             Option<String>,
@@ -152,12 +150,10 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             accumulated_output_tokens,
         ) = match decoded {
             Ok(decoded) => decoded,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("session row {row_index} could not be decoded: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -170,9 +166,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         if input < 0 || output < 0 || total < 0 {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("session `{session_id}` has a negative token count")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
 
@@ -184,17 +178,13 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         if session_id.is_empty() {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    "token-bearing row has an empty session id".to_string()
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
         let Some(model_config) = model_config_json.as_ref() else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!("session `{session_id}` has no model_config_json")
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         let model_id = match parse_model_config(db_path, model_config) {
@@ -205,41 +195,35 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 } else {
                     RecordRejectionReason::MalformedRecord
                 };
-                scanned.rejections.record(reason, || error.to_string());
+                scanned.rejections.record(reason);
                 continue;
             }
         };
         let Some(timestamp) = created_at.as_deref().and_then(parse_created_at) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!("session `{session_id}` has no valid created_at timestamp")
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let provider = match resolved_provider(db_path, provider_name, &model_id) {
             Ok(provider) => provider,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingProvider, || error.to_string());
+                    .record(RecordRejectionReason::MissingProvider);
                 continue;
             }
         };
         let Some(non_reasoning_tokens) = input.checked_add(output) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("session `{session_id}` token total overflows i64")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if reported_total.is_some_and(|total| total < non_reasoning_tokens) {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("session `{session_id}` total token count is below input plus output")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
         let mut msg = UnifiedMessage::new(

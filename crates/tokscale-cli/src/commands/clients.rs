@@ -116,20 +116,8 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     };
     let built_in_extra_paths = match built_in_extra_scan_paths_for(&home_dir, &all_clients) {
         Ok(paths) => paths,
-        Err(ScannerError::ClaudeMirror(source)) => {
-            let path = source
-                .path()
-                .unwrap_or(&home_dir)
-                .to_string_lossy()
-                .into_owned();
-            health.record_unavailable_source(
-                ClientId::Claude.as_str(),
-                path,
-                tokscale_core::SourceFailure::new(
-                    "discover Claude mirror paths for clients diagnostics",
-                    source.to_string(),
-                ),
-            );
+        Err(ScannerError::ClaudeMirror(_)) => {
+            health.record_unavailable_source(ClientId::Claude.as_str());
             vec![(ClientId::Claude, home_dir.join(".claude/transcripts"))]
         }
         Err(error) => return Err(error.into()),
@@ -139,16 +127,8 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
     let opencode_data_root = opencode_data_dir_with_env_strategy(&home_dir_str, use_env_roots);
     let opencode_auto_dbs = match discover_opencode_dbs(&opencode_data_root) {
         Ok(paths) => paths,
-        Err(error) => {
-            let path = opencode_data_root.to_string_lossy().into_owned();
-            health.record_unavailable_source(
-                ClientId::OpenCode.as_str(),
-                path,
-                tokscale_core::SourceFailure::new(
-                    "discover OpenCode databases for clients diagnostics",
-                    error.to_string(),
-                ),
-            );
+        Err(_) => {
+            health.record_unavailable_source(ClientId::OpenCode.as_str());
             Vec::new()
         }
     };

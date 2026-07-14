@@ -1362,10 +1362,9 @@ mod tests {
             )],
             None,
         );
-        entry.rejections.record(
-            crate::source_health::RecordRejectionReason::MissingModel,
-            || "bad cached row".to_string(),
-        );
+        entry
+            .rejections
+            .record(crate::source_health::RecordRejectionReason::MissingModel);
         let mut cache = message_cache::SourceMessageCache::default();
         cache.insert(entry);
         let hit = match OMP_ADAPTER.plan_cache_hit(unit, &cache).unwrap() {

@@ -1151,16 +1151,15 @@ fn record_claude_error_rejection(rejections: &mut RejectionSummary, error: &Sess
     } else {
         RecordRejectionReason::MalformedRecord
     };
-    rejections.record(reason, || detail);
+    rejections.record(reason);
 }
 
 fn record_claude_rejection(
     rejections: &mut RejectionSummary,
     reason: RecordRejectionReason,
-    error: &SessionParseError,
+    _error: &SessionParseError,
 ) {
-    let sample = error.to_string();
-    rejections.record(reason, || sample);
+    rejections.record(reason);
 }
 
 fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
@@ -2572,7 +2571,6 @@ mod tests {
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-timestamp");
-        assert!(rejection.sample.unwrap().contains("line 1"));
         assert!(scanned.interrupted.is_none());
     }
 
@@ -2608,7 +2606,6 @@ mod tests {
         assert_eq!(scanned.messages.len(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-timestamp");
-        assert!(rejection.sample.unwrap().contains("line 2"));
         assert!(scanned.interrupted.is_none());
     }
 
@@ -2654,7 +2651,6 @@ mod tests {
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-timestamp");
-        assert!(rejection.sample.unwrap().contains("line 1"));
         let failure = scanned.interrupted.unwrap();
         assert_eq!(failure.operation, "validate Claude headless timestamp");
     }
@@ -2701,12 +2697,11 @@ mod tests {
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-model");
-        assert!(rejection.sample.unwrap().contains("missing model"));
         assert!(scanned.interrupted.is_none());
     }
 
     #[test]
-    fn malformed_sidechain_meta_keeps_usage_and_reports_sidecar_path() {
+    fn malformed_sidechain_meta_keeps_usage_and_reports_rejection() {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_dir = temp_dir.path().join(".claude/projects/project-a");
         let path = project_dir.join("session/subagents/agent-badmeta.jsonl");
@@ -2731,14 +2726,11 @@ mod tests {
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        let sample = rejection.sample.unwrap();
-        assert!(sample.contains(&meta_path.display().to_string()));
-        assert!(sample.contains("decode Claude sidechain metadata"));
         assert!(scanned.interrupted.is_none());
     }
 
     #[test]
-    fn malformed_sidechain_parent_keeps_usage_and_reports_parent_path() {
+    fn malformed_sidechain_parent_keeps_usage_and_reports_rejection() {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_dir = temp_dir.path().join(".claude/projects/project-a");
         let parent_path = project_dir.join("session.jsonl");
@@ -2764,9 +2756,6 @@ mod tests {
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        let sample = rejection.sample.unwrap();
-        assert!(sample.contains(&parent_path.display().to_string()));
-        assert!(sample.contains("decode Claude parent session line"));
         assert!(scanned.interrupted.is_none());
     }
 
@@ -2968,7 +2957,6 @@ mod tests {
         assert_eq!(scanned.messages[0].tokens.output, 100);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-model");
-        assert!(rejection.sample.unwrap().contains("missing model"));
         assert!(scanned.interrupted.is_none());
     }
 

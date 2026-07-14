@@ -407,7 +407,6 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
     let mut scanned = ScannedSource::default();
     let mut fingerprint_indices: HashMap<OpenCodeSqliteFingerprint, usize> = HashMap::new();
     let mut dedup_states: Vec<OpenCodeSqliteDedupState> = Vec::new();
-    let mut row_index = 0_u64;
 
     loop {
         let row = match rows.next() {
@@ -425,66 +424,40 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
                 break;
             }
         };
-        row_index += 1;
         let row_id: String = match row.get(0) {
             Ok(row_id) => row_id,
-            Err(source) => {
-                let error = OpenCodeSqliteError::RowId {
-                    db_path: db_path.to_path_buf(),
-                    source,
-                };
+            Err(_) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("row {row_index}: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let data_value = match row.get_ref(2) {
             Ok(data_value) => data_value,
-            Err(source) => {
-                let error = OpenCodeSqliteError::Row {
-                    db_path: db_path.to_path_buf(),
-                    row_id: row_id.clone(),
-                    source,
-                };
+            Err(_) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let data_json = match data_value.as_str() {
             Ok(data_json) => data_json,
-            Err(source) => {
-                let error = OpenCodeSqliteError::Row {
-                    db_path: db_path.to_path_buf(),
-                    row_id: row_id.clone(),
-                    source: rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        data_value.data_type(),
-                        Box::new(source),
-                    ),
-                };
+            Err(_) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
 
         let msg = match decode_opencode_assistant(data_json) {
             Ok(msg) => msg,
-            Err(source) => {
-                let error = OpenCodeSqliteError::PayloadDecode {
-                    db_path: db_path.to_path_buf(),
-                    row_id: row_id.clone(),
-                    source,
-                };
+            Err(_) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -503,14 +476,9 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
         } = msg;
 
         let Some(tokens) = tokens else {
-            let error = OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: OpenCodeMessageSemanticError::MissingTokens,
-            };
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let Some(tokens) = tokens.0 else {
@@ -534,128 +502,72 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
 
         let session_id: String = match row.get(1) {
             Ok(session_id) => session_id,
-            Err(source) => {
-                let error = OpenCodeSqliteError::Row {
-                    db_path: db_path.to_path_buf(),
-                    row_id: row_id.clone(),
-                    source,
-                };
+            Err(_) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let workspace_root: Option<String> = match row.get(3) {
             Ok(workspace_root) => workspace_root,
-            Err(source) => {
-                let error = OpenCodeSqliteError::Row {
-                    db_path: db_path.to_path_buf(),
-                    row_id: row_id.clone(),
-                    source,
-                };
+            Err(_) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
 
         if session_id.trim().is_empty() {
-            let error = OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: OpenCodeMessageSemanticError::EmptySessionId,
-            };
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
 
         let Some(model_id) = model_id else {
-            let error = OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: OpenCodeMessageSemanticError::MissingModelId,
-            };
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || error.to_string());
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         if model_id.trim().is_empty() {
-            let error = OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: OpenCodeMessageSemanticError::EmptyModelId,
-            };
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || error.to_string());
+                .record(RecordRejectionReason::MissingModel);
             continue;
         }
         let Some(provider_id) = provider_id else {
-            let error = OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: OpenCodeMessageSemanticError::MissingProviderId,
-            };
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || error.to_string());
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         };
         if provider_id.trim().is_empty() {
-            let error = OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: OpenCodeMessageSemanticError::EmptyProviderId,
-            };
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || error.to_string());
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         }
         let Some(time) = time else {
-            let error = OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: OpenCodeMessageSemanticError::MissingTime,
-            };
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    error.to_string()
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let Some(created) = time.created else {
-            let error = OpenCodeSqliteError::Semantic {
-                db_path: db_path.to_path_buf(),
-                row_id: row_id.clone(),
-                source: OpenCodeMessageSemanticError::MissingTime,
-            };
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    error.to_string()
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let created_timestamp = match validate_created_timestamp(created) {
             Ok(timestamp) => timestamp,
-            Err(source) => {
-                let error = OpenCodeSqliteError::Semantic {
-                    db_path: db_path.to_path_buf(),
-                    row_id: row_id.clone(),
-                    source,
-                };
+            Err(_) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingTimestamp, || {
-                        error.to_string()
-                    });
+                    .record(RecordRejectionReason::MissingTimestamp);
                 continue;
             }
         };
@@ -862,7 +774,6 @@ mod tests {
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        assert!(rejection.sample.unwrap().contains("02-bad"));
         assert!(scanned.interrupted.is_none());
     }
 
@@ -1018,13 +929,10 @@ mod tests {
         assert!(scanned.interrupted.is_none());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        let sample = rejection.sample.unwrap();
-        assert!(sample.contains("row 1"));
-        assert!(sample.contains(path.to_str().unwrap()));
     }
 
     #[test]
-    fn row_failure_after_id_carries_database_and_row_context() {
+    fn row_failure_after_id_is_rejected_without_interrupting() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = create_current_db(&path);
@@ -1039,13 +947,10 @@ mod tests {
         assert!(scanned.interrupted.is_none());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        let sample = rejection.sample.unwrap();
-        assert!(sample.contains(path.to_str().unwrap()));
-        assert!(sample.contains("bad-data-column"));
     }
 
     #[test]
-    fn payload_decode_error_carries_database_row_and_source() {
+    fn payload_decode_error_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = create_current_db(&path);
@@ -1063,13 +968,10 @@ mod tests {
         let scanned = parse_opencode_sqlite(&path).unwrap();
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        let sample = rejection.sample.unwrap();
-        assert!(sample.contains(path.to_str().unwrap()));
-        assert!(sample.contains("bad-model-type"));
     }
 
     #[test]
-    fn malformed_json_is_a_payload_error_with_database_and_row_context() {
+    fn malformed_json_is_a_record_rejection() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = create_current_db(&path);
@@ -1083,9 +985,6 @@ mod tests {
         let scanned = parse_opencode_sqlite(&path).unwrap();
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
-        let sample = rejection.sample.unwrap();
-        assert!(sample.contains(path.to_str().unwrap()));
-        assert!(sample.contains("malformed-json"));
     }
 
     #[test]
@@ -1163,7 +1062,6 @@ mod tests {
             assert!(scanned.interrupted.is_none());
             let rejection = scanned.rejections.entries().next().unwrap();
             assert_eq!(rejection.key, expected_reason, "row {row_id}");
-            assert!(rejection.sample.unwrap().contains(row_id));
         }
     }
 
@@ -1235,7 +1133,7 @@ mod tests {
             ),
         ];
 
-        for (row_id, session_id, payload, expected_field, expected_reason) in cases {
+        for (row_id, session_id, payload, _expected_field, expected_reason) in cases {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("opencode.db");
             let conn = create_current_db(&path);
@@ -1250,9 +1148,6 @@ mod tests {
             assert!(scanned.interrupted.is_none());
             let rejection = scanned.rejections.entries().next().unwrap();
             assert_eq!(rejection.key, expected_reason, "row {row_id}");
-            let sample = rejection.sample.unwrap();
-            assert!(sample.contains(row_id));
-            assert!(sample.contains(expected_field));
         }
     }
 

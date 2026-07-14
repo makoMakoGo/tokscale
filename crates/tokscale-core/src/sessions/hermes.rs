@@ -56,7 +56,6 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> 
         .map_err(|error| SessionParseError::new("execute Hermes session query", error))?;
 
     let mut scanned = ScannedSource::default();
-    let mut row_index = 0_u64;
     loop {
         let row = match rows.next() {
             Ok(Some(row)) => row,
@@ -67,7 +66,6 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> 
                 break;
             }
         };
-        row_index += 1;
         type HermesRow = (
             String,
             Option<String>,
@@ -107,12 +105,10 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> 
             reasoning,
         ) = match decoded {
             Ok(decoded) => decoded,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("session row {row_index} could not be decoded: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -122,9 +118,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> 
         {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("session `{session_id}` contains a negative token count")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
         let tokens = TokenBreakdown {
@@ -137,9 +131,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> 
         let Some(token_total) = tokens.checked_total() else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("session `{session_id}` token total overflows i64")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if token_total == 0 {
@@ -151,25 +143,19 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> 
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!("session `{session_id}` is missing a non-empty model")
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
         let Some(timestamp) = started_at.and_then(parse_epoch_f64_millis) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!("session `{session_id}` has no valid started_at timestamp")
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
         let Some(provider) = resolved_provider(billing_provider, &model_id) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || {
-                    format!("session `{session_id}` has no resolvable provider")
-                });
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         };
         let mut msg = UnifiedMessage::new_with_agent(

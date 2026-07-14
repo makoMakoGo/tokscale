@@ -69,7 +69,6 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         .map_err(|error| SessionParseError::new("execute Kilo message query", error))?;
 
     let mut scanned = ScannedSource::default();
-    let mut row_index = 0_u64;
 
     loop {
         let row = match rows.next() {
@@ -81,37 +80,30 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 break;
             }
         };
-        row_index += 1;
         let row_id = match row.get::<_, String>(0) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("row {row_index}: failed to decode Kilo message id: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let row_session_id = match row.get::<_, String>(1) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("message `{row_id}` has an invalid session id: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let data_json = match row.get::<_, String>(2) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("message `{row_id}` has an invalid data payload: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -119,12 +111,10 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         let mut bytes = data_json.into_bytes();
         let value: serde_json::Value = match simd_json::from_slice(&mut bytes) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("message `{row_id}` has invalid JSON: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -134,20 +124,16 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             None => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("message `{row_id}` is missing a string role")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         }
         let msg: KiloMessage = match serde_json::from_value(value) {
             Ok(message) => message,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("assistant message `{row_id}` has invalid fields: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -155,9 +141,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(tokens) = msg.tokens else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("assistant message `{row_id}` is missing tokens")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
 
@@ -173,9 +157,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("assistant message `{row_id}` contains a negative token count")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
 
@@ -189,9 +171,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(token_total) = token_breakdown.checked_total() else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("assistant message `{row_id}` token total overflows i64")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         if token_total == 0 {
@@ -210,9 +190,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingModel, || {
-                    format!("assistant message `{row_id}` is missing modelID")
-                });
+                .record(RecordRejectionReason::MissingModel);
             continue;
         };
 
@@ -228,9 +206,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(session_id) = session_id else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!("assistant message `{row_id}` has no non-empty session id")
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         let timestamp = msg
@@ -243,9 +219,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(timestamp) = timestamp else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingTimestamp, || {
-                    format!("assistant message `{row_id}` is missing a valid created timestamp")
-                });
+                .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
 
@@ -259,9 +233,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(provider) = provider else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MissingProvider, || {
-                    format!("assistant message `{row_id}` has no resolvable provider")
-                });
+                .record(RecordRejectionReason::MissingProvider);
             continue;
         };
 

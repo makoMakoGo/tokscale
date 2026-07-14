@@ -84,16 +84,13 @@ pub fn parse_antigravity_cli_file(path: &Path) -> SessionParseResult<ScannedSour
                 break;
             }
         };
-        let current_row_index = row_index;
         row_index += 1;
         let blob = match row.get::<_, Vec<u8>>(0) {
             Ok(blob) => blob,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} row {current_row_index}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -109,9 +106,7 @@ pub fn parse_antigravity_cli_file(path: &Path) -> SessionParseResult<ScannedSour
                 } else {
                     RecordRejectionReason::MalformedRecord
                 };
-                scanned.rejections.record(reason, || {
-                    format!("{} row {current_row_index}: {error}", path.display())
-                });
+                scanned.rejections.record(reason);
             }
         }
     }

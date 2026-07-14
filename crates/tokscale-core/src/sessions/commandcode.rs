@@ -87,12 +87,10 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
         let chars = match entry.content.as_ref() {
             Some(content) => match content_chars(content) {
                 Ok(chars) => chars,
-                Err(error) => {
+                Err(_error) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            format!("{} line {line_number}: {error}", path.display())
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             },
@@ -117,15 +115,9 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
                     reasoning: 0,
                 };
                 if tokens.checked_total().is_none() {
-                    scanned.rejections.record(
-                        RecordRejectionReason::MalformedRecord,
-                        || {
-                            format!(
-                                "{} line {line_number}: Command Code estimated token total exceeds i64",
-                                path.display()
-                            )
-                        },
-                    );
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
 
@@ -137,9 +129,9 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
                     .map(str::to_string)
                     .or_else(|| session_id.clone())
                 else {
-                    scanned.rejections.record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: Command Code assistant turn is missing a non-empty sessionId", path.display())
-                    });
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 };
                 let timestamp = match entry.timestamp.as_deref() {
@@ -147,17 +139,16 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
                         .filter(|timestamp| *timestamp > 0)
                         .unwrap_or(0),
                     None => {
-                        scanned.rejections.record(RecordRejectionReason::MissingTimestamp, || {
-                            format!("{} line {line_number}: Command Code assistant turn is missing a timestamp", path.display())
-                        });
+                        scanned
+                            .rejections
+                            .record(RecordRejectionReason::MissingTimestamp);
                         continue;
                     }
                 };
                 if timestamp <= 0 {
-                    let timestamp_text = entry.timestamp.as_deref().unwrap_or_default();
-                    scanned.rejections.record(RecordRejectionReason::MissingTimestamp, || {
-                        format!("{} line {line_number}: invalid Command Code timestamp `{timestamp_text}`", path.display())
-                    });
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MissingTimestamp);
                     continue;
                 }
                 let dedup_key = crate::sessions::dedup_hash_str(&format!(

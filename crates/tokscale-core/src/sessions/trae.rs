@@ -51,15 +51,11 @@ fn provider_for_model(name: &str) -> &'static str {
 /// Parse a single session JSON object into a `UnifiedMessage`.
 struct TraeSessionRejection {
     reason: RecordRejectionReason,
-    detail: String,
 }
 
 impl TraeSessionRejection {
-    fn new(reason: RecordRejectionReason, detail: impl Into<String>) -> Self {
-        Self {
-            reason,
-            detail: detail.into(),
-        }
+    fn new(reason: RecordRejectionReason) -> Self {
+        Self { reason }
     }
 }
 
@@ -70,14 +66,12 @@ fn parse_session(
     if !session.is_object() {
         return Err(TraeSessionRejection::new(
             RecordRejectionReason::MalformedRecord,
-            "session must be an object",
         ));
     }
     let extra = &session["extra_info"];
     if !extra.is_object() {
         return Err(TraeSessionRejection::new(
             RecordRejectionReason::MalformedRecord,
-            "session is missing extra_info object",
         ));
     }
     let tokens = TokenBreakdown {
@@ -95,12 +89,7 @@ fn parse_session(
         .as_str()
         .map(str::trim)
         .filter(|model| !model.is_empty())
-        .ok_or_else(|| {
-            TraeSessionRejection::new(
-                RecordRejectionReason::MissingModel,
-                "session is missing a non-empty model_name",
-            )
-        })?;
+        .ok_or_else(|| TraeSessionRejection::new(RecordRejectionReason::MissingModel))?;
     let model_id = normalize_trae_model(model_raw);
     let provider = provider_for_model(&model_id);
     // Records without a real `session_id` cannot be deduplicated correctly
@@ -110,34 +99,22 @@ fn parse_session(
     let session_id = session["session_id"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            TraeSessionRejection::new(
-                RecordRejectionReason::MalformedRecord,
-                "session is missing a non-empty session_id",
-            )
-        })?;
-    let usage_time = session["usage_time"].as_i64().ok_or_else(|| {
-        TraeSessionRejection::new(
-            RecordRejectionReason::MissingTimestamp,
-            "session is missing usage_time",
-        )
-    })?;
+        .ok_or_else(|| TraeSessionRejection::new(RecordRejectionReason::MalformedRecord))?;
+    let usage_time = session["usage_time"]
+        .as_i64()
+        .ok_or_else(|| TraeSessionRejection::new(RecordRejectionReason::MissingTimestamp))?;
     if usage_time <= 0 {
         return Err(TraeSessionRejection::new(
             RecordRejectionReason::MissingTimestamp,
-            "session usage_time must be positive",
         ));
     }
     // API returns epoch seconds; UnifiedMessage expects milliseconds. Use
     // `checked_mul` because the JSON cache is untrusted input — a crafted
     // `usage_time` near `i64::MAX` would panic in debug builds and silently
     // wrap to a negative timestamp in release builds.
-    let timestamp_ms = usage_time.checked_mul(1000).ok_or_else(|| {
-        TraeSessionRejection::new(
-            RecordRejectionReason::MissingTimestamp,
-            "session usage_time overflows millis",
-        )
-    })?;
+    let timestamp_ms = usage_time
+        .checked_mul(1000)
+        .ok_or_else(|| TraeSessionRejection::new(RecordRejectionReason::MissingTimestamp))?;
     let dedup_key = Some(crate::sessions::dedup_hash_str(&format!(
         "trae:{}:{}",
         session_id, usage_time
@@ -159,16 +136,12 @@ fn nonnegative_token(extra: &serde_json::Value, field: &str) -> Result<i64, Trae
     let Some(value) = extra.get(field) else {
         return Ok(0);
     };
-    let value = value.as_i64().ok_or_else(|| {
-        TraeSessionRejection::new(
-            RecordRejectionReason::MalformedRecord,
-            format!("extra_info.{field} must be an integer"),
-        )
-    })?;
+    let value = value
+        .as_i64()
+        .ok_or_else(|| TraeSessionRejection::new(RecordRejectionReason::MalformedRecord))?;
     if value < 0 {
         return Err(TraeSessionRejection::new(
             RecordRejectionReason::MalformedRecord,
-            format!("extra_info.{field} must be non-negative"),
         ));
     }
     Ok(value)
@@ -187,13 +160,12 @@ pub fn parse_trae_file(client: &str, path: &std::path::Path) -> SessionParseResu
         )
     })?;
     let mut scanned = ScannedSource::default();
-    for (index, session) in sessions.iter().enumerate() {
+    for session in sessions {
         match parse_session(client, session) {
             Ok(Some(message)) => scanned.messages.push(message),
             Ok(None) => {}
             Err(rejection) => {
-                let sample = format!("session {}: {}", index + 1, rejection.detail);
-                scanned.rejections.record(rejection.reason, || sample);
+                scanned.rejections.record(rejection.reason);
             }
         }
     }
@@ -441,7 +413,6 @@ mod tests {
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
         assert_eq!(rejection.count, 1);
-        assert!(rejection.sample.unwrap().contains("session 2"));
         assert!(scanned.interrupted.is_none());
     }
 }

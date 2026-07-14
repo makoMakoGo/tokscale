@@ -49,13 +49,11 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
         let value = match serde_json::from_str::<Value>(&line) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 pending_turn_start = false;
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("{} line {line_number}: {error}", path.display())
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -85,29 +83,19 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
         for (usage_index, usage) in usages.iter().enumerate() {
             let tokens = match tokens_from_usage(usage) {
                 Ok(tokens) => tokens,
-                Err(error) => {
+                Err(_error) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            format!(
-                                "{} line {line_number} usage {usage_index}: {error}",
-                                path.display()
-                            )
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             };
             let token_total = match checked_token_total(&tokens) {
                 Ok(total) => total,
-                Err(error) => {
+                Err(_error) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            format!(
-                                "{} line {line_number} usage {usage_index}: {error}",
-                                path.display()
-                            )
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             };
@@ -116,15 +104,10 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
             }
             let timestamp = match number_field(&value, "timestampMs") {
                 Ok(timestamp) => timestamp,
-                Err(error) => {
+                Err(_error) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            format!(
-                                "{} line {line_number} usage {usage_index}: {error}",
-                                path.display()
-                            )
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             }
@@ -133,38 +116,23 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
             let Some(timestamp) = timestamp else {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingTimestamp, || {
-                        format!(
-                            "{} line {line_number} usage {usage_index}: usage has no timestampMs and session id `{session_id}` has no timestamp",
-                            path.display()
-                        )
-                    });
+                    .record(RecordRejectionReason::MissingTimestamp);
                 continue;
             };
             let Some(model_raw) = string_field(usage, "model") else {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingModel, || {
-                        format!(
-                            "{} line {line_number} usage {usage_index}: positive usage is missing model",
-                            path.display()
-                        )
-                    });
+                    .record(RecordRejectionReason::MissingModel);
                 continue;
             };
             let model_id = model_aliases::canonicalize_source_model_id(model_raw)
                 .unwrap_or_else(|| model_raw.trim().to_string());
             let provider_id = match provider_from_usage(usage, &model_id) {
                 Ok(provider_id) => provider_id,
-                Err(error) => {
+                Err(_error) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MissingProvider, || {
-                            format!(
-                                "{} line {line_number} usage {usage_index}: {error}",
-                                path.display()
-                            )
-                        });
+                        .record(RecordRejectionReason::MissingProvider);
                     continue;
                 }
             };
@@ -194,15 +162,10 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
             message.dedup_key = Some(dedup_hash_str(&dedup_key));
             message.duration_ms = match number_field(usage, "time") {
                 Ok(duration) => duration.filter(|duration| *duration > 0),
-                Err(error) => {
+                Err(_error) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            format!(
-                                "{} line {line_number} usage {usage_index}: {error}",
-                                path.display()
-                            )
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             };

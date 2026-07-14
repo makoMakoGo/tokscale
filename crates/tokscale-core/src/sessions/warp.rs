@@ -60,7 +60,6 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
 
     let mut pending_messages = Vec::new();
     let mut pending_total = 0_i64;
-    let mut row_index = 0_u64;
     loop {
         let row = match rows.next() {
             Ok(Some(row)) => row,
@@ -74,39 +73,34 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 break;
             }
         };
-        row_index += 1;
         let decoded = (|| -> rusqlite::Result<(String, String, Option<String>)> {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })();
         let (conversation_id, conversation_data, last_modified_at) = match decoded {
             Ok(decoded) => decoded,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("conversation row {row_index} could not be decoded: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let value = match serde_json::from_str::<Value>(&conversation_data) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("conversation `{conversation_id}` has invalid JSON: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
         let token_usage = match conversation_token_usage(db_path, &value) {
             Ok(Some(token_usage)) => token_usage,
             Ok(None) => continue,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -115,9 +109,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         if conversation_id.is_empty() {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    "token-bearing conversation has an empty conversation_id".to_string()
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
         let timestamp = last_modified_at
@@ -135,10 +127,10 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         for (index, item) in token_usage.iter().enumerate() {
             let total = match warp_token_total(db_path, item, conversation_id, index) {
                 Ok(total) => total,
-                Err(error) => {
+                Err(_error) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || error.to_string());
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             };
@@ -149,9 +141,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             let Some(timestamp) = timestamp else {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingTimestamp, || {
-                        format!("conversation `{conversation_id}` has no valid last_modified_at")
-                    });
+                    .record(RecordRejectionReason::MissingTimestamp);
                 continue;
             };
 
@@ -160,21 +150,13 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 None | Some(Value::Null) | Some(Value::String(_)) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MissingModel, || {
-                            format!(
-                                "conversation `{conversation_id}` usage row {index} is missing model_id"
-                            )
-                        });
+                        .record(RecordRejectionReason::MissingModel);
                     continue;
                 }
                 Some(_) => {
                     scanned
                         .rejections
-                        .record(RecordRejectionReason::MalformedRecord, || {
-                            format!(
-                                "conversation `{conversation_id}` usage row {index} has a non-string model_id"
-                            )
-                        });
+                        .record(RecordRejectionReason::MalformedRecord);
                     continue;
                 }
             };
@@ -184,9 +166,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             else {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MissingProvider, || {
-                        format!("cannot infer provider for model `{raw_model_id}`")
-                    });
+                    .record(RecordRejectionReason::MissingProvider);
                 continue;
             };
             let dedup_key =
@@ -194,9 +174,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             let Some(next_row_total) = row_total.checked_add(total) else {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("conversation `{conversation_id}` token usage total overflows i64")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 row_total_overflowed = true;
                 break;
             };
@@ -219,11 +197,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         let Some(next_pending_total) = pending_total.checked_add(row_total) else {
             scanned
                 .rejections
-                .record(RecordRejectionReason::MalformedRecord, || {
-                    format!(
-                        "conversation `{conversation_id}` would overflow the Warp token usage batch"
-                    )
-                });
+                .record(RecordRejectionReason::MalformedRecord);
             continue;
         };
         pending_total = next_pending_total;
@@ -291,7 +265,6 @@ fn load_query_metadata(
     };
 
     let mut metadata = HashMap::new();
-    let mut row_index = 0_u64;
     loop {
         let row = match rows.next() {
             Ok(Some(row)) => row,
@@ -303,17 +276,14 @@ fn load_query_metadata(
                 break;
             }
         };
-        row_index += 1;
         let decoded =
             (|| -> rusqlite::Result<(String, Option<String>)> { Ok((row.get(0)?, row.get(1)?)) })();
         let (conversation_id, working_directory) = match decoded {
             Ok(decoded) => decoded,
-            Err(error) => {
+            Err(_error) => {
                 scanned
                     .rejections
-                    .record(RecordRejectionReason::MalformedRecord, || {
-                        format!("query metadata row {row_index} could not be decoded: {error}")
-                    });
+                    .record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
         };
@@ -661,10 +631,6 @@ mod tests {
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
         assert_eq!(rejection.count, 1);
-        assert!(rejection
-            .sample
-            .unwrap()
-            .contains("query metadata row 1 could not be decoded"));
     }
 
     #[test]
