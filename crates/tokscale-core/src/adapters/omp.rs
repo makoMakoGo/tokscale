@@ -18,9 +18,10 @@ pub(crate) struct OmpAdapter;
 
 pub(crate) static OMP_ADAPTER: OmpAdapter = OmpAdapter;
 
-// Earlier OMP revisions emitted per-agent swarm labels or could bind a
-// precomputed parent digest to a newer source snapshot.
-const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 7;
+// Earlier OMP revisions emitted per-agent swarm labels, could bind a
+// precomputed parent digest to a newer source snapshot, or missed dynamic and
+// nested task-agent names.
+const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 8;
 const OMP_PARENT_HEALTH_REVISION: u32 = 2;
 
 impl LocalSourceAdapter for OmpAdapter {
@@ -381,7 +382,7 @@ fn parse_parent_health_cache_misses(
                         .cache_input
                         .expect("complete OMP parent health must carry its cache input");
                     let rejections = health.rejections;
-                    adapter_cache::load_or_scan_empty_sentinel_with_primary_hash(
+                    let mut parsed = adapter_cache::load_or_scan_empty_sentinel_with_primary_hash(
                         miss.unit,
                         ctx,
                         cache_input.content_hash,
@@ -393,7 +394,14 @@ fn parse_parent_health_cache_misses(
                                 interrupted: None,
                             })
                         },
-                    )
+                    );
+                    if matches!(
+                        parsed.health.status,
+                        crate::source_health::SourceStatus::Partial { .. }
+                    ) {
+                        parsed.health.rejections = Default::default();
+                    }
+                    parsed
                 }
                 crate::source_health::SourceStatus::Partial { failure } => {
                     let mut parsed = ParsedUnit::healthy(
@@ -860,6 +868,10 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].cache_write.is_none());
         assert!(parsed[0].invalidate_cache);
+        assert!(matches!(
+            &parsed[0].health.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
     }
 
     #[test]
@@ -889,6 +901,11 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].cache_write.is_none());
         assert!(parsed[0].invalidate_cache);
+        assert!(matches!(
+            &parsed[0].health.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(parsed[0].health.rejections.total(), 0);
     }
 
     #[test]

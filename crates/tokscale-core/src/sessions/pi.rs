@@ -3,7 +3,9 @@
 //! Parses JSONL files from ~/.pi/agent/sessions/<encoded-cwd>/*.jsonl
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{
+    normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
+};
 use crate::message_cache::{
     source_file_identity_from_open_file, SourceInputPolicy, SourceInputSnapshot,
 };
@@ -437,19 +439,8 @@ fn token_breakdown_from_pi_usage(
 }
 
 fn normalize_omp_agent_label(agent: &str) -> Option<String> {
-    let label = match agent.trim().to_ascii_lowercase().as_str() {
-        "explore" => "OMP Explore",
-        "plan" => "OMP Plan",
-        "designer" => "OMP Designer",
-        "reviewer" => "OMP Reviewer",
-        "task" => "OMP Task",
-        "quick_task" => "OMP Quick Task",
-        "librarian" => "OMP Librarian",
-        "oracle" => "OMP Oracle",
-        _ => return None,
-    };
-
-    Some(label.to_string())
+    let label = normalize_agent_name(&format!("OMP {}", agent.replace('_', " ")));
+    (label != "OMP").then_some(label)
 }
 
 fn normalize_omp_advisor_label(child_stem: &str) -> Option<String> {
@@ -768,15 +759,23 @@ fn omp_task_agent_scan_from_reader(parent_path: &Path, reader: &mut impl BufRead
 
 fn omp_subagent_label_from_map(
     task_agents: &HashMap<String, String>,
+    child_path: &Path,
     child_stem: &str,
 ) -> Option<String> {
     let suffix = child_stem
         .split_once('-')
         .map(|(_, suffix)| suffix)
         .unwrap_or(child_stem);
+    let nested_suffix = child_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|parent_stem| parent_stem.to_str())
+        .and_then(|parent_stem| child_stem.strip_prefix(parent_stem))
+        .and_then(|suffix| suffix.strip_prefix('.'));
 
     task_agents
         .get(child_stem)
+        .or_else(|| nested_suffix.and_then(|suffix| task_agents.get(suffix)))
         .or_else(|| task_agents.get(suffix))
         .cloned()
 }
@@ -881,7 +880,7 @@ fn parse_pi_format_file(
                     match omp_swarm_agent_label_from_path(path) {
                         Ok(Some(label)) => Some(label),
                         Ok(None) => omp_parent_scan.and_then(|parent| {
-                            omp_subagent_label_from_map(&parent.task_agents, stem)
+                            omp_subagent_label_from_map(&parent.task_agents, path, stem)
                         }),
                         Err(_error) => {
                             scanned
@@ -1292,6 +1291,40 @@ mod tests {
         assert_eq!(
             messages[0].agent_instance.as_deref(),
             Some("0-ReviewFindings")
+        );
+    }
+
+    #[test]
+    fn test_parse_omp_nested_child_recovers_dynamic_task_agent_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join(".omp/agent/sessions/project");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let parent_stem = "138-SourceIntegritySweep";
+        let session_root = session_dir.join(parent_stem);
+        std::fs::write(
+            session_root.with_extension("jsonl"),
+            r#"{"type":"session","version":3,"id":"parent-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"root_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_001","name":"task","arguments":{"agent":"code-reviewer","tasks":[{"id":"ReviewFindings","description":"Review findings","assignment":"Check the diff"}]}}],"model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&session_root).unwrap();
+
+        let child_path = session_root.join(format!("{parent_stem}.0-ReviewFindings.jsonl"));
+        std::fs::write(
+            &child_path,
+            r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"child_001","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
+        )
+        .unwrap();
+
+        let messages = parse_omp_file(&child_path).unwrap().messages;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("OMP Code Reviewer"));
+        assert_eq!(
+            messages[0].agent_instance.as_deref(),
+            Some("138-SourceIntegritySweep.0-ReviewFindings")
         );
     }
 

@@ -223,16 +223,31 @@ where
         Err(error) => return ParsedUnit::unavailable(unit, SourceFailure::from(&error)),
     };
     let fingerprint_failed = fingerprint_failure.is_some();
-    if scanned.interrupted.is_none() {
-        scanned.interrupted = fingerprint_failure;
-    }
     crate::finalize_token_priced_messages(&mut scanned.messages, ctx.pricing);
-    // A post-scan snapshot failure means the source's stability is unknown:
-    // keep the scanned data but treat the source as changed for caching.
-    let source_unchanged = match input_policy.snapshot() {
-        Ok(current) => current == snapshot,
-        Err(_) => false,
+    let post_scan_snapshot_failure = match input_policy.snapshot() {
+        Ok(current) if current == snapshot => None,
+        Ok(_) => Some(SourceFailure::new(
+            "validate source snapshot after scan",
+            format!("{} changed while it was scanned", unit.path.display()),
+        )),
+        Err(source) => Some(snapshot_failure(source)),
     };
+    let source_unchanged = post_scan_snapshot_failure.is_none();
+    if scanned.interrupted.is_none() {
+        scanned.interrupted = fingerprint_failure
+            .or_else(|| {
+                precomputed_snapshot_mismatch.then(|| {
+                    SourceFailure::new(
+                        "validate precomputed source snapshot",
+                        format!(
+                            "{} changed after its shared content was indexed",
+                            unit.path.display()
+                        ),
+                    )
+                })
+            })
+            .or(post_scan_snapshot_failure);
+    }
     let complete = scanned.interrupted.is_none();
     let cacheable_output =
         cache_clean_empty || !scanned.messages.is_empty() || !scanned.rejections.is_empty();
@@ -942,6 +957,10 @@ mod tests {
 
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
+        assert!(matches!(
+            &parsed.health.status,
+            SourceStatus::Partial { .. }
+        ));
     }
 
     #[test]
@@ -959,6 +978,10 @@ mod tests {
 
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
+        assert!(matches!(
+            &parsed.health.status,
+            SourceStatus::Partial { .. }
+        ));
     }
 
     #[test]

@@ -46,7 +46,12 @@ Damage is contained to the smallest unit that owns it:
   OMP stores a separate, path-keyed empty-message shard for a completed shared
   parent-health scan. This restores the single parent issue on a full warm hit
   without copying it into every child shard or reparsing the parent. Partial
-  and unavailable parent-health scans are not cached.
+  and unavailable parent-health scans are not cached. If the shared snapshot
+  diverges after indexing, the dependent result is `Partial`, self-contained
+  child usage is retained, stale parent-health rejections are discarded, and
+  no shard is written. OMP task records may name bundled, user, project, or
+  plugin agents, so their non-empty agent names are display-normalized rather
+  than checked against a hard-coded built-in list.
 - **Pipeline**: only tokscale's own contract violations — internal
   invariants, cache-infrastructure write failures, invalid requests, and
   configuration errors — remain hard errors of the outer `Result`. Third-party
