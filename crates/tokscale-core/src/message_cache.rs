@@ -481,7 +481,7 @@ impl SourceStamp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum SourceFileIdentity {
     Unix {
         device: u64,
@@ -589,6 +589,18 @@ impl SourceInputSnapshot {
             .first()
             .filter(|file| file.present)
             .map(|file| file.size)
+    }
+
+    pub(crate) fn visit_present_files(&self, mut visit: impl FnMut(SourceFileIdentity, u64)) {
+        for file in &self.files {
+            if file.present {
+                visit(
+                    file.identity
+                        .expect("present source input must carry a stable file identity"),
+                    file.size,
+                );
+            }
+        }
     }
 
     #[cfg(test)]

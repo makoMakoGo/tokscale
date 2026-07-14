@@ -587,8 +587,11 @@ pub(crate) fn emit_health_summary(health: &tokscale_core::source_health::HealthR
     eprintln!(
         "{}",
         format!(
-            "  Data health: {} rejected record(s), {} partial source(s), {} failed source(s)",
-            health.rejected_records, health.partial_sources, health.failed_sources
+            "  Data health: {} degraded source(s), {} rejected record(s), {} partial source(s), {} failed source(s)",
+            health.degraded_sources,
+            health.rejected_records,
+            health.partial_sources,
+            health.failed_sources
         )
         .yellow()
     );

@@ -23,7 +23,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 32;
+const CACHE_SCHEMA_VERSION: u32 = 34;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1976,10 +1976,12 @@ mod tests {
         let data = UsageData {
             health: tokscale_core::source_health::HealthReport {
                 complete: false,
-                healthy_sources: 0,
+                clean_sources: 0,
+                degraded_sources: 1,
                 rejected_records: 1,
                 partial_sources: 0,
                 failed_sources: 0,
+                source_data_bytes: 4_096,
                 sources: vec![tokscale_core::source_health::SourceHealthReport {
                     client: "zed".to_string(),
                     path: "/tmp/threads.db".to_string(),
@@ -2011,10 +2013,12 @@ mod tests {
             let data = UsageData {
                 health: tokscale_core::source_health::HealthReport {
                     complete: false,
-                    healthy_sources: 0,
+                    clean_sources: 0,
+                    degraded_sources: 0,
                     rejected_records: 0,
                     partial_sources,
                     failed_sources,
+                    source_data_bytes: 8_192,
                     sources: vec![tokscale_core::source_health::SourceHealthReport {
                         client: "opencode".to_string(),
                         path: "/tmp/opencode.db".to_string(),

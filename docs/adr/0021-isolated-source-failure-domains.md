@@ -57,12 +57,44 @@ Damage is contained to the smallest unit that owns it:
 Every internal fold produces `DataHealth`: per-source status
 (`Complete`/`Partial`/`Unavailable` with a structured operation + message
 failure) and per-reason rejection counts with one sample each. Public reports
-carry a bounded `HealthReport` projection alongside the payload: record issues
-are grouped by client and reason, source failures by client, status, and
-operation, and each group retains only its count plus one sample path/detail.
+classify every examined source into exactly one summary state:
+
+- `Clean`: the source completed with no rejected records;
+- `Degraded`: the source completed but rejected at least one record;
+- `Partial`: the scan could not continue, but already confirmed records remain;
+- `Failed`: the source was unavailable and produced no records.
+
+The four source counts are exhaustive and mutually exclusive. Public reports
+carry them as `cleanSources`, `degradedSources`, `partialSources`, and
+`failedSources`. Record damage remains a separate dimension in
+`rejectedRecords`, because one degraded source may contain many rejected
+records.
+
+`sourceDataBytes` reports the current on-disk footprint captured by the latest
+source-inventory snapshot. It sums every present primary and related source
+input once by stable file identity, so shared dependencies and hard links are
+not double-counted; tokscale's own caches are excluded. The inventory already
+reads this metadata for identity and cache decisions, so producing the total
+does not add another filesystem scan.
+
+The bounded `HealthReport` projection groups record issues by client and
+reason, source failures by client, status, and operation, and retains only each
+group's count plus one sample path/detail.
 Rejection reasons serialize as stable string keys; unknown keys from newer
 parsers are preserved and displayed as-is. No raw record payloads, per-record
 error objects, or per-session issue lists cross the report boundary.
+
+For example, consider six sources:
+
+- A, B, and C complete without rejection;
+- D completes but rejects two damaged records;
+- E stops after an I/O failure, after producing some confirmed records;
+- F cannot be opened.
+
+The report is `Clean: 3`, `Degraded: 1`, `Partial: 1`, `Failed: 1`, and
+`Rejected records: 2`. The four source counts sum to six; the rejected-record
+count describes the two damaged records inside D and is not added to the source
+total.
 
 The public raw-message loaders return `LocalReport<Vec<UnifiedMessage>>`
 instead of a bare vector. Its `health` field carries the serializable report
@@ -131,7 +163,7 @@ errors at every seam) is unchanged.
 
 Source-message shards and TUI aggregate caches gain the rejection summary and
 health fields. Old individual shards are reparsed only when encountered; a
-format change does not delete unrelated healthy shards. This ADR does not
+format change does not delete unrelated clean shards. This ADR does not
 weaken ADR 0001: nothing substitutes guessed or synthetic data, and no failure
 is delivered as ordinary success — it is delivered as data plus health.
 

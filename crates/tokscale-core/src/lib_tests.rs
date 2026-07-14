@@ -2244,6 +2244,42 @@ fn prepared_test_group(
 }
 
 #[test]
+fn source_data_size_counts_related_inputs_once_by_file_identity() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let source = dir.path().join("source.jsonl");
+    let dependency = dir.path().join("dependency.json");
+    std::fs::write(&source, b"12345678").unwrap();
+    std::fs::write(&dependency, b"12345").unwrap();
+
+    let with_dependency = crate::adapters::SourceUnit::plain_file(ClientId::Amp, source.clone())
+        .with_dependency(dependency)
+        .prepare_snapshot()
+        .unwrap();
+    let duplicate = crate::adapters::SourceUnit::plain_file(ClientId::Amp, source)
+        .prepare_snapshot()
+        .unwrap();
+
+    assert_eq!(super::source_data_bytes([&with_dependency, &duplicate]), 13);
+}
+
+#[test]
+fn inventory_probe_refreshes_source_data_size_from_metadata() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let source = amp_dir.join("T-first.json");
+    std::fs::write(&source, b"12345678").unwrap();
+
+    let mut prepared =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    assert_eq!(prepared.health.source_data_bytes(), 8);
+
+    std::fs::write(&source, b"1234567890123").unwrap();
+    prepared.refresh_source_inventory_signature().unwrap();
+    assert_eq!(prepared.health.source_data_bytes(), 13);
+}
+
+#[test]
 fn prepared_inventory_is_stable_sensitive_and_reads_no_source_bytes() {
     let home = tempfile::TempDir::new().unwrap();
     let amp_dir = home.path().join(".local/share/amp/threads");

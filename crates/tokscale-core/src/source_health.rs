@@ -176,24 +176,25 @@ pub struct SourceHealth {
 }
 
 impl SourceHealth {
-    pub fn is_healthy(&self) -> bool {
+    pub fn is_clean(&self) -> bool {
         matches!(self.status, SourceStatus::Complete) && self.rejections.is_empty()
     }
 }
 
-/// Aggregated health for one report load. Healthy sources are not retained;
+/// Aggregated health for one report load. Clean sources are not retained;
 /// their count is derivable from load metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DataHealth {
     sources: Vec<SourceHealth>,
     examined_sources: usize,
+    source_data_bytes: u64,
 }
 
 impl DataHealth {
     /// Retain a source's health only when there is something to report.
     pub fn record(&mut self, health: SourceHealth) {
         self.examined_sources += 1;
-        if !health.is_healthy() {
+        if !health.is_clean() {
             self.sources.push(health);
         }
     }
@@ -201,6 +202,18 @@ impl DataHealth {
     pub fn merge(&mut self, other: DataHealth) {
         self.sources.extend(other.sources);
         self.examined_sources += other.examined_sources;
+        self.source_data_bytes = self
+            .source_data_bytes
+            .checked_add(other.source_data_bytes)
+            .expect("source data size must fit in u64");
+    }
+
+    pub fn set_source_data_bytes(&mut self, source_data_bytes: u64) {
+        self.source_data_bytes = source_data_bytes;
+    }
+
+    pub fn source_data_bytes(&self) -> u64 {
+        self.source_data_bytes
     }
 
     pub fn sources(&self) -> &[SourceHealth] {
@@ -232,8 +245,17 @@ impl DataHealth {
             .count()
     }
 
-    pub fn healthy_sources(&self) -> usize {
+    pub fn clean_sources(&self) -> usize {
         self.examined_sources.saturating_sub(self.sources.len())
+    }
+
+    pub fn degraded_sources(&self) -> usize {
+        self.sources
+            .iter()
+            .filter(|source| {
+                matches!(source.status, SourceStatus::Complete) && !source.rejections.is_empty()
+            })
+            .count()
     }
 
     /// Total issue count: every rejected record plus every partial or
@@ -305,10 +327,12 @@ impl DataHealth {
 
         HealthReport {
             complete: self.is_empty(),
-            healthy_sources: self.healthy_sources(),
+            clean_sources: self.clean_sources(),
+            degraded_sources: self.degraded_sources(),
             rejected_records: self.rejected_records(),
             partial_sources: self.partial_sources(),
             failed_sources: self.failed_sources(),
+            source_data_bytes: self.source_data_bytes,
             sources: grouped.into_values().collect(),
         }
     }
@@ -320,10 +344,14 @@ impl DataHealth {
 #[serde(default, rename_all = "camelCase")]
 pub struct HealthReport {
     pub complete: bool,
-    pub healthy_sources: usize,
+    pub clean_sources: usize,
+    pub degraded_sources: usize,
     pub rejected_records: u64,
     pub partial_sources: usize,
     pub failed_sources: usize,
+    /// Deduplicated on-disk size of source inputs at the latest inventory
+    /// snapshot. Tokscale's own cache files are not included.
+    pub source_data_bytes: u64,
     #[serde(default)]
     pub sources: Vec<SourceHealthReport>,
 }
@@ -332,10 +360,12 @@ impl Default for HealthReport {
     fn default() -> Self {
         Self {
             complete: true,
-            healthy_sources: 0,
+            clean_sources: 0,
+            degraded_sources: 0,
             rejected_records: 0,
             partial_sources: 0,
             failed_sources: 0,
+            source_data_bytes: 0,
             sources: Vec::new(),
         }
     }
@@ -485,10 +515,12 @@ mod tests {
         let report = HealthReport::default();
 
         assert!(report.complete);
-        assert_eq!(report.healthy_sources, 0);
+        assert_eq!(report.clean_sources, 0);
+        assert_eq!(report.degraded_sources, 0);
         assert_eq!(report.rejected_records, 0);
         assert_eq!(report.partial_sources, 0);
         assert_eq!(report.failed_sources, 0);
+        assert_eq!(report.source_data_bytes, 0);
         assert!(report.sources.is_empty());
     }
 
@@ -504,10 +536,13 @@ mod tests {
         let value = serde_json::to_value(HealthReport::default()).unwrap();
 
         assert_eq!(value["complete"], true);
-        assert_eq!(value["healthySources"], 0);
+        assert_eq!(value["cleanSources"], 0);
+        assert_eq!(value["degradedSources"], 0);
+        assert!(value.get("healthySources").is_none());
         assert_eq!(value["rejectedRecords"], 0);
         assert_eq!(value["partialSources"], 0);
         assert_eq!(value["failedSources"], 0);
+        assert_eq!(value["sourceDataBytes"], 0);
         assert_eq!(value["sources"], serde_json::json!([]));
     }
 
@@ -515,10 +550,12 @@ mod tests {
     fn health_report_issue_count_includes_records_and_source_failures() {
         let report = HealthReport {
             complete: false,
-            healthy_sources: 4,
+            clean_sources: 4,
+            degraded_sources: 1,
             rejected_records: 3,
             partial_sources: 2,
             failed_sources: 1,
+            source_data_bytes: 1_024,
             sources: Vec::new(),
         };
 
@@ -526,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn data_health_drops_healthy_sources_and_counts_issues() {
+    fn data_health_classifies_sources_into_clean_degraded_partial_and_failed() {
         let mut data_health = DataHealth::default();
         data_health.record(health(SourceStatus::Complete, RejectionSummary::default()));
         assert!(data_health.is_empty());
@@ -549,21 +586,24 @@ mod tests {
         ));
 
         assert_eq!(data_health.rejected_records(), 2);
-        assert_eq!(data_health.healthy_sources(), 1);
+        assert_eq!(data_health.clean_sources(), 1);
+        assert_eq!(data_health.degraded_sources(), 1);
         assert_eq!(data_health.failed_sources(), 1);
         assert_eq!(data_health.partial_sources(), 1);
         assert_eq!(data_health.issue_count(), 4);
     }
 
     #[test]
-    fn merging_data_health_preserves_examined_and_healthy_source_counts() {
+    fn merging_data_health_preserves_clean_and_degraded_source_counts() {
         let mut left = DataHealth::default();
+        left.set_source_data_bytes(1_024);
         left.record(health(SourceStatus::Complete, RejectionSummary::default()));
         let mut rejected = RejectionSummary::default();
         rejected.record(RecordRejectionReason::MissingModel, || "bad".into());
         left.record(health(SourceStatus::Complete, rejected));
 
         let mut right = DataHealth::default();
+        right.set_source_data_bytes(2_048);
         right.record(health(SourceStatus::Complete, RejectionSummary::default()));
         right.record(health(
             SourceStatus::Unavailable {
@@ -574,10 +614,12 @@ mod tests {
 
         left.merge(right);
 
-        assert_eq!(left.healthy_sources(), 2);
+        assert_eq!(left.clean_sources(), 2);
+        assert_eq!(left.degraded_sources(), 1);
         assert_eq!(left.sources().len(), 2);
         assert_eq!(left.failed_sources(), 1);
         assert_eq!(left.rejected_records(), 1);
+        assert_eq!(left.source_data_bytes(), 3_072);
     }
 
     #[test]
@@ -612,6 +654,8 @@ mod tests {
 
         let report = data_health.to_report();
 
+        assert_eq!(report.clean_sources, 0);
+        assert_eq!(report.degraded_sources, 2);
         assert_eq!(report.rejected_records, 2);
         assert_eq!(report.failed_sources, 2);
         assert_eq!(report.sources.len(), 2);

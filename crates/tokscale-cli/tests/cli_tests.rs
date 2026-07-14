@@ -1161,11 +1161,12 @@ fn test_opencode_invalid_sqlite_payload_is_rejected_without_losing_good_rows() {
         .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("\"degradedSources\": 1"))
         .stdout(predicate::str::contains("\"rejectedRecords\": 1"))
         .stdout(predicate::str::contains("\"failedSources\": 0"))
         .stdout(predicate::str::contains("gpt-5.5"))
         .stderr(predicate::str::contains(
-            "Data health: 1 rejected record(s), 0 partial source(s), 0 failed source(s)",
+            "Data health: 1 degraded source(s), 1 rejected record(s), 0 partial source(s), 0 failed source(s)",
         ));
 }
 
@@ -1794,10 +1795,11 @@ fn test_time_metrics_reports_degraded_source_health_without_failing() {
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["health"]["complete"], false);
+    assert_eq!(json["health"]["degradedSources"], 0);
     assert_eq!(json["health"]["failedSources"], 1);
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("Data health: 0 rejected record(s), 0 partial source(s), 1 failed source(s)"),
+            .contains("Data health: 0 degraded source(s), 0 rejected record(s), 0 partial source(s), 1 failed source(s)"),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1821,7 +1823,7 @@ fn test_time_metrics_text_reports_degraded_source_health_without_failing() {
         .success()
         .stdout(predicate::str::contains("Session Time Metrics"))
         .stderr(predicate::str::contains(
-            "Data health: 0 rejected record(s), 0 partial source(s), 1 failed source(s)",
+            "Data health: 0 degraded source(s), 0 rejected record(s), 0 partial source(s), 1 failed source(s)",
         ));
 }
 
@@ -3176,10 +3178,11 @@ fn test_clients_json_reports_degraded_source_health_without_losing_payload() {
         .as_array()
         .is_some_and(|rows| !rows.is_empty()));
     assert_eq!(json["health"]["complete"], false);
+    assert_eq!(json["health"]["degradedSources"], 0);
     assert_eq!(json["health"]["failedSources"], 1);
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("Data health: 0 rejected record(s), 0 partial source(s), 1 failed source(s)"),
+            .contains("Data health: 0 degraded source(s), 0 rejected record(s), 0 partial source(s), 1 failed source(s)"),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -3203,7 +3206,7 @@ fn test_clients_text_reports_degraded_source_health_without_failing() {
         .success()
         .stdout(predicate::str::contains("Local clients & session counts"))
         .stderr(predicate::str::contains(
-            "Data health: 0 rejected record(s), 0 partial source(s), 1 failed source(s)",
+            "Data health: 0 degraded source(s), 0 rejected record(s), 0 partial source(s), 1 failed source(s)",
         ));
 }
 

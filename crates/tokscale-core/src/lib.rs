@@ -371,9 +371,30 @@ impl PreparedLocalSources {
         for health in unavailable {
             self.health.record(health);
         }
+        self.health.set_source_data_bytes(source_data_bytes(
+            self.groups.iter().flat_map(|group| group.units.iter()),
+        ));
         self.signature = source_inventory_signature(&self.clients, &self.groups);
         Ok(self.signature)
     }
+}
+
+fn source_data_bytes<'a>(units: impl IntoIterator<Item = &'a adapters::SourceUnit>) -> u64 {
+    let mut seen = HashSet::new();
+    let mut total = 0_u64;
+    for unit in units {
+        let snapshot = unit
+            .prepared_source_input_snapshot()
+            .expect("prepared source unit must carry an inventory snapshot");
+        snapshot.visit_present_files(|identity, size| {
+            if seen.insert(identity) {
+                total = total
+                    .checked_add(size)
+                    .expect("source data size must fit in u64");
+            }
+        });
+    }
+    total
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -831,6 +852,9 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
             Ok(adapters::PreparedAdapterSources { adapter, units })
         })
         .collect::<Result<_, _>>()?;
+    health.set_source_data_bytes(source_data_bytes(
+        groups.iter().flat_map(|group| group.units.iter()),
+    ));
     let signature = source_inventory_signature(&clients, &groups);
     Ok(PreparedLocalSources {
         options,

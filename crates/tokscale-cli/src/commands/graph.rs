@@ -335,10 +335,12 @@ mod tests {
             time_metrics: None,
             health: tokscale_core::source_health::HealthReport {
                 complete: false,
-                healthy_sources: 4,
+                clean_sources: 4,
+                degraded_sources: 1,
                 rejected_records: 2,
                 partial_sources: 1,
                 failed_sources: 0,
+                source_data_bytes: 12_345,
                 sources: Vec::new(),
             },
         };
@@ -346,7 +348,10 @@ mod tests {
         let json = serde_json::to_value(to_graph_export_data(&graph)).unwrap();
 
         assert_eq!(json["health"]["complete"], false);
+        assert_eq!(json["health"]["cleanSources"], 4);
+        assert_eq!(json["health"]["degradedSources"], 1);
         assert_eq!(json["health"]["rejectedRecords"], 2);
         assert_eq!(json["health"]["partialSources"], 1);
+        assert_eq!(json["health"]["sourceDataBytes"], 12_345);
     }
 }
