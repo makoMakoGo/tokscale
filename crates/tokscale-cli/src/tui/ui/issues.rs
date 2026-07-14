@@ -252,7 +252,7 @@ fn record_table_row(theme: &Theme, row: &IssueRow, layout: IssueTableLayout) -> 
         } else {
             theme.muted
         })),
-        Cell::from(truncate_display_width(&row.handling, layout.handling))
+        Cell::from(truncate_display_width(row.handling, layout.handling))
             .style(Style::default().fg(theme.foreground)),
     ])
 }
