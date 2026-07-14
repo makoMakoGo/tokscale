@@ -8,29 +8,31 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
-use crate::{checked_token_add, provider_identity, TokenBreakdown};
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 struct GooseModelConfig {
-    model_name: String,
+    model_name: Option<String>,
 }
 
 fn parse_model_config(path: &Path, json: &str) -> SessionParseResult<String> {
     let mut bytes = json.as_bytes().to_vec();
     let config: GooseModelConfig = simd_json::from_slice(&mut bytes)
         .map_err(|source| SessionParseError::at_path(path, "decode Goose model config", source))?;
-    let name = config.model_name.trim().to_string();
-    if name.is_empty() {
-        Err(invalid_at_path(
-            path,
-            "validate Goose model config",
-            "model_name must be non-empty",
-        ))
-    } else {
-        Ok(name)
-    }
+    config
+        .model_name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            invalid_at_path(
+                path,
+                "validate Goose model config",
+                "model_name must be present and non-empty",
+            )
+        })
 }
 
 fn resolved_provider(
@@ -69,7 +71,7 @@ fn parse_created_at(s: &str) -> Option<i64> {
     None
 }
 
-pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
     let conn = open_readonly_sqlite(db_path).map_err(|source| {
         SessionParseError::at_path(db_path, "open Goose database read-only", source)
     })?;
@@ -93,27 +95,50 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessa
         SessionParseError::at_path(db_path, "prepare Goose session query", error)
     })?;
 
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, Option<i64>>(8)?,
-                row.get::<_, Option<i64>>(9)?,
-            ))
-        })
-        .map_err(|error| {
-            SessionParseError::at_path(db_path, "execute Goose session query", error)
-        })?;
+    let mut rows = stmt.query([]).map_err(|error| {
+        SessionParseError::at_path(db_path, "execute Goose session query", error)
+    })?;
 
-    let mut messages = Vec::new();
-    for row in rows {
+    let mut scanned = ScannedSource::default();
+    let mut row_index = 0_u64;
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(error) => {
+                let error =
+                    SessionParseError::at_path(db_path, "iterate Goose session rows", error);
+                scanned.interrupted = Some(SourceFailure::from(&error));
+                break;
+            }
+        };
+        row_index += 1;
+        type GooseRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        );
+        let decoded = (|| -> rusqlite::Result<GooseRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+            ))
+        })();
         let (
             session_id,
             model_config_json,
@@ -125,20 +150,30 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessa
             accumulated_total_tokens,
             accumulated_input_tokens,
             accumulated_output_tokens,
-        ) = row.map_err(|error| {
-            SessionParseError::at_path(db_path, "decode Goose session row", error)
-        })?;
+        ) = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord, || {
+                        format!("session row {row_index} could not be decoded: {error}")
+                    });
+                continue;
+            }
+        };
 
         let input = accumulated_input_tokens.or(input_tokens).unwrap_or(0);
         let output = accumulated_output_tokens.or(output_tokens).unwrap_or(0);
-        let total = accumulated_total_tokens.or(total_tokens).unwrap_or(0);
+        let reported_total = accumulated_total_tokens.or(total_tokens);
+        let total = reported_total.unwrap_or(0);
 
         if input < 0 || output < 0 || total < 0 {
-            return Err(invalid_at_path(
-                db_path,
-                "validate Goose token counts",
-                format!("session `{session_id}` has a negative token count"),
-            ));
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    format!("session `{session_id}` has a negative token count")
+                });
+            continue;
         }
 
         if input == 0 && output == 0 && total == 0 {
@@ -147,29 +182,66 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessa
 
         let session_id = session_id.trim();
         if session_id.is_empty() {
-            return Err(invalid_at_path(
-                db_path,
-                "validate Goose session identifier",
-                "token-bearing row has an empty session id",
-            ));
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    "token-bearing row has an empty session id".to_string()
+                });
+            continue;
         }
-        let model_config = model_config_json.as_ref().ok_or_else(|| {
-            invalid_at_path(
-                db_path,
-                "validate Goose session row",
-                "model_config_json is unexpectedly null",
-            )
-        })?;
-        let model_id = parse_model_config(db_path, model_config)?;
-        let timestamp = parse_created_at(&created_at).ok_or_else(|| {
-            invalid_at_path(
-                db_path,
-                "validate Goose created_at",
-                format!("invalid created_at `{created_at}`"),
-            )
-        })?;
-        let provider = resolved_provider(db_path, provider_name, &model_id)?;
-        let non_reasoning_tokens = checked_token_add(input, output);
+        let Some(model_config) = model_config_json.as_ref() else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel, || {
+                    format!("session `{session_id}` has no model_config_json")
+                });
+            continue;
+        };
+        let model_id = match parse_model_config(db_path, model_config) {
+            Ok(model_id) => model_id,
+            Err(error) => {
+                let reason = if error.operation() == "validate Goose model config" {
+                    RecordRejectionReason::MissingModel
+                } else {
+                    RecordRejectionReason::MalformedRecord
+                };
+                scanned.rejections.record(reason, || error.to_string());
+                continue;
+            }
+        };
+        let Some(timestamp) = created_at.as_deref().and_then(parse_created_at) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp, || {
+                    format!("session `{session_id}` has no valid created_at timestamp")
+                });
+            continue;
+        };
+        let provider = match resolved_provider(db_path, provider_name, &model_id) {
+            Ok(provider) => provider,
+            Err(error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MissingProvider, || error.to_string());
+                continue;
+            }
+        };
+        let Some(non_reasoning_tokens) = input.checked_add(output) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    format!("session `{session_id}` token total overflows i64")
+                });
+            continue;
+        };
+        if reported_total.is_some_and(|total| total < non_reasoning_tokens) {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    format!("session `{session_id}` total token count is below input plus output")
+                });
+            continue;
+        }
         let mut msg = UnifiedMessage::new(
             "goose",
             model_id,
@@ -190,9 +262,9 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<Vec<UnifiedMessa
             0.0,
         );
         msg.dedup_key = Some(crate::sessions::dedup_hash_str(session_id));
-        messages.push(msg);
+        scanned.messages.push(msg);
     }
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn invalid_at_path(
@@ -268,7 +340,7 @@ mod tests {
                 id TEXT NOT NULL,
                 model_config_json TEXT,
                 provider_name TEXT,
-                created_at TEXT NOT NULL,
+                created_at TEXT,
                 total_tokens INTEGER,
                 input_tokens INTEGER,
                 output_tokens INTEGER,
@@ -302,7 +374,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let messages = parse_goose_sqlite(&path).unwrap();
+        let messages = parse_goose_sqlite(&path).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id.as_ref(), "session-1");
@@ -310,6 +382,17 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 20);
         assert_eq!(messages[0].tokens.output, 5);
         assert_eq!(messages[0].tokens.reasoning, 5);
+    }
+
+    #[test]
+    fn parse_goose_sqlite_reports_missing_schema_as_source_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        drop(Connection::open(&path).unwrap());
+
+        let error = parse_goose_sqlite(&path).unwrap_err();
+
+        assert_eq!(error.operation(), "prepare Goose session query");
     }
 
     #[test]
@@ -324,10 +407,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let error = parse_goose_sqlite(&path).unwrap_err();
+        let scanned = parse_goose_sqlite(&path).unwrap();
 
-        assert_eq!(error.operation(), "decode Goose model config");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -342,10 +429,54 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let error = parse_goose_sqlite(&path).unwrap_err();
+        let scanned = parse_goose_sqlite(&path).unwrap();
 
-        assert_eq!(error.operation(), "validate Goose session row");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
+    }
+
+    #[test]
+    fn parse_goose_sqlite_classifies_missing_model_name_as_missing_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_goose_db(&path);
+        conn.execute(
+            "INSERT INTO sessions VALUES (?1, ?2, ?3, ?4, 1, 1, 0, NULL, NULL, NULL)",
+            params!["session-1", "{}", "anthropic", "2026-04-14T16:18:53Z"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_goose_sqlite(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-model");
+        assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn parse_goose_sqlite_classifies_null_created_at_as_missing_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_goose_db(&path);
+        conn.execute(
+            "INSERT INTO sessions VALUES (?1, ?2, ?3, NULL, 1, 1, 0, NULL, NULL, NULL)",
+            params!["session-1", r#"{"model_name":"gpt-5"}"#, "openai"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_goose_sqlite(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-timestamp");
+        assert_eq!(rejection.count, 1);
     }
 
     #[test]
@@ -360,8 +491,113 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let messages = parse_goose_sqlite(&path).unwrap();
+        let scanned = parse_goose_sqlite(&path).unwrap();
 
-        assert!(messages.is_empty());
+        assert!(scanned.messages.is_empty());
+        assert!(scanned.rejections.is_empty());
+    }
+
+    #[test]
+    fn parse_goose_sqlite_keeps_good_rows_around_a_bad_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_goose_db(&path);
+        for (id, config) in [
+            ("01-good", r#"{"model_name":"gpt-5"}"#),
+            ("02-bad", "not json"),
+            ("03-good", r#"{"model_name":"claude-sonnet-4"}"#),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions VALUES (?1, ?2, NULL, ?3, 1, 1, 0, NULL, NULL, NULL)",
+                params![id, config, "2026-04-14T16:18:53Z"],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let scanned = parse_goose_sqlite(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn overflowing_token_total_is_rejected_and_later_row_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_goose_db(&path);
+        for (id, input, output) in [("01-overflow", i64::MAX, 1), ("02-good", 1, 1)] {
+            conn.execute(
+                "INSERT INTO sessions VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, NULL, NULL, NULL)",
+                params![
+                    id,
+                    r#"{"model_name":"gpt-5"}"#,
+                    "openai",
+                    "2026-04-14T16:18:53Z",
+                    input,
+                    output
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let scanned = parse_goose_sqlite(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn explicit_total_below_input_and_output_is_rejected_but_missing_total_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_goose_db(&path);
+        for (id, total) in [
+            ("01-invalid-total", Some(5_i64)),
+            ("02-missing-total", None),
+            ("03-good", Some(8_i64)),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions VALUES (?1, ?2, ?3, ?4, ?5, 4, 3, NULL, NULL, NULL)",
+                params![
+                    id,
+                    r#"{"model_name":"gpt-5"}"#,
+                    "openai",
+                    "2026-04-14T16:18:53Z",
+                    total
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let scanned = parse_goose_sqlite(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        let missing_total = scanned
+            .messages
+            .iter()
+            .find(|message| message.session_id.as_ref() == "02-missing-total")
+            .unwrap();
+        assert_eq!(missing_total.tokens.input, 4);
+        assert_eq!(missing_total.tokens.output, 3);
+        assert_eq!(missing_total.tokens.reasoning, 0);
+        let good = scanned
+            .messages
+            .iter()
+            .find(|message| message.session_id.as_ref() == "03-good")
+            .unwrap();
+        assert_eq!(good.tokens.reasoning, 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
     }
 }

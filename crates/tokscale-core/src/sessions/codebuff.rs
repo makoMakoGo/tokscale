@@ -16,12 +16,13 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{parse_timestamp_str, parse_timestamp_value, read_file};
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, ScannedSource};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
 
 /// Parse a single `chat-messages.json` file into UnifiedMessages.
-pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let mut bytes = read_file(path)?;
     let root: Value = simd_json::from_slice(&mut bytes)
         .map_err(|error| SessionParseError::new("decode Codebuff chat file", error))?;
@@ -38,69 +39,84 @@ pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage
 
     let chat_id_ts = parse_chat_id_to_millis(&chat_id).unwrap_or(0);
 
-    let mut results = Vec::new();
+    let mut scanned = ScannedSource::default();
     for (ordinal, msg) in messages.iter().enumerate() {
         if !is_assistant_role(msg) {
             continue;
         }
 
-        let usage = extract_assistant_usage(msg);
-        if !usage.has_signal() {
-            continue;
+        let extracted = extract_assistant_usage(msg);
+        for detail in extracted.rejections {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    format!("{} message {ordinal}: {detail}", path.display())
+                });
         }
+        let usage = extracted.usage;
+        let tokens = match usage.checked_token_breakdown() {
+            Ok(Some(tokens)) => tokens,
+            Ok(None) => continue,
+            Err(detail) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord, || {
+                        format!("{} message {ordinal}: {detail}", path.display())
+                    });
+                continue;
+            }
+        };
 
         let chat_id_fallback = if chat_id_ts > 0 {
             Some(chat_id_ts)
         } else {
             None
         };
-        let ts = message_timestamp(msg).or(chat_id_fallback).ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate Codebuff assistant message",
-                format!("assistant message {ordinal} has no valid timestamp"),
-            )
-        })?;
+        let Some(ts) = message_timestamp(msg).or(chat_id_fallback) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp, || {
+                    format!("{} message {ordinal}: no valid timestamp", path.display())
+                });
+            continue;
+        };
 
-        let model = usage
-            .model
-            .clone()
-            .filter(|model| !model.trim().is_empty())
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate Codebuff assistant message",
-                    format!("assistant message {ordinal} has no model id"),
-                )
-            })?;
-        let provider =
-            provider_identity::inferred_provider_from_model(&model).ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate Codebuff assistant message",
-                    format!("cannot infer provider for model `{model}`"),
-                )
-            })?;
+        let Some(model) = usage.model.clone().filter(|model| !model.trim().is_empty()) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel, || {
+                    format!("{} message {ordinal}: no model id", path.display())
+                });
+            continue;
+        };
+        let Some(provider) = provider_identity::inferred_provider_from_model(&model) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingProvider, || {
+                    format!(
+                        "{} message {ordinal}: cannot infer provider for model `{model}`",
+                        path.display()
+                    )
+                });
+            continue;
+        };
 
         let dedup_key = upstream_message_id(msg)
             .unwrap_or_else(|| derive_dedup_key(&session_id, ts, &model, &usage, ordinal));
 
-        results.push(UnifiedMessage::new_with_dedup(
+        scanned.messages.push(UnifiedMessage::new_with_dedup(
             "codebuff",
             &model,
             provider,
             &session_id,
             ts,
-            TokenBreakdown {
-                input: usage.input_tokens.max(0),
-                output: usage.output_tokens.max(0),
-                cache_read: usage.cache_read_input_tokens.max(0),
-                cache_write: usage.cache_creation_input_tokens.max(0),
-                reasoning: 0,
-            },
+            tokens,
             0.0,
             Some(crate::sessions::dedup_hash_str(&dedup_key)),
         ));
     }
 
-    Ok(results)
+    Ok(scanned)
 }
 
 /// Extract the upstream `ChatMessage.id` if present, so dedup keys remain
@@ -125,10 +141,10 @@ fn derive_dedup_key(
 ) -> String {
     format!(
         "codebuff:{session_id}:{ts}:{model}:{ordinal}:{i}:{o}:{cr}:{cw}",
-        i = usage.input_tokens.max(0),
-        o = usage.output_tokens.max(0),
-        cr = usage.cache_read_input_tokens.max(0),
-        cw = usage.cache_creation_input_tokens.max(0),
+        i = usage.input_tokens,
+        o = usage.output_tokens,
+        cr = usage.cache_read_input_tokens,
+        cw = usage.cache_creation_input_tokens,
     )
 }
 
@@ -245,64 +261,92 @@ impl AssistantUsage {
     }
 
     fn merge_fallback(&mut self, other: AssistantUsage) {
-        if self.input_tokens <= 0 {
+        if self.input_tokens == 0 {
             self.input_tokens = other.input_tokens;
         }
-        if self.output_tokens <= 0 {
+        if self.output_tokens == 0 {
             self.output_tokens = other.output_tokens;
         }
-        if self.cache_read_input_tokens <= 0 {
+        if self.cache_read_input_tokens == 0 {
             self.cache_read_input_tokens = other.cache_read_input_tokens;
         }
-        if self.cache_creation_input_tokens <= 0 {
+        if self.cache_creation_input_tokens == 0 {
             self.cache_creation_input_tokens = other.cache_creation_input_tokens;
         }
         if self.model.is_none() {
             self.model = other.model;
         }
     }
+
+    fn checked_token_breakdown(&self) -> Result<Option<TokenBreakdown>, &'static str> {
+        let tokens = TokenBreakdown {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            cache_read: self.cache_read_input_tokens,
+            cache_write: self.cache_creation_input_tokens,
+            reasoning: 0,
+        };
+        let total = tokens
+            .checked_total()
+            .ok_or("assistant usage token total exceeds i64::MAX")?;
+        Ok((total > 0).then_some(tokens))
+    }
+}
+
+#[derive(Default)]
+struct AssistantUsageExtraction {
+    usage: AssistantUsage,
+    rejections: Vec<String>,
 }
 
 /// Extract assistant usage trying, in order: `metadata.usage`,
 /// `metadata.codebuff.usage`, and the stashed RunState message history (which
 /// is where OpenRouter-routed calls land their final token counts).
-fn extract_assistant_usage(msg: &Value) -> AssistantUsage {
+fn extract_assistant_usage(msg: &Value) -> AssistantUsageExtraction {
     let metadata = msg.get("metadata");
 
-    let mut usage = AssistantUsage::default();
+    let mut extracted = AssistantUsageExtraction::default();
 
     if let Some(meta) = metadata {
         if let Some(model) = meta.get("model").and_then(|v| v.as_str()) {
-            usage.model = Some(model.to_string());
+            extracted.usage.model = Some(model.to_string());
         }
         if let Some(u) = meta.get("usage") {
-            usage.merge_fallback(parse_usage_object(u));
+            merge_usage_candidate(&mut extracted, u, "metadata.usage");
         }
         if let Some(u) = meta.get("codebuff").and_then(|c| c.get("usage")) {
-            usage.merge_fallback(parse_usage_object(u));
+            merge_usage_candidate(&mut extracted, u, "metadata.codebuff.usage");
         }
-        if let Some(run_state_usage) = extract_usage_from_run_state(meta) {
-            usage.merge_fallback(run_state_usage);
-        }
+        merge_usage_from_run_state(meta, &mut extracted);
     }
 
-    usage
+    extracted
+}
+
+fn merge_usage_candidate(extracted: &mut AssistantUsageExtraction, value: &Value, location: &str) {
+    match parse_usage_object(value) {
+        Ok(usage) => extracted.usage.merge_fallback(usage),
+        Err(detail) => extracted.rejections.push(format!("{location}: {detail}")),
+    }
 }
 
 /// Find the last assistant entry in `metadata.runState.sessionState.
 /// mainAgentState.messageHistory` and pull `providerOptions.usage` (or
 /// `providerOptions.codebuff.usage`) plus any model hint it carries.
-fn extract_usage_from_run_state(metadata: &Value) -> Option<AssistantUsage> {
-    let history = metadata
+fn merge_usage_from_run_state(metadata: &Value, extracted: &mut AssistantUsageExtraction) {
+    let Some(history) = metadata
         .get("runState")
         .and_then(|rs| rs.get("sessionState"))
         .and_then(|ss| ss.get("mainAgentState"))
         .and_then(|mas| mas.get("messageHistory"))
-        .and_then(|v| v.as_array())?;
+        .and_then(|v| v.as_array())
+    else {
+        return;
+    };
 
     let mut accumulator = AssistantUsage::default();
     let mut found_any = false;
-    for entry in history.iter().rev() {
+    for (history_index, entry) in history.iter().enumerate().rev() {
         let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
         if role != "assistant" {
             continue;
@@ -312,13 +356,23 @@ fn extract_usage_from_run_state(metadata: &Value) -> Option<AssistantUsage> {
         };
         let mut entry_usage = AssistantUsage::default();
         if let Some(u) = provider_options.get("usage") {
-            entry_usage.merge_fallback(parse_usage_object(u));
+            match parse_usage_object(u) {
+                Ok(usage) => entry_usage.merge_fallback(usage),
+                Err(detail) => extracted.rejections.push(format!(
+                    "metadata.runState messageHistory[{history_index}].providerOptions.usage: {detail}"
+                )),
+            }
         }
         if let Some(u) = provider_options
             .get("codebuff")
             .and_then(|c| c.get("usage"))
         {
-            entry_usage.merge_fallback(parse_usage_object(u));
+            match parse_usage_object(u) {
+                Ok(usage) => entry_usage.merge_fallback(usage),
+                Err(detail) => extracted.rejections.push(format!(
+                    "metadata.runState messageHistory[{history_index}].providerOptions.codebuff.usage: {detail}"
+                )),
+            }
         }
         if let Some(model) = provider_options
             .get("codebuff")
@@ -333,15 +387,13 @@ fn extract_usage_from_run_state(metadata: &Value) -> Option<AssistantUsage> {
         accumulator.merge_fallback(entry_usage);
     }
     if found_any {
-        Some(accumulator)
-    } else {
-        None
+        extracted.usage.merge_fallback(accumulator);
     }
 }
 
 /// Accept both camelCase and snake_case shapes, matching the @ccusage/codebuff
 /// valibot schema (different upstreams ship different casings).
-fn parse_usage_object(value: &Value) -> AssistantUsage {
+fn parse_usage_object(value: &Value) -> Result<AssistantUsage, String> {
     let mut usage = AssistantUsage::default();
 
     let input = pick_number(
@@ -352,7 +404,7 @@ fn parse_usage_object(value: &Value) -> AssistantUsage {
             "promptTokens",
             "prompt_tokens",
         ],
-    );
+    )?;
     let output = pick_number(
         value,
         &[
@@ -361,8 +413,8 @@ fn parse_usage_object(value: &Value) -> AssistantUsage {
             "completionTokens",
             "completion_tokens",
         ],
-    );
-    let cache_read = pick_number(
+    )?;
+    let cache_read = match pick_number(
         value,
         &[
             "cacheReadInputTokens",
@@ -370,17 +422,16 @@ fn parse_usage_object(value: &Value) -> AssistantUsage {
             "cachedTokensCreated",
             "cached_tokens_created",
         ],
-    )
-    .or_else(|| {
-        value
+    )? {
+        Some(value) => Some(value),
+        None => match value
             .get("promptTokensDetails")
             .or_else(|| value.get("prompt_tokens_details"))
-            .and_then(|d| {
-                d.get("cachedTokens")
-                    .or_else(|| d.get("cached_tokens"))
-                    .and_then(|v| v.as_i64())
-            })
-    });
+        {
+            Some(details) => pick_number(details, &["cachedTokens", "cached_tokens"])?,
+            None => None,
+        },
+    };
     let cache_write = pick_number(
         value,
         &[
@@ -389,7 +440,7 @@ fn parse_usage_object(value: &Value) -> AssistantUsage {
             "cacheCreationTokens",
             "cache_creation_tokens",
         ],
-    );
+    )?;
 
     usage.input_tokens = input.unwrap_or(0);
     usage.output_tokens = output.unwrap_or(0);
@@ -400,34 +451,54 @@ fn parse_usage_object(value: &Value) -> AssistantUsage {
         usage.model = Some(model.to_string());
     }
 
-    usage
+    usage.checked_token_breakdown().map_err(str::to_string)?;
+
+    Ok(usage)
 }
 
-fn pick_number(value: &Value, keys: &[&str]) -> Option<i64> {
+fn pick_number(value: &Value, keys: &[&str]) -> Result<Option<i64>, String> {
+    let mut selected = None;
     for key in keys {
         if let Some(v) = value.get(*key) {
-            if let Some(n) = v
-                .as_i64()
-                .or_else(|| v.as_u64().map(|v| v as i64))
-                .or_else(|| v.as_f64().map(|f| f as i64))
-            {
-                if n > 0 {
-                    return Some(n);
-                }
+            let parsed = strict_nonnegative_i64(v, key)?;
+            if selected.is_none() {
+                selected = Some(parsed);
             }
         }
     }
-    None
+    Ok(selected)
+}
+
+fn strict_nonnegative_i64(value: &Value, field: &str) -> Result<i64, String> {
+    let parsed = if let Some(number) = value.as_i64() {
+        number
+    } else if let Some(number) = value.as_u64() {
+        i64::try_from(number).map_err(|_| format!("{field} exceeds i64::MAX"))?
+    } else if let Some(number) = value.as_f64() {
+        const I64_EXCLUSIVE_UPPER_BOUND: f64 = 9_223_372_036_854_775_808.0;
+        if !number.is_finite()
+            || number.fract() != 0.0
+            || !(0.0..I64_EXCLUSIVE_UPPER_BOUND).contains(&number)
+        {
+            return Err(format!(
+                "{field} must be a non-negative integer no greater than i64::MAX"
+            ));
+        }
+        number as i64
+    } else {
+        return Err(format!("{field} must be an integer"));
+    };
+
+    if parsed < 0 {
+        return Err(format!("{field} must be non-negative"));
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-
-    fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_codebuff_file(path).unwrap()
-    }
 
     #[test]
     fn malformed_chat_file_is_reported() {
@@ -468,7 +539,9 @@ mod tests {
         )
         .unwrap();
 
-        let usage = extract_assistant_usage(&msg);
+        let extracted = extract_assistant_usage(&msg);
+        assert!(extracted.rejections.is_empty());
+        let usage = extracted.usage;
         assert_eq!(usage.input_tokens, 1000);
         assert_eq!(usage.output_tokens, 400);
         assert_eq!(usage.cache_read_input_tokens, 200);
@@ -494,7 +567,9 @@ mod tests {
         )
         .unwrap();
 
-        let usage = extract_assistant_usage(&msg);
+        let extracted = extract_assistant_usage(&msg);
+        assert!(extracted.rejections.is_empty());
+        let usage = extracted.usage;
         assert_eq!(usage.input_tokens, 750);
         assert_eq!(usage.output_tokens, 120);
         assert_eq!(usage.cache_read_input_tokens, 100);
@@ -533,7 +608,9 @@ mod tests {
         )
         .unwrap();
 
-        let usage = extract_assistant_usage(&msg);
+        let extracted = extract_assistant_usage(&msg);
+        assert!(extracted.rejections.is_empty());
+        let usage = extracted.usage;
         assert_eq!(usage.input_tokens, 2000);
         assert_eq!(usage.output_tokens, 800);
         assert_eq!(usage.cache_read_input_tokens, 400);
@@ -603,7 +680,9 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_codebuff_file(&msgs_path);
+        let scanned = super::parse_codebuff_file(&msgs_path).unwrap();
+        assert!(scanned.rejections.is_empty());
+        let messages = scanned.messages;
         assert_eq!(messages.len(), 1);
         let only = &messages[0];
         assert_eq!(only.client.as_ref(), "codebuff");
@@ -612,5 +691,88 @@ mod tests {
         assert!(only.session_id.ends_with("/proj/2025-12-20T12-00-00.000Z"));
         assert_eq!(only.tokens.input, 10);
         assert_eq!(only.tokens.output, 5);
+    }
+
+    #[test]
+    fn bad_assistant_record_does_not_hide_later_usage() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let chat_dir = dir
+            .path()
+            .join("manicode/projects/proj/chats/2025-12-20T12-00-00.000Z");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        let path = chat_dir.join("chat-messages.json");
+        std::fs::write(
+            &path,
+            r#"[
+                {"variant":"ai","metadata":{"model":"gpt-5","usage":{"inputTokens":10,"outputTokens":2}}},
+                {"variant":"ai","metadata":{"usage":{"inputTokens":11,"outputTokens":2}}},
+                {"variant":"ai","metadata":{"model":"gpt-5","usage":{"inputTokens":20,"outputTokens":3}}}
+            ]"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuff_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn invalid_numeric_usage_records_are_rejected_without_hiding_good_siblings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let chat_dir = dir
+            .path()
+            .join("manicode/projects/proj/chats/2025-12-20T12-00-00.000Z");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        let path = chat_dir.join("chat-messages.json");
+        std::fs::write(
+            &path,
+            r#"[
+                {"variant":"ai","metadata":{"model":"gpt-5","usage":{"inputTokens":10,"outputTokens":2}}},
+                {"variant":"ai","metadata":{"model":"gpt-5","usage":{"inputTokens":-1,"outputTokens":999}}},
+                {"variant":"ai","metadata":{"model":"gpt-5","usage":{"inputTokens":9223372036854775807,"outputTokens":1}}},
+                {"variant":"ai","metadata":{"model":"gpt-5","usage":{"inputTokens":1.5,"outputTokens":4}}},
+                {"variant":"ai","metadata":{"model":"gpt-5","usage":{"inputTokens":9223372036854775808,"outputTokens":4}}},
+                {"variant":"ai","metadata":{"model":"gpt-5","usage":{"inputTokens":20,"outputTokens":3}}}
+            ]"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuff_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert_eq!(scanned.messages[1].tokens.input, 20);
+        assert_eq!(scanned.rejections.total(), 4);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn malformed_run_state_item_is_not_spliced_into_a_good_history_sibling() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let chat_dir = dir
+            .path()
+            .join("manicode/projects/proj/chats/2025-12-20T12-00-00.000Z");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        let path = chat_dir.join("chat-messages.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "variant":"ai",
+                "metadata":{"runState":{"sessionState":{"mainAgentState":{"messageHistory":[
+                    {"role":"assistant","providerOptions":{"codebuff":{"model":"gpt-5","usage":{"inputTokens":10,"outputTokens":2}}}},
+                    {"role":"assistant","providerOptions":{"codebuff":{"model":"gpt-5","usage":{"inputTokens":-1,"outputTokens":999}}}}
+                ]}}}}
+            }]"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuff_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert_eq!(scanned.messages[0].tokens.output, 2);
+        assert_eq!(scanned.rejections.total(), 1);
     }
 }

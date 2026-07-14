@@ -62,6 +62,13 @@ impl TestEnvGuard {
         std::env::set_var(key, value);
         Self { key, original }
     }
+
+    #[cfg(unix)]
+    fn set_os(key: &'static str, value: &OsString) -> Self {
+        let original = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
 }
 
 impl Drop for TestEnvGuard {
@@ -2153,6 +2160,66 @@ fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
     }
 }
 
+#[test]
+#[serial_test::serial]
+fn prepare_local_sources_rejects_invalid_extra_dirs_configuration() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _extra_dirs_guard = TestEnvGuard::set("TOKSCALE_EXTRA_DIRS", "missing-separator");
+    let mut options = inventory_options(home.path(), &["amp"]);
+    options.use_env_roots = true;
+
+    let error = super::prepare_local_sources(options)
+        .err()
+        .expect("invalid extra-dir syntax must fail source preparation");
+
+    assert!(error.contains("TOKSCALE_EXTRA_DIRS"));
+    assert!(error.contains("parse environment variable"));
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn prepare_local_sources_rejects_non_utf8_extra_dirs_configuration() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let home = tempfile::TempDir::new().unwrap();
+    let value = OsString::from_vec(b"amp:/tmp/non-utf8-\xff".to_vec());
+    let _extra_dirs_guard = TestEnvGuard::set_os("TOKSCALE_EXTRA_DIRS", &value);
+    let mut options = inventory_options(home.path(), &["amp"]);
+    options.use_env_roots = true;
+
+    let error = super::prepare_local_sources(options)
+        .err()
+        .expect("non-UTF-8 extra-dir configuration must fail source preparation");
+
+    assert!(error.contains("TOKSCALE_EXTRA_DIRS"));
+    assert!(error.contains("read environment variable"));
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_local_sources_isolates_ordinary_discovery_source_failure() {
+    let home = tempfile::TempDir::new().unwrap();
+    let goose_root = home.path().join("configured-goose-root");
+    let invalid_db_candidate = goose_root.join("data/sessions/sessions.db");
+    std::fs::create_dir_all(&invalid_db_candidate).unwrap();
+    let _goose_root_guard = TestEnvGuard::set("GOOSE_PATH_ROOT", goose_root.to_str().unwrap());
+    let mut options = inventory_options(home.path(), &["goose"]);
+    options.use_env_roots = true;
+
+    let prepared = super::prepare_local_sources(options)
+        .expect("a source discovery failure must remain isolated as health");
+
+    assert_eq!(prepared.health.failed_sources(), 1);
+    let failure = &prepared.health.sources()[0];
+    assert_eq!(failure.client, ClientId::Goose);
+    assert_eq!(failure.path, invalid_db_candidate);
+    assert!(matches!(
+        failure.status,
+        crate::source_health::SourceStatus::Unavailable { .. }
+    ));
+}
+
 fn signature_for_test_units(
     requested_clients: &[String],
     client: ClientId,
@@ -3643,7 +3710,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
+fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -3671,9 +3738,19 @@ fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
         )
         .unwrap();
         assert!(messages.is_empty());
-        assert_eq!(health.failed_sources(), 1);
+        assert_eq!(health.partial_sources(), 1);
+        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.rejected_records(), 1);
         let source = &health.sources()[0];
         assert_eq!(source.path, path);
+        assert!(matches!(
+            source.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(
+            source.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
         let failure = source.status.failure().unwrap();
         assert_eq!(failure.operation, "validate Codex token-count event");
         assert!(
@@ -3702,7 +3779,7 @@ fn test_codex_untimestamped_token_row_returns_error_without_cache_shard() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_malformed_json_suffix_returns_error_without_cache_shard() {
+fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -3731,10 +3808,22 @@ fn test_codex_malformed_json_suffix_returns_error_without_cache_shard() {
             None,
         )
         .unwrap();
-        assert!(messages.is_empty());
-        assert_eq!(health.failed_sources(), 1);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(health.partial_sources(), 1);
+        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.rejected_records(), 1);
         let source = &health.sources()[0];
         assert_eq!(source.path, path);
+        assert!(matches!(
+            source.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(
+            source.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
         let failure = source.status.failure().unwrap();
         assert_eq!(failure.operation, "decode Codex headless line");
         assert!(message_cache::SourceMessageCache::load()
@@ -3758,7 +3847,7 @@ fn test_codex_malformed_json_suffix_returns_error_without_cache_shard() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
+fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -3789,10 +3878,19 @@ fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
             None,
         )
         .unwrap();
-        assert!(messages.is_empty());
-        assert_eq!(health.failed_sources(), 1);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(health.partial_sources(), 1);
+        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.rejected_records(), 0);
         let source = &health.sources()[0];
         assert_eq!(source.path, path);
+        assert!(matches!(
+            source.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert!(source.rejections.is_empty());
         let failure = source.status.failure().unwrap();
         assert_eq!(failure.operation, "read Codex JSONL line");
 
@@ -3817,7 +3915,7 @@ fn test_codex_invalid_full_log_returns_error_without_cache_shard() {
 
 #[test]
 #[serial_test::serial]
-fn test_codex_unknown_model_prefix_errors_without_shard_then_parses_when_completed() {
+fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let fresh_cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
@@ -3846,9 +3944,19 @@ fn test_codex_unknown_model_prefix_errors_without_shard_then_parses_when_complet
         )
         .unwrap();
         assert!(initial_messages.is_empty());
-        assert_eq!(initial_health.failed_sources(), 1);
+        assert_eq!(initial_health.partial_sources(), 1);
+        assert_eq!(initial_health.failed_sources(), 0);
+        assert_eq!(initial_health.rejected_records(), 1);
         let source = &initial_health.sources()[0];
         assert_eq!(source.path, path);
+        assert!(matches!(
+            source.status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert_eq!(
+            source.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
         let failure = source.status.failure().unwrap();
         assert_eq!(failure.operation, "resolve Codex token-count model");
         assert!(
@@ -5986,7 +6094,7 @@ fn test_default_graph_includes_antigravity_cache_rows() {
     std::fs::create_dir_all(&sessions_dir).unwrap();
     std::fs::write(
         sessions_dir.join("ag-local.jsonl"),
-        r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
+        r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","providerId":"antigravity","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
 "#,
     )
     .unwrap();

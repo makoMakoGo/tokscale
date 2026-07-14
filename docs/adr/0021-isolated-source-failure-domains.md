@@ -37,9 +37,16 @@ Damage is contained to the smallest unit that owns it:
   scan interrupted mid-source is `Partial`: records confirmed before the
   interruption are kept, the loss is declared unknown, and the result is
   never cached.
-- **Shared input**: when one damaged input feeds several units (such as the
-  OMP parent-task index), all units that depend on it become unavailable
-  together; the failure still does not leave that adapter's domain.
+- **Shared input**: health belongs to the shared input and is counted once,
+  not copied onto every dependent unit. If the input only enriches optional
+  metadata (the OMP parent-task index supplies agent labels), self-contained
+  child usage remains available; if it is required to interpret the child,
+  that child is unavailable. A dependent unit's cache fingerprint includes
+  the shared input so metadata and health cannot remain stale after it changes.
+  OMP stores a separate, path-keyed empty-message shard for a completed shared
+  parent-health scan. This restores the single parent issue on a full warm hit
+  without copying it into every child shard or reparsing the parent. Partial
+  and unavailable parent-health scans are not cached.
 - **Pipeline**: only tokscale's own contract violations — internal
   invariants, cache-infrastructure write failures, invalid requests, and
   configuration errors — remain hard errors of the outer `Result`. Third-party
@@ -63,8 +70,12 @@ boundary.
 
 Parsers report a completed scan as `ScannedSource { messages, rejections,
 interrupted }`. A parser `Err` means the source could not be read at all.
-Adapters that have not migrated to record-level rejection get source-level
-isolation automatically through the shared seam.
+Production adapters consume that result through the scanned-source seam;
+there is no vector-only compatibility path in ingestion. Codex's incremental
+outcome carries the same rejection and interruption fields. It applies each
+JSONL record transactionally: independently invalid non-state records can be
+rejected and skipped, while malformed or incomplete state-bearing records
+stop the scan as `Partial` before they can pollute model or token state.
 
 ### Cache
 
@@ -72,6 +83,9 @@ isolation automatically through the shared seam.
   it produced zero messages; its rejection summary is part of the shard, so a
   warm hit restores the Issues view without rescanning. A stable bad record
   therefore never makes a cache permanently stale.
+- A completed shared-input health scan follows the same rule in its own cache
+  namespace. The shard contains no usage messages and is keyed by the shared
+  input path, so multiple dependants restore one health owner.
 - A `Partial` scan is never cached.
 - An `Unavailable` source leaves any previously cached shard in place; the
   shard is served again only if the source fingerprint still matches, in
@@ -112,7 +126,13 @@ does not weaken ADR 0001: nothing substitutes guessed or synthetic data, and
 no failure is delivered as ordinary success — it is delivered as data plus
 health.
 
-Record-level adoption is incremental. Until a multi-record parser returns
-`ScannedSource`, its failures are still visible and isolated to that source,
-but a bad record can discard other records in the same source. Issue #141
-remains open until those legacy parsers migrate.
+Every production local source parser now exposes record health through
+`ScannedSource` or, for Codex's stateful append path, the equivalent
+incremental adapter outcome. New parsers must not use a vector-only adapter
+seam. A vector-returning Codex full-file helper remains for direct parser
+tests, but it is not part of production ingestion.
+
+Failure before discovery has established individual `SourceUnit` identities
+is still attributed to the adapter that was being discovered. Per-root and
+per-path discovery isolation is a separate boundary from the record-parser
+migration decided here.

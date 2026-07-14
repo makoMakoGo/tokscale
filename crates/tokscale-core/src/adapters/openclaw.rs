@@ -7,9 +7,13 @@ use crate::adapters::{
     ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
 pub(crate) struct OpenClawAdapter;
+
+const OPENCLAW_RECORD_REJECTION_REVISION: u32 =
+    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 impl LocalSourceAdapter for OpenClawAdapter {
     fn client(&self) -> ClientId {
@@ -34,18 +38,26 @@ impl LocalSourceAdapter for OpenClawAdapter {
             ctx,
         )?);
 
-        adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::source_units_from_paths(
             ClientId::OpenClaw,
             adapter_discover::scan_roots(ClientId::OpenClaw, roots, def.pattern)?,
             FingerprintPolicy::PlainFile,
-        )
+        )?
+        .into_iter()
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(
+                ParserId::OpenClaw,
+                OPENCLAW_RECORD_REJECTION_REVISION,
+            ))
+        })
+        .collect())
     }
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
+                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                     sessions::openclaw::parse_openclaw_transcript(path)
                 })
             })
@@ -120,12 +132,8 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let paths: Vec<_> = OPENCLAW_ADAPTER
-            .discover_checked(&ctx)
-            .unwrap()
-            .into_iter()
-            .map(|unit| unit.path)
-            .collect();
+        let units = OPENCLAW_ADAPTER.discover_checked(&ctx).unwrap();
+        let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![
             default_path,
             clawdbot_path,
@@ -136,5 +144,9 @@ mod tests {
         expected.sort_unstable();
 
         assert_eq!(paths, expected);
+        assert!(units.iter().all(|unit| {
+            unit.parser_version
+                == ParserVersion::new(ParserId::OpenClaw, OPENCLAW_RECORD_REJECTION_REVISION)
+        }));
     }
 }

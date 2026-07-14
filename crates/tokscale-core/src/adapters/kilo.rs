@@ -7,8 +7,10 @@ use crate::adapters::{
     SourceDiscoveryError, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
-use crate::source_health::ScannedSource;
+
+const KILO_RECORD_REJECTION_REVISION: u32 = 4;
 
 pub(crate) struct KiloAdapter;
 
@@ -32,7 +34,11 @@ impl LocalSourceAdapter for KiloAdapter {
         )?;
         Ok(paths
             .into_iter()
-            .map(|path| SourceUnit::sqlite_with_wal(ClientId::Kilo, path))
+            .map(|path| {
+                SourceUnit::sqlite_with_wal(ClientId::Kilo, path).with_parser_version(
+                    ParserVersion::new(ParserId::Kilo, KILO_RECORD_REJECTION_REVISION),
+                )
+            })
             .collect())
     }
 
@@ -40,9 +46,7 @@ impl LocalSourceAdapter for KiloAdapter {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::parse_uncached_unit(unit, ctx, |path| {
-                    sessions::kilo::parse_kilo_sqlite(path).map(ScannedSource::complete)
-                })
+                adapter_cache::parse_uncached_unit(unit, ctx, sessions::kilo::parse_kilo_sqlite)
             })
             .collect()
     }
@@ -86,6 +90,10 @@ mod tests {
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, db_path);
+        assert_eq!(
+            units[0].parser_version,
+            ParserVersion::new(ParserId::Kilo, KILO_RECORD_REJECTION_REVISION)
+        );
         assert_eq!(
             units[0].fingerprint_policy,
             crate::adapters::FingerprintPolicy::SqliteWithWal

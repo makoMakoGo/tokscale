@@ -211,6 +211,17 @@ fn is_workflow_journal(path: &Path) -> bool {
         })
 }
 
+pub(crate) fn nested_parent_session_path(sidechain_path: &Path) -> Option<PathBuf> {
+    let subagents_dir = sidechain_path.ancestors().find(|ancestor| {
+        ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents")
+    })?;
+    let session_dir = subagents_dir.parent()?;
+    let project_dir = session_dir.parent()?;
+    let mut parent_filename = session_dir.file_name()?.to_os_string();
+    parent_filename.push(".jsonl");
+    Some(project_dir.join(parent_filename))
+}
+
 /// Locate the parent main-session JSONL for a sidechain transcript.
 ///
 /// Nested layout: `.../projects/<key>/<session>/subagents/agent-X.jsonl`
@@ -223,31 +234,23 @@ fn find_parent_session_path(
     sidechain_path: &Path,
     parent_session_id: &str,
 ) -> SessionParseResult<Option<PathBuf>> {
-    let parent_filename = format!("{}.jsonl", parent_session_id);
-
-    for ancestor in sidechain_path.ancestors() {
-        if ancestor.file_name().and_then(|name| name.to_str()) == Some("subagents") {
-            if let Some(project_dir) = ancestor.parent().and_then(Path::parent) {
-                let candidate = project_dir.join(&parent_filename);
-                match std::fs::metadata(&candidate) {
-                    Ok(_) => return Ok(Some(candidate)),
-                    Err(source) if source.kind() == ErrorKind::NotFound => {}
-                    Err(source) => {
-                        return Err(SessionParseError::at_path(
-                            &candidate,
-                            "inspect Claude parent session",
-                            source,
-                        ));
-                    }
-                }
+    if let Some(candidate) = nested_parent_session_path(sidechain_path) {
+        match std::fs::metadata(&candidate) {
+            Ok(_) => return Ok(Some(candidate)),
+            Err(source) if source.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(SessionParseError::at_path(
+                    &candidate,
+                    "inspect Claude parent session",
+                    source,
+                ));
             }
-            break;
         }
     }
 
     // Flat layout: parent dir is 1 level up
     if let Some(project_dir) = sidechain_path.parent() {
-        let candidate = project_dir.join(&parent_filename);
+        let candidate = project_dir.join(format!("{}.jsonl", parent_session_id));
         match std::fs::metadata(&candidate) {
             Ok(_) => return Ok(Some(candidate)),
             Err(source) if source.kind() == ErrorKind::NotFound => {}
@@ -568,8 +571,7 @@ pub fn parse_claude_file_with_cache_and_home(
             workspace_label.clone(),
             &client_id,
             metadata_provider_hint,
-        )
-        .map(ScannedSource::complete);
+        );
     }
 
     let file = std::fs::File::open(path)
@@ -673,14 +675,15 @@ pub fn parse_claude_file_with_cache_and_home(
             // Detect sidechain on the first parseable entry (any type).
             // All lines in a subagent file carry isSidechain: true.
             if !sidechain_detected {
-                sidechain_detected = true;
                 if entry.is_sidechain {
-                    let parent_id = entry
+                    let parent_id = match entry
                         .session_id
                         .as_deref()
                         .filter(|parent_id| !parent_id.trim().is_empty())
-                        .ok_or_else(|| {
-                            SessionParseError::at_path(
+                    {
+                        Some(parent_id) => parent_id,
+                        None => {
+                            let error = SessionParseError::at_path(
                                 path,
                                 "validate Claude sidechain session",
                                 std::io::Error::new(
@@ -690,20 +693,41 @@ pub fn parse_claude_file_with_cache_and_home(
                                         line_index + 1
                                     ),
                                 ),
-                            )
-                        })?;
+                            );
+                            record_claude_rejection(
+                                &mut rejections,
+                                RecordRejectionReason::MalformedRecord,
+                                &error,
+                            );
+                            continue;
+                        }
+                    };
+                    sidechain_detected = true;
                     session_id = parent_id.to_string();
                     let stem_agent_id = path
                         .file_stem()
                         .and_then(|stem| stem.to_str())
                         .and_then(sidechain_agent_id_from_stem);
                     sidechain_agent_instance = entry.agent_id.clone().or(stem_agent_id);
-                    sidechain_agent = Some(resolve_subagent_name(
+                    let agent = match resolve_subagent_name(
                         path,
                         entry.session_id.as_deref(),
                         entry.agent_id.as_deref(),
                         parent_cache,
-                    )?);
+                    ) {
+                        Ok(agent) => agent,
+                        Err(error) => {
+                            record_claude_rejection(
+                                &mut rejections,
+                                RecordRejectionReason::MalformedRecord,
+                                &error,
+                            );
+                            "Claude Subagent".to_string()
+                        }
+                    };
+                    sidechain_agent = Some(agent);
+                } else {
+                    sidechain_detected = true;
                 }
             }
 
@@ -1737,14 +1761,14 @@ fn parse_claude_headless_json(
     workspace_label: Option<String>,
     client_id: &str,
     default_provider_hint: Option<&str>,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+) -> SessionParseResult<ScannedSource> {
     let mut bytes = std::fs::read(path)
         .map_err(|source| SessionParseError::at_path(path, "read Claude JSON source", source))?;
     let value: Value = simd_json::from_slice(&mut bytes)
         .map_err(|source| SessionParseError::at_path(path, "decode Claude JSON source", source))?;
 
-    let mut messages = Vec::with_capacity(1);
-    if let Some(message) = extract_claude_headless_message(
+    let mut scanned = ScannedSource::complete(Vec::with_capacity(1));
+    match extract_claude_headless_message(
         &value,
         ClaudeHeadlessContext {
             path,
@@ -1753,13 +1777,16 @@ fn parse_claude_headless_json(
             client_id,
             default_provider_hint,
         },
-    )? {
-        let mut message = message;
-        message.set_workspace(workspace_key, workspace_label);
-        messages.push(message);
+    ) {
+        Ok(Some(mut message)) => {
+            message.set_workspace(workspace_key, workspace_label);
+            scanned.messages.push(message);
+        }
+        Ok(None) => {}
+        Err(error) => record_claude_error_rejection(&mut scanned.rejections, &error),
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn process_claude_headless_line(
@@ -2501,7 +2528,7 @@ mod tests {
     }
 
     #[test]
-    fn token_bearing_headless_json_without_model_reports_semantic_error() {
+    fn token_bearing_headless_json_without_model_is_rejected() {
         let mut file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
         writeln!(
             file,
@@ -2509,10 +2536,15 @@ mod tests {
         )
         .unwrap();
 
-        let error = parse_claude_file(file.path()).unwrap_err();
+        let scanned = super::parse_claude_file(file.path()).unwrap();
 
-        assert_eq!(error.path(), Some(file.path()));
-        assert_eq!(error.operation(), "validate Claude headless message");
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -2545,7 +2577,7 @@ mod tests {
     }
 
     #[test]
-    fn token_bearing_headless_json_without_timestamp_reports_semantic_error() {
+    fn token_bearing_headless_json_without_timestamp_is_rejected() {
         let mut file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
         writeln!(
             file,
@@ -2553,11 +2585,15 @@ mod tests {
         )
         .unwrap();
 
-        let error = parse_claude_file(file.path()).unwrap_err();
+        let scanned = super::parse_claude_file(file.path()).unwrap();
 
-        assert_eq!(error.path(), Some(file.path()));
-        assert_eq!(error.operation(), "validate Claude headless timestamp");
-        assert!(error.to_string().contains("JSON source"));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -2670,7 +2706,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_sidechain_meta_reports_sidecar_path() {
+    fn malformed_sidechain_meta_keeps_usage_and_reports_sidecar_path() {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_dir = temp_dir.path().join(".claude/projects/project-a");
         let path = project_dir.join("session/subagents/agent-badmeta.jsonl");
@@ -2683,10 +2719,55 @@ mod tests {
         let meta_path = path.with_file_name("agent-badmeta.meta.json");
         std::fs::write(&meta_path, "{not-json").unwrap();
 
-        let error = parse_claude_file_with_home(&path, Some(temp_dir.path())).unwrap_err();
+        let scanned = parse_claude_file_with_home(&path, Some(temp_dir.path())).unwrap();
 
-        assert_eq!(error.path(), Some(meta_path.as_path()));
-        assert_eq!(error.operation(), "decode Claude sidechain metadata");
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 1);
+        assert_eq!(scanned.messages[0].tokens.output, 1);
+        assert_eq!(
+            scanned.messages[0].agent.as_deref(),
+            Some("Claude Subagent")
+        );
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        let sample = rejection.sample.unwrap();
+        assert!(sample.contains(&meta_path.display().to_string()));
+        assert!(sample.contains("decode Claude sidechain metadata"));
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn malformed_sidechain_parent_keeps_usage_and_reports_parent_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir.path().join(".claude/projects/project-a");
+        let parent_path = project_dir.join("session.jsonl");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(&parent_path, "{not-json").unwrap();
+        let path = project_dir.join("session/subagents/agent-badparent.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","isSidechain":true,"sessionId":"session","agentId":"badparent","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":2,"output_tokens":3}}}"#,
+        )
+        .unwrap();
+
+        let scanned = parse_claude_file_with_home(&path, Some(temp_dir.path())).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 2);
+        assert_eq!(scanned.messages[0].tokens.output, 3);
+        assert_eq!(
+            scanned.messages[0].agent.as_deref(),
+            Some("Claude Subagent")
+        );
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        let sample = rejection.sample.unwrap();
+        assert!(sample.contains(&parent_path.display().to_string()));
+        assert!(sample.contains("decode Claude parent session line"));
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -3802,16 +3883,21 @@ mod tests {
     }
 
     #[test]
-    fn test_sidechain_without_session_id_is_rejected() {
+    fn test_sidechain_without_session_id_does_not_block_later_records() {
         let jsonl = r#"{"type":"user","isSidechain":true,"agentId":"noid","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"agentId":"noid","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_no","message":{"id":"msg_no","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+{"type":"assistant","isSidechain":true,"sessionId":"parent-valid","agentId":"noid","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_no","message":{"id":"msg_no","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
 
         let file = create_test_file(jsonl);
-        let error = parse_claude_file(file.path()).unwrap_err();
+        let scanned = super::parse_claude_file(file.path()).unwrap();
 
-        assert_eq!(error.path(), Some(file.path()));
-        assert_eq!(error.operation(), "validate Claude sidechain session");
-        assert!(error.to_string().contains("missing sessionId"));
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].session_id.as_ref(), "parent-valid");
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        assert!(scanned.interrupted.is_none());
     }
 
     // --- Tier 2: parent session tool_use inference tests ---

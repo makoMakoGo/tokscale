@@ -4,6 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
@@ -32,6 +33,20 @@ pub struct AmpTokens {
     pub cache_creation_input_tokens: Option<i64>,
 }
 
+impl AmpTokens {
+    fn has_negative(&self) -> bool {
+        [
+            self.input,
+            self.output,
+            self.cache_read_input_tokens,
+            self.cache_creation_input_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|tokens| tokens < 0)
+    }
+}
+
 /// Amp message usage (per-message, more detailed)
 #[derive(Debug, Deserialize)]
 pub struct AmpMessageUsage {
@@ -46,6 +61,20 @@ pub struct AmpMessageUsage {
     pub cache_creation_input_tokens: Option<i64>,
 }
 
+impl AmpMessageUsage {
+    fn has_negative(&self) -> bool {
+        [
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_input_tokens,
+            self.cache_creation_input_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|tokens| tokens < 0)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AmpMessage {
     pub role: Option<String>,
@@ -56,14 +85,14 @@ pub struct AmpMessage {
 
 #[derive(Debug, Deserialize)]
 pub struct AmpUsageLedger {
-    pub events: Option<Vec<AmpUsageEvent>>,
+    pub events: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AmpThread {
     pub id: Option<String>,
     pub created: Option<i64>,
-    pub messages: Option<Vec<AmpMessage>>,
+    pub messages: Option<Vec<serde_json::Value>>,
     #[serde(rename = "usageLedger")]
     pub usage_ledger: Option<AmpUsageLedger>,
 }
@@ -125,19 +154,40 @@ fn parse_amp_timestamp(timestamp: Option<String>) -> SessionParseResult<Option<i
 
 fn parse_amp_ledger_records(
     usage_ledger: Option<AmpUsageLedger>,
-) -> SessionParseResult<Vec<AmpUsageRecord>> {
+    path: &Path,
+    rejections: &mut RejectionSummary,
+) -> Vec<AmpUsageRecord> {
     let Some(ledger) = usage_ledger else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let Some(events) = ledger.events else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
 
     let mut records = Vec::new();
-    for event in events {
+    for (event_index, value) in events.into_iter().enumerate() {
+        let event_number = event_index + 1;
+        let event = match serde_json::from_value::<AmpUsageEvent>(value) {
+            Ok(event) => event,
+            Err(error) => {
+                rejections.record(RecordRejectionReason::MalformedRecord, || {
+                    format!("{} ledger event {event_number}: {error}", path.display())
+                });
+                continue;
+            }
+        };
         let Some(tokens) = event.tokens else {
             continue;
         };
+        if tokens.has_negative() {
+            rejections.record(RecordRejectionReason::MalformedRecord, || {
+                format!(
+                    "{} ledger event {event_number}: Amp token fields must be non-negative",
+                    path.display()
+                )
+            });
+            continue;
+        }
         let tokens = TokenBreakdown {
             input: tokens.input.unwrap_or(0).max(0),
             output: tokens.output.unwrap_or(0).max(0),
@@ -145,24 +195,45 @@ fn parse_amp_ledger_records(
             cache_write: tokens.cache_creation_input_tokens.unwrap_or(0).max(0),
             reasoning: 0,
         };
-        if crate::positive_token_total(&tokens) == 0 {
+        let Some(token_total) = tokens.checked_total() else {
+            rejections.record(RecordRejectionReason::MalformedRecord, || {
+                format!(
+                    "{} ledger event {event_number}: Amp token total exceeds i64",
+                    path.display()
+                )
+            });
+            continue;
+        };
+        if token_total == 0 {
             continue;
         }
-        let model = event
-            .model
-            .filter(|model| !model.trim().is_empty())
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate usage event",
-                    "Amp usage event is missing a non-empty model",
+        let Some(model) = event.model.filter(|model| !model.trim().is_empty()) else {
+            rejections.record(RecordRejectionReason::MissingModel, || {
+                format!(
+                    "{} ledger event {event_number}: positive usage is missing a non-empty model",
+                    path.display()
                 )
-            })?;
-        let explicit_timestamp = parse_amp_timestamp(event.timestamp)?.ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate usage timestamp",
-                "Amp usage event with positive tokens is missing a timestamp",
-            )
-        })?;
+            });
+            continue;
+        };
+        let explicit_timestamp = match parse_amp_timestamp(event.timestamp) {
+            Ok(Some(timestamp)) => timestamp,
+            Ok(None) => {
+                rejections.record(RecordRejectionReason::MissingTimestamp, || {
+                    format!(
+                        "{} ledger event {event_number}: positive usage is missing a timestamp",
+                        path.display()
+                    )
+                });
+                continue;
+            }
+            Err(error) => {
+                rejections.record(RecordRejectionReason::MissingTimestamp, || {
+                    format!("{} ledger event {event_number}: {error}", path.display())
+                });
+                continue;
+            }
+        };
 
         records.push(AmpUsageRecord {
             model,
@@ -173,25 +244,46 @@ fn parse_amp_ledger_records(
             tokens,
         });
     }
-    Ok(records)
+    records
 }
 
 fn parse_amp_message_records(
-    thread_messages: Option<Vec<AmpMessage>>,
+    thread_messages: Option<Vec<serde_json::Value>>,
     thread_created_ms: Option<i64>,
-) -> SessionParseResult<Vec<AmpUsageRecord>> {
+    path: &Path,
+    rejections: &mut RejectionSummary,
+) -> Vec<AmpUsageRecord> {
     let Some(thread_messages) = thread_messages else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
 
     let mut records = Vec::new();
-    for msg in thread_messages {
+    for (message_index, value) in thread_messages.into_iter().enumerate() {
+        let message_number = message_index + 1;
+        let msg = match serde_json::from_value::<AmpMessage>(value) {
+            Ok(message) => message,
+            Err(error) => {
+                rejections.record(RecordRejectionReason::MalformedRecord, || {
+                    format!("{} message {message_number}: {error}", path.display())
+                });
+                continue;
+            }
+        };
         if msg.role.as_deref() != Some("assistant") {
             continue;
         }
         let Some(usage) = msg.usage else {
             continue;
         };
+        if usage.has_negative() {
+            rejections.record(RecordRejectionReason::MalformedRecord, || {
+                format!(
+                    "{} message {message_number}: Amp token fields must be non-negative",
+                    path.display()
+                )
+            });
+            continue;
+        }
         let tokens = TokenBreakdown {
             input: usage.input_tokens.unwrap_or(0).max(0),
             output: usage.output_tokens.unwrap_or(0).max(0),
@@ -199,33 +291,54 @@ fn parse_amp_message_records(
             cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
             reasoning: 0,
         };
-        if crate::positive_token_total(&tokens) == 0 {
+        let Some(token_total) = tokens.checked_total() else {
+            rejections.record(RecordRejectionReason::MalformedRecord, || {
+                format!(
+                    "{} message {message_number}: Amp token total exceeds i64",
+                    path.display()
+                )
+            });
+            continue;
+        };
+        if token_total == 0 {
             continue;
         }
-        let model = usage
-            .model
-            .filter(|model| !model.trim().is_empty())
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate assistant usage",
-                    "Amp assistant usage is missing a non-empty model",
+        let Some(model) = usage.model.filter(|model| !model.trim().is_empty()) else {
+            rejections.record(RecordRejectionReason::MissingModel, || {
+                format!(
+                    "{} message {message_number}: assistant usage is missing a non-empty model",
+                    path.display()
                 )
-            })?;
-        let message_id = msg.message_id.filter(|id| *id > 0).ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate assistant usage",
-                "Amp assistant usage is missing a positive messageId",
-            )
-        })?;
-        let base_timestamp = thread_created_ms
-            .filter(|timestamp| *timestamp > 0)
-            .ok_or_else(|| {
-                SessionParseError::invalid(
-                    "validate thread timestamp",
-                    "Amp thread with assistant usage is missing a positive created timestamp",
+            });
+            continue;
+        };
+        let Some(message_id) = msg.message_id.filter(|id| *id > 0) else {
+            rejections.record(RecordRejectionReason::MalformedRecord, || {
+                format!(
+                    "{} message {message_number}: assistant usage is missing a positive messageId",
+                    path.display()
                 )
-            })?;
-        let timestamp = base_timestamp.saturating_add(message_id.saturating_mul(1000));
+            });
+            continue;
+        };
+        let Some(base_timestamp) = thread_created_ms.filter(|timestamp| *timestamp > 0) else {
+            rejections.record(RecordRejectionReason::MissingTimestamp, || {
+                format!("{} message {message_number}: thread with assistant usage is missing a positive created timestamp", path.display())
+            });
+            continue;
+        };
+        let Some(timestamp) = message_id
+            .checked_mul(1000)
+            .and_then(|offset| base_timestamp.checked_add(offset))
+        else {
+            rejections.record(RecordRejectionReason::MalformedRecord, || {
+                format!(
+                    "{} message {message_number}: derived Amp timestamp exceeds i64",
+                    path.display()
+                )
+            });
+            continue;
+        };
 
         records.push(AmpUsageRecord {
             model,
@@ -236,7 +349,7 @@ fn parse_amp_message_records(
             tokens,
         });
     }
-    Ok(records)
+    records
 }
 
 fn find_matching_ledger_record(
@@ -285,8 +398,26 @@ fn merge_amp_records(
     }
 }
 
+fn build_amp_messages(
+    records: Vec<AmpUsageRecord>,
+    thread_id: &str,
+    path: &Path,
+    rejections: &mut RejectionSummary,
+) -> Vec<UnifiedMessage> {
+    let mut messages = Vec::with_capacity(records.len());
+    for record in records {
+        match record.into_unified(thread_id) {
+            Ok(message) => messages.push(message),
+            Err(error) => rejections.record(RecordRejectionReason::MissingProvider, || {
+                format!("{}: {error}", path.display())
+            }),
+        }
+    }
+    messages
+}
+
 /// Parse an Amp thread JSON file
-pub fn parse_amp_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let content = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
 
@@ -302,16 +433,19 @@ pub fn parse_amp_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
         })?;
 
     let thread_created_ms = thread.created;
-    let mut ledger_records = parse_amp_ledger_records(thread.usage_ledger)?;
-    let message_records = parse_amp_message_records(thread.messages, thread_created_ms)?;
+    let mut rejections = RejectionSummary::default();
+    let mut ledger_records = parse_amp_ledger_records(thread.usage_ledger, path, &mut rejections);
+    let message_records =
+        parse_amp_message_records(thread.messages, thread_created_ms, path, &mut rejections);
 
     if ledger_records.is_empty() {
         let mut message_records = message_records;
         message_records.sort_by_key(|record| record.timestamp);
-        return message_records
-            .into_iter()
-            .map(|record| record.into_unified(&thread_id))
-            .collect::<SessionParseResult<Vec<_>>>();
+        return Ok(ScannedSource {
+            messages: build_amp_messages(message_records, &thread_id, path, &mut rejections),
+            rejections,
+            interrupted: None,
+        });
     }
 
     let mut consumed = vec![false; ledger_records.len()];
@@ -333,10 +467,11 @@ pub fn parse_amp_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
 
     ledger_records.extend(unmatched_message_records);
     ledger_records.sort_by_key(|record| record.timestamp);
-    ledger_records
-        .into_iter()
-        .map(|record| record.into_unified(&thread_id))
-        .collect::<SessionParseResult<Vec<_>>>()
+    Ok(ScannedSource {
+        messages: build_amp_messages(ledger_records, &thread_id, path, &mut rejections),
+        rejections,
+        interrupted: None,
+    })
 }
 
 #[cfg(test)]
@@ -345,7 +480,7 @@ mod tests {
     use std::path::Path;
 
     fn parse_amp_file(path: &Path) -> Vec<crate::UnifiedMessage> {
-        parse_amp_file_result(path).unwrap()
+        parse_amp_file_result(path).unwrap().messages
     }
 
     fn write_amp_thread(path: &Path, content: &str) {
@@ -594,8 +729,13 @@ mod tests {
             .to_string(),
         );
 
-        let error = parse_amp_file_result(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate usage timestamp");
+        let scanned = parse_amp_file_result(&path).unwrap();
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
     }
 
     #[test]
@@ -622,8 +762,13 @@ mod tests {
             }"#,
         );
 
-        let error = parse_amp_file_result(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate thread timestamp");
+        let scanned = parse_amp_file_result(&path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
     }
 
     #[test]
@@ -651,8 +796,13 @@ mod tests {
             .to_string(),
         );
 
-        let error = parse_amp_file_result(&path).unwrap_err();
-        assert_eq!(error.operation(), "validate usage provider");
+        let scanned = parse_amp_file_result(&path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-provider"
+        );
     }
 
     #[test]
@@ -669,5 +819,132 @@ mod tests {
         );
 
         assert!(parse_amp_file(&path).is_empty());
+    }
+
+    #[test]
+    fn mixed_ledger_events_reject_bad_record_and_keep_later_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("T-mixed.json");
+        write_amp_thread(
+            &path,
+            r#"{
+                "id":"T-mixed",
+                "created":1767225600000,
+                "usageLedger":{"events":[
+                    {"timestamp":"2026-01-01T00:00:00Z","model":"claude-sonnet-4-5","tokens":{"input":10}},
+                    {"timestamp":"2026-01-01T00:00:01Z","tokens":{"output":20}},
+                    {"timestamp":"2026-01-01T00:00:02Z","model":"gpt-5","tokens":{"output":30}}
+                ]}
+            }"#,
+        );
+
+        let scanned = parse_amp_file_result(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn negative_ledger_tokens_are_malformed_instead_of_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("T-negative.json");
+        write_amp_thread(
+            &path,
+            r#"{
+                "id":"T-negative",
+                "usageLedger":{"events":[
+                    {"timestamp":"2026-01-01T00:00:00Z","model":"claude-sonnet-4-5","tokens":{"input":10}},
+                    {"timestamp":"2026-01-01T00:00:01Z","model":"claude-sonnet-4-5","tokens":{"input":-5,"output":20}},
+                    {"timestamp":"2026-01-01T00:00:02Z","model":"gpt-5","tokens":{"output":30}}
+                ]}
+            }"#,
+        );
+
+        let scanned = parse_amp_file_result(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn overflowing_ledger_tokens_are_malformed_and_later_event_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("T-overflow.json");
+        write_amp_thread(
+            &path,
+            r#"{
+                "id":"T-overflow",
+                "usageLedger":{"events":[
+                    {"timestamp":"2026-01-01T00:00:00Z","model":"gpt-5","tokens":{"input":9223372036854775807,"output":1}},
+                    {"timestamp":"2026-01-01T00:00:01Z","model":"gpt-5","tokens":{"output":30}}
+                ]}
+            }"#,
+        );
+
+        let scanned = parse_amp_file_result(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.output, 30);
+        assert_eq!(scanned.rejections.total(), 1);
+    }
+
+    #[test]
+    fn overflowing_message_tokens_are_malformed_and_later_message_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("T-message-overflow.json");
+        write_amp_thread(
+            &path,
+            r#"{
+                "id":"T-message-overflow",
+                "created":1767225600000,
+                "messages":[
+                    {"role":"assistant","messageId":1,"usage":{"model":"gpt-5","inputTokens":9223372036854775807,"outputTokens":1}},
+                    {"role":"assistant","messageId":2,"usage":{"model":"gpt-5","outputTokens":30}}
+                ]
+            }"#,
+        );
+
+        let scanned = parse_amp_file_result(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.output, 30);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn overflowing_derived_timestamp_is_malformed_and_later_message_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("T-timestamp-overflow.json");
+        write_amp_thread(
+            &path,
+            r#"{
+                "id":"T-timestamp-overflow",
+                "created":1,
+                "messages":[
+                    {"role":"assistant","messageId":9223372036854775807,"usage":{"model":"gpt-5","outputTokens":20}},
+                    {"role":"assistant","messageId":1,"usage":{"model":"gpt-5","outputTokens":30}}
+                ]
+            }"#,
+        );
+
+        let scanned = parse_amp_file_result(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.output, 30);
+        assert_eq!(scanned.messages[0].timestamp, 1001);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 }

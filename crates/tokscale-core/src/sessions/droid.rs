@@ -4,6 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, ScannedSource};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
@@ -124,7 +125,7 @@ fn invalid_at_path(
 }
 
 /// Parse a Droid settings.json file
-pub fn parse_droid_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
 
@@ -135,18 +136,44 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
     // Skip if no token usage data
     let usage = match settings.token_usage {
         Some(u) => u,
-        None => return Ok(Vec::new()),
+        None => return Ok(ScannedSource::default()),
     };
 
+    let mut scanned = ScannedSource::default();
     let tokens = TokenBreakdown {
-        input: usage.input_tokens.unwrap_or(0).max(0),
-        output: usage.output_tokens.unwrap_or(0).max(0),
-        cache_read: usage.cache_read_tokens.unwrap_or(0).max(0),
-        cache_write: usage.cache_creation_tokens.unwrap_or(0).max(0),
-        reasoning: usage.thinking_tokens.unwrap_or(0).max(0),
+        input: usage.input_tokens.unwrap_or(0),
+        output: usage.output_tokens.unwrap_or(0),
+        cache_read: usage.cache_read_tokens.unwrap_or(0),
+        cache_write: usage.cache_creation_tokens.unwrap_or(0),
+        reasoning: usage.thinking_tokens.unwrap_or(0),
     };
-    if tokens.total() == 0 {
-        return Ok(Vec::new());
+    if [
+        tokens.input,
+        tokens.output,
+        tokens.cache_read,
+        tokens.cache_write,
+        tokens.reasoning,
+    ]
+    .into_iter()
+    .any(|tokens| tokens < 0)
+    {
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MalformedRecord, || {
+                path.display().to_string()
+            });
+        return Ok(scanned);
+    }
+    let Some(token_total) = tokens.checked_total() else {
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MalformedRecord, || {
+                path.display().to_string()
+            });
+        return Ok(scanned);
+    };
+    if token_total == 0 {
+        return Ok(scanned);
     }
 
     // The settings filename is Factory's authoritative session identifier.
@@ -166,55 +193,69 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
         .to_string();
 
     let provider_lock = settings.provider_lock.as_deref();
-    let raw_model = settings
+    let Some(raw_model) = settings
         .model
         .as_deref()
         .map(str::trim)
         .filter(|model| !model.is_empty())
-        .ok_or_else(|| {
-            invalid_at_path(
-                path,
-                "validate model",
-                "token-bearing settings are missing a non-empty model",
-            )
-        })?;
+    else {
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MissingModel, || {
+                path.display().to_string()
+            });
+        return Ok(scanned);
+    };
     let model = normalize_model_name(raw_model);
     if model.is_empty() {
-        return Err(invalid_at_path(
-            path,
-            "validate model",
-            format!("model `{raw_model}` normalizes to an empty identifier"),
-        ));
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MissingModel, || {
+                path.display().to_string()
+            });
+        return Ok(scanned);
     }
-    let provider = get_provider_from_model_and_lock(&model, provider_lock).ok_or_else(|| {
-        invalid_at_path(
-            path,
-            "validate provider",
-            format!("cannot determine provider for model `{model}` without providerLock"),
-        )
-    })?;
+    let Some(provider) = get_provider_from_model_and_lock(&model, provider_lock) else {
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MissingProvider, || {
+                path.display().to_string()
+            });
+        return Ok(scanned);
+    };
 
-    let raw_timestamp = settings.provider_lock_timestamp.as_deref().ok_or_else(|| {
-        invalid_at_path(
-            path,
-            "validate provider lock timestamp",
-            "token-bearing settings are missing providerLockTimestamp",
-        )
-    })?;
-    let timestamp = chrono::DateTime::parse_from_rfc3339(raw_timestamp)
-        .map_err(|error| SessionParseError::at_path(path, "decode provider lock timestamp", error))?
-        .timestamp_millis();
+    let Some(raw_timestamp) = settings.provider_lock_timestamp.as_deref() else {
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MissingTimestamp, || {
+                path.display().to_string()
+            });
+        return Ok(scanned);
+    };
+    let timestamp = match chrono::DateTime::parse_from_rfc3339(raw_timestamp) {
+        Ok(timestamp) => timestamp.timestamp_millis(),
+        Err(_) => {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    path.display().to_string()
+                });
+            return Ok(scanned);
+        }
+    };
     if timestamp <= 0 {
-        return Err(invalid_at_path(
-            path,
-            "validate provider lock timestamp",
-            "provider lock timestamp must resolve after the Unix epoch",
-        ));
+        scanned
+            .rejections
+            .record(RecordRejectionReason::MalformedRecord, || {
+                path.display().to_string()
+            });
+        return Ok(scanned);
     }
 
-    Ok(vec![UnifiedMessage::new(
+    scanned.messages.push(UnifiedMessage::new(
         "droid", model, provider, session_id, timestamp, tokens, 0.0,
-    )])
+    ));
+    Ok(scanned)
 }
 
 #[cfg(test)]
@@ -222,7 +263,7 @@ mod tests {
     use super::*;
 
     fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_droid_file(path).unwrap()
+        super::parse_droid_file(path).unwrap().messages
     }
 
     #[test]
@@ -471,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_droid_file_rejects_usage_when_timestamp_missing() {
+    fn test_parse_droid_file_records_usage_when_timestamp_missing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("session.settings.json");
         std::fs::write(
@@ -486,14 +527,16 @@ mod tests {
         )
         .unwrap();
 
-        let error = super::parse_droid_file(&path).unwrap_err();
+        let scanned = super::parse_droid_file(&path).unwrap();
 
-        assert_eq!(error.operation(), "validate provider lock timestamp");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-timestamp");
+        assert_eq!(rejection.count, 1);
     }
 
     #[test]
-    fn test_parse_droid_file_rejects_usage_when_model_missing() {
+    fn test_parse_droid_file_records_usage_when_model_missing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("session.settings.json");
         std::fs::write(
@@ -506,14 +549,16 @@ mod tests {
         )
         .unwrap();
 
-        let error = super::parse_droid_file(&path).unwrap_err();
+        let scanned = super::parse_droid_file(&path).unwrap();
 
-        assert_eq!(error.operation(), "validate model");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-model");
+        assert_eq!(rejection.count, 1);
     }
 
     #[test]
-    fn test_parse_droid_file_rejects_unknown_provider() {
+    fn test_parse_droid_file_records_unknown_provider() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("session.settings.json");
         std::fs::write(
@@ -526,9 +571,60 @@ mod tests {
         )
         .unwrap();
 
-        let error = super::parse_droid_file(&path).unwrap_err();
+        let scanned = super::parse_droid_file(&path).unwrap();
 
-        assert_eq!(error.operation(), "validate provider");
-        assert_eq!(error.path(), Some(path.as_path()));
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "missing-provider");
+        assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn test_parse_droid_file_records_negative_tokens() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("negative.settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "gpt-5",
+                "providerLock": "openai",
+                "providerLockTimestamp": "2026-07-14T00:00:00Z",
+                "tokenUsage": {"inputTokens": -1, "outputTokens": 2}
+            }"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_droid_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn test_parse_droid_file_records_token_total_overflow() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("overflow.settings.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                    "model": "gpt-5",
+                    "providerLock": "openai",
+                    "providerLockTimestamp": "2026-07-14T00:00:00Z",
+                    "tokenUsage": {{"inputTokens": {}, "outputTokens": 1}}
+                }}"#,
+                i64::MAX
+            ),
+        )
+        .unwrap();
+
+        let scanned = super::parse_droid_file(&path).unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
     }
 }

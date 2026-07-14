@@ -199,6 +199,7 @@ impl SourceUnit {
             fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir,
                 variant_path,
+                parent_session_path: None,
             },
             meta: SourceUnitMeta::None,
             parser_version: SourceUnitMeta::None.parser_version(client),
@@ -217,6 +218,23 @@ impl SourceUnit {
 
     pub(crate) fn with_parser_version(mut self, parser_version: ParserVersion) -> Self {
         self.parser_version = parser_version;
+        self
+    }
+
+    pub(crate) fn with_dependency(mut self, dependency_path: PathBuf) -> Self {
+        self.fingerprint_policy = FingerprintPolicy::PrimaryWithDependency { dependency_path };
+        self
+    }
+
+    pub(crate) fn with_claude_parent_session(mut self, parent_session_path: PathBuf) -> Self {
+        let FingerprintPolicy::ClaudeCodeWithHome {
+            parent_session_path: configured_parent,
+            ..
+        } = &mut self.fingerprint_policy
+        else {
+            unreachable!("Claude parent dependency requires a Claude fingerprint policy");
+        };
+        *configured_parent = Some(parent_session_path);
         self
     }
 
@@ -357,9 +375,24 @@ impl SourceUnit {
             FingerprintPolicy::SqliteWithWal => {
                 message_cache::hash_inventory_bytes(hasher, b"sqlite-with-wal");
             }
-            FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
+            FingerprintPolicy::ClaudeCodeWithHome {
+                home_dir,
+                parent_session_path,
+                ..
+            } => {
                 message_cache::hash_inventory_bytes(hasher, b"claude-code-with-home");
                 message_cache::hash_inventory_path(hasher, home_dir);
+                message_cache::hash_inventory_bytes(
+                    hasher,
+                    if parent_session_path.is_some() {
+                        b"parent-session"
+                    } else {
+                        b"no-parent-session"
+                    },
+                );
+                if let Some(parent_session_path) = parent_session_path {
+                    message_cache::hash_inventory_path(hasher, parent_session_path);
+                }
             }
             FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
                 message_cache::hash_inventory_bytes(hasher, b"primary-with-siblings");
@@ -367,6 +400,10 @@ impl SourceUnit {
                 for name in *sibling_names {
                     message_cache::hash_inventory_bytes(hasher, name.as_bytes());
                 }
+            }
+            FingerprintPolicy::PrimaryWithDependency { dependency_path } => {
+                message_cache::hash_inventory_bytes(hasher, b"primary-with-dependency");
+                message_cache::hash_inventory_path(hasher, dependency_path);
             }
             FingerprintPolicy::NoMessageCache => {
                 message_cache::hash_inventory_bytes(hasher, b"no-message-cache");
@@ -382,13 +419,25 @@ impl SourceUnit {
             FingerprintPolicy::SqliteWithWal => {
                 message_cache::SourceInputPolicy::sqlite_with_wal(&self.path)
             }
-            FingerprintPolicy::ClaudeCodeWithHome { variant_path, .. } => {
-                message_cache::SourceInputPolicy::claude_code(&self.path, variant_path.clone())
-            }
+            FingerprintPolicy::ClaudeCodeWithHome {
+                variant_path,
+                parent_session_path,
+                ..
+            } => message_cache::SourceInputPolicy::claude_code(
+                &self.path,
+                variant_path.clone(),
+                parent_session_path.clone(),
+            ),
             FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
                 message_cache::SourceInputPolicy::with_siblings(
                     &self.path,
                     sibling_names.iter().copied(),
+                )
+            }
+            FingerprintPolicy::PrimaryWithDependency { dependency_path } => {
+                message_cache::SourceInputPolicy::with_dependency(
+                    &self.path,
+                    dependency_path.clone(),
                 )
             }
         }
@@ -501,9 +550,13 @@ pub(crate) enum FingerprintPolicy {
     ClaudeCodeWithHome {
         home_dir: PathBuf,
         variant_path: Option<PathBuf>,
+        parent_session_path: Option<PathBuf>,
     },
     PrimaryWithSiblings {
         sibling_names: &'static [&'static str],
+    },
+    PrimaryWithDependency {
+        dependency_path: PathBuf,
     },
     NoMessageCache,
 }
@@ -1439,6 +1492,35 @@ mod tests {
         let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
 
         assert_eq!(unit.digest_paths(), vec![path]);
+    }
+
+    #[test]
+    fn dynamic_dependency_participates_in_digest_paths_and_inventory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let primary = dir.path().join("child.jsonl");
+        let dependency = dir.path().join("parent.jsonl");
+        std::fs::write(&primary, b"child").unwrap();
+
+        let mut unit = SourceUnit::plain_file(ClientId::Omp, primary.clone())
+            .with_dependency(dependency.clone());
+        assert_eq!(
+            unit.digest_paths(),
+            vec![primary.clone(), dependency.clone()]
+        );
+        unit.refresh_prepared_snapshot_for_inventory_probe()
+            .unwrap();
+        let absent = unit.inventory_signature_digest();
+
+        std::fs::write(&dependency, b"reviewer").unwrap();
+        unit.refresh_prepared_snapshot_for_inventory_probe()
+            .unwrap();
+        let reviewer = unit.inventory_signature_digest();
+        assert_ne!(absent, reviewer);
+
+        std::fs::write(&dependency, b"oracle-agent").unwrap();
+        unit.refresh_prepared_snapshot_for_inventory_probe()
+            .unwrap();
+        assert_ne!(reviewer, unit.inventory_signature_digest());
     }
 
     #[test]

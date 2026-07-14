@@ -57,22 +57,6 @@ pub(crate) fn report_cache_lookup_failure(failure: &message_cache::CacheLookupFa
     );
 }
 
-/// Compatibility seam for parsers that have not migrated to record-level
-/// rejection yet: a parse `Err` is isolated to this unit as an
-/// `Unavailable` source instead of failing the batch.
-pub(crate) fn load_or_parse_unit_with<F>(
-    unit: SourceUnit,
-    ctx: &ParseContext<'_>,
-    parse: F,
-) -> ParsedUnit
-where
-    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<Vec<UnifiedMessage>>,
-{
-    load_or_scan_unit_cacheable(unit, ctx, |path| {
-        parse(path).map(|messages| (ScannedSource::complete(messages), true))
-    })
-}
-
 /// Seam for migrated parsers returning `ScannedSource`: record rejections
 /// are carried alongside the messages, an interrupted scan keeps its
 /// confirmed records but is never cached, and a source-level `Err` is
@@ -85,12 +69,32 @@ pub(crate) fn load_or_scan_unit_with<F>(
 where
     F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
 {
-    load_or_scan_unit_cacheable(unit, ctx, |path| scan(path).map(|scanned| (scanned, true)))
+    load_or_scan_unit_cacheable(unit, ctx, false, |path| {
+        scan(path).map(|scanned| (scanned, true))
+    })
+}
+
+/// Scan a primary source whose related fingerprint inputs only provide
+/// optional metadata. If hashing one of those inputs fails, the primary scan
+/// still runs, the failure is exposed as partial health when the parser did
+/// not report a more specific interruption, and no cache shard is written.
+pub(crate) fn load_or_scan_unit_with_optional_related_inputs<F>(
+    unit: SourceUnit,
+    ctx: &ParseContext<'_>,
+    scan: F,
+) -> ParsedUnit
+where
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
+{
+    load_or_scan_unit_cacheable(unit, ctx, true, |path| {
+        scan(path).map(|scanned| (scanned, true))
+    })
 }
 
 fn load_or_scan_unit_cacheable<F>(
     mut unit: SourceUnit,
     ctx: &ParseContext<'_>,
+    preserve_primary_on_fingerprint_failure: bool,
     scan: F,
 ) -> ParsedUnit
 where
@@ -117,8 +121,12 @@ where
         Ok(snapshot) => snapshot,
         Err(source) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
     };
-    let fingerprint = match input_policy.fingerprint_from_snapshot(&snapshot) {
-        Ok(fingerprint) => fingerprint,
+    let (fingerprint, fingerprint_failure) = match input_policy.fingerprint_from_snapshot(&snapshot)
+    {
+        Ok(fingerprint) => (Some(fingerprint), None),
+        Err(source) if preserve_primary_on_fingerprint_failure => {
+            (None, Some(snapshot_failure(source)))
+        }
         Err(source) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
     };
 
@@ -126,6 +134,10 @@ where
         Ok(scanned) => scanned,
         Err(error) => return ParsedUnit::unavailable(unit, SourceFailure::from(&error)),
     };
+    let fingerprint_failed = fingerprint_failure.is_some();
+    if scanned.interrupted.is_none() {
+        scanned.interrupted = fingerprint_failure;
+    }
     crate::finalize_token_priced_messages(&mut scanned.messages, ctx.pricing);
     // A post-scan snapshot failure means the source's stability is unknown:
     // keep the scanned data but treat the source as changed for caching.
@@ -134,13 +146,12 @@ where
         Err(_) => false,
     };
     let complete = scanned.interrupted.is_none();
-    let cache_write = if complete && cacheable && source_unchanged {
-        Some(Box::new(
+    let cache_write = match fingerprint {
+        Some(fingerprint) if complete && cacheable && source_unchanged => Some(Box::new(
             message_cache::CacheWritePlan::new(&unit.path, unit.parser_version, fingerprint, None)
                 .with_rejections(scanned.rejections.clone()),
-        ))
-    } else {
-        None
+        )),
+        _ => None,
     };
 
     let status = match scanned.interrupted {
@@ -151,7 +162,7 @@ where
         unit,
         messages: UnitMessageSource::Fresh(scanned.messages),
         cache_write,
-        invalidate_cache: !complete || !cacheable || !source_unchanged,
+        invalidate_cache: fingerprint_failed || !complete || !cacheable || !source_unchanged,
         health: Box::new(crate::adapters::UnitScanHealth {
             status,
             rejections: scanned.rejections,
@@ -616,9 +627,9 @@ mod tests {
         ));
         let parse_called = std::cell::Cell::new(false);
 
-        let parsed = load_or_parse_unit_with(miss, &ParseContext { pricing: None }, |_| {
+        let parsed = load_or_scan_unit_with(miss, &ParseContext { pricing: None }, |_| {
             parse_called.set(true);
-            Ok(vec![cached_message()])
+            Ok(ScannedSource::complete(vec![cached_message()]))
         });
 
         assert!(parse_called.get());
@@ -633,7 +644,7 @@ mod tests {
         std::fs::write(&source_path, PI_SOURCE).unwrap();
         let unit = pi_unit(&source_path);
 
-        let parsed = load_or_parse_unit_with(
+        let parsed = load_or_scan_unit_with(
             unit.prepare_snapshot().unwrap(),
             &ParseContext { pricing: None },
             |_| {
@@ -793,9 +804,9 @@ mod tests {
         message_cache::reset_source_read_stats(&path);
         let parse_called = std::cell::Cell::new(false);
 
-        let parsed = load_or_parse_unit_with(unit, &ParseContext { pricing: None }, |_| {
+        let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
             parse_called.set(true);
-            Ok(vec![cached_message()])
+            Ok(ScannedSource::complete(vec![cached_message()]))
         });
         assert!(parse_called.get());
         assert!(matches!(parsed.messages, UnitMessageSource::Fresh(_)));
@@ -807,9 +818,9 @@ mod tests {
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"before").unwrap();
         let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
-        let parsed = load_or_parse_unit_with(unit, &ParseContext { pricing: None }, |_| {
+        let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
             std::fs::write(&path, b"after-and-different-size").unwrap();
-            Ok(vec![cached_message()])
+            Ok(ScannedSource::complete(vec![cached_message()]))
         });
 
         assert!(parsed.cache_write.is_none());
@@ -824,9 +835,9 @@ mod tests {
         std::fs::write(&path, b"database").unwrap();
         std::fs::write(&wal_path, b"wal-before").unwrap();
         let unit = SourceUnit::sqlite_with_wal(ClientId::Zed, path);
-        let parsed = load_or_parse_unit_with(unit, &ParseContext { pricing: None }, |_| {
+        let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
             std::fs::write(&wal_path, b"wal-after-and-larger").unwrap();
-            Ok(vec![cached_message()])
+            Ok(ScannedSource::complete(vec![cached_message()]))
         });
 
         assert!(parsed.cache_write.is_none());
@@ -1159,7 +1170,7 @@ mod tests {
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cold_cache),
             "next run must cold-parse instead of planning the removed bad shard",
         );
-        let cold_parsed = load_or_parse_unit_with(
+        let cold_parsed = load_or_scan_unit_with(
             cold_unit,
             &ParseContext { pricing: None },
             crate::sessions::pi::parse_pi_file,

@@ -9,10 +9,14 @@ use crate::adapters::{
     ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::paths::configured_path_env;
 use crate::sessions;
 
 pub(crate) struct CodebuffAdapter;
+
+const CODEBUFF_RECORD_REJECTION_REVISION: u32 =
+    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 impl LocalSourceAdapter for CodebuffAdapter {
     fn client(&self) -> ClientId {
@@ -36,18 +40,26 @@ impl LocalSourceAdapter for CodebuffAdapter {
             )?);
         }
 
-        adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::source_units_from_paths(
             ClientId::Codebuff,
             adapter_discover::scan_roots(ClientId::Codebuff, roots, def.pattern)?,
             FingerprintPolicy::PlainFile,
-        )
+        )?
+        .into_iter()
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(
+                ParserId::Codebuff,
+                CODEBUFF_RECORD_REJECTION_REVISION,
+            ))
+        })
+        .collect())
     }
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
+                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                     sessions::codebuff::parse_codebuff_file(path)
                 })
             })
@@ -170,14 +182,14 @@ mod tests {
             use_env_roots: true,
             scanner_settings: &settings,
         };
-        let paths: Vec<_> = CODEBUFF_ADAPTER
-            .discover_checked(&ctx)
-            .unwrap()
-            .into_iter()
-            .map(|unit| unit.path)
-            .collect();
+        let units = CODEBUFF_ADAPTER.discover_checked(&ctx).unwrap();
+        let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![override_file]);
+        assert_eq!(
+            units[0].parser_version,
+            ParserVersion::new(ParserId::Codebuff, CODEBUFF_RECORD_REJECTION_REVISION)
+        );
     }
 
     #[cfg(unix)]

@@ -5,6 +5,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
+use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -20,6 +21,20 @@ struct TokenUsage {
     output: Option<i64>,
     input_cache_read: Option<i64>,
     input_cache_creation: Option<i64>,
+}
+
+impl TokenUsage {
+    fn has_negative(&self) -> bool {
+        [
+            self.input_other,
+            self.output,
+            self.input_cache_read,
+            self.input_cache_creation,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|tokens| tokens < 0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +73,7 @@ fn invalid_at_path(
 }
 
 /// Parse a Kimi Code wire.jsonl file.
-pub fn parse_kimi_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
@@ -68,11 +83,20 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
     let agent_instance = Some(format!("{session_id}:{}", wire_path.agent_id));
     let mut agent = None;
     let reader = BufReader::new(file);
-    let mut messages = Vec::new();
+    let mut scanned = ScannedSource::default();
 
-    for line in reader.lines() {
-        let line =
-            line.map_err(|error| SessionParseError::at_path(path, "read JSONL line", error))?;
+    for (line_index, line) in reader.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "read JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -80,8 +104,16 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
         }
 
         let mut bytes = trimmed.as_bytes().to_vec();
-        let wire_line = simd_json::from_slice::<WireLine>(&mut bytes)
-            .map_err(|error| SessionParseError::at_path(path, "decode JSONL line", error))?;
+        let wire_line = match simd_json::from_slice::<WireLine>(&mut bytes) {
+            Ok(wire_line) => wire_line,
+            Err(error) => {
+                scanned.interrupted = Some(SourceFailure::new(
+                    "decode JSONL line",
+                    format!("{} line {line_number}: {error}", path.display()),
+                ));
+                break;
+            }
+        };
 
         if wire_line.line_type.as_deref() == Some("config.update") {
             if let Some(profile_name) = wire_line.profile_name.as_deref() {
@@ -98,62 +130,99 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
             Some(usage) => usage,
             None => continue,
         };
+        if usage.has_negative() {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    format!(
+                        "{} line {line_number}: Kimi token fields must be non-negative",
+                        path.display()
+                    )
+                });
+            continue;
+        }
 
         let input = usage.input_other.unwrap_or(0).max(0);
         let output = usage.output.unwrap_or(0).max(0);
         let cache_read = usage.input_cache_read.unwrap_or(0).max(0);
         let cache_write = usage.input_cache_creation.unwrap_or(0).max(0);
-
-        if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
+        let tokens = TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning: 0,
+        };
+        let Some(token_total) = tokens.checked_total() else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MalformedRecord, || {
+                    format!(
+                        "{} line {line_number}: Kimi token total exceeds i64",
+                        path.display()
+                    )
+                });
+            continue;
+        };
+        if token_total == 0 {
             continue;
         }
 
-        let raw_model = wire_line
+        let Some(raw_model) = wire_line
             .model
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty())
-            .ok_or_else(|| {
-                invalid_at_path(
-                    path,
-                    "validate usage record",
-                    "usage.record is missing a non-empty model",
-                )
-            })?;
-        let timestamp = wire_line
-            .time
-            .filter(|timestamp| *timestamp > 0)
-            .ok_or_else(|| {
-                invalid_at_path(
-                    path,
-                    "validate usage timestamp",
-                    "usage.record is missing a positive time",
-                )
-            })?;
-        let (provider_id, model_id) = resolve_model(path, raw_model, &aliases)?;
+        else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingModel, || {
+                    format!(
+                        "{} line {line_number}: usage.record is missing a non-empty model",
+                        path.display()
+                    )
+                });
+            continue;
+        };
+        let Some(timestamp) = wire_line.time.filter(|timestamp| *timestamp > 0) else {
+            scanned
+                .rejections
+                .record(RecordRejectionReason::MissingTimestamp, || {
+                    format!(
+                        "{} line {line_number}: usage.record is missing a positive time",
+                        path.display()
+                    )
+                });
+            continue;
+        };
+        let (provider_id, model_id) = match resolve_model(path, raw_model, &aliases) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord, || {
+                        format!("{} line {line_number}: {error}", path.display())
+                    });
+                continue;
+            }
+        };
         let mut message = UnifiedMessage::new_with_agent(
             CLIENT_ID,
             model_id,
             provider_id,
             session_id.clone(),
             timestamp,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning: 0,
-            },
+            tokens,
             0.0,
             agent.clone(),
         );
         if agent.is_some() {
             message.set_agent_instance(agent_instance.clone());
         }
-        messages.push(message);
+        scanned.messages.push(message);
     }
 
-    Ok(messages)
+    Ok(scanned)
 }
 
 fn normalize_kimi_agent_label(profile_name: &str) -> Option<String> {
@@ -314,7 +383,7 @@ mod tests {
     use super::*;
 
     fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
-        super::parse_kimi_file(path).unwrap()
+        super::parse_kimi_file(path).unwrap().messages
     }
     use std::io::Write;
     use tempfile::TempDir;
@@ -491,10 +560,14 @@ model = "gpt-5.5"
         );
         std::fs::write(dir.path().join("config.toml"), "[models]\n").unwrap();
 
-        let error = super::parse_kimi_file(&wire).unwrap_err();
+        let scanned = super::parse_kimi_file(&wire).unwrap();
 
-        assert_eq!(error.operation(), "resolve usage model");
-        assert_eq!(error.path(), Some(wire.as_path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 
     #[test]
@@ -512,6 +585,63 @@ model = "gpt-5.5"
     }
 
     #[test]
+    fn mixed_usage_records_reject_bad_record_and_keep_later_usage() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009000,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}
+{"type":"usage.record","time":1780942009050,"usage":{"inputOther":2}}
+{"type":"usage.record","time":1780942009100,"model":"openai-pro/gpt-5.5","usage":{"output":3}}"#,
+        );
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn negative_usage_tokens_are_malformed_instead_of_clamped() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009000,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}
+{"type":"usage.record","time":1780942009050,"model":"openai-pro/gpt-5.5","usage":{"inputOther":-2,"output":4}}
+{"type":"usage.record","time":1780942009100,"model":"openai-pro/gpt-5.5","usage":{"output":3}}"#,
+        );
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
+    fn overflowing_usage_tokens_are_malformed_and_later_record_survives() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009050,"model":"openai-pro/gpt-5.5","usage":{"inputOther":9223372036854775807,"output":1}}
+{"type":"usage.record","time":1780942009100,"model":"openai-pro/gpt-5.5","usage":{"output":3}}"#,
+        );
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.output, 3);
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+    }
+
+    #[test]
     fn rejects_usage_record_without_timestamp() {
         let dir = TempDir::new().unwrap();
         let wire = write_wire(
@@ -519,10 +649,14 @@ model = "gpt-5.5"
             r#"{"type":"usage.record","model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
         );
 
-        let error = super::parse_kimi_file(&wire).unwrap_err();
+        let scanned = super::parse_kimi_file(&wire).unwrap();
 
-        assert_eq!(error.operation(), "validate usage timestamp");
-        assert_eq!(error.path(), Some(wire.as_path()));
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
     }
 
     #[test]

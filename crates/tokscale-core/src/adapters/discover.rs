@@ -45,7 +45,7 @@ pub(crate) fn extra_roots_for_client(
             Ok(value) => value,
             Err(std::env::VarError::NotPresent) => String::new(),
             Err(source) => {
-                return Err(SourceDiscoveryError::new(
+                return Err(SourceDiscoveryError::configuration(
                     client,
                     "TOKSCALE_EXTRA_DIRS",
                     "read environment variable",
@@ -56,7 +56,7 @@ pub(crate) fn extra_roots_for_client(
         roots.extend(
             scanner::parse_extra_dirs(&extra_dirs, &enabled)
                 .map_err(|source| {
-                    SourceDiscoveryError::new(
+                    SourceDiscoveryError::configuration(
                         client,
                         "TOKSCALE_EXTRA_DIRS",
                         "parse environment variable",
@@ -187,6 +187,9 @@ fn source_unit_for_policy(
             let mut unit = SourceUnit::plain_file(client, path);
             unit.fingerprint_policy = FingerprintPolicy::PrimaryWithSiblings { sibling_names };
             unit
+        }
+        FingerprintPolicy::PrimaryWithDependency { dependency_path } => {
+            SourceUnit::plain_file(client, path).with_dependency(dependency_path.clone())
         }
         FingerprintPolicy::NoMessageCache => SourceUnit::no_message_cache(client, path),
     };

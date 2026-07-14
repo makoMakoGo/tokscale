@@ -9,8 +9,10 @@ use crate::adapters::{
     SourceDiscoveryError, SourceUnit, UnitMessageSource,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
-use crate::source_health::ScannedSource;
+
+const GOOSE_RECORD_REJECTION_REVISION: u32 = 4;
 
 pub(crate) struct GooseAdapter;
 
@@ -26,7 +28,13 @@ impl LocalSourceAdapter for GooseAdapter {
         Ok(goose_db_candidates(ctx)?
             .into_iter()
             .next()
-            .map(|path| vec![SourceUnit::sqlite_with_wal(ClientId::Goose, path)])
+            .map(|path| {
+                vec![
+                    SourceUnit::sqlite_with_wal(ClientId::Goose, path).with_parser_version(
+                        ParserVersion::new(ParserId::Goose, GOOSE_RECORD_REJECTION_REVISION),
+                    ),
+                ]
+            })
             .unwrap_or_default())
     }
 
@@ -34,9 +42,7 @@ impl LocalSourceAdapter for GooseAdapter {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::parse_uncached_unit(unit, ctx, |path| {
-                    sessions::goose::parse_goose_sqlite(path).map(ScannedSource::complete)
-                })
+                adapter_cache::parse_uncached_unit(unit, ctx, sessions::goose::parse_goose_sqlite)
             })
             .collect()
     }
@@ -61,20 +67,11 @@ fn goose_db_candidates(ctx: &AdapterScanContext<'_>) -> Result<Vec<PathBuf>, Sou
     let mut candidates = Vec::new();
 
     if ctx.use_env_roots {
-        match std::env::var("GOOSE_PATH_ROOT") {
-            Ok(custom_root) if !custom_root.trim().is_empty() => {
-                candidates
-                    .push(PathBuf::from(custom_root.trim()).join("data/sessions/sessions.db"));
+        match std::env::var_os("GOOSE_PATH_ROOT") {
+            Some(custom_root) if !custom_root.is_empty() => {
+                candidates.push(PathBuf::from(custom_root).join("data/sessions/sessions.db"));
             }
-            Ok(_) | Err(std::env::VarError::NotPresent) => {}
-            Err(source) => {
-                return Err(SourceDiscoveryError::new(
-                    ClientId::Goose,
-                    "GOOSE_PATH_ROOT",
-                    "read environment variable",
-                    source,
-                ));
-            }
+            Some(_) | None => {}
         }
     }
 
@@ -99,6 +96,30 @@ pub(crate) static GOOSE_ADAPTER: GooseAdapter = GooseAdapter;
 mod tests {
     use super::*;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn goose_adapter_uses_first_existing_default_candidate() {
         let home = tempfile::TempDir::new().unwrap();
@@ -121,5 +142,36 @@ mod tests {
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, xdg_db);
+        assert_eq!(
+            units[0].parser_version,
+            ParserVersion::new(ParserId::Goose, GOOSE_RECORD_REJECTION_REVISION)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn goose_adapter_preserves_non_utf8_environment_root() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let home = tempfile::TempDir::new().unwrap();
+        let custom_root = home
+            .path()
+            .join(std::ffi::OsString::from_vec(b"goose-\xff".to_vec()));
+        let custom_db = custom_root.join("data/sessions/sessions.db");
+        std::fs::create_dir_all(custom_db.parent().unwrap()).unwrap();
+        std::fs::write(&custom_db, "").unwrap();
+        let _guard = EnvVarGuard::set("GOOSE_PATH_ROOT", &custom_root);
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = AdapterScanContext {
+            home_dir: home.path().to_str().unwrap(),
+            use_env_roots: true,
+            scanner_settings: &settings,
+        };
+
+        let units = GOOSE_ADAPTER.discover_checked(&ctx).unwrap();
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].path, custom_db);
     }
 }

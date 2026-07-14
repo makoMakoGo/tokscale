@@ -9,6 +9,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_i64, extract_string, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::source_health::{RecordRejectionReason, RejectionSummary, SourceFailure};
 use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -187,6 +188,8 @@ pub(crate) struct CodexParseState {
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedCodexFile {
     pub messages: Vec<UnifiedMessage>,
+    pub rejections: RejectionSummary,
+    pub interrupted: Option<SourceFailure>,
     pub consumed_offset: u64,
     pub state: CodexParseState,
     pub content_hash: Option<[u8; 32]>,
@@ -194,6 +197,7 @@ pub(crate) struct ParsedCodexFile {
     pub source_identity: Option<crate::message_cache::SourceFileIdentity>,
 }
 
+#[derive(Clone)]
 struct PendingCodexMessage {
     provider: String,
     session_id: String,
@@ -310,12 +314,20 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
     let mut line = String::with_capacity(4096);
     let mut consumed_offset = start_offset;
     let mut pending_model_messages = Vec::new();
+    let mut rejections = RejectionSummary::default();
+    let mut interrupted = None;
 
-    loop {
+    'records: loop {
         line.clear();
-        let bytes_read = reader
-            .read_line(&mut line)
-            .map_err(|source| SessionParseError::new("read Codex JSONL line", source))?;
+        let record_offset = consumed_offset;
+        let bytes_read = match reader.read_line(&mut line) {
+            Ok(bytes_read) => bytes_read,
+            Err(source) => {
+                let error = SessionParseError::new("read Codex JSONL line", source);
+                interrupted = Some(SourceFailure::from(&error));
+                break;
+            }
+        };
         if bytes_read == 0 {
             break;
         }
@@ -326,6 +338,40 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
             continue;
         }
 
+        // A line is the Codex record boundary. Parsing is transactional so a
+        // rejected record cannot leak a model, token baseline, pending turn,
+        // or provisional message into later records.
+        let state_before = state.clone();
+        let messages_len_before = messages.len();
+        let pending_before = pending_model_messages.clone();
+
+        macro_rules! reject_record {
+            ($reason:expr, $error:expr) => {{
+                let reason = $reason;
+                let error = $error;
+                let sample = format!("Codex JSONL byte offset {record_offset}: {error}");
+                state = state_before.clone();
+                messages.truncate(messages_len_before);
+                pending_model_messages = pending_before.clone();
+                rejections.record(reason, || sample);
+                continue 'records;
+            }};
+        }
+
+        macro_rules! interrupt_on_record {
+            ($reason:expr, $error:expr) => {{
+                let reason = $reason;
+                let error = $error;
+                let sample = format!("Codex JSONL byte offset {record_offset}: {error}");
+                state = state_before.clone();
+                messages.truncate(messages_len_before);
+                pending_model_messages = pending_before.clone();
+                rejections.record(reason, || sample);
+                interrupted = Some(SourceFailure::from(&error));
+                break 'records;
+            }};
+        }
+
         let mut handled = false;
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
@@ -334,15 +380,57 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
             Err(error) => (None, Some(error)),
         };
         if let Some(entry) = entry {
+            if entry.payload.is_none() {
+                let error = match entry.entry_type.as_str() {
+                    "session_meta" => Some(SessionParseError::invalid(
+                        "validate Codex session metadata",
+                        "payload is missing",
+                    )),
+                    "turn_context" => Some(SessionParseError::invalid(
+                        "validate Codex turn_context event",
+                        "payload is missing",
+                    )),
+                    "event_msg" => Some(SessionParseError::invalid(
+                        "validate Codex event message",
+                        "payload is missing",
+                    )),
+                    _ => None,
+                };
+                if let Some(error) = error {
+                    interrupt_on_record!(RecordRejectionReason::MalformedRecord, error);
+                }
+            }
             if let Some(payload) = entry.payload {
                 let payload_model = extract_model(&payload);
-                let is_token_count = entry.entry_type == "event_msg"
-                    && payload.payload_type.as_deref() == Some("token_count");
-                let info_model = if is_token_count {
-                    payload.info.as_ref().and_then(extract_model_from_info)
+                let event_type = if entry.entry_type == "event_msg" {
+                    match payload.payload_type.as_deref() {
+                        Some(payload_type) => Some(payload_type),
+                        None => interrupt_on_record!(
+                            RecordRejectionReason::MalformedRecord,
+                            SessionParseError::invalid(
+                                "validate Codex event message",
+                                "payload type is missing",
+                            )
+                        ),
+                    }
                 } else {
                     None
                 };
+                let token_info = match event_type {
+                    Some("token_count") => match payload.info.as_ref() {
+                        Some(info) => Some(info),
+                        None => reject_record!(
+                            RecordRejectionReason::MalformedRecord,
+                            SessionParseError::invalid(
+                                "validate Codex token-count event",
+                                "info is missing",
+                            )
+                        ),
+                    },
+                    _ => None,
+                };
+                let is_token_count = token_info.is_some();
+                let info_model = token_info.and_then(extract_model_from_info);
                 let event_model = payload_model.clone().or(info_model.clone());
 
                 if state.forked_child_waiting_for_turn_context {
@@ -373,9 +461,11 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                                 }
                             }
                         }
-                        if is_token_count {
-                            if let Some(info) = payload.info.as_ref() {
-                                remember_forked_child_inherited_baseline(&mut state, info)?;
+                        if let Some(info) = token_info {
+                            if let Err(error) =
+                                remember_forked_child_inherited_baseline(&mut state, info)
+                            {
+                                interrupt_on_record!(RecordRejectionReason::MalformedRecord, error);
                             }
                         }
                         continue;
@@ -387,10 +477,13 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                     && !is_token_count
                     && entry.entry_type != "session_meta"
                 {
-                    return Err(SessionParseError::invalid(
-                        "resolve Codex token-count model",
-                        "token-count rows were not followed by a model-bearing event",
-                    ));
+                    interrupt_on_record!(
+                        RecordRejectionReason::MissingModel,
+                        SessionParseError::invalid(
+                            "resolve Codex token-count model",
+                            "token-count rows were not followed by a model-bearing event",
+                        )
+                    );
                 }
 
                 if entry.entry_type == "session_meta" {
@@ -441,7 +534,12 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                 if entry.entry_type == "turn_context" {
                     state.current_model = payload_model.clone();
                     state.current_turn_start_ms =
-                        parse_codex_entry_timestamp(entry.timestamp.as_deref())?;
+                        match parse_codex_entry_timestamp(entry.timestamp.as_deref()) {
+                            Ok(timestamp) => timestamp,
+                            Err(error) => {
+                                interrupt_on_record!(RecordRejectionReason::MalformedRecord, error)
+                            }
+                        };
                     if let Some(model) = state.current_model.clone() {
                         flush_pending_model_messages(
                             &mut pending_model_messages,
@@ -473,12 +571,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                 }
 
                 // Process token_count events
-                if is_token_count {
-                    let info = match payload.info {
-                        Some(i) => i,
-                        None => continue,
-                    };
-
+                if let Some(info) = token_info {
                     let model = payload_model
                         .or(info_model)
                         .or_else(|| state.current_model.clone());
@@ -496,7 +589,12 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                     // capping can rewrite them), so we only use total_token_usage for
                     // dedup and monotonicity checks — never as a direct delta source.
                     let (total_usage_record, last_usage_record) =
-                        required_codex_token_usage(&info)?;
+                        match required_codex_token_usage(info) {
+                            Ok(usage) => usage,
+                            Err(error) => {
+                                interrupt_on_record!(RecordRejectionReason::MalformedRecord, error)
+                            }
+                        };
                     let total_usage = CodexTotals::from_usage(total_usage_record);
                     let last_usage = CodexTotals::from_usage(last_usage_record);
 
@@ -538,13 +636,24 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
 
                     state.previous_totals = Some(total_usage);
 
-                    let parsed_timestamp = parse_codex_entry_timestamp(entry.timestamp.as_deref())?;
-                    let timestamp = parsed_timestamp.ok_or_else(|| {
-                        SessionParseError::invalid(
-                            "validate Codex token-count event",
-                            "timestamp is missing",
-                        )
-                    })?;
+                    let parsed_timestamp =
+                        match parse_codex_entry_timestamp(entry.timestamp.as_deref()) {
+                            Ok(timestamp) => timestamp,
+                            Err(error) => {
+                                interrupt_on_record!(RecordRejectionReason::MalformedRecord, error)
+                            }
+                        };
+                    let timestamp = match parsed_timestamp {
+                        Some(timestamp) => timestamp,
+                        None => interrupt_on_record!(
+                            RecordRejectionReason::MissingTimestamp,
+                            SessionParseError::invalid(
+                                "validate Codex token-count event",
+                                "timestamp is missing",
+                            )
+                        ),
+                    };
+
                     let duration_ms =
                         duration_between_ms(state.current_turn_start_ms, Some(timestamp));
 
@@ -608,7 +717,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
             }
         }
 
-        let headless_message = parse_codex_headless_line(
+        let headless_message = match parse_codex_headless_line(
             trimmed,
             CodexHeadlessContext {
                 session_id,
@@ -618,15 +727,21 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                 session_is_headless: state.session_is_headless,
             },
             &mut state.current_model,
-        )?;
+        ) {
+            Ok(message) => message,
+            Err(error) => interrupt_on_record!(error.reason, error.source),
+        };
         if !pending_model_messages.is_empty() {
             if let Some(model) = state.current_model.clone() {
                 flush_pending_model_messages(&mut pending_model_messages, &mut messages, &model);
             } else {
-                return Err(SessionParseError::invalid(
-                    "resolve Codex token-count model",
-                    "headless usage followed token-count rows without a model",
-                ));
+                interrupt_on_record!(
+                    RecordRejectionReason::MissingModel,
+                    SessionParseError::invalid(
+                        "resolve Codex token-count model",
+                        "headless usage followed token-count rows without a model",
+                    )
+                );
             }
         }
 
@@ -640,23 +755,41 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
         }
 
         if let Some(source) = entry_decode_error {
-            return Err(SessionParseError::new("decode Codex JSONL entry", source));
+            let error = SessionParseError::new("decode Codex JSONL entry", source);
+            let mut json_probe = trimmed.as_bytes().to_vec();
+            let value = match simd_json::from_slice::<Value>(&mut json_probe) {
+                Ok(value) => value,
+                Err(_) => interrupt_on_record!(RecordRejectionReason::MalformedRecord, error),
+            };
+            if codex_schema_invalid_value_may_affect_state(&value) {
+                interrupt_on_record!(RecordRejectionReason::MalformedRecord, error);
+            }
+            reject_record!(RecordRejectionReason::MalformedRecord, error);
         }
 
         let mut json_probe = trimmed.as_bytes().to_vec();
-        simd_json::from_slice::<Value>(&mut json_probe)
-            .map_err(|source| SessionParseError::new("decode Codex JSONL line", source))?;
+        if let Err(source) = simd_json::from_slice::<Value>(&mut json_probe) {
+            reject_record!(
+                RecordRejectionReason::MalformedRecord,
+                SessionParseError::new("decode Codex JSONL line", source)
+            );
+        }
     }
 
-    if !pending_model_messages.is_empty() {
-        return Err(SessionParseError::invalid(
+    if interrupted.is_none() && !pending_model_messages.is_empty() {
+        let error = SessionParseError::invalid(
             "resolve Codex token-count model",
             "source ended with token-count rows whose model was never identified",
-        ));
+        );
+        let sample = format!("Codex JSONL byte offset {consumed_offset}: {error}");
+        rejections.record(RecordRejectionReason::MissingModel, || sample);
+        interrupted = Some(SourceFailure::from(&error));
     }
 
     Ok(ParsedCodexFile {
         messages,
+        rejections,
+        interrupted,
         consumed_offset,
         state,
         content_hash: None,
@@ -839,6 +972,12 @@ pub fn parse_codex_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> 
     let session_id = session_id_from_path(path)?;
     let mut reader = BufReader::new(file);
     let parsed = parse_codex_reader(&mut reader, &session_id, 0, CodexParseState::default())?;
+    if let Some(failure) = parsed.interrupted.as_ref() {
+        return Err(SessionParseError::invalid(
+            "parse Codex JSONL source",
+            format!("{}: {}", failure.operation, failure.message),
+        ));
+    }
     Ok(parsed.messages)
 }
 
@@ -1004,6 +1143,17 @@ struct CodexHeadlessUsage {
     timestamp_ms: Option<i64>,
 }
 
+struct CodexRecordError {
+    reason: RecordRejectionReason,
+    source: SessionParseError,
+}
+
+impl CodexRecordError {
+    fn new(reason: RecordRejectionReason, source: SessionParseError) -> Self {
+        Self { reason, source }
+    }
+}
+
 struct CodexHeadlessContext<'a> {
     session_id: &'a str,
     session_provider: Option<&'a str>,
@@ -1016,10 +1166,14 @@ fn parse_codex_headless_line(
     line: &str,
     context: CodexHeadlessContext<'_>,
     current_model: &mut Option<String>,
-) -> SessionParseResult<Option<UnifiedMessage>> {
+) -> Result<Option<UnifiedMessage>, CodexRecordError> {
     let mut bytes = line.as_bytes().to_vec();
-    let value: Value = simd_json::from_slice(&mut bytes)
-        .map_err(|source| SessionParseError::new("decode Codex headless line", source))?;
+    let value: Value = simd_json::from_slice(&mut bytes).map_err(|source| {
+        CodexRecordError::new(
+            RecordRejectionReason::MalformedRecord,
+            SessionParseError::new("decode Codex headless line", source),
+        )
+    })?;
 
     if let Some(model) = extract_model_from_value(&value) {
         *current_model = Some(model);
@@ -1032,10 +1186,16 @@ fn parse_codex_headless_line(
         .model
         .or_else(|| current_model.clone())
         .ok_or_else(|| {
-            SessionParseError::invalid("validate Codex headless usage", "model is missing")
+            CodexRecordError::new(
+                RecordRejectionReason::MissingModel,
+                SessionParseError::invalid("validate Codex headless usage", "model is missing"),
+            )
         })?;
     let timestamp = usage.timestamp_ms.ok_or_else(|| {
-        SessionParseError::invalid("validate Codex headless usage", "timestamp is missing")
+        CodexRecordError::new(
+            RecordRejectionReason::MissingTimestamp,
+            SessionParseError::invalid("validate Codex headless usage", "timestamp is missing"),
+        )
     })?;
 
     if usage.input == 0 && usage.output == 0 && usage.cached == 0 {
@@ -1066,6 +1226,17 @@ fn parse_codex_headless_line(
     message.set_agent_instance(context.session_agent_instance.clone());
 
     Ok(Some(message))
+}
+
+fn codex_schema_invalid_value_may_affect_state(value: &Value) -> bool {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|entry_type| {
+            matches!(entry_type, "session_meta" | "turn_context" | "event_msg")
+        })
+        || extract_model_from_value(value).is_some()
+        || extract_headless_usage(value).is_some()
 }
 
 fn extract_headless_usage(value: &Value) -> Option<CodexHeadlessUsage> {
@@ -1262,13 +1433,17 @@ mod tests {
     }
 
     #[test]
-    fn test_structurally_malformed_entry_returns_decode_error() {
+    fn test_structurally_malformed_non_state_entry_is_rejected() {
         let file = create_test_file(r#"{"type":7,"payload":{}}"#);
 
-        let error = super::parse_codex_file(file.path())
-            .expect_err("a non-string entry type must fail schema decoding");
+        let parsed =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .unwrap();
 
-        assert!(error.to_string().contains("decode Codex JSONL entry"));
+        assert!(parsed.messages.is_empty());
+        assert!(parsed.interrupted.is_none());
+        assert_eq!(parsed.rejections.total(), 1);
+        assert!(super::parse_codex_file(file.path()).unwrap().is_empty());
     }
 
     #[test]
@@ -1433,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn test_token_count_without_model_is_an_error() {
+    fn test_token_count_without_model_interrupts_incremental_scan() {
         let file = create_test_file(concat!(
             r#"{"type":"session_meta","payload":{"source":"interactive","model_provider":"openai"}}"#,
             "\n",
@@ -1441,10 +1616,17 @@ mod tests {
             "\n"
         ));
 
-        let error = super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
-            .expect_err("a token-count row without any model must fail");
+        let parsed =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .unwrap();
 
-        assert!(error.to_string().contains("model was never identified"));
+        assert!(parsed.messages.is_empty());
+        assert_eq!(parsed.rejections.total(), 1);
+        assert!(parsed
+            .interrupted
+            .unwrap()
+            .message
+            .contains("model was never identified"));
     }
 
     #[test]
@@ -1465,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_reader_returns_line_read_error() {
+    fn test_parse_reader_returns_interrupted_outcome_on_line_read_error() {
         let mut reader = FailAfterFirstLine::new(concat!(
             r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
             "\n",
@@ -1473,10 +1655,15 @@ mod tests {
             "\n"
         ));
 
-        let error = parse_codex_reader(&mut reader, "session", 0, CodexParseState::default())
-            .expect_err("line read failure must propagate");
+        let parsed =
+            parse_codex_reader(&mut reader, "session", 0, CodexParseState::default()).unwrap();
 
-        assert!(error.to_string().contains("read Codex JSONL line"));
+        assert!(parsed.messages.is_empty());
+        assert!(parsed.rejections.is_empty());
+        assert_eq!(
+            parsed.interrupted.unwrap().operation,
+            "read Codex JSONL line"
+        );
     }
 
     #[test]
@@ -1497,12 +1684,13 @@ mod tests {
             .expect_err("invalid UTF-8 must fail the full parser");
         assert!(full_error.to_string().contains("read Codex JSONL line"));
 
-        let incremental_error =
+        let incremental =
             super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
-                .expect_err("invalid UTF-8 must fail the incremental parser");
-        assert!(incremental_error
-            .to_string()
-            .contains("read Codex JSONL line"));
+                .unwrap();
+        assert_eq!(
+            incremental.interrupted.unwrap().operation,
+            "read Codex JSONL line"
+        );
     }
 
     #[test]
@@ -1510,9 +1698,9 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(
             concat!(
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
                 "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
                 "\n"
             )
             .as_bytes(),
@@ -1522,10 +1710,11 @@ mod tests {
         file.flush().unwrap();
 
         assert!(super::parse_codex_file(file.path()).is_err());
-        assert!(
-            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default(),)
-                .is_err()
-        );
+        let incremental =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .unwrap();
+        assert_eq!(incremental.messages.len(), 1);
+        assert!(incremental.interrupted.is_some());
     }
 
     #[test]
@@ -1604,6 +1793,34 @@ mod tests {
             .expect_err("current Codex token-count rows require last_token_usage");
 
         assert!(error.to_string().contains("last_token_usage is missing"));
+    }
+
+    #[test]
+    fn test_token_count_missing_info_does_not_block_later_usage() {
+        for malformed in [
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count"}}"#,
+        ] {
+            let content = format!(
+                "{}\n{}\n{malformed}\n{}\n",
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+            );
+            let file = create_test_file(&content);
+
+            let parsed =
+                super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                    .unwrap();
+
+            assert_eq!(parsed.messages.len(), 2, "fixture: {malformed}");
+            assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.4");
+            assert_eq!(parsed.messages[1].tokens.input, 4);
+            assert_eq!(parsed.messages[1].tokens.cache_read, 1);
+            assert_eq!(parsed.messages[1].tokens.output, 2);
+            assert_eq!(parsed.rejections.total(), 1);
+            assert!(parsed.interrupted.is_none());
+        }
     }
 
     #[test]
@@ -2217,11 +2434,14 @@ mod tests {
             "\n"
         ));
 
-        let error = super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
-            .expect_err("an unrelated event must not resolve an earlier model-less row");
+        let parsed =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .unwrap();
 
-        assert!(error
-            .to_string()
+        assert!(parsed
+            .interrupted
+            .unwrap()
+            .message
             .contains("resolve Codex token-count model"));
     }
 

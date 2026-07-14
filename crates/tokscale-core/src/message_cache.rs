@@ -285,6 +285,7 @@ pub(crate) enum ParserId {
     Zcode,
     Warp,
     CodeBuddy,
+    OmpParentHealth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -315,6 +316,7 @@ impl ParserId {
             Self::OpenClaw => "openclaw",
             Self::Pi => "pi",
             Self::Omp => "omp",
+            Self::OmpParentHealth => "omp-parent-health",
             Self::Kimi => "kimi",
             Self::Qwen => "qwen",
             Self::RooCode => "roo-code",
@@ -623,7 +625,15 @@ impl SourceInputPolicy {
         )
     }
 
-    pub(crate) fn claude_code(path: &Path, variant_path: Option<PathBuf>) -> Self {
+    pub(crate) fn with_dependency(path: &Path, dependency_path: PathBuf) -> Self {
+        Self::with_related(path, [("dependency".to_string(), dependency_path)])
+    }
+
+    pub(crate) fn claude_code(
+        path: &Path,
+        variant_path: Option<PathBuf>,
+        parent_session_path: Option<PathBuf>,
+    ) -> Self {
         let mut related = Vec::new();
         if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
             related.push((
@@ -633,6 +643,9 @@ impl SourceInputPolicy {
         }
         if let Some(variant_path) = variant_path {
             related.push(("cc-mirror/variant.json".to_string(), variant_path));
+        }
+        if let Some(parent_session_path) = parent_session_path {
+            related.push(("parent-session".to_string(), parent_session_path));
         }
         Self::with_related(path, related)
     }
@@ -885,7 +898,7 @@ impl SourceFingerprint {
                 path: source.path().unwrap_or(path).to_path_buf(),
                 source,
             })?;
-        SourceInputPolicy::claude_code(path, variant_path).fingerprint()
+        SourceInputPolicy::claude_code(path, variant_path, None).fingerprint()
     }
 
     pub(crate) fn from_main_digest(
@@ -2812,7 +2825,7 @@ mod tests {
         std::fs::write(&source, b"session!").unwrap();
         std::fs::write(&meta, b"meta-one").unwrap();
         std::fs::write(&variant, b"variant1").unwrap();
-        let policy = SourceInputPolicy::claude_code(&source, Some(variant.clone()));
+        let policy = SourceInputPolicy::claude_code(&source, Some(variant.clone()), None);
         let before = policy.stamp().unwrap();
 
         replace_preserving_size_and_mtime(&meta, &dir.path().join("replacement-meta"), b"meta-two");
@@ -2879,6 +2892,31 @@ mod tests {
 
         assert_ne!(sibling_before, sibling_after);
         assert_eq!(plain_before, plain_after);
+    }
+
+    #[test]
+    fn fingerprint_with_dynamic_dependency_tracks_content_and_existence() {
+        let dir = TempDir::new().unwrap();
+        let child_dir = dir.path().join("parent-session");
+        let primary = child_dir.join("0-ReviewFindings.jsonl");
+        let dependency = dir.path().join("parent-session.jsonl");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(&primary, b"child").unwrap();
+
+        let policy = SourceInputPolicy::with_dependency(&primary, dependency.clone());
+        assert_eq!(policy.paths(), vec![primary.clone(), dependency.clone()]);
+        let absent = policy.fingerprint().unwrap();
+
+        std::fs::write(&dependency, b"reviewer").unwrap();
+        let reviewer = policy.fingerprint().unwrap();
+        assert_ne!(absent, reviewer);
+
+        std::fs::write(&dependency, b"oracle!!").unwrap();
+        let oracle = policy.fingerprint().unwrap();
+        assert_ne!(reviewer, oracle);
+
+        std::fs::remove_file(&dependency).unwrap();
+        assert_eq!(policy.fingerprint().unwrap(), absent);
     }
 
     #[test]

@@ -11,6 +11,8 @@ use crate::{sessions, ClientId};
 
 pub(crate) struct JunieAdapter;
 
+const JUNIE_RECORD_REJECTION_REVISION: u32 = EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
+
 impl LocalSourceAdapter for JunieAdapter {
     fn client(&self) -> ClientId {
         ClientId::Junie
@@ -29,7 +31,7 @@ impl LocalSourceAdapter for JunieAdapter {
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
                 ParserId::Junie,
-                EXPLICIT_TOKEN_OVERFLOW_REVISION,
+                JUNIE_RECORD_REJECTION_REVISION,
             ))
         })
         .collect();
@@ -40,7 +42,7 @@ impl LocalSourceAdapter for JunieAdapter {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::load_or_parse_unit_with(unit, ctx, |path| {
+                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                     sessions::junie::parse_junie_file(path)
                 })
             })
@@ -150,6 +152,10 @@ mod tests {
         assert_eq!(units[0].client, ClientId::Junie);
         assert_eq!(units[0].path, path);
         assert_eq!(units[0].fingerprint_policy, FingerprintPolicy::PlainFile);
+        assert_eq!(
+            units[0].parser_version,
+            ParserVersion::new(ParserId::Junie, JUNIE_RECORD_REJECTION_REVISION)
+        );
     }
 
     #[test]
@@ -163,7 +169,7 @@ mod tests {
             &mut cache,
             None,
         );
-        let expected = sessions::junie::parse_junie_file(&path).unwrap();
+        let expected = sessions::junie::parse_junie_file(&path).unwrap().messages;
 
         assert_eq!(actual, expected);
     }

@@ -9,8 +9,15 @@ use crate::sessions::error::SessionParseError;
 
 type BoxSourceError = Box<dyn Error + Send + Sync + 'static>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceDiscoveryErrorKind {
+    Configuration,
+    Source,
+}
+
 #[derive(Debug)]
 pub(crate) struct SourceDiscoveryError {
+    pub(crate) kind: SourceDiscoveryErrorKind,
     pub(crate) client: ClientId,
     pub(crate) path: PathBuf,
     pub(crate) operation: &'static str,
@@ -25,6 +32,22 @@ impl SourceDiscoveryError {
         source: impl Error + Send + Sync + 'static,
     ) -> Self {
         Self {
+            kind: SourceDiscoveryErrorKind::Source,
+            client,
+            path: path.into(),
+            operation,
+            source: Box::new(source),
+        }
+    }
+
+    pub(crate) fn configuration(
+        client: ClientId,
+        path: impl Into<PathBuf>,
+        operation: &'static str,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            kind: SourceDiscoveryErrorKind::Configuration,
             client,
             path: path.into(),
             operation,
@@ -35,10 +58,15 @@ impl SourceDiscoveryError {
 
 impl fmt::Display for SourceDiscoveryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let category = match self.kind {
+            SourceDiscoveryErrorKind::Configuration => "configuration",
+            SourceDiscoveryErrorKind::Source => "source discovery",
+        };
         write!(
             formatter,
-            "{} source discovery failed to {} `{}`: {}",
+            "{} {} failed to {} `{}`: {}",
             self.client.as_str(),
+            category,
             self.operation,
             self.path.display(),
             self.source

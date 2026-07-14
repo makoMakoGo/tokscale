@@ -68,7 +68,7 @@ fn test_parse_codebuff_emits_one_event_per_assistant_message_with_usage() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path).unwrap();
+    let msgs = parse_codebuff_file(&path).unwrap().messages;
     assert_eq!(msgs.len(), 2);
 
     let first = &msgs[0];
@@ -133,7 +133,7 @@ fn test_parse_codebuff_recovers_usage_from_run_state_history_when_metadata_is_em
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path).unwrap();
+    let msgs = parse_codebuff_file(&path).unwrap().messages;
     assert_eq!(msgs.len(), 1);
     let m = &msgs[0];
     assert_eq!(m.model_id.as_ref(), "openrouter/anthropic/claude-opus-4-1");
@@ -177,7 +177,7 @@ fn test_parse_codebuff_uses_chat_id_for_timestamp_when_message_has_none() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path).unwrap();
+    let msgs = parse_codebuff_file(&path).unwrap().messages;
     assert_eq!(msgs.len(), 1);
     // 2025-12-14T10:00:00.000Z → epoch ms
     assert_eq!(msgs[0].timestamp, 1_765_706_400_000_i64);
@@ -202,7 +202,14 @@ fn test_parse_codebuff_rejects_missing_model() {
         ]"#,
     );
 
-    assert!(parse_codebuff_file(&path).is_err());
+    let scanned = parse_codebuff_file(&path).unwrap();
+    assert!(scanned.messages.is_empty());
+    assert_eq!(scanned.rejections.total(), 1);
+    assert_eq!(
+        scanned.rejections.entries().next().unwrap().key,
+        "missing-model"
+    );
+    assert!(scanned.interrupted.is_none());
 }
 
 #[test]
@@ -228,8 +235,8 @@ fn test_parse_codebuff_dedup_key_is_stable_for_same_history() {
         body,
     );
 
-    let msgs_a = parse_codebuff_file(&path_a).unwrap();
-    let msgs_b = parse_codebuff_file(&path_b).unwrap();
+    let msgs_a = parse_codebuff_file(&path_a).unwrap().messages;
+    let msgs_b = parse_codebuff_file(&path_b).unwrap().messages;
 
     assert_eq!(msgs_a.len(), 1);
     assert_eq!(msgs_b.len(), 1);
@@ -264,10 +271,10 @@ fn test_parse_codebuff_dedup_key_falls_back_when_id_missing() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path).unwrap();
+    let msgs = parse_codebuff_file(&path).unwrap().messages;
     assert_eq!(msgs.len(), 1);
     let key = msgs[0].dedup_key.expect("dedup_key required");
-    let reparsed = parse_codebuff_file(&path).unwrap();
+    let reparsed = parse_codebuff_file(&path).unwrap().messages;
     assert_eq!(
         reparsed[0].dedup_key,
         Some(key),
@@ -317,7 +324,7 @@ fn test_parse_codebuff_run_state_skips_entries_missing_provider_options() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path).unwrap();
+    let msgs = parse_codebuff_file(&path).unwrap().messages;
     assert_eq!(
         msgs.len(),
         1,
@@ -377,7 +384,7 @@ fn test_parse_codebuff_run_state_accumulates_across_entries_when_newest_has_mode
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path).unwrap();
+    let msgs = parse_codebuff_file(&path).unwrap().messages;
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].tokens.input, 4242);
     assert_eq!(msgs[0].tokens.output, 99);
@@ -412,7 +419,7 @@ fn test_parse_codebuff_dedup_key_distinguishes_id_less_messages_by_ordinal() {
         ]"#,
     );
 
-    let msgs = parse_codebuff_file(&path).unwrap();
+    let msgs = parse_codebuff_file(&path).unwrap().messages;
     assert_eq!(msgs.len(), 2);
     let key_a = msgs[0].dedup_key.unwrap();
     let key_b = msgs[1].dedup_key.unwrap();

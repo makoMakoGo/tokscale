@@ -776,14 +776,19 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
     let mut health = DataHealth::default();
     let groups: Vec<_> = selected_adapters
         .into_iter()
-        .map(|adapter| {
+        .map(|adapter| -> Result<_, String> {
             #[cfg(test)]
             PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
-            // Discovery and snapshot failures stay inside their source's
-            // failure domain: the affected source becomes unavailable health
-            // instead of erasing every other adapter's data.
+            // Third-party source and snapshot failures stay inside their
+            // source's failure domain. Configuration failures belong to the
+            // outer pipeline and must abort preparation.
             let units = match adapter.discover_checked(&scan_ctx) {
                 Ok(units) => units,
+                Err(error)
+                    if error.kind == adapters::error::SourceDiscoveryErrorKind::Configuration =>
+                {
+                    return Err(error.to_string());
+                }
                 Err(error) => {
                     health.record(SourceHealth {
                         client: error.client,
@@ -793,10 +798,10 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
                         },
                         rejections: RejectionSummary::default(),
                     });
-                    return adapters::PreparedAdapterSources {
+                    return Ok(adapters::PreparedAdapterSources {
                         adapter,
                         units: Vec::new(),
-                    };
+                    });
                 }
             };
             let units = units
@@ -823,9 +828,9 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
                     }
                 })
                 .collect();
-            adapters::PreparedAdapterSources { adapter, units }
+            Ok(adapters::PreparedAdapterSources { adapter, units })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let signature = source_inventory_signature(&clients, &groups);
     Ok(PreparedLocalSources {
         options,

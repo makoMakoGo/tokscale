@@ -10,8 +10,10 @@ use crate::adapters::{
     UnitMessageSource,
 };
 use crate::clients::ClientId;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
-use crate::source_health::ScannedSource;
+
+const HERMES_RECORD_REJECTION_REVISION: u32 = 4;
 
 pub(crate) struct HermesAdapter;
 
@@ -40,20 +42,27 @@ impl LocalSourceAdapter for HermesAdapter {
             def.pattern,
         )?);
 
-        adapter_discover::source_units_from_paths_preserving_order(
+        let units = adapter_discover::source_units_from_paths_preserving_order(
             ClientId::Hermes,
             paths,
             FingerprintPolicy::SqliteWithWal,
-        )
+        )?;
+        Ok(units
+            .into_iter()
+            .map(|unit| {
+                unit.with_parser_version(ParserVersion::new(
+                    ParserId::Hermes,
+                    HERMES_RECORD_REJECTION_REVISION,
+                ))
+            })
+            .collect())
     }
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::parse_uncached_unit(unit, ctx, |path| {
-                    sessions::hermes::parse_hermes_sqlite(path).map(ScannedSource::complete)
-                })
+                adapter_cache::parse_uncached_unit(unit, ctx, sessions::hermes::parse_hermes_sqlite)
             })
             .collect()
     }
@@ -164,13 +173,13 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let paths: Vec<_> = HERMES_ADAPTER
-            .discover_checked(&ctx)
-            .unwrap()
-            .into_iter()
-            .map(|unit| unit.path)
-            .collect();
+        let units = HERMES_ADAPTER.discover_checked(&ctx).unwrap();
+        let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![default_db, profile_db]);
+        assert!(units.iter().all(|unit| {
+            unit.parser_version
+                == ParserVersion::new(ParserId::Hermes, HERMES_RECORD_REJECTION_REVISION)
+        }));
     }
 }

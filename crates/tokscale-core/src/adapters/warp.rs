@@ -8,8 +8,10 @@ use crate::adapters::{
 };
 use crate::clients::ClientId;
 use crate::local_clients;
+use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
-use crate::source_health::ScannedSource;
+
+const WARP_RECORD_REJECTION_REVISION: u32 = 4;
 
 pub(crate) struct WarpAdapter;
 
@@ -37,20 +39,27 @@ impl LocalSourceAdapter for WarpAdapter {
             def.pattern,
         )?);
 
-        adapter_discover::source_units_from_paths(
+        let units = adapter_discover::source_units_from_paths(
             ClientId::Warp,
             paths,
             FingerprintPolicy::SqliteWithWal,
-        )
+        )?;
+        Ok(units
+            .into_iter()
+            .map(|unit| {
+                unit.with_parser_version(ParserVersion::new(
+                    ParserId::Warp,
+                    WARP_RECORD_REJECTION_REVISION,
+                ))
+            })
+            .collect())
     }
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
-                adapter_cache::parse_uncached_unit(unit, ctx, |path| {
-                    sessions::warp::parse_warp_sqlite(path).map(ScannedSource::complete)
-                })
+                adapter_cache::parse_uncached_unit(unit, ctx, sessions::warp::parse_warp_sqlite)
             })
             .collect()
     }
@@ -107,5 +116,9 @@ mod tests {
         assert!(units
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal));
+        assert!(units.iter().all(|unit| {
+            unit.parser_version
+                == ParserVersion::new(ParserId::Warp, WARP_RECORD_REJECTION_REVISION)
+        }));
     }
 }

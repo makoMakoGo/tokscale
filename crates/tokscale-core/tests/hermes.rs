@@ -60,7 +60,7 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
     )
     .unwrap();
 
-    let messages = parse_hermes_sqlite(&db_path).unwrap();
+    let messages = parse_hermes_sqlite(&db_path).unwrap().messages;
     assert_eq!(messages.len(), 1);
 
     let msg = &messages[0];
@@ -167,7 +167,7 @@ fn test_parse_hermes_sqlite_skips_empty_sessions_and_uses_provider_inference() {
     )
     .unwrap();
 
-    let messages = parse_hermes_sqlite(&db_path).unwrap();
+    let messages = parse_hermes_sqlite(&db_path).unwrap().messages;
     assert_eq!(messages.len(), 1);
 
     let msg = &messages[0];
@@ -209,7 +209,7 @@ fn test_parse_hermes_sqlite_ignores_unknown_billing_provider_and_falls_back_to_m
     )
     .unwrap();
 
-    let messages = parse_hermes_sqlite(&db_path).unwrap();
+    let messages = parse_hermes_sqlite(&db_path).unwrap().messages;
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].provider_id.as_ref(), "openai");
 }
