@@ -58,7 +58,7 @@ pub(crate) fn load_or_scan_unit_with<F>(
 where
     F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
 {
-    load_or_scan_unit_cacheable(unit, ctx, false, |path| {
+    load_or_scan_unit_cacheable(unit, ctx, ScanCacheOptions::default(), |path| {
         scan(path).map(|scanned| (scanned, true))
     })
 }
@@ -75,15 +75,75 @@ pub(crate) fn load_or_scan_unit_with_optional_related_inputs<F>(
 where
     F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
 {
-    load_or_scan_unit_cacheable(unit, ctx, true, |path| {
-        scan(path).map(|scanned| (scanned, true))
-    })
+    load_or_scan_unit_cacheable(
+        unit,
+        ctx,
+        ScanCacheOptions {
+            preserve_primary_on_fingerprint_failure: true,
+            ..ScanCacheOptions::default()
+        },
+        |path| scan(path).map(|scanned| (scanned, true)),
+    )
+}
+
+pub(crate) fn load_or_scan_empty_sentinel_with_primary_hash<F>(
+    unit: SourceUnit,
+    ctx: &ParseContext<'_>,
+    primary_hash: [u8; 32],
+    scan: F,
+) -> ParsedUnit
+where
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
+{
+    load_or_scan_unit_cacheable(
+        unit,
+        ctx,
+        ScanCacheOptions {
+            cache_clean_empty: true,
+            precomputed_content_hash: Some(PrecomputedContentHash::Primary(primary_hash)),
+            ..ScanCacheOptions::default()
+        },
+        |path| scan(path).map(|scanned| (scanned, true)),
+    )
+}
+
+pub(crate) fn load_or_scan_unit_with_dependency_hash<F>(
+    unit: SourceUnit,
+    ctx: &ParseContext<'_>,
+    dependency_hash: [u8; 32],
+    scan: F,
+) -> ParsedUnit
+where
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
+{
+    load_or_scan_unit_cacheable(
+        unit,
+        ctx,
+        ScanCacheOptions {
+            precomputed_content_hash: Some(PrecomputedContentHash::Dependency(dependency_hash)),
+            ..ScanCacheOptions::default()
+        },
+        |path| scan(path).map(|scanned| (scanned, true)),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PrecomputedContentHash {
+    Primary([u8; 32]),
+    Dependency([u8; 32]),
+}
+
+#[derive(Clone, Copy, Default)]
+struct ScanCacheOptions {
+    preserve_primary_on_fingerprint_failure: bool,
+    cache_clean_empty: bool,
+    precomputed_content_hash: Option<PrecomputedContentHash>,
 }
 
 fn load_or_scan_unit_cacheable<F>(
     mut unit: SourceUnit,
     ctx: &ParseContext<'_>,
-    preserve_primary_on_fingerprint_failure: bool,
+    options: ScanCacheOptions,
     scan: F,
 ) -> ParsedUnit
 where
@@ -110,10 +170,18 @@ where
         Ok(snapshot) => snapshot,
         Err(source) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
     };
-    let (fingerprint, fingerprint_failure) = match input_policy.fingerprint_from_snapshot(&snapshot)
-    {
+    let fingerprint_result = match options.precomputed_content_hash {
+        Some(PrecomputedContentHash::Primary(hash)) => {
+            input_policy.fingerprint_from_snapshot_with_primary_hash(&snapshot, hash)
+        }
+        Some(PrecomputedContentHash::Dependency(hash)) => {
+            input_policy.fingerprint_from_snapshot_with_dependency_hash(&snapshot, hash)
+        }
+        None => input_policy.fingerprint_from_snapshot(&snapshot),
+    };
+    let (fingerprint, fingerprint_failure) = match fingerprint_result {
         Ok(fingerprint) => (Some(fingerprint), None),
-        Err(source) if preserve_primary_on_fingerprint_failure => {
+        Err(source) if options.preserve_primary_on_fingerprint_failure => {
             (None, Some(snapshot_failure(source)))
         }
         Err(source) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
@@ -135,11 +203,20 @@ where
         Err(_) => false,
     };
     let complete = scanned.interrupted.is_none();
+    let cacheable_output =
+        options.cache_clean_empty || !scanned.messages.is_empty() || !scanned.rejections.is_empty();
     let cache_write = match fingerprint {
-        Some(fingerprint) if complete && cacheable && source_unchanged => Some(Box::new(
-            message_cache::CacheWritePlan::new(&unit.path, unit.parser_version, fingerprint, None)
+        Some(fingerprint) if complete && cacheable && source_unchanged && cacheable_output => {
+            Some(Box::new(
+                message_cache::CacheWritePlan::new(
+                    &unit.path,
+                    unit.parser_version,
+                    fingerprint,
+                    None,
+                )
                 .with_rejections(scanned.rejections.clone()),
-        )),
+            ))
+        }
         _ => None,
     };
 
@@ -644,6 +721,38 @@ mod tests {
             UnitMessageSource::Fresh(ref messages) if messages.is_empty()
         ));
         assert!(parsed.cache_write.is_none());
+    }
+
+    #[test]
+    fn complete_clean_empty_scan_does_not_plan_a_cache_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path);
+
+        let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
+            Ok(ScannedSource::complete(Vec::new()))
+        });
+
+        assert!(parsed.cache_write.is_none());
+    }
+
+    #[test]
+    fn complete_empty_scan_with_rejections_still_plans_a_cache_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("all-bad.jsonl");
+        std::fs::write(&path, b"bad").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Amp, path);
+
+        let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
+            let mut scanned = ScannedSource::complete(Vec::new());
+            scanned
+                .rejections
+                .record(crate::source_health::RecordRejectionReason::MalformedRecord);
+            Ok(scanned)
+        });
+
+        assert!(parsed.cache_write.is_some());
     }
 
     #[test]

@@ -126,14 +126,23 @@ stop the scan as `Partial` before they can pollute model or token state.
   authoritative source; healthy shards remain usable. There is no cache
   migration or compatibility branch. Cache read faults do not enter
   `DataHealth`, emit terminal warnings, or block unrelated sources.
-- A `Complete` scan is cacheable even when it rejected records and even when
-  it produced zero messages; its per-reason rejection counts are part of the
-  shard, so a warm hit restores the Issues view without rescanning. Raw
-  rejection samples are never cached. A stable bad record therefore never
-  makes a cache permanently stale.
+- A `Complete` scan is cacheable when it produced messages or rejection
+  counts. An all-bad source therefore caches its zero-message result and
+  restores the Issues view without rescanning, while a clean zero-message
+  source does not create an otherwise meaningless shard. Raw rejection
+  samples are never cached. A stable bad record therefore never makes a cache
+  permanently stale.
 - A completed shared-input health scan follows the same rule in its own cache
-  namespace. The shard contains no usage messages and is keyed by the shared
-  input path, so multiple dependants restore one health owner.
+  namespace. Its explicit health sentinel may cache a clean zero-message
+  result because that result proves the shared input was checked. The shard is
+  keyed by the shared input path, so multiple dependants restore one health
+  owner.
+- OMP parent content participates unchanged in each child fingerprint, but a
+  cold batch hashes each unique parent during the same pass that parses it and
+  reuses that exact digest for the parent-health sentinel and every dependent child. The resulting
+  fingerprints are byte-for-byte identical to independently hashing each
+  dependency; this is an execution optimization, not a cache-format or
+  invalidation-policy change.
 - A `Partial` scan is never cached.
 - An `Unavailable` source leaves any previously cached shard in place; the
   shard is served again only if the source fingerprint still matches, in

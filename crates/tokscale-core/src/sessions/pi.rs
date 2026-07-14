@@ -8,9 +8,11 @@ use crate::source_health::{
     RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure, SourceStatus,
 };
 use crate::{model_aliases, provider_identity, TokenBreakdown};
+use rayon::prelude::*;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -82,6 +84,10 @@ impl OmpParentTaskAgentIndex {
             .is_none_or(|scan| matches!(scan.status, SourceStatus::Complete))
     }
 
+    pub(crate) fn child_dependency_content_hash(&self, child_path: &Path) -> Option<[u8; 32]> {
+        self.parent_scan_for_child(child_path)?.content_hash
+    }
+
     pub(crate) fn unhealthy_parent_health(&self) -> Vec<OmpParentHealth> {
         self.parent_health()
             .into_iter()
@@ -99,6 +105,7 @@ impl OmpParentTaskAgentIndex {
                 path: path.clone(),
                 status: scan.status.clone(),
                 rejections: scan.rejections.clone(),
+                content_hash: scan.content_hash,
             })
             .collect::<Vec<_>>();
         health.sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -111,6 +118,33 @@ struct OmpParentScan {
     task_agents: HashMap<String, String>,
     rejections: RejectionSummary,
     status: SourceStatus,
+    content_hash: Option<[u8; 32]>,
+}
+
+struct HashingReader<R> {
+    inner: R,
+    hasher: Sha256,
+}
+
+impl<R> HashingReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.hasher.finalize().into()
+    }
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.hasher.update(&buffer[..read]);
+        Ok(read)
+    }
 }
 
 #[derive(Debug)]
@@ -118,6 +152,7 @@ pub(crate) struct OmpParentHealth {
     pub path: PathBuf,
     pub status: SourceStatus,
     pub rejections: RejectionSummary,
+    pub content_hash: Option<[u8; 32]>,
 }
 
 /// Pi session header (first line of JSONL)
@@ -521,12 +556,14 @@ pub fn build_omp_parent_task_agent_index(paths: &[PathBuf]) -> OmpParentTaskAgen
     parent_paths.sort_unstable();
     parent_paths.dedup();
 
-    for parent_path in parent_paths {
-        index.parents.insert(
-            parent_path.clone(),
-            omp_task_agent_scan_from_parent(&parent_path),
-        );
-    }
+    let parent_scans: Vec<_> = parent_paths
+        .into_par_iter()
+        .map(|path| {
+            let scan = omp_task_agent_scan_from_parent(&path);
+            (path, scan)
+        })
+        .collect();
+    index.parents.extend(parent_scans);
     index
 }
 
@@ -567,10 +604,15 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
             };
         }
     };
-    omp_task_agent_scan_from_reader(parent_path, BufReader::new(file))
+    let mut reader = BufReader::new(HashingReader::new(file));
+    let mut scan = omp_task_agent_scan_from_reader(parent_path, &mut reader);
+    if matches!(scan.status, SourceStatus::Complete) {
+        scan.content_hash = Some(reader.into_inner().finish());
+    }
+    scan
 }
 
-fn omp_task_agent_scan_from_reader(parent_path: &Path, reader: impl BufRead) -> OmpParentScan {
+fn omp_task_agent_scan_from_reader(parent_path: &Path, reader: &mut impl BufRead) -> OmpParentScan {
     #[derive(Deserialize)]
     struct OmpParentLine {
         message: Option<OmpParentMessage>,
@@ -1257,9 +1299,9 @@ mod tests {
 {"type":"message","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
         let (_dir, child_path) = create_omp_task_files("", "0-ReviewFindings", child_content);
         let parent_path = child_path.parent().unwrap().with_extension("jsonl");
-        let reader =
+        let mut reader =
             BufReader::new(std::io::Cursor::new(parent_line.as_bytes()).chain(FailingReader));
-        let parent_scan = omp_task_agent_scan_from_reader(&parent_path, reader);
+        let parent_scan = omp_task_agent_scan_from_reader(&parent_path, &mut reader);
         let mut index = OmpParentTaskAgentIndex::new();
         index
             .child_parents
@@ -1283,6 +1325,19 @@ mod tests {
             parent_health[0].status.failure().unwrap().operation,
             "read OMP parent JSONL line"
         );
+    }
+
+    #[test]
+    fn test_omp_parent_scan_hashes_the_exact_bytes_it_parses() {
+        let parent_content = "{\"type\":\"message\",\"message\":null}\r\n";
+        let (_dir, child_path) = create_omp_task_files(parent_content, "0-task", "");
+
+        let index = build_omp_parent_task_agent_index(&[child_path]);
+        let health = index.parent_health();
+        let expected: [u8; 32] = Sha256::digest(parent_content.as_bytes()).into();
+
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0].content_hash, Some(expected));
     }
 
     #[test]

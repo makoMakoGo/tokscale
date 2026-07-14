@@ -778,6 +778,46 @@ impl SourceInputPolicy {
         self.fingerprint_from_stamp(self.stamp_from_snapshot(snapshot)?)
     }
 
+    pub(crate) fn fingerprint_from_snapshot_with_primary_hash(
+        &self,
+        snapshot: &SourceInputSnapshot,
+        primary_hash: [u8; 32],
+    ) -> Result<SourceFingerprint, SourceSnapshotError> {
+        self.fingerprint_from_stamp_with(
+            self.stamp_from_snapshot(snapshot)?,
+            |index, path, size| {
+                if index == 0 {
+                    Ok(primary_hash)
+                } else {
+                    hash_prefix(path, size)
+                }
+            },
+        )
+    }
+
+    pub(crate) fn fingerprint_from_snapshot_with_dependency_hash(
+        &self,
+        snapshot: &SourceInputSnapshot,
+        dependency_hash: [u8; 32],
+    ) -> Result<SourceFingerprint, SourceSnapshotError> {
+        if self.inputs.len() != 2 || self.inputs[1].0 != "dependency" {
+            return Err(SourceSnapshotError::invalid(
+                &self.inputs[0].1,
+                "precomputed dependency hash requires one dependency input",
+            ));
+        }
+        self.fingerprint_from_stamp_with(
+            self.stamp_from_snapshot(snapshot)?,
+            |index, path, size| {
+                if index == 1 {
+                    Ok(dependency_hash)
+                } else {
+                    hash_prefix(path, size)
+                }
+            },
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn fingerprint(&self) -> Result<SourceFingerprint, SourceSnapshotError> {
         let stamp = self.stamp()?;
@@ -787,6 +827,14 @@ impl SourceInputPolicy {
     pub(crate) fn fingerprint_from_stamp(
         &self,
         stamp: SourceStamp,
+    ) -> Result<SourceFingerprint, SourceSnapshotError> {
+        self.fingerprint_from_stamp_with(stamp, |_, path, size| hash_prefix(path, size))
+    }
+
+    fn fingerprint_from_stamp_with(
+        &self,
+        stamp: SourceStamp,
+        mut hash_input: impl FnMut(usize, &Path, u64) -> Result<[u8; 32], SourceSnapshotError>,
     ) -> Result<SourceFingerprint, SourceSnapshotError> {
         if stamp.files.len() != self.inputs.len()
             || self
@@ -805,13 +853,17 @@ impl SourceInputPolicy {
         let size = stamp.primary_size().ok_or_else(|| {
             SourceSnapshotError::invalid(&self.inputs[0].1, "primary source is absent")
         })?;
-        let content_hash = hash_prefix(&self.inputs[0].1, size)?;
+        let content_hash = hash_input(0, &self.inputs[0].1, size)?;
         let mut related_files = Vec::with_capacity(self.inputs.len().saturating_sub(1));
-        for ((label, path), file_stamp) in
-            self.inputs.iter().skip(1).zip(stamp.files.iter().skip(1))
+        for (index, ((label, path), file_stamp)) in self
+            .inputs
+            .iter()
+            .skip(1)
+            .zip(stamp.files.iter().skip(1))
+            .enumerate()
         {
             let content_hash = if file_stamp.present {
-                Some(hash_prefix(path, file_stamp.size)?)
+                Some(hash_input(index + 1, path, file_stamp.size)?)
             } else {
                 None
             };
@@ -2409,6 +2461,14 @@ fn hash_prefix(path: &Path, len: u64) -> Result<[u8; 32], SourceSnapshotError> {
     Ok(hasher.finalize().into())
 }
 
+#[cfg(test)]
+fn hash_file_contents(path: &Path) -> Result<[u8; 32], SourceSnapshotError> {
+    let metadata = fs::metadata(path).map_err(|source| {
+        SourceSnapshotError::io("read source metadata for hashing", path, source)
+    })?;
+    hash_prefix(path, metadata.len())
+}
+
 pub(crate) fn build_codex_incremental_cache(
     consumed_offset: u64,
     state: CodexParseState,
@@ -2966,6 +3026,36 @@ mod tests {
 
         std::fs::remove_file(&dependency).unwrap();
         assert_eq!(policy.fingerprint().unwrap(), absent);
+    }
+
+    #[test]
+    fn precomputed_primary_and_dependency_hashes_preserve_fingerprint_identity() {
+        let dir = TempDir::new().unwrap();
+        let child_dir = dir.path().join("parent-session");
+        let primary = child_dir.join("0-ReviewFindings.jsonl");
+        let dependency = dir.path().join("parent-session.jsonl");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(&primary, b"child").unwrap();
+        std::fs::write(&dependency, b"parent").unwrap();
+        let policy = SourceInputPolicy::with_dependency(&primary, dependency.clone());
+        let snapshot = policy.snapshot().unwrap();
+
+        let ordinary = policy.fingerprint_from_snapshot(&snapshot).unwrap();
+        let with_primary = policy
+            .fingerprint_from_snapshot_with_primary_hash(
+                &snapshot,
+                hash_file_contents(&primary).unwrap(),
+            )
+            .unwrap();
+        let with_dependency = policy
+            .fingerprint_from_snapshot_with_dependency_hash(
+                &snapshot,
+                hash_file_contents(&dependency).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(with_primary, ordinary);
+        assert_eq!(with_dependency, ordinary);
     }
 
     #[test]

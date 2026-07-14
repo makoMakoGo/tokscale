@@ -2922,7 +2922,7 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
 
 #[test]
 #[serial_test::serial]
-fn test_empty_opencode_scan_result_is_cached_and_served_warm() {
+fn test_clean_empty_opencode_scan_result_is_not_cached() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
@@ -2945,11 +2945,10 @@ fn test_empty_opencode_scan_result_is_cached_and_served_warm() {
         assert!(first_messages.is_empty());
 
         let cache = message_cache::SourceMessageCache::load().unwrap();
-        let meta = cache
+        assert!(cache
             .get_meta(&path, unit.parser_version)
             .unwrap()
-            .expect("a complete empty scan must be cached");
-        assert!(meta.rejections.is_empty());
+            .is_none());
 
         message_cache::reset_source_read_stats(&path);
         let second_messages = parse_all_messages_with_pricing(
@@ -2959,10 +2958,9 @@ fn test_empty_opencode_scan_result_is_cached_and_served_warm() {
         )
         .unwrap();
         assert!(second_messages.is_empty());
-        assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats::default(),
-            "second run must serve the cached empty scan without reading source bytes"
+        assert!(
+            message_cache::get_source_read_stats(&path).hash_passes > 0,
+            "a clean empty source has no shard and must be scanned again"
         );
     }
 

@@ -377,14 +377,22 @@ fn parse_parent_health_cache_misses(
             let miss = misses_by_path.remove(&health.path)?;
             let mut parsed = match health.status {
                 crate::source_health::SourceStatus::Complete => {
+                    let content_hash = health
+                        .content_hash
+                        .expect("complete OMP parent health must carry its cache content hash");
                     let rejections = health.rejections;
-                    adapter_cache::load_or_scan_unit_with(miss.unit, ctx, move |_| {
-                        Ok(crate::source_health::ScannedSource {
-                            messages: Vec::new(),
-                            rejections: rejections.clone(),
-                            interrupted: None,
-                        })
-                    })
+                    adapter_cache::load_or_scan_empty_sentinel_with_primary_hash(
+                        miss.unit,
+                        ctx,
+                        content_hash,
+                        move |_| {
+                            Ok(crate::source_health::ScannedSource {
+                                messages: Vec::new(),
+                                rejections: rejections.clone(),
+                                interrupted: None,
+                            })
+                        },
+                    )
                 }
                 crate::source_health::SourceStatus::Partial { failure } => {
                     let mut parsed = ParsedUnit::healthy(
@@ -476,14 +484,33 @@ fn parse_omp_miss_units(
     units
         .into_par_iter()
         .map(|mut unit| {
+            let dependency_hash = parent_index.child_dependency_content_hash(&unit.path);
             if !parent_index.child_dependency_is_cacheable(&unit.path) {
                 // The parent health is reported separately, but an unreadable
                 // dependency cannot produce an authoritative cache fingerprint.
                 unit.fingerprint_policy = FingerprintPolicy::NoMessageCache;
             }
-            adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
-                sessions::pi::parse_omp_file_with_parent_task_agent_index(path, parent_index)
-            })
+            let has_dependency_policy = matches!(
+                unit.fingerprint_policy,
+                FingerprintPolicy::PrimaryWithDependency { .. }
+            );
+            if let (true, Some(dependency_hash)) = (has_dependency_policy, dependency_hash) {
+                adapter_cache::load_or_scan_unit_with_dependency_hash(
+                    unit,
+                    ctx,
+                    dependency_hash,
+                    |path| {
+                        sessions::pi::parse_omp_file_with_parent_task_agent_index(
+                            path,
+                            parent_index,
+                        )
+                    },
+                )
+            } else {
+                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
+                    sessions::pi::parse_omp_file_with_parent_task_agent_index(path, parent_index)
+                })
+            }
         })
         .collect()
 }
@@ -767,6 +794,40 @@ mod tests {
             .unwrap();
         assert_eq!(second[0].session_id.as_ref(), "child-session");
         assert_eq!(second[0].agent.as_deref(), Some("OMP Oracle"));
+    }
+
+    #[test]
+    fn cold_children_do_not_reread_their_shared_parent_for_cache_hashes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session_root = dir.path().join("omp-extra/root-session");
+        let parent_path = session_root.with_extension("jsonl");
+        let first_child_path = session_root.join("0-ReviewFindings.jsonl");
+        let second_child_path = session_root.join("1-ReviewFindings.jsonl");
+        write_file(&parent_path, OMP_PARENT_CONTENT);
+        write_file(&first_child_path, &omp_content("first-child"));
+        write_file(&second_child_path, &omp_content("second-child"));
+
+        let parser_version = ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION);
+        let units = [first_child_path, second_child_path]
+            .into_iter()
+            .map(|path| {
+                SourceUnit::plain_file(ClientId::Omp, path)
+                    .with_dependency(parent_path.clone())
+                    .with_parser_version(parser_version)
+            })
+            .collect();
+        let mut cache = message_cache::SourceMessageCache::default();
+        message_cache::reset_source_read_stats(&parent_path);
+
+        let (messages, health) = fold_batches_with_omp_adapter(units, &mut cache);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(health.issue_count(), 0);
+        assert_eq!(
+            message_cache::get_source_read_stats(&parent_path).hash_passes,
+            0,
+            "the parent scan must hash its own bytes and children must reuse that digest"
+        );
     }
 
     #[test]
