@@ -403,10 +403,6 @@ not-json
             warm_health.rejections.entries().next().unwrap().key,
             "malformed-record"
         );
-        assert_eq!(
-            warm_health.rejections.entries().next().unwrap().key,
-            "malformed-record"
-        );
     }
 
     #[test]
