@@ -584,28 +584,6 @@ pub(crate) fn emit_health_summary(health: &tokscale_core::source_health::HealthR
     if health.complete {
         return;
     }
-    for source in &health.sources {
-        if let Some(failure) = &source.failure {
-            eprintln!(
-                "{}",
-                format!(
-                    "  Warning: {} source {} ({}): {}",
-                    source.client, source.status, source.path, failure.message
-                )
-                .yellow()
-            );
-        }
-        for entry in source.rejections.entries() {
-            eprintln!(
-                "{}",
-                format!(
-                    "  Warning: {} rejected {} record(s) [{}] ({})",
-                    source.client, entry.count, entry.label, source.path
-                )
-                .yellow()
-            );
-        }
-    }
     eprintln!(
         "{}",
         format!(

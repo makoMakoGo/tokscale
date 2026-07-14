@@ -1128,9 +1128,10 @@ fn test_opencode_obsolete_sqlite_schema_is_an_explicit_cli_error() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"failedSources\": 1"))
-        .stderr(predicate::str::contains(
+        .stdout(predicate::str::contains(
             "does not match the current session schema",
-        ));
+        ))
+        .stderr(predicate::str::contains("1 failed source(s)"));
 }
 
 #[test]
@@ -1163,15 +1164,6 @@ fn test_opencode_invalid_sqlite_payload_is_rejected_without_losing_good_rows() {
         .stdout(predicate::str::contains("\"rejectedRecords\": 1"))
         .stdout(predicate::str::contains("\"failedSources\": 0"))
         .stdout(predicate::str::contains("gpt-5.5"))
-        .stderr(predicate::str::contains(
-            "opencode rejected 1 record(s) [Malformed record]",
-        ))
-        .stderr(predicate::str::contains(
-            tmp.path()
-                .join(".local/share/opencode/opencode.db")
-                .to_str()
-                .unwrap(),
-        ))
         .stderr(predicate::str::contains(
             "Data health: 1 rejected record(s), 0 partial source(s), 0 failed source(s)",
         ));
@@ -3239,10 +3231,13 @@ fn test_clients_json_reports_broken_claude_mirror_without_losing_payload() {
     assert_eq!(json["health"]["failedSources"], 1);
     assert_eq!(json["health"]["sources"][0]["client"], "claude");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("variant.json"),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        json["health"]["sources"][0]["failure"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("variant.json")),
+        "health: {}",
+        json["health"]
     );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("variant.json"));
 }
 
 #[test]
@@ -3257,7 +3252,7 @@ fn test_clients_text_reports_broken_claude_mirror_without_failing() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Local clients & session counts"))
-        .stderr(predicate::str::contains("variant.json"))
+        .stderr(predicate::str::contains("variant.json").not())
         .stderr(predicate::str::contains("1 failed source(s)"));
 }
 

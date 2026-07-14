@@ -28,11 +28,13 @@ impl LocalSourceAdapter for KiroAdapter {
         let mut units = adapter_discover::discover_default_scanned_units(
             ClientId::Kiro,
             ctx,
-            FingerprintPolicy::NoMessageCache,
+            FingerprintPolicy::PlainFile,
         )?
         .into_iter()
         .map(|unit| {
-            unit.with_meta(SourceUnitMeta::KiroFile)
+            let sidecar = unit.path.with_extension("jsonl");
+            unit.with_dependency(sidecar)
+                .with_meta(SourceUnitMeta::KiroFile)
                 .with_parser_version(ParserVersion::new(
                     ParserId::KiroFile,
                     KIRO_RECORD_REJECTION_REVISION,
@@ -78,11 +80,13 @@ impl LocalSourceAdapter for KiroAdapter {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
-                SourceUnitMeta::KiroFile => adapter_cache::load_or_scan_unit_with(
-                    unit,
-                    ctx,
-                    sessions::kiro::parse_kiro_file,
-                ),
+                SourceUnitMeta::KiroFile => {
+                    adapter_cache::load_or_scan_unit_with_optional_related_inputs(
+                        unit,
+                        ctx,
+                        sessions::kiro::parse_kiro_file,
+                    )
+                }
                 SourceUnitMeta::KiroSqlite => {
                     adapter_cache::parse_uncached_unit(unit, ctx, sessions::kiro::parse_kiro_sqlite)
                 }
@@ -108,10 +112,10 @@ impl LocalSourceAdapter for KiroAdapter {
         source_cache: &crate::message_cache::SourceMessageCache,
     ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
         match unit.meta {
-            SourceUnitMeta::KiroFile | SourceUnitMeta::KiroSqlite => {
-                Ok(crate::adapters::CacheHitPlan::Miss(unit))
+            SourceUnitMeta::KiroFile | SourceUnitMeta::KiroGlobalStorage => {
+                adapter_cache::plan_cache_hit(unit, source_cache)
             }
-            SourceUnitMeta::KiroGlobalStorage => adapter_cache::plan_cache_hit(unit, source_cache),
+            SourceUnitMeta::KiroSqlite => Ok(crate::adapters::CacheHitPlan::Miss(unit)),
             _ => unreachable!("unexpected Kiro source unit meta"),
         }
     }
@@ -196,7 +200,9 @@ mod tests {
     }
 
     fn kiro_file_unit(path: PathBuf) -> SourceUnit {
-        SourceUnit::no_message_cache(ClientId::Kiro, path)
+        let sidecar = path.with_extension("jsonl");
+        SourceUnit::plain_file(ClientId::Kiro, path)
+            .with_dependency(sidecar)
             .with_meta(SourceUnitMeta::KiroFile)
             .with_parser_version(ParserVersion::new(
                 ParserId::KiroFile,
@@ -241,7 +247,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             file_unit.fingerprint_policy,
-            FingerprintPolicy::NoMessageCache
+            FingerprintPolicy::PrimaryWithDependency {
+                dependency_path: file_path.with_extension("jsonl")
+            }
         );
         let global_unit = units
             .iter()
@@ -367,20 +375,13 @@ mod tests {
     }
 
     #[test]
-    fn kiro_cli_sidecar_change_cannot_use_a_seeded_warm_cache_entry() {
+    fn kiro_cli_cache_fingerprint_tracks_the_sidecar() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
         let sidecar = path.with_extension("jsonl");
         std::fs::write(&path, r#"{"session_id":"session-1"}"#).unwrap();
         std::fs::write(&sidecar, "old sidecar").unwrap();
-        // Even a stale caller-provided PlainFile unit tagged as KiroFile must
-        // not warm-hit: the parser reads the untracked sidecar as well.
-        let unit = SourceUnit::plain_file(ClientId::Kiro, path.clone())
-            .with_meta(SourceUnitMeta::KiroFile)
-            .with_parser_version(ParserVersion::new(
-                ParserId::KiroFile,
-                KIRO_RECORD_REJECTION_REVISION,
-            ));
+        let unit = kiro_file_unit(path.clone());
         let mut cache = crate::message_cache::SourceMessageCache::default();
         cache.insert(crate::message_cache::CachedSourceEntry::new_with_version(
             &path,

@@ -23,7 +23,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 31;
+const CACHE_SCHEMA_VERSION: u32 = 32;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -914,30 +914,15 @@ pub fn load_cache(
 ) -> CacheResult {
     let cache_path = match cache_file() {
         Ok(path) => path,
-        Err(error) => {
-            eprintln!("tokscale: TUI cache path unavailable; cache miss: {error}");
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
     let cached: CachedTUIData = match File::open(&cache_path) {
         Ok(file) => match serde_json::from_reader(BufReader::new(file)) {
             Ok(cached) => cached,
-            Err(err) => {
-                eprintln!(
-                    "tokscale: invalid TUI cache JSON {}; cache miss: {err}",
-                    cache_path.display()
-                );
-                return CacheResult::Miss;
-            }
+            Err(_) => return CacheResult::Miss,
         },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return CacheResult::Miss,
-        Err(err) => {
-            eprintln!(
-                "tokscale: failed to open TUI cache {}: {err}",
-                cache_path.display()
-            );
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
 
     if cached.schema_version != CACHE_SCHEMA_VERSION {
@@ -945,13 +930,7 @@ pub fn load_cache(
     }
     let cached_group_by = match cached.group_by.parse::<GroupBy>() {
         Ok(value) => value,
-        Err(err) => {
-            eprintln!(
-                "tokscale: invalid TUI cache groupBy {}; cache miss: {err}",
-                cache_path.display()
-            );
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
     if &cached_group_by != group_by {
         return CacheResult::Miss;
@@ -967,13 +946,7 @@ pub fn load_cache(
     // Convert cached data to UsageData
     let data: UsageData = match cached.data.try_into() {
         Ok(d) => d,
-        Err(err) => {
-            eprintln!(
-                "tokscale: invalid TUI cache data {}; cache miss: {err}",
-                cache_path.display()
-            );
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
 
     // Preserve the degraded report for immediate rendering, but force the
@@ -986,10 +959,7 @@ pub fn load_cache(
 
     let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_millis() as u64,
-        Err(err) => {
-            eprintln!("tokscale: system clock is before UNIX_EPOCH while reading TUI cache: {err}");
-            return CacheResult::Miss;
-        }
+        Err(_) => return CacheResult::Miss,
     };
     let Some(cache_age) = now.checked_sub(cached.timestamp) else {
         return CacheResult::Stale(data);
@@ -2014,6 +1984,7 @@ mod tests {
                     client: "zed".to_string(),
                     path: "/tmp/threads.db".to_string(),
                     status: "complete".to_string(),
+                    affected_sources: 1,
                     failure: None,
                     rejections,
                 }],
@@ -2048,6 +2019,7 @@ mod tests {
                         client: "opencode".to_string(),
                         path: "/tmp/opencode.db".to_string(),
                         status: status.to_string(),
+                        affected_sources: 1,
                         failure: Some(tokscale_core::SourceFailure::new(
                             "read SQLite",
                             "database is locked",

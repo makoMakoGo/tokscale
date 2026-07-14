@@ -16,7 +16,7 @@ use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use serde_json::Value;
+use serde_json::{value::RawValue, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -50,7 +50,7 @@ struct KiroModelInfo {
 
 #[derive(Debug, Deserialize)]
 struct KiroConversationMetadata {
-    user_turn_metadatas: Option<Vec<Value>>,
+    user_turn_metadatas: Option<Vec<Box<RawValue>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,10 +184,10 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
         return parse_kiro_global_storage_file(path);
     }
 
-    let mut json_bytes = read_file(path)
+    let json_bytes = read_file(path)
         .map_err(|source| SessionParseError::at_path(path, "read Kiro session header", source))?;
 
-    let header = simd_json::from_slice::<KiroSessionHeader>(&mut json_bytes)
+    let header = serde_json::from_slice::<KiroSessionHeader>(&json_bytes)
         .map_err(|source| SessionParseError::at_path(path, "decode Kiro session header", source))?;
     let mut scanned = ScannedSource::default();
 
@@ -357,7 +357,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
     for result in turns.into_iter().enumerate().map(
         |(index, turn)| -> SessionParseResult<Option<UnifiedMessage>> {
-            let turn = serde_json::from_value::<KiroTurnMetadata>(turn).map_err(|source| {
+            let turn = serde_json::from_str::<KiroTurnMetadata>(turn.get()).map_err(|source| {
                 SessionParseError::at_path(path, "decode Kiro turn metadata", source)
             })?;
             let message_ids = turn.message_ids.unwrap_or_default();
@@ -843,7 +843,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
 
         let history = parsed.history.unwrap_or_default();
         for (index, turn) in history.into_iter().enumerate() {
-            let turn = match serde_json::from_value::<KiroDbTurn>(turn) {
+            let turn = match serde_json::from_str::<KiroDbTurn>(turn.get()) {
                 Ok(turn) => turn,
                 Err(error) => {
                     scanned.rejections.record(
@@ -1000,7 +1000,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
 
 #[derive(Debug, Deserialize)]
 struct KiroDbConversation {
-    history: Option<Vec<Value>>,
+    history: Option<Vec<Box<RawValue>>>,
     model_info: Option<KiroModelInfo>,
 }
 

@@ -110,9 +110,9 @@ pub(crate) fn build_issue_lines(theme: &Theme, health: &HealthReport) -> Vec<Lin
                         Style::default().fg(Color::Yellow),
                     ),
                 ]));
-                lines.push(detail_line(theme, "source", &source.path));
+                lines.push(detail_line(theme, "example source", &source.path));
                 if let Some(sample) = rejection.sample {
-                    lines.push(detail_line(theme, "sample", sample));
+                    lines.push(detail_line(theme, "example", sample));
                 }
             }
         }
@@ -129,7 +129,6 @@ pub(crate) fn build_issue_lines(theme: &Theme, health: &HealthReport) -> Vec<Lin
             if !matches!(source.status.as_str(), "partial" | "unavailable") {
                 continue;
             }
-
             let status = if source.status == "partial" {
                 "Partial"
             } else {
@@ -142,9 +141,12 @@ pub(crate) fn build_issue_lines(theme: &Theme, health: &HealthReport) -> Vec<Lin
                         .fg(theme.foreground)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(status, Style::default().fg(Color::Red)),
+                Span::styled(
+                    format!("{}: {}", status, source.affected_sources),
+                    Style::default().fg(Color::Red),
+                ),
             ]));
-            lines.push(detail_line(theme, "source", &source.path));
+            lines.push(detail_line(theme, "example source", &source.path));
             if let Some(failure) = &source.failure {
                 lines.push(detail_line(theme, &failure.operation, &failure.message));
             }
@@ -202,6 +204,7 @@ mod tests {
                     client: "zed".to_string(),
                     path: "C:/Users/test/Zed/threads/threads.db".to_string(),
                     status: "complete".to_string(),
+                    affected_sources: 1,
                     failure: None,
                     rejections,
                 },
@@ -209,6 +212,7 @@ mod tests {
                     client: "opencode".to_string(),
                     path: "/tmp/opencode.db".to_string(),
                     status: "unavailable".to_string(),
+                    affected_sources: 1,
                     failure: Some(SourceFailure::new("open SQLite", "database is corrupt")),
                     rejections: RejectionSummary::default(),
                 },
@@ -216,6 +220,7 @@ mod tests {
                     client: "claude".to_string(),
                     path: "/tmp/session.jsonl".to_string(),
                     status: "partial".to_string(),
+                    affected_sources: 1,
                     failure: Some(SourceFailure::new("read line", "unexpected EOF")),
                     rejections: RejectionSummary::default(),
                 },
@@ -249,5 +254,39 @@ mod tests {
 
         assert!(text.contains("Rejected records: 0"));
         assert!(text.contains("No data issues found."));
+    }
+
+    #[test]
+    fn issue_lines_render_one_preaggregated_sample() {
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let mut first = RejectionSummary::default();
+        first.record_key("malformed-record", || "first detail".to_string());
+        first.record_key("malformed-record", || "second detail".to_string());
+        let health = HealthReport {
+            complete: false,
+            rejected_records: 2,
+            sources: vec![SourceHealthReport {
+                client: "codex".to_string(),
+                path: "/sessions/first.jsonl".to_string(),
+                status: "complete".to_string(),
+                affected_sources: 2,
+                failure: None,
+                rejections: first,
+            }],
+            ..HealthReport::default()
+        };
+
+        let text = build_issue_lines(&theme, &health)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("codex  Malformed record: 2"));
+        assert_eq!(text.matches("example source:").count(), 1);
+        assert_eq!(text.matches("example:").count(), 1);
+        assert!(text.contains("/sessions/first.jsonl"));
+        assert!(text.contains("first detail"));
+        assert!(!text.contains("second detail"));
     }
 }

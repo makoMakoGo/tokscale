@@ -26,7 +26,6 @@ const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 3] = [2, 3, 4];
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const SHARD_KEY_FORMAT_VERSION: u32 = 1;
 const SHARDS_DIRNAME: &str = "shards";
-const SHARD_FORMAT_FILENAME: &str = ".format";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SHARD_HEADER_BYTES: u64 = 16 * 1024 * 1024;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -376,22 +375,7 @@ fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
 
 fn initialize_source_shards(cache_dir: &Path) -> std::io::Result<()> {
     ensure_cache_dir(cache_dir)?;
-    let shards_dir = cache_dir.join(SHARDS_DIRNAME);
-    let format_path = shards_dir.join(SHARD_FORMAT_FILENAME);
-    let current_format = format!("{CACHE_FORMAT_VERSION}\n");
-
-    if fs::read_to_string(&format_path).is_ok_and(|value| value == current_format) {
-        return ensure_cache_dir(&shards_dir);
-    }
-
-    match fs::symlink_metadata(&shards_dir) {
-        Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(&shards_dir)?,
-        Ok(_) => fs::remove_file(&shards_dir)?,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => return Err(source),
-    }
-    ensure_cache_dir(&shards_dir)?;
-    fs::write(format_path, current_format)
+    ensure_cache_dir(&cache_dir.join(SHARDS_DIRNAME))
 }
 
 #[cfg(unix)]
@@ -1060,8 +1044,25 @@ pub(crate) struct CacheReadFailure {
 }
 
 impl CacheReadFailure {
-    pub(crate) fn is_recoverable_body_fault(&self) -> bool {
-        self.requires_shard_removal()
+    pub(crate) fn can_reparse_source(&self) -> bool {
+        match self.reason {
+            CacheReadFailureReason::Invalidated
+            | CacheReadFailureReason::AlreadyConsumed
+            | CacheReadFailureReason::FingerprintMismatch => false,
+            CacheReadFailureReason::Open { .. }
+            | CacheReadFailureReason::Metadata { .. }
+            | CacheReadFailureReason::TooLarge { .. }
+            | CacheReadFailureReason::HeaderRead { .. }
+            | CacheReadFailureReason::InvalidMagic { .. }
+            | CacheReadFailureReason::FormatMismatch { .. }
+            | CacheReadFailureReason::InvalidHeaderLength { .. }
+            | CacheReadFailureReason::HeaderDecode { .. }
+            | CacheReadFailureReason::SourcePathMismatch
+            | CacheReadFailureReason::ParserVersionMismatch
+            | CacheReadFailureReason::ShardFingerprintMismatch
+            | CacheReadFailureReason::BodyDecode { .. }
+            | CacheReadFailureReason::MessageCountMismatch { .. } => true,
+        }
     }
 
     pub(crate) fn requires_shard_removal(&self) -> bool {
@@ -2442,60 +2443,6 @@ mod tests {
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
-    #[test]
-    fn source_cache_format_mismatch_discards_all_shards_on_load() {
-        for format_value in [
-            None,
-            Some(format!("{}\n", CACHE_FORMAT_VERSION - 1)),
-            Some(format!("{}\n", CACHE_FORMAT_VERSION + 1)),
-            Some("damaged\n".to_string()),
-        ] {
-            let cache_dir = TempDir::new().unwrap();
-            let source = write_temp_file(b"source\n");
-            let parser_version = test_parser_version(1);
-            let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
-            let mut cache = SourceMessageCache::with_cache_dir(cache_dir.path());
-            cache.insert(CachedSourceEntry::new_with_version(
-                source.path(),
-                parser_version,
-                fingerprint,
-                vec![UnifiedMessage::new(
-                    "client",
-                    "gpt-5",
-                    "provider",
-                    "cached-session",
-                    1,
-                    TokenBreakdown::default(),
-                    0.0,
-                )],
-                None,
-            ));
-            cache.save_if_dirty().unwrap();
-
-            let shard = shard_path_for_test(cache_dir.path(), source.path(), parser_version);
-            let format_path = cache_dir
-                .path()
-                .join(SHARDS_DIRNAME)
-                .join(SHARD_FORMAT_FILENAME);
-            assert!(shard.exists());
-            match format_value {
-                Some(value) => std::fs::write(&format_path, value).unwrap(),
-                None => std::fs::remove_file(&format_path).unwrap(),
-            }
-
-            let loaded = SourceMessageCache::with_cache_dir(cache_dir.path());
-            assert!(!shard.exists());
-            assert!(loaded
-                .get_meta(source.path(), parser_version)
-                .unwrap()
-                .is_none());
-            assert_eq!(
-                std::fs::read_to_string(format_path).unwrap(),
-                format!("{CACHE_FORMAT_VERSION}\n")
-            );
-        }
-    }
-
     #[allow(dead_code)]
     #[derive(Serialize)]
     enum LegacyV2ParserId {
@@ -2704,6 +2651,37 @@ mod tests {
                 test_cache_read_failure(reason).requires_shard_removal(),
                 "structural corruption must remove the derived shard"
             );
+        }
+    }
+
+    #[test]
+    fn cache_read_faults_reparse_sources_but_in_memory_contract_faults_do_not() {
+        for reason in [
+            CacheReadFailureReason::Open {
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            CacheReadFailureReason::InvalidMagic {
+                actual: *b"notmagic",
+            },
+            CacheReadFailureReason::FormatMismatch {
+                actual: CACHE_FORMAT_VERSION + 1,
+                current: CACHE_FORMAT_VERSION,
+            },
+            CacheReadFailureReason::ShardFingerprintMismatch,
+            CacheReadFailureReason::MessageCountMismatch {
+                declared: 2,
+                actual: 1,
+            },
+        ] {
+            assert!(test_cache_read_failure(reason).can_reparse_source());
+        }
+
+        for reason in [
+            CacheReadFailureReason::Invalidated,
+            CacheReadFailureReason::AlreadyConsumed,
+            CacheReadFailureReason::FingerprintMismatch,
+        ] {
+            assert!(!test_cache_read_failure(reason).can_reparse_source());
         }
     }
 

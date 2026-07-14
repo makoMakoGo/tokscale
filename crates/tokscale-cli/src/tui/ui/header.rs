@@ -87,17 +87,7 @@ fn tab_divider(app: &App) -> Span<'static> {
     Span::styled(TAB_DIVIDER, Style::default().fg(app.theme.border))
 }
 
-fn tab_label(app: &App, tab: Tab, mode: TabLabelMode) -> Cow<'static, str> {
-    if tab == Tab::Issues {
-        let count = app.data.health.issue_count();
-        if count > 0 {
-            return match mode {
-                TabLabelMode::Full => Cow::Owned(format!("Issues ({count})")),
-                TabLabelMode::Short => Cow::Owned(format!("Iss {count}")),
-            };
-        }
-    }
-
+fn tab_label(_app: &App, tab: Tab, mode: TabLabelMode) -> Cow<'static, str> {
     match mode {
         TabLabelMode::Full => Cow::Borrowed(tab.as_str()),
         TabLabelMode::Short => Cow::Borrowed(tab.short_name()),
@@ -143,6 +133,10 @@ fn fitted_tabs(app: &App, tabs_area: Rect) -> (Vec<Tab>, TabLabelMode) {
             break;
         };
         tabs.remove(index);
+    }
+
+    if tab_row_width(app, &tabs, mode) > tabs_area.width && app.current_tab != Tab::Issues {
+        tabs.retain(|tab| *tab == Tab::Issues);
     }
 
     (tabs, mode)
@@ -542,17 +536,14 @@ mod tests {
     }
 
     #[test]
-    fn issues_label_uses_the_same_dynamic_count_for_rendering_and_hitboxes() {
+    fn issues_label_stays_quiet_when_issues_exist() {
         let mut app = make_app(140);
         app.data.health.complete = false;
         app.data.health.rejected_records = 2;
         app.data.health.failed_sources = 1;
 
-        assert_eq!(
-            tab_label(&app, Tab::Issues, TabLabelMode::Full),
-            "Issues (3)"
-        );
-        assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Short), "Iss 3");
+        assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Full), "Issues");
+        assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Short), "Iss");
 
         let area = Rect::new(20, 4, 106, 3);
         let lines = render_header_symbols(&mut app, area, 140, 8);
@@ -561,8 +552,8 @@ mod tests {
             .find(|(_, tab)| *tab == Tab::Issues)
             .expect("Issues tab must remain visible");
 
-        assert_eq!(symbols_at(&lines, 5, 110, 12), " Issues (3) ");
-        assert_eq!(issues_area, (Rect::new(110, 5, 12, 1), Tab::Issues));
+        assert_eq!(symbols_at(&lines, 5, 110, 8), " Issues ");
+        assert_eq!(issues_area, (Rect::new(110, 5, 8, 1), Tab::Issues));
     }
 
     #[test]
@@ -585,5 +576,16 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(app.current_tab, Tab::Issues);
+    }
+
+    #[test]
+    fn issues_tab_wins_when_only_one_short_tab_fits() {
+        let mut app = make_app(12);
+        app.current_tab = Tab::Overview;
+        let lines = render_header_symbols(&mut app, Rect::new(0, 0, 12, 3), 12, 4);
+        let areas = registered_tab_areas(&app);
+
+        assert_eq!(areas, vec![(Rect::new(1, 1, 5, 1), Tab::Issues)]);
+        assert_eq!(symbols_at(&lines, 1, 1, 5), " Iss ");
     }
 }

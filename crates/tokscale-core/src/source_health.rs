@@ -236,36 +236,80 @@ impl DataHealth {
         self.examined_sources.saturating_sub(self.sources.len())
     }
 
-    /// The number shown in `Issues (N)`: every rejected record plus every
-    /// partial or unavailable source counts as one issue.
+    /// Total issue count: every rejected record plus every partial or
+    /// unavailable source counts as one issue.
     pub fn issue_count(&self) -> u64 {
         self.rejected_records() + (self.partial_sources() + self.failed_sources()) as u64
     }
 
     /// Serializable summary for report payloads and exports.
     pub fn to_report(&self) -> HealthReport {
+        let mut grouped = BTreeMap::<(String, String, String), SourceHealthReport>::new();
+        for source in &self.sources {
+            let client = source.client.as_str().to_string();
+            let sample_path = source.path.display().to_string();
+
+            for rejection in source.rejections.entries() {
+                let entry = grouped
+                    .entry((
+                        "record".to_string(),
+                        client.clone(),
+                        rejection.key.to_string(),
+                    ))
+                    .or_insert_with(|| SourceHealthReport {
+                        client: client.clone(),
+                        path: sample_path.clone(),
+                        status: "complete".to_string(),
+                        affected_sources: 0,
+                        failure: None,
+                        rejections: RejectionSummary::default(),
+                    });
+                entry.affected_sources += 1;
+                *entry
+                    .rejections
+                    .counts
+                    .entry(rejection.key.to_string())
+                    .or_insert(0) += rejection.count;
+                if let Some(sample) = rejection.sample {
+                    entry
+                        .rejections
+                        .samples
+                        .entry(rejection.key.to_string())
+                        .or_insert_with(|| sample.to_string());
+                }
+            }
+
+            if let Some(failure) = source.status.failure() {
+                let status = match source.status {
+                    SourceStatus::Partial { .. } => "partial",
+                    SourceStatus::Unavailable { .. } => "unavailable",
+                    SourceStatus::Complete => continue,
+                };
+                let entry = grouped
+                    .entry((
+                        "source".to_string(),
+                        client.clone(),
+                        format!("{status}:{}", failure.operation),
+                    ))
+                    .or_insert_with(|| SourceHealthReport {
+                        client: client.clone(),
+                        path: sample_path.clone(),
+                        status: status.to_string(),
+                        affected_sources: 0,
+                        failure: Some(failure.clone()),
+                        rejections: RejectionSummary::default(),
+                    });
+                entry.affected_sources += 1;
+            }
+        }
+
         HealthReport {
             complete: self.is_empty(),
             healthy_sources: self.healthy_sources(),
             rejected_records: self.rejected_records(),
             partial_sources: self.partial_sources(),
             failed_sources: self.failed_sources(),
-            sources: self
-                .sources
-                .iter()
-                .map(|source| SourceHealthReport {
-                    client: source.client.as_str().to_string(),
-                    path: source.path.display().to_string(),
-                    status: match source.status {
-                        SourceStatus::Complete => "complete",
-                        SourceStatus::Partial { .. } => "partial",
-                        SourceStatus::Unavailable { .. } => "unavailable",
-                    }
-                    .to_string(),
-                    failure: source.status.failure().cloned(),
-                    rejections: source.rejections.clone(),
-                })
-                .collect(),
+            sources: grouped.into_values().collect(),
         }
     }
 }
@@ -298,8 +342,8 @@ impl Default for HealthReport {
 }
 
 impl HealthReport {
-    /// The number shown in `Issues (N)`: every rejected record plus every
-    /// partial or unavailable source counts as one issue.
+    /// Total issue count: every rejected record plus every partial or
+    /// unavailable source counts as one issue.
     pub fn issue_count(&self) -> u64 {
         self.rejected_records + (self.partial_sources + self.failed_sources) as u64
     }
@@ -309,14 +353,58 @@ impl HealthReport {
     pub fn requires_source_retry(&self) -> bool {
         self.partial_sources > 0 || self.failed_sources > 0
     }
+
+    pub fn record_unavailable_source(
+        &mut self,
+        client: &str,
+        path: impl Into<String>,
+        failure: SourceFailure,
+    ) {
+        let path = path.into();
+        if self.sources.iter().any(|source| {
+            source.client == client && source.status == "unavailable" && source.path == path
+        }) {
+            self.complete = false;
+            return;
+        }
+        if let Some(existing) = self.sources.iter_mut().find(|source| {
+            source.client == client
+                && source.status == "unavailable"
+                && source
+                    .failure
+                    .as_ref()
+                    .is_some_and(|existing| existing.operation == failure.operation)
+        }) {
+            if existing.path != path {
+                existing.affected_sources += 1;
+                self.failed_sources += 1;
+            }
+            self.complete = false;
+            return;
+        }
+
+        self.complete = false;
+        self.failed_sources += 1;
+        self.sources.push(SourceHealthReport {
+            client: client.to_string(),
+            path,
+            status: "unavailable".to_string(),
+            affected_sources: 1,
+            failure: Some(failure),
+            rejections: RejectionSummary::default(),
+        });
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceHealthReport {
     pub client: String,
+    /// One representative source path for this aggregated issue class.
     pub path: String,
     pub status: String,
+    /// Number of source units represented by this issue class.
+    pub affected_sources: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<SourceFailure>,
     #[serde(default, skip_serializing_if = "RejectionSummary::is_empty")]
@@ -344,12 +432,6 @@ impl ScannedSource {
             rejections: RejectionSummary::default(),
             interrupted: None,
         }
-    }
-}
-
-impl From<Vec<UnifiedMessage>> for ScannedSource {
-    fn from(messages: Vec<UnifiedMessage>) -> Self {
-        Self::complete(messages)
     }
 }
 
@@ -496,5 +578,67 @@ mod tests {
         assert_eq!(left.sources().len(), 2);
         assert_eq!(left.failed_sources(), 1);
         assert_eq!(left.rejected_records(), 1);
+    }
+
+    #[test]
+    fn report_projection_aggregates_issue_classes_with_one_sample() {
+        let mut data_health = DataHealth::default();
+        for (path, sample) in [
+            ("/sessions/first.jsonl", "first"),
+            ("/sessions/second.jsonl", "second"),
+        ] {
+            let mut rejections = RejectionSummary::default();
+            rejections.record(RecordRejectionReason::MalformedRecord, || {
+                sample.to_string()
+            });
+            data_health.record(SourceHealth {
+                client: ClientId::Codex,
+                path: PathBuf::from(path),
+                status: SourceStatus::Complete,
+                rejections,
+            });
+        }
+
+        for path in ["/sessions/third.jsonl", "/sessions/fourth.jsonl"] {
+            data_health.record(SourceHealth {
+                client: ClientId::Codex,
+                path: PathBuf::from(path),
+                status: SourceStatus::Unavailable {
+                    failure: SourceFailure::new("read JSONL", format!("failed: {path}")),
+                },
+                rejections: RejectionSummary::default(),
+            });
+        }
+
+        let report = data_health.to_report();
+
+        assert_eq!(report.rejected_records, 2);
+        assert_eq!(report.failed_sources, 2);
+        assert_eq!(report.sources.len(), 2);
+
+        let records = report
+            .sources
+            .iter()
+            .find(|source| !source.rejections.is_empty())
+            .unwrap();
+        assert_eq!(records.affected_sources, 2);
+        assert_eq!(records.path, "/sessions/first.jsonl");
+        let rejection = records.rejections.entries().next().unwrap();
+        assert_eq!(rejection.count, 2);
+        assert_eq!(rejection.sample, Some("first"));
+
+        let failures = report
+            .sources
+            .iter()
+            .find(|source| source.failure.is_some())
+            .unwrap();
+        assert_eq!(failures.affected_sources, 2);
+        assert_eq!(failures.path, "/sessions/third.jsonl");
+        assert!(failures
+            .failure
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("third.jsonl"));
     }
 }

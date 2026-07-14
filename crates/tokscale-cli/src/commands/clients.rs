@@ -122,27 +122,14 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
                 .unwrap_or(&home_dir)
                 .to_string_lossy()
                 .into_owned();
-            let already_reported = health.sources.iter().any(|entry| {
-                entry.client == ClientId::Claude.as_str()
-                    && entry.path == path
-                    && entry.status == "unavailable"
-            });
-            if !already_reported {
-                health.complete = false;
-                health.failed_sources += 1;
-                health
-                    .sources
-                    .push(tokscale_core::source_health::SourceHealthReport {
-                        client: ClientId::Claude.as_str().to_string(),
-                        path,
-                        status: "unavailable".to_string(),
-                        failure: Some(tokscale_core::SourceFailure::new(
-                            "discover Claude mirror paths for clients diagnostics",
-                            source.to_string(),
-                        )),
-                        rejections: Default::default(),
-                    });
-            }
+            health.record_unavailable_source(
+                ClientId::Claude.as_str(),
+                path,
+                tokscale_core::SourceFailure::new(
+                    "discover Claude mirror paths for clients diagnostics",
+                    source.to_string(),
+                ),
+            );
             vec![(ClientId::Claude, home_dir.join(".claude/transcripts"))]
         }
         Err(error) => return Err(error.into()),
@@ -154,27 +141,14 @@ pub(crate) fn run_clients_command(json: bool, home_dir: Option<String>) -> Resul
         Ok(paths) => paths,
         Err(error) => {
             let path = opencode_data_root.to_string_lossy().into_owned();
-            let already_reported = health.sources.iter().any(|source| {
-                source.client == ClientId::OpenCode.as_str()
-                    && source.path == path
-                    && source.status == "unavailable"
-            });
-            if !already_reported {
-                health.complete = false;
-                health.failed_sources += 1;
-                health
-                    .sources
-                    .push(tokscale_core::source_health::SourceHealthReport {
-                        client: ClientId::OpenCode.as_str().to_string(),
-                        path,
-                        status: "unavailable".to_string(),
-                        failure: Some(tokscale_core::SourceFailure::new(
-                            "discover OpenCode databases for clients diagnostics",
-                            error.to_string(),
-                        )),
-                        rejections: Default::default(),
-                    });
-            }
+            health.record_unavailable_source(
+                ClientId::OpenCode.as_str(),
+                path,
+                tokscale_core::SourceFailure::new(
+                    "discover OpenCode databases for clients diagnostics",
+                    error.to_string(),
+                ),
+            );
             Vec::new()
         }
     };

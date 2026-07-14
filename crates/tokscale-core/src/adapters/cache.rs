@@ -290,7 +290,7 @@ pub(crate) fn resolve_unit(
                 });
             }
             Err(failure) => {
-                if !failure.is_recoverable_body_fault() {
+                if !failure.can_reparse_source() {
                     return Err(failure.into());
                 }
                 debug_assert_eq!(failure.source_path, unit.path);
@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_planned_shard_is_an_explicit_read_error() {
+    fn deleted_planned_shard_is_rebuilt_from_the_source() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
@@ -1018,17 +1018,18 @@ mod tests {
             message_cache::shard_path_for_test(cache_dir.path(), &source_path, unit.parser_version);
         std::fs::remove_file(&shard_path).unwrap();
 
-        let error = fold_planned_unit_result(parsed, &mut cache)
-            .expect_err("a shard deleted after planning must not degrade to reparsing");
-        assert!(error.to_string().contains("failed to open shard"));
+        let messages = fold_planned_unit_result(parsed, &mut cache)
+            .expect("a missing derived shard must be rebuilt from the source");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "source-session");
         assert!(
-            !shard_path.exists(),
-            "a failed read must not silently recreate the deleted shard"
+            shard_path.exists(),
+            "a successful source scan must replace the missing derived shard"
         );
     }
 
     #[test]
-    fn replaced_shard_fingerprint_is_an_explicit_race_error() {
+    fn replaced_shard_fingerprint_reparses_the_current_source() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
@@ -1045,11 +1046,12 @@ mod tests {
         std::fs::write(&source_path, PI_REPLACEMENT_SOURCE).unwrap();
         seed_disk_cache(cache_dir.path(), &unit, "replacement-source-session");
 
-        let error = fold_planned_unit_result(parsed, &mut reader)
-            .expect_err("stale read plan must expose the replaced shard race");
-        assert!(
-            error.to_string().contains("fingerprint no longer matches"),
-            "unexpected error: {error}"
+        let messages = fold_planned_unit_result(parsed, &mut reader)
+            .expect("a stale derived shard plan must reparse the current source");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].session_id.as_ref(),
+            "replacement-source-session"
         );
 
         let mut repaired_cache =
@@ -1063,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    fn replaced_shard_survives_when_current_source_cannot_be_reparsed() {
+    fn replaced_shard_is_not_served_when_current_source_is_unavailable() {
         let source_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let source_path = source_dir.path().join("session.jsonl");
@@ -1083,14 +1085,18 @@ mod tests {
         let replacement_bytes = std::fs::read(&shard_path).unwrap();
         std::fs::write(&source_path, b"not a pi jsonl session").unwrap();
 
-        let error = fold_planned_unit_result(parsed, &mut reader)
-            .expect_err("replaced shard races must not fall back to source parsing");
-        assert!(error.to_string().contains("fingerprint no longer matches"));
+        let mut sink = Vec::new();
+        let mut ctx = FoldContext::new(&mut reader, None);
+        fold_units(vec![parsed], &mut ctx, &mut sink)
+            .expect("malformed third-party records must not fail the pipeline");
+        assert!(sink.is_empty());
+        assert_eq!(ctx.health.rejected_records(), 0);
+        assert_eq!(ctx.health.failed_sources(), 1);
         reader.save_if_dirty().unwrap();
         assert_eq!(
-            std::fs::read(shard_path).unwrap(),
+            std::fs::read(&shard_path).unwrap(),
             replacement_bytes,
-            "fingerprint mismatch may be a valid atomic replacement and must not delete it"
+            "a concurrent shard replacement must remain untouched, but must not be served"
         );
     }
 

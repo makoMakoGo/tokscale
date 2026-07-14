@@ -172,7 +172,7 @@ fn current_count_label(app: &App) -> String {
         ),
         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
-        Tab::Issues => format!(" ({} issues)", app.data.health.issue_count()),
+        Tab::Issues => String::new(),
         Tab::Stats | Tab::Usage => String::new(),
     }
 }

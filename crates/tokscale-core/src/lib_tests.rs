@@ -3661,7 +3661,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3764,7 +3764,7 @@ fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3832,7 +3832,7 @@ fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3900,7 +3900,7 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -3969,7 +3969,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -4015,7 +4015,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()
@@ -4064,7 +4064,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
                 )
             )
             .unwrap()

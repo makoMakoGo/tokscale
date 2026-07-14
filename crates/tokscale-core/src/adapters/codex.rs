@@ -629,6 +629,9 @@ fn resolve_codex_messages(
                 health_override: None,
             }),
             Err(failure) => {
+                if !failure.can_reparse_source() {
+                    return Err(failure.into());
+                }
                 let recovery_requires_removal = failure.requires_shard_removal();
                 if recovery_requires_removal {
                     ctx.source_cache
@@ -657,6 +660,9 @@ fn resolve_codex_messages(
             let mut raw_messages = match ctx.source_cache.take_messages(&read_plan) {
                 Ok(cached) => cached,
                 Err(failure) => {
+                    if !failure.can_reparse_source() {
+                        return Err(failure.into());
+                    }
                     let recovery_requires_removal = failure.requires_shard_removal();
                     if recovery_requires_removal {
                         ctx.source_cache.remove(&path, parser_version);
@@ -971,7 +977,7 @@ mod tests {
         .unwrap();
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home);
         let meta = cache
@@ -1109,7 +1115,7 @@ mod tests {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
                 ),
             )
             .unwrap()
@@ -1186,7 +1192,7 @@ mod tests {
         assert_eq!(ctx.health.partial_sources(), 0);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let cached = ctx
             .source_cache
@@ -1227,7 +1233,7 @@ mod tests {
         assert_eq!(ctx.health.partial_sources(), 1);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         assert!(ctx
             .source_cache
@@ -1271,7 +1277,7 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         assert!(ctx
             .source_cache
@@ -1318,7 +1324,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         let expected = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1359,7 +1365,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1407,7 +1413,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1467,7 +1473,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1505,7 +1511,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1550,7 +1556,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1594,7 +1600,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         let expected = parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1622,7 +1628,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1668,7 +1674,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1714,7 +1720,7 @@ mod tests {
         write_file(&path, FIRST_CODEX_ENTRY);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path, false)], &mut seed_cache);
@@ -1805,7 +1811,7 @@ mod tests {
 
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
-            crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+            crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
         );
         let meta = cold_cache
             .get_meta(&path, parser_version)
@@ -2050,7 +2056,7 @@ mod tests {
             &path,
             message_cache::ParserVersion::new(
                 message_cache::ParserId::Codex,
-                crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
+                crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION,
             ),
         );
         remover.save_if_dirty().unwrap();

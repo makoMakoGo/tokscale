@@ -57,10 +57,12 @@ Damage is contained to the smallest unit that owns it:
 Every internal fold produces `DataHealth`: per-source status
 (`Complete`/`Partial`/`Unavailable` with a structured operation + message
 failure) and per-reason rejection counts with one sample each. Public reports
-carry its serializable `HealthReport` projection alongside the payload.
+carry a bounded `HealthReport` projection alongside the payload: record issues
+are grouped by client and reason, source failures by client, status, and
+operation, and each group retains only its count plus one sample path/detail.
 Rejection reasons serialize as stable string keys; unknown keys from newer
-parsers are preserved and displayed as-is. No raw record payloads and no
-per-record error objects are retained.
+parsers are preserved and displayed as-is. No raw record payloads, per-record
+error objects, or per-session issue lists cross the report boundary.
 
 The public raw-message loaders return `LocalReport<Vec<UnifiedMessage>>`
 instead of a bare vector. Its `health` field carries the serializable report
@@ -80,12 +82,11 @@ stop the scan as `Partial` before they can pollute model or token state.
 ### Cache
 
 - Source-message cache data is disposable derived state, never source
-  authority. The shard store has one current-format marker. A missing,
-  malformed, older, or newer marker deletes the shard store and starts a cold
-  scan; there is no cache migration or old/new-format compatibility branch.
-  An unreadable individual shard is a cache miss and is reparsed from its
-  authoritative source. Cache read faults do not enter `DataHealth`, do not
-  emit terminal warnings, and do not block unrelated sources.
+  authority. Every shard carries its format version. A missing, malformed,
+  older, newer, or unreadable shard is a cache miss and is reparsed from its
+  authoritative source; healthy shards remain usable. There is no cache
+  migration or compatibility branch. Cache read faults do not enter
+  `DataHealth`, emit terminal warnings, or block unrelated sources.
 - A `Complete` scan is cacheable even when it rejected records and even when
   it produced zero messages; its rejection summary is part of the shard, so a
   warm hit restores the Issues view without rescanning. A stable bad record
@@ -106,11 +107,12 @@ stop the scan as `Partial` before they can pollute model or token state.
 ### Surfaces
 
 - The TUI always renders the report, including an empty one when every source
-  failed. A fixed, always-visible `Issues (N)` tab carries the health detail;
+  failed. A fixed, always-visible `Issues` tab carries the health detail;
   record-level problems render as warnings, source-level failures as errors.
   A full-screen error is reserved for tokscale's own failures.
-- CLI reports always emit their payload. JSON output carries a `health`
-  object; text output prints data to stdout and a health summary to stderr.
+- CLI reports always emit their payload. JSON output carries a bounded,
+  aggregated `health` object; text output prints data to stdout and one health
+  summary line to stderr, never a per-source diagnostic stream.
   The exit code is `0` whenever a report was produced, degraded or not;
   nonzero exit codes are reserved for invalid usage and internal errors.
   Automation that must react to degradation reads `health` from the payload.
@@ -128,13 +130,12 @@ contract (identity-checked stamps, current-format-only decoding, explicit
 errors at every seam) is unchanged.
 
 Source-message shards and TUI aggregate caches gain the rejection summary and
-health fields, which is a one-time format bump and cold rebuild. This ADR
-does not weaken ADR 0001: nothing substitutes guessed or synthetic data, and
-no failure is delivered as ordinary success — it is delivered as data plus
-health.
+health fields. Old individual shards are reparsed only when encountered; a
+format change does not delete unrelated healthy shards. This ADR does not
+weaken ADR 0001: nothing substitutes guessed or synthetic data, and no failure
+is delivered as ordinary success — it is delivered as data plus health.
 
-The disposable shard-store rule supersedes ADR 0020's preservation of
-historical shards during ordinary scans and its propagation of cache-read
+The disposable shard rule supersedes ADR 0020's propagation of cache-read
 format failures. ADR 0020 still governs source identity, cache writes, and
 internal invariant failures.
 

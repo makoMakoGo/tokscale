@@ -46,6 +46,8 @@ pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
 pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
 pub(crate) const ZED_RECORD_FILTER_REVISION: ParserRevision = EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
+pub(crate) const CODEX_OPTIONAL_TOKEN_INFO_REVISION: ParserRevision =
+    MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 pub(crate) trait LocalSourceAdapter: Sync {
     fn client(&self) -> ClientId;
@@ -501,7 +503,7 @@ impl SourceUnitMeta {
                 ParserVersion::new(ParserId::CodeBuddy, MODEL_ID_CANONICALIZATION_REVISION)
             }
             Self::Codex { .. } => {
-                ParserVersion::new(ParserId::Codex, MODEL_ID_CANONICALIZATION_REVISION)
+                ParserVersion::new(ParserId::Codex, CODEX_OPTIONAL_TOKEN_INFO_REVISION)
             }
         }
     }

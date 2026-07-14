@@ -445,7 +445,7 @@ fn fold_omp_cache_hits(
                 sink.extend_messages(messages);
             }
             Err(failure) => {
-                if !failure.is_recoverable_body_fault() {
+                if !failure.can_reparse_source() {
                     return Err(failure.into());
                 }
                 debug_assert_eq!(failure.source_path, unit.path);

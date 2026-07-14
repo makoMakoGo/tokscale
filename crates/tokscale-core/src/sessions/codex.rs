@@ -417,16 +417,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                     None
                 };
                 let token_info = match event_type {
-                    Some("token_count") => match payload.info.as_ref() {
-                        Some(info) => Some(info),
-                        None => reject_record!(
-                            RecordRejectionReason::MalformedRecord,
-                            SessionParseError::invalid(
-                                "validate Codex token-count event",
-                                "info is missing",
-                            )
-                        ),
-                    },
+                    Some("token_count") => payload.info.as_ref(),
                     _ => None,
                 };
                 let is_token_count = token_info.is_some();
@@ -1796,13 +1787,13 @@ mod tests {
     }
 
     #[test]
-    fn test_token_count_missing_info_does_not_block_later_usage() {
-        for malformed in [
+    fn test_token_count_missing_info_is_ignored_without_blocking_later_usage() {
+        for usage_unavailable in [
             r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#,
             r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count"}}"#,
         ] {
             let content = format!(
-                "{}\n{}\n{malformed}\n{}\n",
+                "{}\n{}\n{usage_unavailable}\n{}\n",
                 r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
                 r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
                 r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
@@ -1813,12 +1804,12 @@ mod tests {
                 super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
                     .unwrap();
 
-            assert_eq!(parsed.messages.len(), 2, "fixture: {malformed}");
+            assert_eq!(parsed.messages.len(), 2, "fixture: {usage_unavailable}");
             assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.4");
             assert_eq!(parsed.messages[1].tokens.input, 4);
             assert_eq!(parsed.messages[1].tokens.cache_read, 1);
             assert_eq!(parsed.messages[1].tokens.output, 2);
-            assert_eq!(parsed.rejections.total(), 1);
+            assert_eq!(parsed.rejections.total(), 0);
             assert!(parsed.interrupted.is_none());
         }
     }
