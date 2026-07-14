@@ -57,8 +57,8 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
         };
 
         let payload = match parse_api_req_started_payload(text) {
-            Ok(payload) => payload,
-            Err(_detail) => {
+            Some(payload) => payload,
+            None => {
                 rejections.record(RecordRejectionReason::MalformedRecord);
                 continue;
             }
@@ -253,12 +253,11 @@ struct ApiReqStartedPayload {
     api_protocol: Option<String>,
 }
 
-fn parse_api_req_started_payload(text: &str) -> Result<ApiReqStartedPayload, String> {
+fn parse_api_req_started_payload(text: &str) -> Option<ApiReqStartedPayload> {
     let mut bytes = text.as_bytes().to_vec();
-    let value: Value =
-        simd_json::from_slice(&mut bytes).map_err(|_| "payload is not valid JSON".to_string())?;
+    let value: Value = simd_json::from_slice(&mut bytes).ok()?;
     if !value.is_object() {
-        return Err("payload JSON is not an object".to_string());
+        return None;
     }
 
     let tokens_in = parse_token_field(&value, "tokensIn")?;
@@ -270,7 +269,7 @@ fn parse_api_req_started_payload(text: &str) -> Result<ApiReqStartedPayload, Str
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    Ok(ApiReqStartedPayload {
+    Some(ApiReqStartedPayload {
         tokens_in,
         tokens_out,
         cache_reads,
@@ -279,16 +278,14 @@ fn parse_api_req_started_payload(text: &str) -> Result<ApiReqStartedPayload, Str
     })
 }
 
-fn parse_token_field(value: &Value, field: &'static str) -> Result<i64, String> {
+fn parse_token_field(value: &Value, field: &'static str) -> Option<i64> {
     let Some(value) = value.get(field) else {
-        return Ok(0);
+        return Some(0);
     };
-    let parsed = value
+    value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
         .filter(|value| *value >= 0)
-        .ok_or_else(|| format!("{field} must be a non-negative integer"))?;
-    Ok(parsed)
 }
 
 fn provider_from_api_protocol(api_protocol: Option<&str>) -> Option<String> {
