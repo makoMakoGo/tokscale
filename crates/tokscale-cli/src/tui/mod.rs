@@ -10,7 +10,8 @@ pub mod settings;
 mod themes;
 mod ui;
 
-pub use app::{App, Tab, TuiConfig};
+use app::KeyEventOutcome;
+pub use app::{App, Tab, TuiConfig, TuiExit};
 pub use cache::{
     load_cache, save_cached_data, CacheReportScope, CacheResult, TUI_DEFAULT_GROUP_BY,
 };
@@ -236,7 +237,7 @@ pub fn run(
     until: Option<String>,
     year: Option<String>,
     initial_tab: Option<Tab>,
-) -> Result<()> {
+) -> Result<TuiExit> {
     if debug {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("debug")
@@ -398,7 +399,7 @@ fn run_loop_with_background(
     bg_tx: mpsc::Sender<Result<BackgroundLoad>>,
     bg_rx: mpsc::Receiver<Result<BackgroundLoad>>,
     #[cfg(unix)] sigcont_flag: &Arc<AtomicBool>,
-) -> Result<()> {
+) -> Result<TuiExit> {
     loop {
         #[cfg(unix)]
         if sigcont_flag.swap(false, Ordering::Relaxed) {
@@ -465,8 +466,8 @@ fn run_loop_with_background(
                 app.on_tick();
             }
             Event::Key(key) => {
-                if app.handle_key_event(key) {
-                    break;
+                if let KeyEventOutcome::Exit(exit) = app.handle_key_event(key) {
+                    return Ok(exit);
                 }
             }
             Event::Mouse(mouse) => {
@@ -476,12 +477,7 @@ fn run_loop_with_background(
                 app.handle_resize(w, h);
             }
         }
-
-        if app.should_quit {
-            break;
-        }
     }
-    Ok(())
 }
 
 #[cfg(test)]

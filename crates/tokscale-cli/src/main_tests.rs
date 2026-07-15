@@ -6,6 +6,18 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 use tokscale_core::ClientId;
 
+#[test]
+fn tui_exit_maps_to_process_execution_outcome() {
+    assert_eq!(
+        super::ExecutionOutcome::from(crate::tui::TuiExit::Quit),
+        super::ExecutionOutcome::Completed
+    );
+    assert_eq!(
+        super::ExecutionOutcome::from(crate::tui::TuiExit::Interrupted),
+        super::ExecutionOutcome::Interrupted
+    );
+}
+
 // Tests below call `build_client_filter_with_defaults` directly with
 // an explicit `defaults` slice instead of `build_client_filter`, which
 // reads from `~/.config/tokscale/settings.json`.

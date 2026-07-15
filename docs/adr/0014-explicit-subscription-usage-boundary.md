@@ -41,9 +41,8 @@ Tokscale accepts purpose-specific subscription credentials for plan quota lookup
 
 General provider API keys are intentionally ignored for these quota lookups. Examples include `ZAI_API_KEY`, `GLM_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `MINIMAX_API_TOKEN`.
 
-Credential ownership and persistence follow ADR 0023. In particular, Tokscale
-does not copy Codex OAuth credentials or Cursor browser sessions into its own
-credential stores.
+Credential ownership and persistence follow ADR 0023. The broader Usage
+subsystem boundary, including removal of Cursor and Trae, follows ADR 0024.
 
 ## Configuration Policy
 

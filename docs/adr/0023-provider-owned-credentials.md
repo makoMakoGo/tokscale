@@ -3,7 +3,8 @@
 Status: Accepted
 
 The Cursor subsection is superseded by ADR 0024: Cursor support has been
-removed completely. The Codex credential boundary remains current.
+removed and the broader Subscription Usage redesign now owns that product
+surface. The Codex credential boundary remains current.
 
 ## Context
 
@@ -70,9 +71,10 @@ provider-owned authentication has been verified.
 ### Subscription Usage redesign
 
 ADR 0014 continues to govern when remote subscription requests may occur.
-Multiple Z.ai Coding Plan keys and the broader account/plan presentation model
-are deferred to issue #146; that design must reference external secrets rather
-than store key values in Tokscale.
+ADR 0024 defines the subsystem boundary. Multiple Z.ai Coding Plan keys and the
+broader account/plan presentation model remain in design under issue #146;
+that design must reference external secrets rather than store key values in
+Tokscale.
 
 ## Consequences
 

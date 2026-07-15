@@ -36,26 +36,48 @@ fn main() {
         }
     };
 
-    if let Err(error) = execute(plan) {
-        eprintln!("Error: {error:#}");
-        std::process::exit(1);
+    match execute(plan) {
+        Ok(ExecutionOutcome::Completed) => {}
+        Ok(ExecutionOutcome::Interrupted) => std::process::exit(130),
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            std::process::exit(1);
+        }
     }
 }
 
-fn execute(plan: ExecutionPlan) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionOutcome {
+    Completed,
+    Interrupted,
+}
+
+impl From<tui::TuiExit> for ExecutionOutcome {
+    fn from(exit: tui::TuiExit) -> Self {
+        match exit {
+            tui::TuiExit::Quit => Self::Completed,
+            tui::TuiExit::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
+fn execute(plan: ExecutionPlan) -> Result<ExecutionOutcome> {
     match plan {
-        ExecutionPlan::Tui(plan) => tui::run(
-            plan.theme.as_deref(),
-            plan.refresh,
-            plan.no_refresh,
-            plan.debug,
-            plan.source.home,
-            plan.source.clients,
-            plan.date.since,
-            plan.date.until,
-            plan.date.year,
-            plan.initial_tab,
-        ),
+        ExecutionPlan::Tui(plan) => {
+            return tui::run(
+                plan.theme.as_deref(),
+                plan.refresh,
+                plan.no_refresh,
+                plan.debug,
+                plan.source.home,
+                plan.source.clients,
+                plan.date.since,
+                plan.date.until,
+                plan.date.year,
+                plan.initial_tab,
+            )
+            .map(ExecutionOutcome::from);
+        }
         ExecutionPlan::Models(plan) => {
             let report = plan.report;
             run_models_report(
@@ -149,7 +171,9 @@ fn execute(plan: ExecutionPlan) -> Result<()> {
         ExecutionPlan::CacheWarm(source) => run_warm_tui_cache(source.home, source.clients),
         ExecutionPlan::Antigravity(subcommand) => run_antigravity_command(subcommand),
         ExecutionPlan::Warp(subcommand) => run_warp_command(subcommand),
-    }
+    }?;
+
+    Ok(ExecutionOutcome::Completed)
 }
 
 fn run_wrapped_command(plan: WrappedPlan) -> Result<()> {

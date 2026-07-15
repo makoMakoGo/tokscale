@@ -37,6 +37,18 @@ pub struct TuiConfig {
     pub initial_tab: Option<Tab>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiExit {
+    Quit,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyEventOutcome {
+    Continue,
+    Exit(TuiExit),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
@@ -336,7 +348,6 @@ fn sort_detail_rows(rows: &mut [DetailRow], field: SortField, direction: SortDir
 }
 
 pub struct App {
-    pub should_quit: bool,
     pub current_tab: Tab,
     pub theme: Theme,
     pub settings: Settings,
@@ -496,7 +507,6 @@ impl App {
         let (sort_field, sort_direction) = Self::default_sort_for_tab(current_tab);
 
         let mut app = Self {
-            should_quit: false,
             current_tab,
             theme,
             settings,
@@ -782,28 +792,26 @@ impl App {
         }
     }
 
-    pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+    pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> KeyEventOutcome {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
-            return true;
+            return KeyEventOutcome::Exit(TuiExit::Interrupted);
         }
 
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_key(key);
             self.consume_dialog_reload_if_ready();
-            return false;
+            return KeyEventOutcome::Continue;
         }
 
         if let Some(command) = move_command_from_key(key.code) {
             if self.apply_text_viewport_move(command) {
-                return false;
+                return KeyEventOutcome::Continue;
             }
         }
 
         match key.code {
             KeyCode::Char('q') => {
-                self.should_quit = true;
-                return true;
+                return KeyEventOutcome::Exit(TuiExit::Quit);
             }
             KeyCode::Tab => {
                 let next = self.next_visible_tab();
@@ -930,7 +938,7 @@ impl App {
             }
             _ => {}
         }
-        false
+        KeyEventOutcome::Continue
     }
 
     pub fn fetch_subscription_usage(&mut self) {
@@ -2457,24 +2465,6 @@ mod tests {
         assert_eq!(app.sort_direction, SortDirection::Descending);
     }
 
-    #[test]
-    fn test_should_quit() {
-        let config = TuiConfig {
-            theme: Some("blue".to_string()),
-            refresh: 0,
-            no_refresh: false,
-            home_dir: None,
-            clients: None,
-            since: None,
-            until: None,
-            year: None,
-            initial_tab: None,
-        };
-        let app = App::new_with_cached_data(config, None).unwrap();
-
-        assert!(!app.should_quit);
-    }
-
     // ── Helper ──────────────────────────────────────────────────────
 
     fn test_settings() -> Settings {
@@ -2639,17 +2629,15 @@ mod tests {
     #[test]
     fn test_handle_key_quit_q() {
         let mut app = make_app();
-        let quit = app.handle_key_event(key(KeyCode::Char('q')));
-        assert!(quit);
-        assert!(app.should_quit);
+        let outcome = app.handle_key_event(key(KeyCode::Char('q')));
+        assert_eq!(outcome, KeyEventOutcome::Exit(TuiExit::Quit));
     }
 
     #[test]
     fn test_handle_key_quit_ctrl_c() {
         let mut app = make_app();
-        let quit = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(quit);
-        assert!(app.should_quit);
+        let outcome = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyEventOutcome::Exit(TuiExit::Interrupted));
     }
 
     #[test]
@@ -2657,10 +2645,9 @@ mod tests {
         let mut app = make_app();
         app.open_client_picker();
 
-        let quit = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let outcome = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
-        assert!(quit);
-        assert!(app.should_quit);
+        assert_eq!(outcome, KeyEventOutcome::Exit(TuiExit::Interrupted));
         assert!(!*app.dialog_needs_reload.borrow());
     }
 
@@ -3933,11 +3920,10 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_key_unrecognized_returns_false() {
+    fn test_handle_key_unrecognized_continues() {
         let mut app = make_app();
-        let result = app.handle_key_event(key(KeyCode::F(12)));
-        assert!(!result);
-        assert!(!app.should_quit);
+        let outcome = app.handle_key_event(key(KeyCode::F(12)));
+        assert_eq!(outcome, KeyEventOutcome::Continue);
     }
 
     #[test]

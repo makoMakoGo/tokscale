@@ -5,8 +5,8 @@ Status: Accepted
 OpenCode's retired JSON source-class and precedence details are superseded by
 ADR 0019; this document reflects the current SQLite-only fold contract.
 
-Trae-specific fold clauses are superseded by ADR 0024; the integration and its
-fold state have been removed.
+Trae-specific fold clauses are superseded by ADR 0024's Subscription Usage
+boundary; the integration and its fold state have been removed.
 
 ## Context
 

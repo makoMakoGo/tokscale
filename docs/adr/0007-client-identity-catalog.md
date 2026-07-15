@@ -8,8 +8,9 @@ Superseded in part by ADR 0015: the hosted frontend registry and
 Narrowed by ADR 0012: excluded clients do not retain catalog-only identities
 in this local-only fork.
 
-Narrowed by ADR 0024: every remaining catalog identity participates in ordinary
-local reports; the former `parse_local` capability split has been removed.
+Narrowed by ADR 0024's Subscription Usage boundary: every remaining catalog
+identity participates in ordinary local reports; the former `parse_local`
+capability split has been removed.
 
 ## Decision
 

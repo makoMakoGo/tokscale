@@ -4,8 +4,8 @@
 
 Accepted.
 
-Superseded in part by ADR 0024: Cursor and Trae are no longer maintained local
-integrations.
+Superseded in part by ADR 0024's Subscription Usage boundary: Cursor and Trae
+are no longer maintained integrations.
 
 ## Context
 
