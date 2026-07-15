@@ -2,6 +2,7 @@ use crate::commands::render::format_currency;
 use crate::commands::shared::{use_env_roots, ReportEnvelope};
 use crate::tui;
 use anyhow::Result;
+use std::path::PathBuf;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -188,7 +189,7 @@ pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphE
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_graph_command(
-    output: Option<String>,
+    output: Option<PathBuf>,
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
@@ -245,7 +246,7 @@ pub(crate) fn run_graph_command(
 
         eprintln!(
             "{}",
-            format!("✓ Graph data written to {}", output_path).green()
+            format!("✓ Graph data written to {}", output_path.display()).green()
         );
         eprintln!(
             "{}",
@@ -265,7 +266,7 @@ pub(crate) fn run_graph_command(
             )
             .bright_black()
         );
-        println!("{output_path}");
+        println!("{}", output_path.display());
     } else {
         println!("{}", json_output);
     }

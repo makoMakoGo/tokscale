@@ -2373,6 +2373,30 @@ fn test_graph_json_output() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn graph_output_preserves_non_utf8_path_bytes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = create_empty_fixture_dir();
+    let output_path = tmp
+        .path()
+        .join(OsString::from_vec(b"graph-\xff.json".to_vec()));
+
+    cmd_with_home(tmp.path())
+        .args(["graph", "--client", "opencode", "--output"])
+        .arg(&output_path)
+        .arg("--no-spinner")
+        .assert()
+        .success();
+
+    assert!(
+        output_path.is_file(),
+        "Graph must write to the exact OS path supplied by the user"
+    );
+}
+
 #[test]
 fn test_graph_json_has_meta() {
     let tmp = create_temp_fixture_dir();
@@ -3024,12 +3048,20 @@ fn test_pricing_command_invalid_source() {
 }
 
 #[test]
-fn test_pricing_v4_spelling_is_rejected_with_exact_replacement() {
+fn test_pricing_v4_spellings_are_rejected_with_exact_replacements() {
     cargo_bin_cmd!("tokscale")
         .args(["pricing", "list-overrides"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("use `tokscale pricing overrides`"));
+
+    cargo_bin_cmd!("tokscale")
+        .args(["pricing", "gpt-5", "--json"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "use `tokscale pricing lookup gpt-5 --json`",
+        ));
 }
 
 #[test]
@@ -3084,14 +3116,6 @@ fn test_clients_command_reports_malformed_settings() {
         .stderr(predicate::str::contains("failed to parse settings JSON"))
         .stderr(predicate::str::contains(
             settings_json_path(tmp.path()).display().to_string(),
-        ));
-
-    cargo_bin_cmd!("tokscale")
-        .args(["pricing", "gpt-5", "--json"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "use `tokscale pricing lookup gpt-5 --json`",
         ));
 }
 

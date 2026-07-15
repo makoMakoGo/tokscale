@@ -136,7 +136,7 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             run_clients_command(plan.json, plan.source.home, plan.source.clients)
         }
         ExecutionPlan::Graph(plan) => run_graph_command(
-            plan.output.map(|path| path.to_string_lossy().into_owned()),
+            plan.output,
             plan.source.home,
             plan.source.clients,
             plan.date.since,

@@ -951,6 +951,16 @@ fn resolve_report(args: ReportArgs) -> Result<LocalReportPlan, CliFailure> {
 }
 
 fn resolve_headless(args: HeadlessArgs) -> Result<HeadlessPlan, CliFailure> {
+    if args
+        .command
+        .first()
+        .is_none_or(|program| program.trim().is_empty())
+    {
+        return Err(CliFailure::invalid_message(
+            "headless child command must start with a non-empty executable".to_string(),
+        ));
+    }
+
     let settings = tui::settings::Settings::load()?;
     let timeout = settings.get_native_timeout()?;
 

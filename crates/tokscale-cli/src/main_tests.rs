@@ -331,6 +331,19 @@ fn test_pricing_source_rejects_unknown_values() {
 }
 
 #[test]
+fn pricing_overrides_is_the_registered_user_facing_subcommand() {
+    let cli = Cli::try_parse_from(["tokscale", "pricing", "overrides", "--json"])
+        .expect("documented pricing overrides command must parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Pricing {
+            subcommand: PricingSubcommand::Overrides { json: true }
+        })
+    ));
+}
+
+#[test]
 fn test_build_client_filter_with_defaults_empty_defaults_returns_none() {
     let flags = ClientFlags::default();
     assert_eq!(build_client_filter_with_defaults(flags, &[]).unwrap(), None);
@@ -791,6 +804,23 @@ fn effective_spinner_policy_keeps_json_quiet_without_erasing_explicit_intent() {
     assert!(super::effective_no_spinner(false, true));
     assert!(super::effective_no_spinner(true, false));
     assert!(super::effective_no_spinner(true, true));
+}
+
+#[test]
+fn headless_plan_rejects_a_blank_child_executable() {
+    let cli = Cli::try_parse_from(["tokscale", "headless", "codex", "--", ""])
+        .expect("Clap accepts the present but empty COMMAND token");
+    let error = ExecutionPlan::resolve(
+        cli,
+        TerminalState {
+            stdin: false,
+            stdout: false,
+        },
+    )
+    .expect_err("a blank executable must not enter the execution plan");
+
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("non-empty executable"));
 }
 
 #[test]
