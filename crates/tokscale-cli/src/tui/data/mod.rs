@@ -145,7 +145,7 @@ impl DataLoader {
 
         prepare_local_sources(opts)
             .map(|sources| PreparedDataLoad { sources })
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::new)
     }
 
     pub fn execute_with_diagnostics(
@@ -155,34 +155,35 @@ impl DataLoader {
     ) -> Result<DataLoadResult> {
         let group_by = group_by.clone();
 
-        let usage_data = if Handle::try_current().is_ok() {
+        let usage_data: Result<_> = if Handle::try_current().is_ok() {
             std::thread::scope(|s| {
-                s.spawn(move || {
-                    let rt = Runtime::new().map_err(|e| e.to_string())?;
+                s.spawn(move || -> Result<_> {
+                    let rt = Runtime::new()?;
                     rt.block_on(load_prepared_usage_data_with_diagnostics(
                         prepared.sources,
                         group_by,
                     ))
+                    .map_err(anyhow::Error::new)
                 })
                 .join()
-                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("data loader thread panicked")))
             })
         } else {
-            Runtime::new()?.block_on(load_prepared_usage_data_with_diagnostics(
-                prepared.sources,
-                group_by,
-            ))
+            Runtime::new()?
+                .block_on(load_prepared_usage_data_with_diagnostics(
+                    prepared.sources,
+                    group_by,
+                ))
+                .map_err(anyhow::Error::new)
         };
 
         trim_allocator();
-        usage_data
-            .map(|result| DataLoadResult {
-                data: result.data,
-                pricing_diagnostics: result.pricing_diagnostics,
-                source_inventory_signature: result.source_inventory_signature,
-                source_digest: result.source_inventory_signature.process_digest(),
-            })
-            .map_err(anyhow::Error::msg)
+        usage_data.map(|result| DataLoadResult {
+            data: result.data,
+            pricing_diagnostics: result.pricing_diagnostics,
+            source_inventory_signature: result.source_inventory_signature,
+            source_digest: result.source_inventory_signature.process_digest(),
+        })
     }
 
     #[cfg(test)]
@@ -221,7 +222,7 @@ impl DataLoader {
 
         let usage_data =
             tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), Some(pricing))
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::new)?;
 
         Ok(usage_data)
     }
@@ -302,7 +303,7 @@ mod tests {
         };
 
         tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), pricing)
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::new)
     }
 
     fn expected_message_cost(

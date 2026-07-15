@@ -228,7 +228,7 @@ pub(crate) fn run_graph_command(
             })
             .await
         })
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(anyhow::Error::new)?;
     super::shared::emit_health_summary(&graph_result.health);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;

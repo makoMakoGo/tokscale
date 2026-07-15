@@ -3131,6 +3131,37 @@ fn invalid_settings_range_is_invalid_execution_environment() {
 }
 
 #[test]
+fn non_utf8_settings_is_invalid_execution_environment() {
+    let tmp = create_empty_fixture_dir();
+    let path = settings_json_path(tmp.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"{\"colorPalette\":\"\xff\"}").unwrap();
+
+    cmd_with_home(tmp.path())
+        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("failed to parse settings JSON"));
+}
+
+#[test]
+fn malformed_scanner_environment_is_invalid_execution_environment() {
+    let tmp = create_empty_fixture_dir();
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_EXTRA_DIRS", "broken")
+        .args(["models", "--client", "amp", "--no-spinner"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("TOKSCALE_EXTRA_DIRS")
+                .and(predicate::str::contains("expected `client:path`")),
+        );
+}
+
+#[test]
 fn unreadable_settings_path_remains_an_operational_error() {
     let tmp = create_empty_fixture_dir();
     let path = settings_json_path(tmp.path());

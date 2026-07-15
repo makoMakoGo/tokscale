@@ -39,7 +39,7 @@ pub(crate) fn run_time_metrics_report(
             })
             .await
         })
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(anyhow::Error::new)?;
 
     if let Some(spinner) = spinner {
         spinner.stop();

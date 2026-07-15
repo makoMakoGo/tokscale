@@ -258,7 +258,7 @@ impl Settings {
     }
 
     fn load_from_path(path: &Path) -> std::result::Result<Self, SettingsLoadError> {
-        let content = match fs::read_to_string(path) {
+        let content = match fs::read(path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
@@ -271,11 +271,12 @@ impl Settings {
             }
         };
 
-        let settings =
-            serde_json::from_str::<Self>(&content).map_err(|source| SettingsLoadError::Parse {
+        let settings = serde_json::from_slice::<Self>(&content).map_err(|source| {
+            SettingsLoadError::Parse {
                 path: path.to_path_buf(),
                 source,
-            })?;
+            }
+        })?;
         settings
             .validate()
             .map_err(|source| SettingsLoadError::Invalid {
@@ -470,6 +471,25 @@ mod tests {
         assert!(
             error.source().is_some(),
             "parse error must remain in the chain"
+        );
+    }
+
+    #[test]
+    fn load_for_home_override_reports_non_utf8_json_as_invalid_environment() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{\"colorPalette\":\"\xff\"}").unwrap();
+
+        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("parse settings JSON"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(error.is_invalid_environment());
+        assert!(
+            error.source().is_some(),
+            "UTF-8 decoding failure must remain in the parse error chain"
         );
     }
 

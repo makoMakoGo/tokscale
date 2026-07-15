@@ -26,7 +26,7 @@ struct LocalMessagesForTest {
 
 fn load_local_messages_for_test(
     options: LocalParseOptions,
-) -> Result<LocalMessagesForTest, String> {
+) -> Result<LocalMessagesForTest, super::LocalReportError> {
     let counts = super::count_local_client_messages(options.clone())?.counts;
     let prepared = super::prepare_local_sources(options.clone())?;
     let mut messages = Vec::new();
@@ -2118,8 +2118,13 @@ fn prepare_local_sources_rejects_invalid_extra_dirs_configuration() {
         .err()
         .expect("invalid extra-dir syntax must fail source preparation");
 
-    assert!(error.contains("TOKSCALE_EXTRA_DIRS"));
-    assert!(error.contains("parse environment variable"));
+    assert_eq!(
+        error.kind(),
+        super::LocalReportErrorKind::InvalidEnvironment
+    );
+    let message = error.to_string();
+    assert!(message.contains("TOKSCALE_EXTRA_DIRS"));
+    assert!(message.contains("parse environment variable"));
 }
 
 #[cfg(unix)]
@@ -2138,8 +2143,13 @@ fn prepare_local_sources_rejects_non_utf8_extra_dirs_configuration() {
         .err()
         .expect("non-UTF-8 extra-dir configuration must fail source preparation");
 
-    assert!(error.contains("TOKSCALE_EXTRA_DIRS"));
-    assert!(error.contains("read environment variable"));
+    assert_eq!(
+        error.kind(),
+        super::LocalReportErrorKind::InvalidEnvironment
+    );
+    let message = error.to_string();
+    assert!(message.contains("TOKSCALE_EXTRA_DIRS"));
+    assert!(message.contains("read environment variable"));
 }
 
 #[test]

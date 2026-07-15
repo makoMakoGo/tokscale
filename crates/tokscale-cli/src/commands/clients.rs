@@ -56,7 +56,7 @@ pub(crate) fn run_clients_command(
         year: None,
         scanner_settings: scanner_settings.clone(),
     })
-    .map_err(|e| anyhow::anyhow!(e))?;
+    .map_err(anyhow::Error::new)?;
     let mut health = client_counts.health.clone();
 
     let headless_roots =

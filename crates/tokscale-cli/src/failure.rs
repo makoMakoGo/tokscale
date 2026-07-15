@@ -1,5 +1,7 @@
 use std::fmt;
 
+use tokscale_core::LocalReportError;
+
 use crate::tui::settings::{NativeTimeoutError, SettingsLoadError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,9 @@ impl CliFailure {
         if error.is::<InvalidConfiguration>()
             || error.is::<NativeTimeoutError>()
             || error
+                .downcast_ref::<LocalReportError>()
+                .is_some_and(LocalReportError::is_invalid_invocation)
+            || error
                 .downcast_ref::<SettingsLoadError>()
                 .is_some_and(SettingsLoadError::is_invalid_environment)
         {
@@ -70,6 +75,18 @@ impl From<NativeTimeoutError> for CliFailure {
 
 impl fmt::Display for CliFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.error.is::<LocalReportError>() {
+            for (index, cause) in self.error.chain().enumerate() {
+                if index > 0 {
+                    formatter.write_str(": ")?;
+                }
+                write!(formatter, "{cause}")?;
+                if cause.is::<LocalReportError>() {
+                    break;
+                }
+            }
+            return Ok(());
+        }
         write!(formatter, "{:#}", self.error)
     }
 }
@@ -134,5 +151,19 @@ mod tests {
 
         assert_eq!(failure.class(), FailureClass::Operational);
         assert_eq!(failure.exit_code(), 1);
+    }
+
+    #[test]
+    fn typed_operational_local_report_error_remains_operational() {
+        let error = LocalReportError::from("source cache unavailable".to_string());
+        let failure =
+            CliFailure::from(anyhow::Error::new(error).context("generate local model report"));
+
+        assert_eq!(failure.class(), FailureClass::Operational);
+        assert_eq!(failure.exit_code(), 1);
+        assert_eq!(
+            failure.to_string(),
+            "generate local model report: source cache unavailable"
+        );
     }
 }

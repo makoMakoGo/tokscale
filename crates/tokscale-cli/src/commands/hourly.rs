@@ -61,7 +61,7 @@ pub(crate) fn run_hourly_report(
             })
             .await
         })
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(anyhow::Error::new)?;
 
     if let Some(spinner) = spinner {
         spinner.stop();

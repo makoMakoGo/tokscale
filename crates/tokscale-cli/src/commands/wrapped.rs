@@ -246,7 +246,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         views,
         Some(pricing.as_ref()),
     )
-    .map_err(anyhow::Error::msg)?;
+    .map_err(anyhow::Error::new)?;
     let health = wrapped_health_report(&aggregated);
     let graph = aggregated.graph.expect("graph view requested");
 
