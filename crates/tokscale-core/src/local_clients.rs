@@ -269,9 +269,12 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
     LocalClientEntry {
         client: ClientId::Antigravity,
         def: LocalClientDef {
-            root: PathRoot::Config,
-            relative_path: "antigravity-cache/sessions",
-            pattern: "*.jsonl",
+            root: PathRoot::EnvVar {
+                var: "GEMINI_CLI_HOME",
+                fallback_relative: ".gemini",
+            },
+            relative_path: "antigravity-cli/conversations",
+            pattern: "*.db",
         },
     },
     LocalClientEntry {

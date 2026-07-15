@@ -204,9 +204,7 @@ provider-owned auth state without copying, switching, refreshing, or modifying
 its credentials.
 
 ```bash
-# Local integrations with explicit sync workflows
-tokscale antigravity status --json
-tokscale antigravity sync
+# Local integration with an explicit sync workflow
 tokscale warp status --json
 tokscale warp sync --json
 
@@ -214,6 +212,17 @@ tokscale warp sync --json
 tokscale usage
 tokscale usage --json
 ```
+
+Antigravity is an ordinary local report source, not a command namespace:
+
+```bash
+tokscale clients --client antigravity
+tokscale models --client antigravity --no-spinner
+```
+
+Tokscale reads current AGY CLI SQLite/WAL data directly. The retired
+Antigravity IDE/2.0 private-RPC bridge and `tokscale antigravity ...` commands
+are not supported; see ADR 0025.
 
 Flags belong to the leaf command that executes them. They cannot be placed on
 the root or before the owning subcommand.

@@ -57,3 +57,7 @@ provider-owned Codex and Gemini non-interactive session records continue to be
 discovered. Removing the shadow capture path also removes the possibility of
 counting one execution once from provider storage and again from captured
 stdout.
+
+ADR 0025 applies the same boundary to Antigravity: the private IDE/2.0 RPC
+bridge and Tokscale-owned JSONL session tree are removed in favor of direct,
+read-only AGY CLI SQLite ingestion.

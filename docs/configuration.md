@@ -113,12 +113,15 @@ write it; use `tokscale cache warm` when you intentionally want to prebuild it.
 
 Integration roots are mixed state, not all disposable caches:
 
-- `antigravity-cache/` contains synced Antigravity artifacts. Use
-  `tokscale antigravity purge-cache` when you want to clear them.
 - `warp-cache/` contains both synced Warp aggregate usage and
   `credentials.json`. Deleting the directory can log you out; use
   `tokscale warp logout --purge-cache` when you intentionally want to remove
   credentials and cached usage together.
+
+The retired `antigravity-cache/` integration root is not a current input.
+Tokscale does not delete it automatically; it may be removed manually after
+upgrading. Current AGY CLI usage remains provider-owned under
+`$GEMINI_CLI_HOME/antigravity-cli/conversations/`.
 
 ## Subscription providers
 

@@ -9,14 +9,10 @@ use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
     ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit, SourceUnitMeta,
 };
-use crate::clients::{ClientId, PathRoot};
+use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
-const CLI_RELATIVE_PATH: &str = "antigravity-cli/conversations";
-const CLI_PATTERN: &str = "*.db";
-const ANTIGRAVITY_CACHE_RECORD_REJECTION_REVISION: u32 =
-    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
 const ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION: u32 =
     crate::adapters::EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
 
@@ -34,62 +30,29 @@ impl LocalSourceAdapter for AntigravityAdapter {
         let def = ClientId::Antigravity
             .local_def()
             .expect("Antigravity adapter requires a local scan policy");
-        let default_ide_root = def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
-        let extra_roots = antigravity_extra_roots(ctx)?;
+        let mut roots = vec![def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots)];
+        roots.extend(antigravity_extra_roots(ctx)?);
 
-        let mut ide_roots = vec![default_ide_root];
-        ide_roots.extend(extra_roots.iter().cloned());
-        let mut units = adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::source_units_from_paths(
             ClientId::Antigravity,
-            adapter_discover::scan_roots(ClientId::Antigravity, ide_roots, def.pattern)?,
-            FingerprintPolicy::NoMessageCache,
+            adapter_discover::scan_roots(ClientId::Antigravity, roots, def.pattern)?,
+            FingerprintPolicy::SqliteWithWal,
         )?
         .into_iter()
         .map(|unit| {
-            unit.with_meta(SourceUnitMeta::AntigravityCacheJsonl)
+            unit.with_meta(SourceUnitMeta::AntigravityCliSqlite)
                 .with_parser_version(ParserVersion::new(
-                    ParserId::AntigravityCacheJsonl,
-                    ANTIGRAVITY_CACHE_RECORD_REJECTION_REVISION,
+                    ParserId::AntigravityCliSqlite,
+                    ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
                 ))
         })
-        .collect::<Vec<_>>();
-
-        let cli_root = PathRoot::EnvVar {
-            var: "GEMINI_CLI_HOME",
-            fallback_relative: ".gemini",
-        }
-        .resolve_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
-        let mut cli_roots = vec![cli_root.join(CLI_RELATIVE_PATH)];
-        cli_roots.extend(extra_roots);
-
-        units.extend(
-            adapter_discover::source_units_from_paths(
-                ClientId::Antigravity,
-                adapter_discover::scan_roots(ClientId::Antigravity, cli_roots, CLI_PATTERN)?,
-                FingerprintPolicy::SqliteWithWal,
-            )?
-            .into_iter()
-            .map(|unit| {
-                unit.with_meta(SourceUnitMeta::AntigravityCliSqlite)
-                    .with_parser_version(ParserVersion::new(
-                        ParserId::AntigravityCliSqlite,
-                        ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
-                    ))
-            }),
-        );
-
-        Ok(units)
+        .collect())
     }
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
-                SourceUnitMeta::AntigravityCacheJsonl => adapter_cache::load_or_scan_unit_with(
-                    unit,
-                    ctx,
-                    sessions::antigravity::parse_antigravity_file,
-                ),
                 SourceUnitMeta::AntigravityCliSqlite => adapter_cache::load_or_scan_unit_with(
                     unit,
                     ctx,
@@ -241,51 +204,36 @@ mod tests {
     }
 
     #[test]
-    fn discovers_ide_cache_and_cli_databases_as_antigravity_sources() {
+    fn discovers_provider_owned_cli_databases() {
         let home = tempfile::TempDir::new().unwrap();
-        let cache_path = home
-            .path()
-            .join(".config/tokscale/antigravity-cache/sessions/session.jsonl");
         let cli_path = home
             .path()
             .join(".gemini/antigravity-cli/conversations/session.db");
-        for path in [&cache_path, &cli_path] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, "").unwrap();
-        }
+        std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
+        std::fs::write(&cli_path, "").unwrap();
 
         let settings = ScannerSettings::default();
         let units = ANTIGRAVITY_ADAPTER
             .discover_checked(&scan_context(home.path(), &settings))
             .unwrap();
 
-        assert_eq!(units.len(), 2);
-        assert!(units.iter().any(|unit| {
-            unit.client == ClientId::Antigravity
-                && unit.path == cache_path
-                && unit.fingerprint_policy == FingerprintPolicy::NoMessageCache
-                && unit.parser_version
-                    == ParserVersion::new(
-                        ParserId::AntigravityCacheJsonl,
-                        ANTIGRAVITY_CACHE_RECORD_REJECTION_REVISION,
-                    )
-                && matches!(unit.meta, SourceUnitMeta::AntigravityCacheJsonl)
-        }));
-        assert!(units.iter().any(|unit| {
-            unit.client == ClientId::Antigravity
-                && unit.path == cli_path
-                && unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal
-                && unit.parser_version
-                    == ParserVersion::new(
-                        ParserId::AntigravityCliSqlite,
-                        ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
-                    )
-                && matches!(unit.meta, SourceUnitMeta::AntigravityCliSqlite)
-        }));
+        assert_eq!(units.len(), 1);
+        let unit = &units[0];
+        assert_eq!(unit.client, ClientId::Antigravity);
+        assert_eq!(unit.path, cli_path);
+        assert_eq!(unit.fingerprint_policy, FingerprintPolicy::SqliteWithWal);
+        assert_eq!(
+            unit.parser_version,
+            ParserVersion::new(
+                ParserId::AntigravityCliSqlite,
+                ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
+            )
+        );
+        assert!(matches!(unit.meta, SourceUnitMeta::AntigravityCliSqlite));
     }
 
     #[test]
-    fn discovers_extra_roots_as_ide_jsonl_and_cli_sqlite_sources() {
+    fn extra_roots_accept_cli_databases_but_ignore_shadow_jsonl() {
         let home = tempfile::TempDir::new().unwrap();
         let extra = tempfile::TempDir::new().unwrap();
         let jsonl_path = extra.path().join("extra-session.jsonl");
@@ -303,16 +251,17 @@ mod tests {
             .discover_checked(&scan_context(home.path(), &settings))
             .unwrap();
 
-        assert!(units.iter().any(|unit| {
-            unit.path == jsonl_path
-                && unit.fingerprint_policy == FingerprintPolicy::NoMessageCache
-                && matches!(unit.meta, SourceUnitMeta::AntigravityCacheJsonl)
-        }));
-        assert!(units.iter().any(|unit| {
-            unit.path == db_path
-                && unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal
-                && matches!(unit.meta, SourceUnitMeta::AntigravityCliSqlite)
-        }));
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].path, db_path);
+        assert_eq!(
+            units[0].fingerprint_policy,
+            FingerprintPolicy::SqliteWithWal
+        );
+        assert!(matches!(
+            units[0].meta,
+            SourceUnitMeta::AntigravityCliSqlite
+        ));
+        assert!(!units.iter().any(|unit| unit.path == jsonl_path));
     }
 
     #[test]
@@ -362,31 +311,31 @@ mod tests {
     }
 
     #[test]
-    fn fold_dedupes_shared_ide_and_cli_response_ids() {
+    fn fold_dedupes_response_ids_across_cli_databases() {
         let dir = tempfile::TempDir::new().unwrap();
-        let dedup_key = sessions::antigravity::response_dedup_key("resp-shared");
-        let ide = parsed_unit(
-            &dir.path().join("ide.jsonl"),
-            SourceUnitMeta::AntigravityCacheJsonl,
-            antigravity_message("ide-session", Some(dedup_key)),
-        );
-        let cli = parsed_unit(
-            &dir.path().join("cli.db"),
+        let dedup_key = sessions::antigravity_cli::response_dedup_key("resp-shared");
+        let first = parsed_unit(
+            &dir.path().join("first.db"),
             SourceUnitMeta::AntigravityCliSqlite,
-            antigravity_message("cli-session", Some(dedup_key)),
+            antigravity_message("first-session", Some(dedup_key)),
+        );
+        let second = parsed_unit(
+            &dir.path().join("second.db"),
+            SourceUnitMeta::AntigravityCliSqlite,
+            antigravity_message("second-session", Some(dedup_key)),
         );
         let mut cache = message_cache::SourceMessageCache::default();
         let mut messages = Vec::new();
 
         ANTIGRAVITY_ADAPTER
             .fold(
-                vec![ide, cli],
+                vec![first, second],
                 &mut FoldContext::new(&mut cache, None),
                 &mut messages,
             )
             .unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id.as_ref(), "ide-session");
+        assert_eq!(messages[0].session_id.as_ref(), "first-session");
     }
 }

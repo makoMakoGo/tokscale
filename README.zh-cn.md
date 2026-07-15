@@ -105,7 +105,8 @@ OpenCode、Claude Code、Codex CLI、Gemini CLI、Amp、Droid、OpenClaw、Pi、
 
 - `grok` 和本地 `warp.sqlite` 只提供没有 bucket 拆分的 token 总数，因此 Tokscale 使用 ADR 0017 定义的固定 bucket 分配。
 - `commandcode` 是基于 transcript 的估算用量，不是供应商权威 token 记账。
-- `antigravity` 使用显式 sync 命令刷新的本地缓存。
+- `antigravity` 直接读取当前 AGY CLI 的 SQLite/WAL 数据；已退役的 IDE/2.0
+  私有 RPC bridge 不受支持（ADR 0025）。
 
 ## 数据和定价语义
 

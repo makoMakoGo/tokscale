@@ -342,11 +342,6 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: CacheSubcommand,
     },
-    #[command(about = "Antigravity integration commands")]
-    Antigravity {
-        #[command(subcommand)]
-        subcommand: AntigravitySubcommand,
-    },
     #[command(about = "Warp/Oz aggregate usage integration commands")]
     Warp {
         #[command(subcommand)]
@@ -573,19 +568,6 @@ pub(crate) enum CacheSubcommand {
 }
 
 #[derive(Subcommand, Debug)]
-pub(crate) enum AntigravitySubcommand {
-    #[command(about = "Sync usage from running Antigravity language servers")]
-    Sync,
-    #[command(about = "Show Antigravity sync status")]
-    Status {
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-    },
-    #[command(about = "Delete cached Antigravity usage artifacts")]
-    PurgeCache,
-}
-
-#[derive(Subcommand, Debug)]
 pub(crate) enum WarpSubcommand {
     #[command(about = "Save Warp GraphQL authentication")]
     Login {
@@ -763,7 +745,6 @@ pub(crate) enum ExecutionPlan {
     Wrapped(WrappedPlan),
     CachePrune,
     CacheWarm(ResolvedSourceScope),
-    Antigravity(AntigravitySubcommand),
     Warp(WarpSubcommand),
 }
 
@@ -796,7 +777,6 @@ impl ExecutionPlan {
                 CacheSubcommand::Prune => Ok(Self::CachePrune),
                 CacheSubcommand::Warm { source } => resolve_source(source).map(Self::CacheWarm),
             },
-            Commands::Antigravity { subcommand } => Ok(Self::Antigravity(subcommand)),
             Commands::Warp { subcommand } => Ok(Self::Warp(subcommand)),
         }
     }

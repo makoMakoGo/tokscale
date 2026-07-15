@@ -56,6 +56,8 @@ The current Antigravity adapter still reads the accepted
 `~/.gemini/antigravity-cli/conversations/*.db` source under the canonical
 `antigravity` identity. ADR 0007 owns the exact persisted
 `defaultClients` identity migration from the former `antigravity-cli` client.
+ADR 0025 later makes this current AGY CLI database the sole Antigravity source
+and retires the IDE/2.0 private-RPC cache bridge.
 
 This decision supersedes ADR 0008's metadata-only persisted stamp, transient-
 identity-only race check, same-size/same-mtime limitation, legacy public-key

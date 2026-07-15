@@ -183,13 +183,6 @@ pub(crate) fn run_clients_command(
                         exists: true,
                     }));
                 }
-                if client == ClientId::Antigravity {
-                    let path = antigravity_cli_conversations_path(&home_dir_str, use_env_roots);
-                    additional_paths.push(AdditionalPath {
-                        path: path.to_string_lossy().to_string(),
-                        exists: path.exists(),
-                    });
-                }
                 let legacy_paths = if client == ClientId::OpenClaw {
                     vec![
                         LegacyPath {
@@ -375,15 +368,6 @@ pub(crate) fn run_clients_command(
     }
 
     Ok(())
-}
-
-pub(crate) fn antigravity_cli_conversations_path(home_dir: &str, use_env_roots: bool) -> PathBuf {
-    let root = tokscale_core::PathRoot::EnvVar {
-        var: "GEMINI_CLI_HOME",
-        fallback_relative: ".gemini",
-    }
-    .resolve_with_env_strategy(home_dir, use_env_roots);
-    root.join("antigravity-cli/conversations")
 }
 
 pub(crate) fn describe_path_for_home(path: &str, exists: bool, home: &Path) -> String {

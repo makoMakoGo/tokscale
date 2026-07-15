@@ -5,6 +5,11 @@
 //! blobs without a checked-in `.proto`; this parser reads only the fields needed
 //! for token accounting.
 //!
+//! Tokscale intentionally supports this provider-owned database directly and
+//! does not bridge Antigravity IDE or Antigravity 2.0 through a running language
+//! server, transient CSRF credentials, private RPCs, or a Tokscale-owned shadow
+//! cache. See ADR 0025.
+//!
 //! The field numbers below were reverse-engineered upstream from real
 //! Antigravity CLI conversation databases and ported here as a narrow decoder.
 //! They were cross-checked against successful sessions where token buckets move
@@ -46,6 +51,10 @@ use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
+
+pub(crate) fn response_dedup_key(response_id: &str) -> u64 {
+    crate::sessions::dedup_hash_str(&format!("antigravity:{response_id}"))
+}
 
 pub fn parse_antigravity_cli_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let conn = open_readonly_sqlite(path)?;
@@ -213,9 +222,7 @@ fn parse_gen_metadata(
         seen_response_ids.insert(response_id.clone());
     }
 
-    let dedup_key = response_id
-        .as_deref()
-        .map(super::antigravity::response_dedup_key);
+    let dedup_key = response_id.as_deref().map(response_dedup_key);
 
     Ok(Some(UnifiedMessage::new_with_dedup(
         "antigravity",
@@ -907,12 +914,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(message.model_id.as_ref(), "gemini-3.1-pro");
-        assert_eq!(
-            message.dedup_key,
-            Some(crate::sessions::antigravity::response_dedup_key(
-                "resp-display"
-            ))
-        );
+        assert_eq!(message.dedup_key, Some(response_dedup_key("resp-display")));
     }
 
     #[test]

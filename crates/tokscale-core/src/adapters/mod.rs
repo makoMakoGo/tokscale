@@ -342,7 +342,6 @@ impl SourceUnit {
         let (name, detail) = match self.meta {
             SourceUnitMeta::None => ("none", None),
             SourceUnitMeta::OpenCodeSqlite => ("opencode-sqlite", None),
-            SourceUnitMeta::AntigravityCacheJsonl => ("antigravity-cache-jsonl", None),
             SourceUnitMeta::AntigravityCliSqlite => ("antigravity-cli-sqlite", None),
             SourceUnitMeta::KiroFile => ("kiro-file", None),
             SourceUnitMeta::KiroSqlite => ("kiro-sqlite", None),
@@ -443,7 +442,6 @@ pub(crate) enum SourceUnitMeta {
     #[default]
     None,
     OpenCodeSqlite,
-    AntigravityCacheJsonl,
     AntigravityCliSqlite,
     KiroFile,
     KiroSqlite,
@@ -471,10 +469,6 @@ impl SourceUnitMeta {
             Self::OpenCodeSqlite => {
                 ParserVersion::new(ParserId::OpenCodeSqlite, OPENCODE_CURRENT_SQLITE_REVISION)
             }
-            Self::AntigravityCacheJsonl => ParserVersion::new(
-                ParserId::AntigravityCacheJsonl,
-                MODEL_ID_CANONICALIZATION_REVISION,
-            ),
             Self::AntigravityCliSqlite => ParserVersion::new(
                 ParserId::AntigravityCliSqlite,
                 EXPLICIT_TOKEN_OVERFLOW_REVISION,
@@ -519,7 +513,7 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::Goose => ParserId::Goose,
         ClientId::Codebuff => ParserId::Codebuff,
         ClientId::CodeBuddy => ParserId::CodeBuddy,
-        ClientId::Antigravity => ParserId::Antigravity,
+        ClientId::Antigravity => ParserId::AntigravityCliSqlite,
         ClientId::Zed => ParserId::Zed,
         ClientId::Zcode => ParserId::Zcode,
         ClientId::Kiro => ParserId::Kiro,

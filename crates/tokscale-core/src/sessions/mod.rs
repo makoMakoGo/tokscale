@@ -3,7 +3,6 @@
 //! Each client has its own parser that converts to a unified message format.
 
 pub mod amp;
-pub mod antigravity;
 pub mod antigravity_cli;
 pub mod claudecode;
 pub mod cline;
