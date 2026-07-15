@@ -13,6 +13,10 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 type ParentSubagentTypeCache = HashMap<PathBuf, HashMap<String, String>>;
 
@@ -40,6 +44,9 @@ pub struct ClaudeEntry {
     pub provider_id: Option<String>,
     /// Current working directory emitted by Claude Code for workspace identity.
     pub cwd: Option<String>,
+    /// Authoritative project directory emitted by recovery or wrapper records.
+    #[serde(rename = "projectPath", alias = "project_path")]
+    pub project_path: Option<String>,
 }
 
 /// Meta sidecar written next to nested-layout sidechain transcripts.
@@ -62,19 +69,223 @@ impl CcMirrorVariantMetadata {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ClaudeWorkspaceParts {
     key: String,
     label: Option<String>,
 }
 
 impl ClaudeWorkspaceParts {
-    fn into_options(self) -> (Option<String>, Option<String>) {
-        (Some(self.key), self.label)
-    }
-
     fn to_options(&self) -> (Option<String>, Option<String>) {
         (Some(self.key.clone()), self.label.clone())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ClaudeProjectCandidates {
+    project_paths: HashSet<String>,
+    cwds: HashSet<String>,
+}
+
+impl ClaudeProjectCandidates {
+    fn record(&mut self, project_path: Option<&str>, cwd: Option<&str>) {
+        if let Some(project_path) = project_path.filter(|path| !path.trim().is_empty()) {
+            self.project_paths.insert(project_path.to_string());
+        }
+        if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
+            self.cwds.insert(cwd.to_string());
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaudeProjectResolution {
+    Resolved(ClaudeWorkspaceParts),
+    Unresolved,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CandidateMatch {
+    None,
+    Unique(String),
+    Ambiguous,
+}
+
+/// Per-scan resolver for Claude's lossy project-directory names.
+///
+/// Transcript JSONL remains single-pass: candidates are collected while usage
+/// records are parsed. History and config are loaded only when those candidates
+/// cannot identify the project, and at most once for the resolver.
+#[derive(Debug)]
+pub(crate) struct ClaudeProjectResolver {
+    home_dir: Option<PathBuf>,
+    resolved: Mutex<HashMap<String, String>>,
+    parent_candidates: Mutex<HashMap<PathBuf, ClaudeProjectCandidates>>,
+    external_candidates: OnceLock<ClaudeProjectCandidates>,
+    reported_diagnostics: Mutex<HashSet<(String, &'static str)>>,
+    #[cfg(test)]
+    resolution_computations: AtomicUsize,
+    #[cfg(test)]
+    external_loads: AtomicUsize,
+}
+
+impl ClaudeProjectResolver {
+    pub(crate) fn new(home_dir: Option<&Path>) -> Self {
+        Self {
+            home_dir: home_dir.map(Path::to_path_buf),
+            resolved: Mutex::new(HashMap::new()),
+            parent_candidates: Mutex::new(HashMap::new()),
+            external_candidates: OnceLock::new(),
+            reported_diagnostics: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            resolution_computations: AtomicUsize::new(0),
+            #[cfg(test)]
+            external_loads: AtomicUsize::new(0),
+        }
+    }
+
+    fn resolve(
+        &self,
+        project_key: &str,
+        candidates: &ClaudeProjectCandidates,
+        source_path: &Path,
+        parent_session_id: Option<&str>,
+    ) -> ClaudeProjectResolution {
+        if let Some(path) = self
+            .resolved
+            .lock()
+            .expect("Claude project resolver cache poisoned")
+            .get(project_key)
+            .cloned()
+        {
+            return resolved_workspace(&path);
+        }
+
+        #[cfg(test)]
+        self.resolution_computations.fetch_add(1, Ordering::Relaxed);
+
+        let local_match = match_project_candidate_tiers(project_key, candidates);
+        if !matches!(local_match, CandidateMatch::None) {
+            return self.finish_match(project_key, local_match, source_path);
+        }
+
+        if let Some(parent_session_id) = parent_session_id {
+            match find_parent_session_path(source_path, parent_session_id) {
+                Ok(Some(parent_path)) => {
+                    let parent_candidates = self.parent_candidates(&parent_path);
+                    let parent_match =
+                        match_project_candidate_tiers(project_key, &parent_candidates);
+                    if !matches!(parent_match, CandidateMatch::None) {
+                        return self.finish_match(project_key, parent_match, source_path);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    code = "claude_project_parent_unreadable",
+                    source = %source_path.display(),
+                    error = %error,
+                    "could not inspect Claude parent session while resolving project path"
+                ),
+            }
+        }
+
+        let external_match = match_project_candidates(
+            project_key,
+            self.external_candidates()
+                .project_paths
+                .iter()
+                .map(String::as_str),
+        );
+        self.finish_match(project_key, external_match, source_path)
+    }
+
+    fn finish_match(
+        &self,
+        project_key: &str,
+        candidate_match: CandidateMatch,
+        source_path: &Path,
+    ) -> ClaudeProjectResolution {
+        match candidate_match {
+            CandidateMatch::Unique(path) => {
+                let mut resolved = self
+                    .resolved
+                    .lock()
+                    .expect("Claude project resolver cache poisoned");
+                if let Some(existing) = resolved.get(project_key) {
+                    if existing != &path {
+                        drop(resolved);
+                        self.report_once(project_key, "claude_project_path_ambiguous", source_path);
+                        return ClaudeProjectResolution::Ambiguous;
+                    }
+                } else {
+                    resolved.insert(project_key.to_string(), path.clone());
+                }
+                resolved_workspace(&path)
+            }
+            CandidateMatch::Ambiguous => {
+                self.report_once(project_key, "claude_project_path_ambiguous", source_path);
+                ClaudeProjectResolution::Ambiguous
+            }
+            CandidateMatch::None => {
+                self.report_once(project_key, "claude_project_path_unresolved", source_path);
+                ClaudeProjectResolution::Unresolved
+            }
+        }
+    }
+
+    fn parent_candidates(&self, parent_path: &Path) -> ClaudeProjectCandidates {
+        if let Some(cached) = self
+            .parent_candidates
+            .lock()
+            .expect("Claude parent candidate cache poisoned")
+            .get(parent_path)
+            .cloned()
+        {
+            return cached;
+        }
+
+        let candidates = read_project_candidates_from_jsonl(parent_path).unwrap_or_else(|error| {
+            tracing::warn!(
+                code = "claude_project_parent_unreadable",
+                source = %parent_path.display(),
+                error = %error,
+                "could not read Claude parent session while resolving project path"
+            );
+            ClaudeProjectCandidates::default()
+        });
+        self.parent_candidates
+            .lock()
+            .expect("Claude parent candidate cache poisoned")
+            .insert(parent_path.to_path_buf(), candidates.clone());
+        candidates
+    }
+
+    fn external_candidates(&self) -> &ClaudeProjectCandidates {
+        self.external_candidates.get_or_init(|| {
+            #[cfg(test)]
+            self.external_loads.fetch_add(1, Ordering::Relaxed);
+            self.home_dir
+                .as_deref()
+                .map(read_external_project_candidates)
+                .unwrap_or_default()
+        })
+    }
+
+    fn report_once(&self, project_key: &str, code: &'static str, source_path: &Path) {
+        let inserted = self
+            .reported_diagnostics
+            .lock()
+            .expect("Claude project diagnostic cache poisoned")
+            .insert((project_key.to_string(), code));
+        if inserted {
+            tracing::warn!(
+                code,
+                project_key,
+                source = %source_path.display(),
+                "Claude project path could not be resolved uniquely; usage is retained without workspace metadata"
+            );
+        }
     }
 }
 
@@ -518,7 +729,27 @@ pub fn parse_claude_file_with_home(
     home_dir: Option<&Path>,
 ) -> SessionParseResult<ScannedSource> {
     let mut parent_cache = ParentSubagentTypeCache::new();
-    parse_claude_file_with_cache_and_home(path, &mut parent_cache, home_dir)
+    let project_resolver = ClaudeProjectResolver::new(home_dir);
+    parse_claude_file_with_cache_home_and_resolver(
+        path,
+        &mut parent_cache,
+        home_dir,
+        &project_resolver,
+    )
+}
+
+pub(crate) fn parse_claude_file_with_project_resolver(
+    path: &Path,
+    home_dir: Option<&Path>,
+    project_resolver: &ClaudeProjectResolver,
+) -> SessionParseResult<ScannedSource> {
+    let mut parent_cache = ParentSubagentTypeCache::new();
+    parse_claude_file_with_cache_home_and_resolver(
+        path,
+        &mut parent_cache,
+        home_dir,
+        project_resolver,
+    )
 }
 
 pub fn parse_claude_file_with_cache(
@@ -534,11 +765,25 @@ pub fn parse_claude_file_with_cache_and_home(
     parent_cache: &mut ParentSubagentTypeCache,
     home_dir: Option<&Path>,
 ) -> SessionParseResult<ScannedSource> {
+    let project_resolver = ClaudeProjectResolver::new(home_dir);
+    parse_claude_file_with_cache_home_and_resolver(path, parent_cache, home_dir, &project_resolver)
+}
+
+fn parse_claude_file_with_cache_home_and_resolver(
+    path: &Path,
+    parent_cache: &mut ParentSubagentTypeCache,
+    home_dir: Option<&Path>,
+    project_resolver: &ClaudeProjectResolver,
+) -> SessionParseResult<ScannedSource> {
     if is_workflow_journal(path) {
         return Ok(ScannedSource::complete(Vec::new()));
     }
 
-    let (workspace_key, workspace_label) = claude_workspace_from_path(path);
+    let project_key = claude_project_key_from_path(path);
+    let workspace_key = None;
+    let workspace_label = None;
+    let mut project_candidates = ClaudeProjectCandidates::default();
+    let mut parent_session_id = None;
     let is_transcript_path = is_claude_transcripts_path(path);
     let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir)?;
     let client_id = cc_mirror_metadata
@@ -635,7 +880,12 @@ pub fn parse_claude_file_with_cache_and_home(
             }
         };
         {
-            let entry_workspace = entry.cwd.as_deref().and_then(workspace_parts_from_key);
+            project_candidates.record(entry.project_path.as_deref(), entry.cwd.as_deref());
+            let entry_workspace = entry
+                .project_path
+                .as_deref()
+                .or(entry.cwd.as_deref())
+                .and_then(workspace_parts_from_key);
             if entry.entry_type.trim().is_empty() {
                 let error = SessionParseError::at_path(
                     path,
@@ -691,6 +941,7 @@ pub fn parse_claude_file_with_cache_and_home(
                     };
                     sidechain_detected = true;
                     session_id = parent_id.to_string();
+                    parent_session_id = Some(parent_id.to_string());
                     let stem_agent_id = path
                         .file_stem()
                         .and_then(|stem| stem.to_str())
@@ -1066,6 +1317,15 @@ pub fn parse_claude_file_with_cache_and_home(
 
     messages.retain(|message| crate::has_positive_tokens(&message.tokens));
 
+    apply_resolved_project_workspace(
+        project_resolver,
+        project_key.as_deref(),
+        &project_candidates,
+        path,
+        parent_session_id.as_deref(),
+        &mut messages,
+    );
+
     Ok(ScannedSource {
         messages,
         rejections,
@@ -1093,7 +1353,7 @@ fn record_claude_rejection(
     rejections.record(reason);
 }
 
-fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
+fn claude_project_key_from_path(path: &Path) -> Option<String> {
     let components: Vec<String> = path
         .components()
         .map(|component| component.as_os_str().to_string_lossy().to_string())
@@ -1101,23 +1361,23 @@ fn claude_workspace_from_path(path: &Path) -> (Option<String>, Option<String>) {
 
     for window in components.windows(3) {
         if window[0] == ".claude" && window[1] == "projects" {
-            return workspace_options_from_key(&window[2]);
+            return Some(window[2].clone());
         }
     }
 
     for window in components.windows(5) {
         if window[0] == ".cc-mirror" && window[2] == "config" && window[3] == "projects" {
-            return workspace_options_from_key(&window[4]);
+            return Some(window[4].clone());
         }
     }
 
     for window in components.windows(2).rev() {
         if window[0] == "projects" {
-            return workspace_options_from_key(&window[1]);
+            return Some(window[1].clone());
         }
     }
 
-    (None, None)
+    None
 }
 
 fn is_claude_transcripts_path(path: &Path) -> bool {
@@ -1129,12 +1389,6 @@ fn is_claude_transcripts_path(path: &Path) -> bool {
     components
         .windows(2)
         .any(|window| window[0] == ".claude" && window[1] == "transcripts")
-}
-
-fn workspace_options_from_key(raw: &str) -> (Option<String>, Option<String>) {
-    workspace_parts_from_key(raw)
-        .map(ClaudeWorkspaceParts::into_options)
-        .unwrap_or((None, None))
 }
 
 fn workspace_parts_from_key(raw: &str) -> Option<ClaudeWorkspaceParts> {
@@ -1158,6 +1412,256 @@ fn workspace_options_for_entry(
     } else {
         (fallback_key.clone(), fallback_label.clone())
     }
+}
+
+fn apply_resolved_project_workspace(
+    resolver: &ClaudeProjectResolver,
+    project_key: Option<&str>,
+    candidates: &ClaudeProjectCandidates,
+    source_path: &Path,
+    parent_session_id: Option<&str>,
+    messages: &mut [UnifiedMessage],
+) {
+    let Some(project_key) = project_key else {
+        return;
+    };
+
+    match resolver.resolve(project_key, candidates, source_path, parent_session_id) {
+        ClaudeProjectResolution::Resolved(workspace) => {
+            for message in messages {
+                set_message_workspace(message, &workspace);
+            }
+        }
+        ClaudeProjectResolution::Unresolved | ClaudeProjectResolution::Ambiguous => {
+            for message in messages {
+                message.set_workspace(None, None);
+            }
+        }
+    }
+}
+
+fn resolved_workspace(path: &str) -> ClaudeProjectResolution {
+    workspace_parts_from_key(path)
+        .map(ClaudeProjectResolution::Resolved)
+        .unwrap_or(ClaudeProjectResolution::Unresolved)
+}
+
+fn match_project_candidate_tiers(
+    project_key: &str,
+    candidates: &ClaudeProjectCandidates,
+) -> CandidateMatch {
+    let project_path_match = match_project_candidates(
+        project_key,
+        candidates.project_paths.iter().map(String::as_str),
+    );
+    if !matches!(project_path_match, CandidateMatch::None) {
+        return project_path_match;
+    }
+
+    let cwd_match =
+        match_project_candidates(project_key, candidates.cwds.iter().map(String::as_str));
+    if !matches!(cwd_match, CandidateMatch::None) {
+        return cwd_match;
+    }
+
+    match_project_candidates(
+        project_key,
+        candidates
+            .cwds
+            .iter()
+            .flat_map(|cwd| workspace_ancestor_candidates(cwd)),
+    )
+}
+
+fn match_project_candidates<'a>(
+    project_key: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> CandidateMatch {
+    let mut matches = HashSet::new();
+    for candidate in candidates {
+        let Some(normalized) = normalize_workspace_key(candidate) else {
+            continue;
+        };
+        if claude_project_key(candidate) == project_key
+            || claude_project_key(&normalized) == project_key
+        {
+            matches.insert(normalized);
+            if matches.len() > 1 {
+                return CandidateMatch::Ambiguous;
+            }
+        }
+    }
+
+    matches
+        .into_iter()
+        .next()
+        .map(CandidateMatch::Unique)
+        .unwrap_or(CandidateMatch::None)
+}
+
+fn workspace_ancestor_candidates(raw: &str) -> Vec<&str> {
+    let trimmed = raw.trim().trim_end_matches(['/', '\\']);
+    let mut ancestors = Vec::new();
+    let mut end = trimmed.len();
+    while let Some(index) = trimmed[..end].rfind(['/', '\\']) {
+        if index == 0 {
+            ancestors.push(&trimmed[..1]);
+            break;
+        }
+        end = index;
+        ancestors.push(&trimmed[..end]);
+    }
+    ancestors
+}
+
+/// Match Claude Code's project-directory encoding exactly. The replacement
+/// and length limit operate on JavaScript UTF-16 code units.
+fn claude_project_key(path: &str) -> String {
+    let utf16: Vec<u16> = path.encode_utf16().collect();
+    let mut encoded = String::with_capacity(utf16.len());
+    for code_unit in &utf16 {
+        if (*code_unit >= b'a' as u16 && *code_unit <= b'z' as u16)
+            || (*code_unit >= b'A' as u16 && *code_unit <= b'Z' as u16)
+            || (*code_unit >= b'0' as u16 && *code_unit <= b'9' as u16)
+        {
+            encoded.push(char::from_u32(*code_unit as u32).expect("ASCII code unit"));
+        } else {
+            encoded.push('-');
+        }
+    }
+
+    if encoded.len() <= 200 {
+        return encoded;
+    }
+
+    let hash = utf16.iter().fold(0_i32, |hash, code_unit| {
+        hash.wrapping_mul(31).wrapping_add(*code_unit as i32)
+    });
+    format!(
+        "{}-{}",
+        &encoded[..200],
+        unsigned_to_base36(i64::from(hash).unsigned_abs())
+    )
+}
+
+fn unsigned_to_base36(mut value: u64) -> String {
+    if value == 0 {
+        return "0".to_string();
+    }
+
+    let mut digits = Vec::new();
+    while value > 0 {
+        let digit = (value % 36) as u8;
+        digits.push(if digit < 10 {
+            (b'0' + digit) as char
+        } else {
+            (b'a' + digit - 10) as char
+        });
+        value /= 36;
+    }
+    digits.into_iter().rev().collect()
+}
+
+fn read_project_candidates_from_jsonl(path: &Path) -> SessionParseResult<ClaudeProjectCandidates> {
+    let file = std::fs::File::open(path).map_err(|source| {
+        SessionParseError::at_path(path, "open Claude project candidate source", source)
+    })?;
+    let mut candidates = ClaudeProjectCandidates::default();
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|source| {
+            SessionParseError::at_path(
+                path,
+                "read Claude project candidate source",
+                std::io::Error::new(source.kind(), format!("line {}: {source}", line_index + 1)),
+            )
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: ClaudeEntry = serde_json::from_str(&line).map_err(|source| {
+            SessionParseError::at_path(
+                path,
+                "decode Claude project candidate source",
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("line {}: {source}", line_index + 1),
+                ),
+            )
+        })?;
+        candidates.record(entry.project_path.as_deref(), entry.cwd.as_deref());
+    }
+    Ok(candidates)
+}
+
+fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates {
+    let mut candidates = ClaudeProjectCandidates::default();
+    let history_path = home_dir.join(".claude/history.jsonl");
+    match std::fs::File::open(&history_path) {
+        Ok(file) => {
+            for (line_index, line) in BufReader::new(file).lines().enumerate() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        tracing::warn!(
+                            code = "claude_project_history_unreadable",
+                            source = %history_path.display(),
+                            line = line_index + 1,
+                            error = %error,
+                            "could not read Claude history project metadata"
+                        );
+                        break;
+                    }
+                };
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(value) => {
+                        candidates.record(value.get("project").and_then(Value::as_str), None)
+                    }
+                    Err(error) => tracing::warn!(
+                        code = "claude_project_history_invalid",
+                        source = %history_path.display(),
+                        line = line_index + 1,
+                        error = %error,
+                        "could not decode Claude history project metadata"
+                    ),
+                }
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            code = "claude_project_history_unreadable",
+            source = %history_path.display(),
+            error = %error,
+            "could not open Claude history project metadata"
+        ),
+    }
+
+    let config_path = home_dir.join(".claude.json");
+    match std::fs::read(&config_path) {
+        Ok(mut bytes) => match simd_json::from_slice::<Value>(&mut bytes) {
+            Ok(value) => {
+                if let Some(projects) = value.get("projects").and_then(Value::as_object) {
+                    for project in projects.keys() {
+                        candidates.record(Some(project), None);
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(
+                code = "claude_project_config_invalid",
+                source = %config_path.display(),
+                error = %error,
+                "could not decode Claude project configuration"
+            ),
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            code = "claude_project_config_unreadable",
+            source = %config_path.display(),
+            error = %error,
+            "could not read Claude project configuration"
+        ),
+    }
+
+    candidates
 }
 
 fn sanitize_cc_mirror_segment(raw: &str) -> String {
@@ -2306,7 +2810,7 @@ mod tests {
 
     #[test]
     fn test_parse_cc_mirror_claude_variant_attributes_client_provider_and_workspace() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/Users/example/work","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
 
         let (_temp_dir, path) = create_cc_mirror_project_file(
             content,
@@ -2328,12 +2832,9 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(
             messages[0].workspace_key.as_deref(),
-            Some("-Users-example-work")
+            Some("/Users/example/work")
         );
-        assert_eq!(
-            messages[0].workspace_label.as_deref(),
-            Some("-Users-example-work")
-        );
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("work"));
     }
 
     #[test]
@@ -2904,15 +3405,22 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_metadata_from_claude_project_path() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
-        let (_dir, path) = create_project_file(content, "myproject", "session.jsonl");
+    fn test_workspace_metadata_from_explicit_project_path() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","projectPath":"/home/travis/tokscale-recovery","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) =
+            create_project_file(content, "-home-travis-tokscale-recovery", "session.jsonl");
 
         let messages = parse_claude_file(&path).unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key.as_deref(), Some("myproject"));
-        assert_eq!(messages[0].workspace_label.as_deref(), Some("myproject"));
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/home/travis/tokscale-recovery")
+        );
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("tokscale-recovery")
+        );
     }
 
     #[test]
@@ -2932,14 +3440,6 @@ mod tests {
             Some("/home/travis/01-workspace/tokscale".into())
         );
         assert_eq!(messages[0].workspace_label.as_deref(), Some("tokscale"));
-    }
-
-    #[test]
-    fn test_workspace_metadata_preserves_key_without_label() {
-        let (workspace_key, workspace_label) = workspace_options_from_key("/");
-
-        assert_eq!(workspace_key, Some("/".to_string()));
-        assert_eq!(workspace_label, None);
     }
 
     #[test]
@@ -2977,6 +3477,146 @@ mod tests {
             Some("C:/Users/Travis/Desktop".into())
         );
         assert_eq!(messages[0].workspace_label.as_deref(), Some("Desktop"));
+    }
+
+    #[test]
+    fn test_workspace_metadata_resolves_project_from_cwd_ancestor() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/home/travis/01-workspace/tokscale/crates/tokscale-core","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) = create_project_file(
+            content,
+            "-home-travis-01-workspace-tokscale",
+            "session.jsonl",
+        );
+
+        let messages = parse_claude_file(&path).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/home/travis/01-workspace/tokscale")
+        );
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("tokscale"));
+    }
+
+    #[test]
+    fn test_workspace_metadata_uses_history_only_after_local_candidates_miss() {
+        let home = tempfile::tempdir().unwrap();
+        let history_path = home.path().join(".claude/history.jsonl");
+        std::fs::create_dir_all(history_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &history_path,
+            r#"{"project":"/home/travis/history-project","sessionId":"history-session"}"#,
+        )
+        .unwrap();
+        let path = home
+            .path()
+            .join(".claude/projects/-home-travis-history-project/session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+        )
+        .unwrap();
+
+        let resolver = ClaudeProjectResolver::new(Some(home.path()));
+        let mut parent_cache = ParentSubagentTypeCache::new();
+        let scanned = parse_claude_file_with_cache_home_and_resolver(
+            &path,
+            &mut parent_cache,
+            Some(home.path()),
+            &resolver,
+        )
+        .unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(
+            scanned.messages[0].workspace_key.as_deref(),
+            Some("/home/travis/history-project")
+        );
+        assert_eq!(resolver.external_loads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_workspace_metadata_keeps_usage_when_project_path_is_unresolved() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home
+            .path()
+            .join(".claude/projects/-home-travis-missing/session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_claude_file_with_home(&path, Some(home.path())).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 100);
+        assert_eq!(scanned.messages[0].workspace_key, None);
+        assert_eq!(scanned.messages[0].workspace_label, None);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn test_workspace_metadata_keeps_usage_when_project_path_is_ambiguous() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"projects":{"/home/travis/a-b":{},"/home/travis/a/b":{}}}"#,
+        )
+        .unwrap();
+        let path = home
+            .path()
+            .join(".claude/projects/-home-travis-a-b/session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_claude_file_with_home(&path, Some(home.path())).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].workspace_key, None);
+        assert_eq!(scanned.messages[0].workspace_label, None);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn test_claude_project_key_matches_long_path_hashing() {
+        let path = format!("/{}", "a".repeat(205));
+        let expected = format!("-{}-bn8w8e", "a".repeat(199));
+
+        assert_eq!(claude_project_key(&path), expected);
+    }
+
+    #[test]
+    fn test_project_resolution_is_cached_and_skips_external_metadata_on_cwd_match() {
+        let resolver = ClaudeProjectResolver::new(None);
+        let source = Path::new(
+            "/home/travis/.claude/projects/-home-travis-01-workspace-tokscale/session.jsonl",
+        );
+        let mut candidates = ClaudeProjectCandidates::default();
+        candidates.record(None, Some("/home/travis/01-workspace/tokscale"));
+
+        let first = resolver.resolve(
+            "-home-travis-01-workspace-tokscale",
+            &candidates,
+            source,
+            None,
+        );
+        let second = resolver.resolve(
+            "-home-travis-01-workspace-tokscale",
+            &ClaudeProjectCandidates::default(),
+            source,
+            None,
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(resolver.resolution_computations.load(Ordering::Relaxed), 1);
+        assert_eq!(resolver.external_loads.load(Ordering::Relaxed), 0);
     }
 
     #[test]

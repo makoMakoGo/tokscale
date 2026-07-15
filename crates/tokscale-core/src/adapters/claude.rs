@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use rayon::prelude::*;
 
@@ -15,7 +16,42 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
 
-const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 5;
+const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 6;
+
+static CLAUDE_PROJECT_RESOLVERS: LazyLock<
+    Mutex<HashMap<PathBuf, Arc<sessions::claudecode::ClaudeProjectResolver>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn reset_claude_project_resolver(home_dir: &Path) {
+    CLAUDE_PROJECT_RESOLVERS
+        .lock()
+        .expect("Claude project resolver registry poisoned")
+        .insert(
+            home_dir.to_path_buf(),
+            Arc::new(sessions::claudecode::ClaudeProjectResolver::new(Some(
+                home_dir,
+            ))),
+        );
+}
+
+fn claude_project_resolver(
+    home_dir: Option<&Path>,
+) -> Arc<sessions::claudecode::ClaudeProjectResolver> {
+    let Some(home_dir) = home_dir else {
+        return Arc::new(sessions::claudecode::ClaudeProjectResolver::new(None));
+    };
+    let mut resolvers = CLAUDE_PROJECT_RESOLVERS
+        .lock()
+        .expect("Claude project resolver registry poisoned");
+    resolvers
+        .entry(home_dir.to_path_buf())
+        .or_insert_with(|| {
+            Arc::new(sessions::claudecode::ClaudeProjectResolver::new(Some(
+                home_dir,
+            )))
+        })
+        .clone()
+}
 
 pub(crate) struct ClaudeAdapter;
 
@@ -28,6 +64,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
         &self,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+        reset_claude_project_resolver(Path::new(ctx.home_dir));
         let def = ClientId::Claude
             .local_def()
             .expect("Claude adapter must have local scan policy");
@@ -90,8 +127,13 @@ impl LocalSourceAdapter for ClaudeAdapter {
                     FingerprintPolicy::NoMessageCache => None,
                     _ => unreachable!("unexpected Claude source fingerprint policy"),
                 };
+                let project_resolver = claude_project_resolver(home_dir.as_deref());
                 adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
-                    sessions::claudecode::parse_claude_file_with_home(path, home_dir.as_deref())
+                    sessions::claudecode::parse_claude_file_with_project_resolver(
+                        path,
+                        home_dir.as_deref(),
+                        &project_resolver,
+                    )
                 })
             })
             .collect()
