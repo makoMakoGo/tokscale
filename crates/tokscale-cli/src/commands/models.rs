@@ -4,10 +4,9 @@ use crate::commands::render::{
     format_ms_per_1k, format_tokens_with_commas, LightSpinner, TABLE_PRESET,
 };
 use crate::commands::shared::{
-    auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
-    emit_client_diagnostics, emit_cursor_setup_warnings, emit_cursor_sync_warning,
-    get_date_range_label, has_cursor_usage_cache_for_report, model_usage_includes_client,
-    resolve_effective_home_dir, setup_warnings_for_report, use_env_roots, ReportEnvelope,
+    emit_client_diagnostics, emit_cursor_setup_warnings, get_date_range_label,
+    model_usage_includes_client, resolve_effective_home_dir, setup_warnings_for_report,
+    use_env_roots, ReportEnvelope,
 };
 use crate::tui::{
     self, get_client_display_name, get_provider_display_name, truncate_model_display_name,
@@ -60,14 +59,11 @@ pub(crate) fn run_models_report(
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
     let effective_home_dir = resolve_effective_home_dir(&home_dir);
 
-    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
-    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
-    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
@@ -92,11 +88,6 @@ pub(crate) fn run_models_report(
     if let Some(spinner) = spinner {
         spinner.stop();
     }
-    emit_cursor_sync_warning(
-        cursor_sync_result.as_ref(),
-        had_cursor_cache,
-        explicit_cursor_filter,
-    );
     super::shared::emit_health_summary(&report.health);
     let processing_time_ms = start.elapsed().as_millis();
     let claude_message_count = report

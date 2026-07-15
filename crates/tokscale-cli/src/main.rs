@@ -2,7 +2,6 @@ mod antigravity;
 mod claude_diagnostics;
 mod cli;
 mod commands;
-mod cursor;
 mod paths;
 mod trae;
 mod tui;
@@ -18,14 +17,10 @@ use commands::clients::run_clients_command;
 use commands::graph::run_graph_command;
 use commands::headless::run_headless_command;
 use commands::hourly::run_hourly_report;
-use commands::integrations::{
-    run_antigravity_command, run_codex_command, run_cursor_command, run_trae_command,
-    run_warp_command,
-};
+use commands::integrations::{run_antigravity_command, run_trae_command, run_warp_command};
 use commands::models::run_models_report;
 use commands::monthly::run_monthly_report;
 use commands::pricing::{run_pricing_list_overrides, run_pricing_lookup};
-use commands::shared::auto_sync_cursor_before_tui;
 use commands::time_metrics::run_time_metrics_report;
 
 fn main() {
@@ -50,21 +45,18 @@ fn main() {
 
 fn execute(plan: ExecutionPlan) -> Result<()> {
     match plan {
-        ExecutionPlan::Tui(plan) => {
-            auto_sync_cursor_before_tui(&plan.source.home, &plan.source.clients)?;
-            tui::run(
-                plan.theme.as_deref(),
-                plan.refresh,
-                plan.no_refresh,
-                plan.debug,
-                plan.source.home,
-                plan.source.clients,
-                plan.date.since,
-                plan.date.until,
-                plan.date.year,
-                plan.initial_tab,
-            )
-        }
+        ExecutionPlan::Tui(plan) => tui::run(
+            plan.theme.as_deref(),
+            plan.refresh,
+            plan.no_refresh,
+            plan.debug,
+            plan.source.home,
+            plan.source.clients,
+            plan.date.since,
+            plan.date.until,
+            plan.date.year,
+            plan.initial_tab,
+        ),
         ExecutionPlan::Models(plan) => {
             let report = plan.report;
             run_models_report(
@@ -156,8 +148,6 @@ fn execute(plan: ExecutionPlan) -> Result<()> {
         ),
         ExecutionPlan::CachePrune => run_source_cache_prune(),
         ExecutionPlan::CacheWarm(source) => run_warm_tui_cache(source.home, source.clients),
-        ExecutionPlan::Codex(subcommand) => run_codex_command(subcommand),
-        ExecutionPlan::Cursor(subcommand) => run_cursor_command(subcommand),
         ExecutionPlan::Antigravity(subcommand) => run_antigravity_command(subcommand),
         ExecutionPlan::Trae(subcommand) => run_trae_command(subcommand),
         ExecutionPlan::Warp(subcommand) => run_warp_command(subcommand),

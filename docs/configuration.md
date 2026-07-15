@@ -8,12 +8,9 @@ Tokscale stores most local settings under the platform config directory:
 
 Known exceptions that are not moved by `TOKSCALE_CONFIG_DIR` today:
 
-- Cursor integration state:
-  `$HOME/.config/tokscale/cursor-credentials.json` and
-  `$HOME/.config/tokscale/cursor-cache/`
+- Cursor local usage data: `$HOME/.config/tokscale/cursor-cache/`
 
-Setting `TOKSCALE_CONFIG_DIR` does not isolate Cursor credentials or Cursor
-usage cache today.
+Setting `TOKSCALE_CONFIG_DIR` does not move this Cursor data directory today.
 
 ## Example
 
@@ -73,7 +70,7 @@ reported explicitly.
 
 | Variable | Meaning |
 | --- | --- |
-| `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Non-empty values are used verbatim. Empty values are treated as unset. It does not currently move Cursor credentials or Cursor usage cache. |
+| `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Non-empty values are used verbatim. Empty values are treated as unset. It does not currently move the Cursor local usage data directory. |
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | Overrides `nativeTimeoutMs`. |
 | `TOKSCALE_EXTRA_DIRS` | One-off extra scan roots as `client:/abs/path,client:/abs/path`. |
 | `TOKSCALE_HEADLESS_DIR` | Overrides the headless capture root. Surrounding whitespace is trimmed; blank values fall back to the default root. |
@@ -135,10 +132,11 @@ Integration roots are mixed state, not all disposable caches:
   `tokscale warp logout --purge-cache` when you intentionally want to remove
   credentials and cached usage together.
 
-Cursor is separate from the `TOKSCALE_CONFIG_DIR` roots above: its credentials
-and cache live at
-`$HOME/.config/tokscale/cursor-credentials.json` and
-`$HOME/.config/tokscale/cursor-cache/`, independent of `TOKSCALE_CONFIG_DIR`.
+Cursor local usage data is separate from the `TOKSCALE_CONFIG_DIR` roots above.
+Tokscale only reads existing `usage*.csv` files from
+`$HOME/.config/tokscale/cursor-cache/`; it does not store Cursor credentials or
+refresh those files. A legacy `cursor-credentials.json` is obsolete and ignored
+by current versions.
 
 ## Subscription providers
 
@@ -160,3 +158,9 @@ warp
 General-purpose provider API keys such as `ZAI_API_KEY`, `GLM_API_KEY`,
 `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `MINIMAX_API_TOKEN` are not used for
 subscription quota lookups.
+
+Codex subscription usage reads the currently authenticated account from
+provider-owned Codex auth state (`$CODEX_HOME/auth.json`, the standard Codex
+config locations, or the official macOS keychain item). Tokscale does not copy,
+refresh, switch, or modify those credentials. A legacy Tokscale
+`codex-credentials.json` is obsolete and ignored by current versions.

@@ -1,4 +1,3 @@
-use crate::cursor;
 use ab_glyph::{point, Font, FontArc, GlyphId, PxScale, ScaleFont};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -205,37 +204,9 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
 
     let has_cursor_cache =
         crate::commands::shared::has_cursor_usage_cache_for_report(&options.home_dir);
-    let cursor_logged_in = options.home_dir.is_none() && cursor::is_cursor_logged_in();
-    let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
-
-    if include_cursor && cursor_logged_in {
-        cursor_sync_result = Some(cursor::sync_cursor_cache().await);
-    }
-
-    if let Some(sync) = cursor_sync_result.as_ref() {
-        if let Some(error) = sync.error.as_ref() {
-            if sync.synced || has_cursor_cache {
-                let prefix = if sync.synced {
-                    "Cursor sync warning"
-                } else {
-                    "Cursor sync failed; using cached data"
-                };
-                eprintln!("{}", format!("  {}: {}", prefix, error).yellow());
-            }
-        }
-    }
-
-    let include_cursor_in_graph = if include_cursor {
-        let synced = cursor_sync_result
-            .as_ref()
-            .map(|sync| sync.synced)
-            .unwrap_or(false);
-        synced || has_cursor_cache
-    } else {
-        false
-    };
+    let include_cursor_in_graph = include_cursor && has_cursor_cache;
     if let Some(warning) =
-        cursor_setup_warning_for_wrapped(explicit_cursor, include_cursor_in_graph, cursor_logged_in)
+        cursor_setup_warning_for_wrapped(explicit_cursor, include_cursor_in_graph)
     {
         eprintln!("{}", format!("  Warning: {warning}").yellow());
     }
@@ -2750,21 +2721,15 @@ mod tests {
 fn cursor_setup_warning_for_wrapped(
     explicit_cursor: bool,
     include_cursor_in_graph: bool,
-    cursor_logged_in: bool,
 ) -> Option<String> {
     if !explicit_cursor || include_cursor_in_graph {
         return None;
     }
 
-    let action = if cursor_logged_in {
-        "run `tokscale cursor sync --json`"
-    } else {
-        "run `tokscale cursor login` and `tokscale cursor sync --json`"
-    };
-
-    Some(format!(
-        "Cursor usage requires Tokscale's Cursor API cache at `~/.config/tokscale/cursor-cache/usage*.csv`; {action}. Tokscale does not parse local `~/.cursor` session data."
-    ))
+    Some(
+        "Cursor usage is read only from local CSV data at `~/.config/tokscale/cursor-cache/usage*.csv`; no readable usage cache was found. Tokscale does not store Cursor credentials or authenticate to Cursor."
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -2772,22 +2737,15 @@ mod cursor_setup_warning_tests {
     use super::cursor_setup_warning_for_wrapped;
 
     #[test]
-    fn wrapped_cursor_warning_suggests_login_when_not_authenticated() {
-        let warning = cursor_setup_warning_for_wrapped(true, false, false).unwrap();
-        assert!(warning.contains("tokscale cursor login"));
-        assert!(warning.contains("tokscale cursor sync --json"));
-    }
-
-    #[test]
-    fn wrapped_cursor_warning_suggests_sync_only_when_authenticated() {
-        let warning = cursor_setup_warning_for_wrapped(true, false, true).unwrap();
-        assert!(!warning.contains("tokscale cursor login"));
-        assert!(warning.contains("tokscale cursor sync --json"));
+    fn wrapped_cursor_warning_explains_local_data_boundary() {
+        let warning = cursor_setup_warning_for_wrapped(true, false).unwrap();
+        assert!(warning.contains("read only from local CSV data"));
+        assert!(warning.contains("does not store Cursor credentials"));
     }
 
     #[test]
     fn wrapped_cursor_warning_is_suppressed_without_explicit_missing_cursor() {
-        assert!(cursor_setup_warning_for_wrapped(false, false, false).is_none());
-        assert!(cursor_setup_warning_for_wrapped(true, true, false).is_none());
+        assert!(cursor_setup_warning_for_wrapped(false, false).is_none());
+        assert!(cursor_setup_warning_for_wrapped(true, true).is_none());
     }
 }

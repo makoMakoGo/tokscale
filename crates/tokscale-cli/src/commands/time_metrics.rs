@@ -1,8 +1,6 @@
 use crate::commands::render::LightSpinner;
 use crate::commands::shared::{
-    auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
-    emit_cursor_setup_warnings, emit_cursor_sync_warning, has_cursor_usage_cache_for_report,
-    setup_warnings_for_report, use_env_roots, ReportEnvelope,
+    emit_cursor_setup_warnings, setup_warnings_for_report, use_env_roots, ReportEnvelope,
 };
 use crate::tui;
 use anyhow::Result;
@@ -21,14 +19,11 @@ pub(crate) fn run_time_metrics_report(
     use tokio::runtime::Runtime;
     use tokscale_core::{get_time_metrics_report, GroupBy, ReportOptions};
 
-    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
-    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Computing time metrics..."))
     };
-    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
@@ -52,11 +47,6 @@ pub(crate) fn run_time_metrics_report(
     if let Some(spinner) = spinner {
         spinner.stop();
     }
-    emit_cursor_sync_warning(
-        cursor_sync_result.as_ref(),
-        had_cursor_cache,
-        explicit_cursor_filter,
-    );
     super::shared::emit_health_summary(&report.health);
     emit_cursor_setup_warnings(&cursor_setup_warnings);
 

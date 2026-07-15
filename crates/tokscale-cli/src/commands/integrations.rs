@@ -1,35 +1,6 @@
-use crate::cli::{
-    AntigravitySubcommand, CodexSubcommand, CursorSubcommand, TraeSubcommand, WarpSubcommand,
-};
-use crate::{antigravity, commands, cursor, trae, warp};
+use crate::cli::{AntigravitySubcommand, TraeSubcommand, WarpSubcommand};
+use crate::{antigravity, trae, warp};
 use anyhow::Result;
-
-pub(crate) fn run_codex_command(subcommand: CodexSubcommand) -> Result<()> {
-    match subcommand {
-        CodexSubcommand::Import { name } => commands::usage::codex::run_codex_import(name),
-        CodexSubcommand::Accounts { json } => commands::usage::codex::run_codex_accounts(json),
-        CodexSubcommand::Switch { name } => commands::usage::codex::run_codex_switch(&name),
-        CodexSubcommand::Remove { name } => commands::usage::codex::run_codex_remove(&name),
-        CodexSubcommand::Status { name, json } => {
-            commands::usage::codex::run_codex_status(name, json)
-        }
-    }
-}
-
-pub(crate) fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
-    match subcommand {
-        CursorSubcommand::Login { name } => cursor::run_cursor_login(name),
-        CursorSubcommand::Logout {
-            name,
-            all,
-            purge_cache,
-        } => cursor::run_cursor_logout(name, all, purge_cache),
-        CursorSubcommand::Status { name } => cursor::run_cursor_status(name),
-        CursorSubcommand::Accounts { json } => cursor::run_cursor_accounts(json),
-        CursorSubcommand::Sync { json } => cursor::run_cursor_sync(json),
-        CursorSubcommand::Switch { name } => cursor::run_cursor_switch(&name),
-    }
-}
 
 pub(crate) fn run_antigravity_command(subcommand: AntigravitySubcommand) -> Result<()> {
     match subcommand {

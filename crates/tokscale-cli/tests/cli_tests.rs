@@ -815,28 +815,6 @@ fn write_cursor_usage_cache(base: &Path) {
     fs::write(cache_dir.join("usage.csv"), "Date,Model\n").unwrap();
 }
 
-fn write_cursor_credentials(base: &Path) {
-    let config_dir = base.join(".config/tokscale");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("cursor-credentials.json"),
-        serde_json::json!({
-            "version": 1,
-            "activeAccountId": "active-account",
-            "accounts": {
-                "active-account": {
-                    "sessionToken": "test-session-token",
-                    "userId": "active-account",
-                    "createdAt": "2026-01-01T00:00:00Z",
-                    "label": "work"
-                }
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-}
-
 // ── Existing tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -943,15 +921,13 @@ fn test_cache_prune_surfaces_unknown_shard_magic() {
 }
 
 #[test]
-fn test_codex_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("codex")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Codex account integration commands",
-        ));
+fn test_account_management_namespaces_are_not_registered() {
+    for command in ["codex", "cursor"] {
+        cargo_bin_cmd!("tokscale")
+            .args([command, "--help"])
+            .assert()
+            .code(2);
+    }
 }
 
 #[test]
@@ -1045,18 +1021,6 @@ fn test_invalid_command() {
 fn test_invalid_subcommand() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("models").arg("invalid-flag").assert().failure();
-}
-
-#[test]
-fn test_codex_accounts_empty_json() {
-    let tmp = TempDir::new().expect("failed to create temp home");
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.env("HOME", tmp.path())
-        .env_remove("CODEX_HOME")
-        .args(["codex", "accounts", "--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(r#""accounts": []"#));
 }
 
 #[test]
@@ -1656,9 +1620,8 @@ fn assert_cursor_setup_warning(output: &std::process::Output) {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(json.get("warnings").is_none());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("tokscale cursor login"), "stderr: {stderr}");
     assert!(
-        stderr.contains("tokscale cursor sync --json"),
+        stderr.contains("Cursor usage is read only from local CSV data"),
         "stderr: {stderr}"
     );
     assert!(
@@ -1666,7 +1629,7 @@ fn assert_cursor_setup_warning(output: &std::process::Output) {
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("Tokscale does not parse local `~/.cursor`"),
+        stderr.contains("Tokscale does not store Cursor credentials"),
         "stderr: {stderr}"
     );
 }
@@ -1752,8 +1715,8 @@ fn test_models_cursor_explicit_home_override_reports_fixture_cache_path() {
     let warning = String::from_utf8_lossy(&output.stderr);
     assert!(
         warning.contains(tmp.path().to_str().unwrap())
-            && warning.contains("tokscale cursor login")
-            && warning.contains("tokscale cursor sync --json")
+            && warning.contains("read only from local CSV data")
+            && warning.contains("does not store Cursor credentials")
             && warning.contains("cursor-cache/usage*.csv"),
         "warning did not explain Cursor --home setup: {warning}"
     );
@@ -1766,11 +1729,11 @@ fn test_models_cursor_explicit_missing_cache_reports_setup_warning_text() {
         .args(["models", "--client", "cursor", "--no-spinner"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Cursor usage requires"))
-        .stderr(predicate::str::contains("tokscale cursor login"))
-        .stderr(predicate::str::contains("tokscale cursor sync --json"))
         .stderr(predicate::str::contains(
-            "Tokscale does not parse local `~/.cursor`",
+            "Cursor usage is read only from local CSV data",
+        ))
+        .stderr(predicate::str::contains(
+            "Tokscale does not store Cursor credentials",
         ));
 }
 
@@ -1784,7 +1747,8 @@ fn test_models_default_missing_cursor_cache_does_not_emit_setup_warning_json() {
 
     assert!(output.status.success());
     assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("Cursor usage requires"),
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("Cursor usage is read only from local CSV data"),
         "default all-client report should not warn about unrequested Cursor setup"
     );
 }
@@ -1801,15 +1765,22 @@ fn test_models_cursor_explicit_existing_cache_suppresses_setup_warning_json() {
 
     assert!(output.status.success());
     assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("Cursor usage requires"),
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("Cursor usage is read only from local CSV data"),
         "existing Cursor cache should suppress setup warnings"
     );
 }
 
 #[test]
-fn test_models_cursor_logged_in_missing_cache_suggests_sync_only_json() {
+fn test_models_cursor_legacy_credentials_do_not_enable_network_sync() {
     let tmp = create_empty_fixture_dir();
-    write_cursor_credentials(tmp.path());
+    let config_dir = tmp.path().join(".config/tokscale");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("cursor-credentials.json"),
+        r#"{"sessionToken":"must-not-be-read"}"#,
+    )
+    .unwrap();
 
     let output = cmd_with_home(tmp.path())
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
@@ -1826,11 +1797,10 @@ fn test_models_cursor_logged_in_missing_cache_suggests_sync_only_json() {
     );
     let _: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let warning = String::from_utf8_lossy(&output.stderr);
-    assert!(warning.contains("tokscale cursor sync --json"));
-    assert!(
-        !warning.contains("tokscale cursor login"),
-        "logged-in users with no cache should be told to sync, not log in again: {warning}"
-    );
+    assert!(warning.contains("read only from local CSV data"));
+    assert!(warning.contains("does not store Cursor credentials"));
+    assert!(!warning.contains("cursor login"));
+    assert!(!warning.contains("cursor sync"));
 }
 
 #[test]
@@ -1924,14 +1894,14 @@ fn test_graph_cursor_explicit_missing_cache_reports_setup_warning_text() {
         .args(["graph", "--client", "cursor", "--no-spinner"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Cursor usage requires"))
-        .stderr(predicate::str::contains("tokscale cursor login"));
+        .stderr(predicate::str::contains(
+            "Cursor usage is read only from local CSV data",
+        ));
 }
 
 #[test]
-fn test_graph_fresh_cursor_cache_skips_auto_sync_warning() {
+fn test_graph_reads_cursor_cache_without_network_sync() {
     let tmp = create_empty_fixture_dir();
-    write_cursor_credentials(tmp.path());
     write_cursor_usage_cache(tmp.path());
 
     let output = cmd_with_home(tmp.path())
@@ -1950,7 +1920,7 @@ fn test_graph_fresh_cursor_cache_skips_auto_sync_warning() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("Cursor sync failed") && !stderr.contains("Cursor sync warning"),
-        "fresh Cursor cache should skip implicit graph sync; stderr: {stderr}"
+        "local Cursor cache must not trigger graph sync; stderr: {stderr}"
     );
 }
 

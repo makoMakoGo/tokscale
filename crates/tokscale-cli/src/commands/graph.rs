@@ -1,8 +1,6 @@
 use crate::commands::render::format_currency;
 use crate::commands::shared::{
-    auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
-    emit_cursor_setup_warnings, emit_cursor_sync_warning, has_cursor_usage_cache_for_report,
-    setup_warnings_for_report, use_env_roots, ReportEnvelope,
+    emit_cursor_setup_warnings, setup_warnings_for_report, use_env_roots, ReportEnvelope,
 };
 use crate::tui;
 use anyhow::Result;
@@ -206,9 +204,6 @@ pub(crate) fn run_graph_command(
     use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
-    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
-    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
     let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
 
     if show_progress {
@@ -237,11 +232,6 @@ pub(crate) fn run_graph_command(
             .await
         })
         .map_err(|e| anyhow::anyhow!(e))?;
-    emit_cursor_sync_warning(
-        cursor_sync_result.as_ref(),
-        had_cursor_cache,
-        explicit_cursor_filter,
-    );
     super::shared::emit_health_summary(&graph_result.health);
     emit_cursor_setup_warnings(&cursor_setup_warnings);
 
@@ -289,22 +279,6 @@ pub(crate) fn run_graph_command(
             "{}",
             format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
         );
-        if let Some(sync) = cursor_sync_result {
-            if sync.synced {
-                eprintln!(
-                    "{}",
-                    format!(
-                        "  Cursor: {} usage events synced (full lifetime data)",
-                        sync.rows
-                    )
-                    .bright_black()
-                );
-            } else if let Some(err) = sync.error {
-                if had_cursor_cache {
-                    eprintln!("{}", format!("  Cursor: sync failed - {}", err).yellow());
-                }
-            }
-        }
     }
 
     Ok(())

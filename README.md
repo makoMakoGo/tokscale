@@ -130,10 +130,9 @@ Some catalog entries have explicit boundaries:
   Tokscale applies the fixed total-only bucket allocation from ADR 0017.
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
   accounting.
-- `cursor` reads a local API cache. Logged-in local reports and the TUI can
-  refresh a stale cache automatically when no `--home` override is used, Cursor
-  is in scope, and the cache is older than five minutes; `tokscale cursor sync`
-  forces a refresh.
+- `cursor` reads existing `usage*.csv` files from the local Cursor cache.
+  Tokscale does not store Cursor credentials, authenticate with Cursor, or make
+  implicit Cursor API requests.
 - `antigravity` and `trae` use local caches refreshed by explicit sync commands.
 
 ## Data and pricing semantics

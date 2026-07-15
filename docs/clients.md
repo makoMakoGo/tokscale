@@ -21,7 +21,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode*.db` | Reads only current-format SQLite databases and combines multiple release channels when present. |
 | `claude` | Claude Code | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Claude Desktop chat history is not treated as Claude Code token accounting. |
 | `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Also supports `tokscale headless codex ...` capture. |
-| `cursor` | Cursor | `~/.config/tokscale/cursor-cache/usage*.csv` | Reads a local API cache. Logged-in reports and the TUI may auto-refresh stale cache data; local `~/.cursor` state is not parsed. |
+| `cursor` | Cursor | `~/.config/tokscale/cursor-cache/usage*.csv` | Reads existing local CSV data only. Tokscale does not authenticate with Cursor or refresh the data; local `~/.cursor` state is not parsed. |
 | `gemini` | Gemini CLI | `$GEMINI_CLI_HOME/tmp/**/chats/*`, fallback `~/.gemini/tmp/` | Reads local chat files. |
 | `amp` | Amp | `~/.local/share/amp/threads/T-*.json` | Reads local thread files. |
 | `droid` | Droid | `~/.factory/sessions/**/*.settings.json` | Reads Factory Droid sessions. |
@@ -113,24 +113,12 @@ TOKSCALE_EXTRA_DIRS='codex:/abs/path/.codex/sessions,gemini:/abs/path/gemini/tmp
 
 ## Cache-backed integrations
 
-Cursor reads a local API cache, but it is not purely manual-sync-backed. Ordinary
-local reports and the TUI may call the Cursor API before reading reports when
-all of these are true:
-
-- no `--home` override is active;
-- the client filter includes Cursor, including the default unfiltered report;
-- saved Cursor credentials exist;
-- the expected Cursor cache files are older than five minutes.
-
-Manual commands are still available:
-
-```bash
-tokscale cursor login --name work
-tokscale cursor sync --json
-```
-
-`tokscale cursor sync --json` forces a refresh. Filtering Cursor out with
-`--client` or using `--home` prevents the implicit pre-report refresh.
+Cursor reads existing `usage*.csv` files under
+`~/.config/tokscale/cursor-cache/`. Tokscale does not store Cursor credentials,
+authenticate with Cursor, or make network requests to refresh that directory.
+There is no `tokscale cursor` account-management namespace. When Cursor is
+explicitly selected but no local CSV data exists, Tokscale reports the missing
+local data while preserving results from other selected clients.
 
 Antigravity and Trae are different: they do not refresh from the root report or
 TUI command. Run their sync commands before reports when you need fresh data:

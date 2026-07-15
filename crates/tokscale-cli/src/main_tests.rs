@@ -764,9 +764,11 @@ fn clap_accepts_explicit_cache_warm_scope() {
 }
 
 #[test]
-fn clap_accepts_cursor_sync_command() {
-    assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());
+fn cli_rejects_removed_account_management_namespaces() {
+    assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "cursor", "logout", "--all"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "codex", "accounts"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "codex", "switch", "work"]).is_err());
 }
 
 #[test]
@@ -869,48 +871,33 @@ fn headless_roots_trim_env_override() {
 }
 
 #[test]
-fn cursor_auto_sync_enabled_for_default_report() {
-    assert!(should_auto_sync_cursor_for_local_report(&None, &None));
+fn cursor_setup_uses_local_usage_csv_without_credentials() {
+    let home = tempfile::TempDir::new().unwrap();
+    let cache = home.path().join(".config/tokscale/cursor-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("usage.csv"), "Date,Model\n").unwrap();
+
+    let home = Some(home.path().to_string_lossy().into_owned());
+    assert!(has_cursor_usage_cache_for_report(&home));
+    assert!(cursor_setup_warnings_for_report(&home, &Some(vec!["cursor".to_string()])).is_empty());
 }
 
 #[test]
-fn cursor_auto_sync_enabled_when_cursor_filter_is_explicit() {
-    assert!(should_auto_sync_cursor_for_local_report(
-        &None,
-        &Some(vec!["cursor".to_string()])
-    ));
-}
+fn cursor_credentials_file_is_not_treated_as_a_data_source() {
+    let home = tempfile::TempDir::new().unwrap();
+    let config = home.path().join(".config/tokscale");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("cursor-credentials.json"),
+        r#"{"sessionToken":"must-not-be-read"}"#,
+    )
+    .unwrap();
 
-#[test]
-fn cursor_auto_sync_disabled_when_filter_excludes_cursor() {
-    assert!(!should_auto_sync_cursor_for_local_report(
-        &None,
-        &Some(vec!["codex".to_string()])
-    ));
-}
-
-#[test]
-fn cursor_auto_sync_disabled_for_home_override() {
-    assert!(!should_auto_sync_cursor_for_local_report(
-        &Some("/tmp/other-home".to_string()),
-        &None
-    ));
-    assert!(!should_auto_sync_cursor_for_local_report(
-        &Some("/tmp/other-home".to_string()),
-        &Some(vec!["cursor".to_string()])
-    ));
-}
-
-#[test]
-fn cursor_auto_sync_runtime_init_failure_is_best_effort() {
-    let result = run_best_effort_cursor_sync_with_runtime_factory(|| {
-        Err(std::io::Error::other("runtime unavailable"))
-    });
-
-    assert!(!result.synced);
-    assert_eq!(result.rows, 0);
-    assert!(result
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("runtime unavailable")));
+    let home = Some(home.path().to_string_lossy().into_owned());
+    assert!(!has_cursor_usage_cache_for_report(&home));
+    let warnings = cursor_setup_warnings_for_report(&home, &Some(vec!["cursor".to_string()]));
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("does not store Cursor credentials"));
+    assert!(!warnings[0].contains("cursor login"));
+    assert!(!warnings[0].contains("cursor sync"));
 }

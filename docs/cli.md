@@ -183,23 +183,14 @@ a local source parser.
 
 ## Integration and usage commands
 
+Tokscale does not provide `cursor` or `codex` account-management command
+namespaces. Cursor local reports read existing local usage CSV files only.
+`tokscale usage` reads the currently authenticated Codex account from
+provider-owned auth state without copying, switching, refreshing, or modifying
+its credentials.
+
 ```bash
-# Cursor
-tokscale cursor login --name work
-tokscale cursor status
-tokscale cursor accounts --json
-tokscale cursor sync --json
-tokscale cursor switch work
-tokscale cursor logout --name work
-
-# Codex accounts
-tokscale codex import --name work
-tokscale codex accounts --json
-tokscale codex switch work
-tokscale codex status --json
-tokscale codex remove work
-
-# Other local integrations
+# Local integrations with explicit sync workflows
 tokscale antigravity status --json
 tokscale antigravity sync
 tokscale trae status --json

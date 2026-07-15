@@ -104,8 +104,6 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
         "wrapped",
         "headless",
         "cache",
-        "codex",
-        "cursor",
         "antigravity",
         "trae",
         "warp",
@@ -254,16 +252,6 @@ pub(crate) enum Commands {
     Cache {
         #[command(subcommand)]
         subcommand: CacheSubcommand,
-    },
-    #[command(about = "Codex account integration commands")]
-    Codex {
-        #[command(subcommand)]
-        subcommand: CodexSubcommand,
-    },
-    #[command(about = "Cursor API cache integration commands")]
-    Cursor {
-        #[command(subcommand)]
-        subcommand: CursorSubcommand,
     },
     #[command(about = "Antigravity integration commands")]
     Antigravity {
@@ -494,75 +482,6 @@ pub(crate) enum CacheSubcommand {
     },
     #[command(about = "Remove orphaned and superseded source-message cache shards")]
     Prune,
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum CodexSubcommand {
-    #[command(about = "Import the current Codex OAuth credentials as a saved account")]
-    Import {
-        #[arg(long, help = "Label for this Codex account")]
-        name: Option<String>,
-    },
-    #[command(about = "List saved Codex accounts")]
-    Accounts {
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-    },
-    #[command(about = "Switch active Codex account and write Codex auth.json")]
-    Switch {
-        #[arg(help = "Account label or id")]
-        name: String,
-    },
-    #[command(about = "Remove a saved Codex account")]
-    Remove {
-        #[arg(help = "Account label or id")]
-        name: String,
-    },
-    #[command(about = "Check Codex subscription usage for an account")]
-    Status {
-        #[arg(long, help = "Account label or id")]
-        name: Option<String>,
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum CursorSubcommand {
-    #[command(about = "Login to Cursor with a browser session token")]
-    Login {
-        #[arg(long, help = "Label for this Cursor account")]
-        name: Option<String>,
-    },
-    #[command(about = "Logout from a Cursor account")]
-    Logout {
-        #[arg(long, help = "Account label or id")]
-        name: Option<String>,
-        #[arg(long, help = "Logout from all Cursor accounts")]
-        all: bool,
-        #[arg(long, help = "Also delete cached Cursor usage")]
-        purge_cache: bool,
-    },
-    #[command(about = "Check Cursor authentication status")]
-    Status {
-        #[arg(long, help = "Account label or id")]
-        name: Option<String>,
-    },
-    #[command(about = "List saved Cursor accounts")]
-    Accounts {
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-    },
-    #[command(about = "Sync Cursor API usage into the local cache")]
-    Sync {
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-    },
-    #[command(about = "Switch active Cursor account")]
-    Switch {
-        #[arg(help = "Account label or id")]
-        name: String,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -814,8 +733,6 @@ pub(crate) enum ExecutionPlan {
     Headless(HeadlessArgs),
     CachePrune,
     CacheWarm(ResolvedSourceScope),
-    Codex(CodexSubcommand),
-    Cursor(CursorSubcommand),
     Antigravity(AntigravitySubcommand),
     Trae(TraeSubcommand),
     Warp(WarpSubcommand),
@@ -872,8 +789,6 @@ impl ExecutionPlan {
                 CacheSubcommand::Prune => Ok(Self::CachePrune),
                 CacheSubcommand::Warm { source } => resolve_source(source).map(Self::CacheWarm),
             },
-            Commands::Codex { subcommand } => Ok(Self::Codex(subcommand)),
-            Commands::Cursor { subcommand } => Ok(Self::Cursor(subcommand)),
             Commands::Antigravity { subcommand } => Ok(Self::Antigravity(subcommand)),
             Commands::Trae { subcommand } => Ok(Self::Trae(subcommand)),
             Commands::Warp { subcommand } => Ok(Self::Warp(subcommand)),
