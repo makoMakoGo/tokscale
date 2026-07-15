@@ -161,14 +161,13 @@ fn run_wrapped_command(plan: WrappedPlan) -> Result<()> {
         eprintln!("{}", "Generating wrapped image...".bright_black());
     }
 
-    let include_agents = !plan.show_clients || plan.agents;
     let wrapped_options = commands::wrapped::WrappedOptions {
         output: plan.output,
         year: plan.year,
         home_dir: plan.source.home,
         clients: plan.source.clients,
         short: plan.short,
-        include_agents,
+        ranking: plan.ranking,
         pin_sisyphus: !plan.disable_pinned,
     };
 

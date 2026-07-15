@@ -190,38 +190,87 @@ fn test_client_flags_parses_canonical_form() {
 }
 
 #[test]
-fn test_wrapped_parses_clients_view_flag() {
+fn wrapped_ranking_is_one_typed_selection() {
     let cli = Cli::try_parse_from(["tokscale", "wrapped"]).expect("parse ok");
     let Some(Commands::Wrapped(args)) = cli.command else {
         panic!("expected wrapped command");
     };
-    assert!(!args.show_clients);
-    assert!(!args.agents);
+    assert_eq!(args.ranking, None);
 
-    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients"]).expect("parse ok");
+    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "agents"])
+        .expect("agents ranking parses");
     let Some(Commands::Wrapped(args)) = cli.command else {
         panic!("expected wrapped command");
     };
-    assert!(args.show_clients);
+    assert_eq!(args.ranking, Some(WrappedRankingArg::Agents));
+
+    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "clients"])
+        .expect("clients ranking parses");
+    let Some(Commands::Wrapped(args)) = cli.command else {
+        panic!("expected wrapped command");
+    };
+    assert_eq!(args.ranking, Some(WrappedRankingArg::Clients));
+
+    for removed in ["--agents", "--clients"] {
+        assert!(Cli::try_parse_from(["tokscale", "wrapped", removed]).is_err());
+    }
 }
 
 #[test]
-fn test_wrapped_client_filter_coexists_with_clients_view_flag() {
-    let cli =
-        Cli::try_parse_from(["tokscale", "wrapped", "--client", "opencode"]).expect("parse ok");
-    let Some(Commands::Wrapped(args)) = cli.command else {
-        panic!("expected wrapped command");
+fn wrapped_ranking_resolves_without_boolean_precedence() {
+    let resolve = |args: &[&str]| {
+        let cli = Cli::try_parse_from(args).expect("wrapped arguments parse");
+        ExecutionPlan::resolve(
+            cli,
+            TerminalState {
+                stdin: false,
+                stdout: false,
+            },
+        )
     };
-    assert_eq!(args.source.clients.clients, vec![ClientId::OpenCode]);
-    assert!(!args.show_clients);
 
-    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients", "--client", "opencode"])
-        .expect("parse ok");
-    let Some(Commands::Wrapped(args)) = cli.command else {
-        panic!("expected wrapped command");
+    let ExecutionPlan::Wrapped(plan) =
+        resolve(&["tokscale", "wrapped"]).expect("default ranking resolves")
+    else {
+        panic!("expected wrapped plan");
     };
-    assert_eq!(args.source.clients.clients, vec![ClientId::OpenCode]);
-    assert!(args.show_clients);
+    assert_eq!(plan.ranking, WrappedRanking::Auto);
+
+    let ExecutionPlan::Wrapped(plan) = resolve(&[
+        "tokscale",
+        "wrapped",
+        "--ranking",
+        "agents",
+        "--client",
+        "opencode",
+    ])
+    .expect("agents ranking resolves") else {
+        panic!("expected wrapped plan");
+    };
+    assert_eq!(plan.ranking, WrappedRanking::Agents);
+
+    let error = resolve(&[
+        "tokscale",
+        "wrapped",
+        "--ranking",
+        "agents",
+        "--client",
+        "claude",
+    ])
+    .expect_err("agents ranking without OpenCode must fail during resolve");
+    assert!(
+        matches!(error, ResolveError::Usage(message) if message.contains("requires `opencode`"))
+    );
+
+    let error = resolve(&[
+        "tokscale",
+        "wrapped",
+        "--ranking",
+        "clients",
+        "--disable-pinned",
+    ])
+    .expect_err("client ranking cannot accept an ignored agent option");
+    assert!(matches!(error, ResolveError::Usage(message) if message.contains("does not apply")));
 }
 
 #[test]

@@ -953,6 +953,49 @@ fn test_tui_command_help() {
 }
 
 #[test]
+fn test_wrapped_ranking_rejects_ambiguous_and_irrelevant_options() {
+    cargo_bin_cmd!("tokscale")
+        .args(["wrapped", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--ranking <RANKING>"))
+        .stdout(predicate::str::contains("--agents").not())
+        .stdout(predicate::str::contains("--clients").not());
+
+    cargo_bin_cmd!("tokscale")
+        .args(["wrapped", "--agents", "--clients", "--no-spinner"])
+        .assert()
+        .code(2);
+
+    cargo_bin_cmd!("tokscale")
+        .args([
+            "wrapped",
+            "--ranking",
+            "agents",
+            "--client",
+            "claude",
+            "--no-spinner",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "--ranking agents requires `opencode`",
+        ));
+
+    cargo_bin_cmd!("tokscale")
+        .args([
+            "wrapped",
+            "--ranking",
+            "clients",
+            "--disable-pinned",
+            "--no-spinner",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--disable-pinned does not apply"));
+}
+
+#[test]
 fn test_help_exposes_only_leaf_owned_options() {
     cargo_bin_cmd!("tokscale")
         .arg("--help")

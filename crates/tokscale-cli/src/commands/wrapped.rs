@@ -14,6 +14,8 @@ use tokscale_core::{
     ReportOptions, ViewSet,
 };
 
+use crate::cli::WrappedRanking;
+
 const SCALE: i32 = 2;
 const IMAGE_WIDTH: i32 = 1200 * SCALE;
 const IMAGE_HEIGHT: i32 = 1200 * SCALE;
@@ -61,7 +63,7 @@ pub struct WrappedOptions {
     pub home_dir: Option<String>,
     pub clients: Option<Vec<String>>,
     pub short: bool,
-    pub include_agents: bool,
+    pub ranking: WrappedRanking,
     pub pin_sisyphus: bool,
 }
 
@@ -117,8 +119,14 @@ struct FontSet {
 #[derive(Debug, Clone)]
 struct RenderOptions {
     short: bool,
-    include_agents: bool,
+    ranking: RenderRanking,
     pin_sisyphus: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderRanking {
+    Agents,
+    Clients,
 }
 
 pub fn run(options: WrappedOptions) -> Result<String> {
@@ -130,7 +138,6 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
     let data = load_wrapped_data(&options).await?;
     crate::commands::shared::emit_health_summary(&data.health);
 
-    let agents_requested = options.include_agents;
     let has_agent_data = data
         .top_agents
         .as_ref()
@@ -140,17 +147,27 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
         .clients
         .as_ref()
         .is_none_or(|clients| clients.iter().any(|s| s == "opencode"));
-    let effective_include_agents = agents_requested && has_agent_data;
+    let render_ranking = select_render_ranking(options.ranking, has_agent_data);
 
-    if agents_requested && opencode_enabled && !has_agent_data {
+    if options.ranking == WrappedRanking::Auto && opencode_enabled && !has_agent_data {
         eprintln!(
             "{}",
             format!("\n  ⚠ No OpenCode agent data found for {}.", data.year).yellow()
         );
-        eprintln!("{}", "    Falling back to clients view.".bright_black());
         eprintln!(
             "{}",
-            "    Use --clients to always show clients view.\n".bright_black()
+            "    Automatic ranking selected the clients view. Use --ranking clients to select it explicitly.\n"
+                .bright_black()
+        );
+    } else if options.ranking == WrappedRanking::Agents && !has_agent_data {
+        eprintln!(
+            "{}",
+            format!("\n  ⚠ No OpenCode agent data found for {}.", data.year).yellow()
+        );
+        eprintln!(
+            "{}",
+            "    Rendering the requested agents view with an explicit empty-state panel.\n"
+                .bright_black()
         );
     }
 
@@ -158,7 +175,7 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
         &data,
         &RenderOptions {
             short: options.short,
-            include_agents: effective_include_agents,
+            ranking: render_ranking,
             pin_sisyphus: options.pin_sisyphus,
         },
     )
@@ -182,6 +199,15 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
     Ok(absolute.to_string_lossy().to_string())
 }
 
+fn select_render_ranking(ranking: WrappedRanking, has_agent_data: bool) -> RenderRanking {
+    match ranking {
+        WrappedRanking::Auto if has_agent_data => RenderRanking::Agents,
+        WrappedRanking::Auto => RenderRanking::Clients,
+        WrappedRanking::Agents => RenderRanking::Agents,
+        WrappedRanking::Clients => RenderRanking::Clients,
+    }
+}
+
 async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let year = options
         .year
@@ -193,6 +219,10 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .filter(|src| src.as_str() != ClientId::Cursor.as_str())
         .cloned()
         .collect();
+    let include_agent_view = options.ranking != WrappedRanking::Clients
+        && local_clients
+            .iter()
+            .any(|client| client == ClientId::OpenCode.as_str());
     let include_cursor = clients.iter().any(|src| src == ClientId::Cursor.as_str());
     let explicit_cursor = options
         .clients
@@ -222,7 +252,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     };
 
     let mut views = ViewSet::GRAPH | ViewSet::TIME_METRICS;
-    if options.include_agents && !local_clients.is_empty() {
+    if include_agent_view {
         views |= ViewSet::AGENTS;
     }
 
@@ -269,7 +299,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     top_clients.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(Ordering::Equal));
     top_clients.truncate(3);
 
-    let top_agents = if options.include_agents {
+    let top_agents = if include_agent_view {
         aggregated
             .agent_usage
             .as_ref()
@@ -558,7 +588,7 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
     }
     y_pos += 40 * SCALE;
 
-    if options.include_agents {
+    if options.ranking == RenderRanking::Agents {
         draw_text_mut_baseline(
             &mut canvas,
             &fonts.regular,
@@ -571,6 +601,17 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
         y_pos += 48 * SCALE;
 
         let agents = data.top_agents.clone().unwrap_or_default();
+        if agents.is_empty() {
+            draw_text_mut_baseline(
+                &mut canvas,
+                &fonts.regular,
+                (28 * SCALE) as f32,
+                COLOR_TEXT_SECONDARY,
+                PADDING,
+                y_pos,
+                "No OpenCode agent data",
+            );
+        }
         let mut rank_index = 1;
 
         for agent in agents {
@@ -1704,6 +1745,30 @@ mod tests {
     use std::env;
     use tempfile::TempDir;
     use tokscale_core::{DataHealth, RejectionSummary, SourceFailure, SourceHealth, SourceStatus};
+
+    #[test]
+    fn automatic_ranking_uses_agents_only_when_agent_data_exists() {
+        assert_eq!(
+            select_render_ranking(WrappedRanking::Auto, true),
+            RenderRanking::Agents
+        );
+        assert_eq!(
+            select_render_ranking(WrappedRanking::Auto, false),
+            RenderRanking::Clients
+        );
+    }
+
+    #[test]
+    fn explicit_agents_ranking_never_changes_to_clients() {
+        assert_eq!(
+            select_render_ranking(WrappedRanking::Agents, false),
+            RenderRanking::Agents
+        );
+        assert_eq!(
+            select_render_ranking(WrappedRanking::Clients, true),
+            RenderRanking::Clients
+        );
+    }
 
     fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
         unsafe {

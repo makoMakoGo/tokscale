@@ -353,14 +353,38 @@ pub(crate) struct WrappedArgs {
     pub(crate) source: SourceScopeArgs,
     #[arg(long, help = "Display total tokens in abbreviated format")]
     pub(crate) short: bool,
-    #[arg(long, help = "Display Top OpenCode Agents")]
-    pub(crate) agents: bool,
-    #[arg(long = "clients", help = "Display Top Clients instead of agents")]
-    pub(crate) show_clients: bool,
+    #[arg(
+        long,
+        value_enum,
+        help = "Choose the ranking panel instead of automatic selection"
+    )]
+    pub(crate) ranking: Option<WrappedRankingArg>,
     #[arg(long, help = "Disable pinning of Sisyphus agents in rankings")]
     pub(crate) disable_pinned: bool,
     #[arg(long, help = "Disable progress animation")]
     pub(crate) no_spinner: bool,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WrappedRankingArg {
+    Agents,
+    Clients,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WrappedRanking {
+    Auto,
+    Agents,
+    Clients,
+}
+
+impl From<WrappedRankingArg> for WrappedRanking {
+    fn from(value: WrappedRankingArg) -> Self {
+        match value {
+            WrappedRankingArg::Agents => Self::Agents,
+            WrappedRankingArg::Clients => Self::Clients,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -712,8 +736,7 @@ pub(crate) struct WrappedPlan {
     pub(crate) year: Option<String>,
     pub(crate) source: ResolvedSourceScope,
     pub(crate) short: bool,
-    pub(crate) agents: bool,
-    pub(crate) show_clients: bool,
+    pub(crate) ranking: WrappedRanking,
     pub(crate) disable_pinned: bool,
     pub(crate) no_spinner: bool,
 }
@@ -774,16 +797,7 @@ impl ExecutionPlan {
             })),
             Commands::Pricing { subcommand } => Ok(Self::Pricing(subcommand)),
             Commands::Usage { json } => Ok(Self::Usage { json }),
-            Commands::Wrapped(args) => Ok(Self::Wrapped(WrappedPlan {
-                output: args.output,
-                year: args.year,
-                source: resolve_source(args.source)?,
-                short: args.short,
-                agents: args.agents,
-                show_clients: args.show_clients,
-                disable_pinned: args.disable_pinned,
-                no_spinner: args.no_spinner,
-            })),
+            Commands::Wrapped(args) => resolve_wrapped(args).map(Self::Wrapped),
             Commands::Headless(args) => Ok(Self::Headless(args)),
             Commands::Cache { subcommand } => match subcommand {
                 CacheSubcommand::Prune => Ok(Self::CachePrune),
@@ -794,6 +808,42 @@ impl ExecutionPlan {
             Commands::Warp { subcommand } => Ok(Self::Warp(subcommand)),
         }
     }
+}
+
+fn resolve_wrapped(args: WrappedArgs) -> Result<WrappedPlan, ResolveError> {
+    let source = resolve_source(args.source)?;
+    let ranking = args
+        .ranking
+        .map(WrappedRanking::from)
+        .unwrap_or(WrappedRanking::Auto);
+
+    if ranking == WrappedRanking::Agents
+        && source.clients.as_ref().is_some_and(|clients| {
+            !clients
+                .iter()
+                .any(|client| client == ClientId::OpenCode.as_str())
+        })
+    {
+        return Err(ResolveError::Usage(
+            "--ranking agents requires `opencode` in the --client scope".to_string(),
+        ));
+    }
+
+    if ranking == WrappedRanking::Clients && args.disable_pinned {
+        return Err(ResolveError::Usage(
+            "--disable-pinned does not apply to --ranking clients".to_string(),
+        ));
+    }
+
+    Ok(WrappedPlan {
+        output: args.output,
+        year: args.year,
+        source,
+        short: args.short,
+        ranking,
+        disable_pinned: args.disable_pinned,
+        no_spinner: args.no_spinner,
+    })
 }
 
 fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, ResolveError> {

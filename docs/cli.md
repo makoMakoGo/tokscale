@@ -150,6 +150,20 @@ tokscale clients --json
 tokscale clients --client codex --home /tmp/test-home
 ```
 
+## Wrapped ranking
+
+```bash
+tokscale wrapped
+tokscale wrapped --ranking agents
+tokscale wrapped --ranking clients
+```
+
+Without `--ranking`, Wrapped automatically uses OpenCode agent rankings when
+agent data exists and otherwise uses client rankings. An explicit
+`--ranking agents` never changes into a client ranking: when no agent data is
+available, the image keeps the requested panel and renders an explicit empty
+state. `--ranking agents` requires OpenCode in an explicit `--client` scope.
+
 ## Cache maintenance
 
 ```bash
