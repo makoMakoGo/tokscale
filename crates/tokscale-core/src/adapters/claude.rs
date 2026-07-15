@@ -15,7 +15,7 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
 
-const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
+const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 5;
 
 pub(crate) struct ClaudeAdapter;
 

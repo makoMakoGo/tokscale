@@ -7,7 +7,6 @@
 //! Note: This parser has stateful logic to track model and delta calculations.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::utils::{extract_i64, extract_string, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::source_health::{RecordRejectionReason, RejectionSummary, SourceFailure};
 use crate::{checked_token_sum, TokenBreakdown};
@@ -165,7 +164,7 @@ pub(crate) struct CodexParseState {
     #[serde(default)]
     pub current_turn_start_ms: Option<i64>,
     pub previous_totals: Option<CodexTotals>,
-    pub session_is_headless: bool,
+    pub session_is_exec: bool,
     pub session_id_from_meta: Option<String>,
     pub session_forked_from_id: Option<String>,
     pub forked_child_session_id: Option<String>,
@@ -475,7 +474,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
 
                 if entry.entry_type == "session_meta" {
                     if codex_source_is_exec(payload.source.as_ref()) {
-                        state.session_is_headless = true;
+                        state.session_is_exec = true;
                     }
                     if let Some(ref id) = payload.id {
                         state.session_id_from_meta = Some(id.clone());
@@ -504,7 +503,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                         payload.source.as_ref(),
                         agent_role,
                         payload.agent_nickname.as_deref(),
-                        state.session_is_headless,
+                        state.session_is_exec,
                     );
                     state.session_agent_instance = payload
                         .agent_nickname
@@ -540,7 +539,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                 // A human `user_message` event starts a new turn. The event
                 // itself carries no tokens, so we defer the flag to the next
                 // token_count-derived message (the assistant's reply). This
-                // counts `codex exec` one-shots too: they are headless but still
+                // counts `codex exec` one-shots too: they are non-interactive but still
                 // carry a real human prompt, so each is one turn. Only
                 // system-injected messages (leading `<`, e.g.
                 // <environment_context>, <system-reminder>) are excluded as
@@ -697,48 +696,21 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
             continue;
         }
 
+        if !pending_model_messages.is_empty() {
+            interrupt_on_record!(
+                RecordRejectionReason::MissingModel,
+                SessionParseError::invalid(
+                    "resolve Codex token-count model",
+                    "token-count rows were not followed by a model-bearing event",
+                )
+            );
+        }
+
         if state.forked_child_waiting_for_turn_context {
             let mut json_probe = trimmed.as_bytes().to_vec();
             if simd_json::from_slice::<Value>(&mut json_probe).is_ok() {
                 continue;
             }
-        }
-
-        let headless_message = match parse_codex_headless_line(
-            trimmed,
-            CodexHeadlessContext {
-                session_id,
-                session_provider: state.session_provider.as_deref(),
-                session_agent: &state.session_agent,
-                session_agent_instance: &state.session_agent_instance,
-                session_is_headless: state.session_is_headless,
-            },
-            &mut state.current_model,
-        ) {
-            Ok(message) => message,
-            Err(error) => interrupt_on_record!(error.reason, error.source),
-        };
-        if !pending_model_messages.is_empty() {
-            if let Some(model) = state.current_model.clone() {
-                flush_pending_model_messages(&mut pending_model_messages, &mut messages, &model);
-            } else {
-                interrupt_on_record!(
-                    RecordRejectionReason::MissingModel,
-                    SessionParseError::invalid(
-                        "resolve Codex token-count model",
-                        "headless usage followed token-count rows without a model",
-                    )
-                );
-            }
-        }
-
-        if let Some(mut msg) = headless_message {
-            msg.set_workspace(
-                state.session_workspace_key.clone(),
-                state.session_workspace_label.clone(),
-            );
-            messages.push(msg);
-            continue;
         }
 
         if let Some(source) = entry_decode_error {
@@ -806,10 +778,10 @@ fn codex_agent_label(
     source: Option<&Value>,
     agent_role: Option<&str>,
     agent_nickname: Option<&str>,
-    is_headless: bool,
+    is_exec: bool,
 ) -> Option<String> {
-    if is_headless {
-        return Some("Codex Headless".to_string());
+    if is_exec {
+        return Some("Codex Exec".to_string());
     }
 
     if codex_source_is_subagent(source) {
@@ -1118,99 +1090,6 @@ fn extract_model_from_info(info: &CodexInfo) -> Option<String> {
         .or(info.model_name.clone().filter(|s| !s.is_empty()))
 }
 
-struct CodexHeadlessUsage {
-    input: i64,
-    output: i64,
-    cached: i64,
-    model: Option<String>,
-    timestamp_ms: Option<i64>,
-}
-
-struct CodexRecordError {
-    reason: RecordRejectionReason,
-    source: SessionParseError,
-}
-
-impl CodexRecordError {
-    fn new(reason: RecordRejectionReason, source: SessionParseError) -> Self {
-        Self { reason, source }
-    }
-}
-
-struct CodexHeadlessContext<'a> {
-    session_id: &'a str,
-    session_provider: Option<&'a str>,
-    session_agent: &'a Option<String>,
-    session_agent_instance: &'a Option<String>,
-    session_is_headless: bool,
-}
-
-fn parse_codex_headless_line(
-    line: &str,
-    context: CodexHeadlessContext<'_>,
-    current_model: &mut Option<String>,
-) -> Result<Option<UnifiedMessage>, CodexRecordError> {
-    let mut bytes = line.as_bytes().to_vec();
-    let value: Value = simd_json::from_slice(&mut bytes).map_err(|source| {
-        CodexRecordError::new(
-            RecordRejectionReason::MalformedRecord,
-            SessionParseError::new("decode Codex headless line", source),
-        )
-    })?;
-
-    if let Some(model) = extract_model_from_value(&value) {
-        *current_model = Some(model);
-    }
-
-    let Some(usage) = extract_headless_usage(&value) else {
-        return Ok(None);
-    };
-    let model = usage
-        .model
-        .or_else(|| current_model.clone())
-        .ok_or_else(|| {
-            CodexRecordError::new(
-                RecordRejectionReason::MissingModel,
-                SessionParseError::invalid("validate Codex headless usage", "model is missing"),
-            )
-        })?;
-    let timestamp = usage.timestamp_ms.ok_or_else(|| {
-        CodexRecordError::new(
-            RecordRejectionReason::MissingTimestamp,
-            SessionParseError::invalid("validate Codex headless usage", "timestamp is missing"),
-        )
-    })?;
-
-    if usage.input == 0 && usage.output == 0 && usage.cached == 0 {
-        return Ok(None);
-    }
-
-    let provider = context.session_provider.unwrap_or("openai");
-    let mut message = UnifiedMessage::new_with_agent(
-        "codex",
-        model,
-        provider,
-        context.session_id,
-        timestamp,
-        TokenBreakdown {
-            input: usage.input.max(0),
-            output: usage.output.max(0),
-            cache_read: usage.cached.max(0),
-            cache_write: 0,
-            reasoning: 0,
-        },
-        0.0,
-        if context.session_is_headless {
-            Some("Codex Headless".to_string())
-        } else {
-            context.session_agent.clone()
-        },
-    );
-    message.set_agent_instance(context.session_agent_instance.clone());
-
-    Ok(Some(message))
-}
-
 fn codex_schema_invalid_value_may_affect_state(value: &Value) -> bool {
     value
         .get("type")
@@ -1218,70 +1097,6 @@ fn codex_schema_invalid_value_may_affect_state(value: &Value) -> bool {
         .is_some_and(|entry_type| {
             matches!(entry_type, "session_meta" | "turn_context" | "event_msg")
         })
-        || extract_model_from_value(value).is_some()
-        || extract_headless_usage(value).is_some()
-}
-
-fn extract_headless_usage(value: &Value) -> Option<CodexHeadlessUsage> {
-    let usage = value
-        .get("usage")
-        .or_else(|| value.get("data").and_then(|data| data.get("usage")))
-        .or_else(|| value.get("result").and_then(|data| data.get("usage")))
-        .or_else(|| value.get("response").and_then(|data| data.get("usage")))?;
-
-    let input_tokens = extract_i64(usage.get("input_tokens"))
-        .or_else(|| extract_i64(usage.get("prompt_tokens")))
-        .or_else(|| extract_i64(usage.get("input")))
-        .unwrap_or(0);
-    let output_tokens = extract_i64(usage.get("output_tokens"))
-        .or_else(|| extract_i64(usage.get("completion_tokens")))
-        .or_else(|| extract_i64(usage.get("output")))
-        .unwrap_or(0);
-    let cached_tokens = extract_i64(usage.get("cached_input_tokens"))
-        .or_else(|| extract_i64(usage.get("cache_read_input_tokens")))
-        .or_else(|| extract_i64(usage.get("cached_tokens")))
-        .unwrap_or(0);
-
-    let model = extract_model_from_value(value)
-        .or_else(|| value.get("data").and_then(extract_model_from_value));
-    let timestamp_ms = extract_timestamp_from_value(value);
-
-    Some(CodexHeadlessUsage {
-        input: input_tokens.saturating_sub(cached_tokens),
-        output: output_tokens,
-        cached: cached_tokens,
-        model,
-        timestamp_ms,
-    })
-}
-
-fn extract_model_from_value(value: &Value) -> Option<String> {
-    extract_string(value.get("model"))
-        .or_else(|| extract_string(value.get("model_name")))
-        .or_else(|| {
-            value
-                .get("data")
-                .and_then(|data| extract_string(data.get("model")))
-        })
-        .or_else(|| {
-            value
-                .get("data")
-                .and_then(|data| extract_string(data.get("model_name")))
-        })
-        .or_else(|| {
-            value
-                .get("response")
-                .and_then(|data| extract_string(data.get("model")))
-        })
-}
-
-fn extract_timestamp_from_value(value: &Value) -> Option<i64> {
-    value
-        .get("timestamp")
-        .or_else(|| value.get("time"))
-        .or_else(|| value.get("created_at"))
-        .or_else(|| value.get("data").and_then(|data| data.get("timestamp")))
-        .and_then(parse_timestamp_value)
 }
 
 /// Prefixes Codex prepends to context it injects as `user_message` events.
@@ -1450,31 +1265,18 @@ mod tests {
     );
 
     #[test]
-    fn test_headless_usage_line() {
-        let content = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn.completed","model":"gpt-4o-mini","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}"#;
-        let file = create_test_file(content);
+    fn structured_stdout_is_not_a_provider_session_source() {
+        let file = create_test_file(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn.completed","model":"gpt-4o-mini","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}"#,
+        );
 
-        let messages = parse_codex_file(file.path());
+        let parsed =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .unwrap();
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
-        assert_eq!(messages[0].tokens.input, 100);
-        assert_eq!(messages[0].tokens.output, 30);
-        assert_eq!(messages[0].tokens.cache_read, 20);
-    }
-
-    #[test]
-    fn test_headless_usage_nested_data() {
-        let content = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"result","data":{"model_name":"gpt-4o","usage":{"input_tokens":50,"cached_input_tokens":5,"output_tokens":12}}}"#;
-        let file = create_test_file(content);
-
-        let messages = parse_codex_file(file.path());
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "gpt-4o");
-        assert_eq!(messages[0].tokens.input, 45);
-        assert_eq!(messages[0].tokens.output, 12);
-        assert_eq!(messages[0].tokens.cache_read, 5);
+        assert!(parsed.messages.is_empty());
+        assert!(parsed.rejections.is_empty());
+        assert!(parsed.interrupted.is_none());
     }
 
     #[test]
@@ -1613,23 +1415,6 @@ mod tests {
     }
 
     #[test]
-    fn test_model_only_headless_line_flushes_pending_token_counts() {
-        let file = create_test_file(concat!(
-            r#"{"type":"session_meta","payload":{"source":"interactive","model_provider":"openai"}}"#,
-            "\n",
-            r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#,
-            "\n",
-            r#"{"model":"gpt-5.5","type":"metadata"}"#,
-            "\n"
-        ));
-
-        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
-
-        assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.5");
-    }
-
-    #[test]
     fn test_parse_reader_returns_interrupted_outcome_on_line_read_error() {
         let mut reader = FailAfterFirstLine::new(concat!(
             r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
@@ -1701,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn test_session_meta_exec_marks_headless() {
+    fn test_session_meta_exec_marks_exec() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"originator":"codex_exec","source":"exec"}}"#;
         let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"gpt-5.4","total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#;
         let content = format!("{}\n{}", line1, line2);
@@ -1710,7 +1495,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent.as_deref(), Some("Codex Headless"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Codex Exec"));
     }
 
     #[test]
@@ -2359,35 +2144,6 @@ mod tests {
     }
 
     #[test]
-    fn test_headless_line_uses_session_provider_and_agent() {
-        // session_meta sets provider to "azure" and agent to "my-bot",
-        // then a line falls through to headless parsing (no structured entry_type)
-        let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"model_provider":"azure","agent_nickname":"my-bot"}}"#;
-        let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn.completed","model":"gpt-4o","usage":{"input_tokens":100,"output_tokens":50}}"#;
-        let content = format!("{}\n{}", line1, line2);
-        let file = create_test_file(&content);
-
-        let messages = parse_codex_file(file.path());
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id.as_ref(), "azure");
-        assert_eq!(messages[0].agent.as_deref(), Some("Codex Agent"));
-    }
-
-    #[test]
-    fn test_headless_line_uses_codex_default_provider_without_session_meta() {
-        // The Codex headless protocol uses OpenAI as its default provider.
-        let content = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn.completed","model":"gpt-4o-mini","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}"#;
-        let file = create_test_file(content);
-
-        let messages = parse_codex_file(file.path());
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].provider_id.as_ref(), "openai");
-        assert!(messages[0].agent.is_none());
-    }
-
-    #[test]
     fn test_extract_model_skips_empty_slug_falls_through_to_model() {
         // model_info.slug is empty string, but payload.model has a valid value.
         // extract_model should skip the empty slug and return payload.model.
@@ -2490,7 +2246,7 @@ mod tests {
 
     #[test]
     fn test_exec_user_message_still_marks_turn_start() {
-        // A `codex exec` one-shot is headless but still carries a real human
+        // A `codex exec` one-shot is non-interactive but still carries a real human
         // prompt, so it counts as exactly one turn (verified against a real
         // `codex exec` session: 1 user_message -> turn_count 1).
         let content = [
@@ -2512,7 +2268,7 @@ mod tests {
             messages[0].is_turn_start,
             "an exec one-shot with a human prompt counts as one turn"
         );
-        assert_eq!(messages[0].agent.as_deref(), Some("Codex Headless"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Codex Exec"));
     }
 
     #[test]

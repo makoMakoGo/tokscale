@@ -1865,33 +1865,6 @@ fn test_client_count_sink_attributes_cc_mirror_variants_to_claude() {
 }
 
 #[test]
-fn test_client_count_sink_counts_folded_headless_codex_messages() {
-    let mut sink = super::ClientCountSink::new(DateRange::none());
-    let mut message = UnifiedMessage::new_with_agent(
-        "codex",
-        "gpt-5",
-        "openai",
-        "headless-session",
-        1_717_977_600_000,
-        TokenBreakdown {
-            input: 10,
-            output: 5,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        },
-        0.01,
-        Some("headless".to_string()),
-    );
-    message.message_count = 4;
-
-    super::adapters::MessageSink::push_message(&mut sink, message);
-
-    assert_eq!(sink.counts.get(ClientId::Codex), 4);
-    assert_eq!(sink.headless_codex_count, 4);
-}
-
-#[test]
 fn test_retain_for_requested_clients_preserves_kilo_split() {
     let kilocode_only: HashSet<&str> = HashSet::from(["kilocode"]);
     assert!(retain_for_requested_clients(
@@ -3651,7 +3624,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
+                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3754,7 +3727,7 @@ fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
+                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3815,14 +3788,14 @@ fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
             "malformed-record"
         );
         let failure = source.status.failure().unwrap();
-        assert_eq!(failure.operation, "decode Codex headless line");
+        assert_eq!(failure.operation, "decode Codex JSONL entry");
         assert!(message_cache::SourceMessageCache::load()
             .unwrap()
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
+                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3890,7 +3863,7 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
+                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3959,7 +3932,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
+                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -4005,7 +3978,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
+                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -4054,7 +4027,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
                 &path,
                 message_cache::ParserVersion::new(
                     message_cache::ParserId::Codex,
-                    crate::adapters::CODEX_OPTIONAL_TOKEN_INFO_REVISION
+                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()

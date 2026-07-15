@@ -218,16 +218,9 @@ tokscale usage --json
 Flags belong to the leaf command that executes them. They cannot be placed on
 the root or before the owning subcommand.
 
-## Headless capture
-
-Headless capture requires `--` between Tokscale options and the child command:
-
-```bash
-tokscale headless codex --format jsonl -- codex exec -m gpt-5 "review this change"
-```
-
-This boundary prevents child flags such as `--json` or `--output` from being
-claimed by Tokscale. Set `TOKSCALE_HEADLESS_DIR` to change the capture root.
+Provider-owned non-interactive sessions require no Tokscale wrapper. For
+example, Codex writes ordinary `codex exec` rollouts under its own session
+directory, and Tokscale discovers them through the `codex` adapter.
 
 ## Exit codes
 

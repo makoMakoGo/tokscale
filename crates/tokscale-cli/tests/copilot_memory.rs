@@ -180,7 +180,6 @@ fn run_copilot_report(home: &Path) -> (Vec<u8>, u64) {
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
         .env_remove("TOKSCALE_CONFIG_DIR")
         .env_remove("TOKSCALE_EXTRA_DIRS")
-        .env_remove("TOKSCALE_HEADLESS_DIR")
         .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
         .output()
         .unwrap();

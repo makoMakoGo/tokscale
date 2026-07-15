@@ -1,7 +1,6 @@
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -75,13 +74,6 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
             }
             _ => {}
         }
-    }
-
-    if first == "headless" && !arguments.iter().any(|argument| argument == "--") {
-        return Some(
-            "separate Tokscale options from the child command with `--`, for example `tokscale headless codex --format jsonl -- codex exec ...`"
-                .to_string(),
-        );
     }
 
     if contains_long_option(arguments, "write-cache")
@@ -345,8 +337,6 @@ pub(crate) enum Commands {
     },
     #[command(about = "Generate year-in-review wrapped image")]
     Wrapped(WrappedArgs),
-    #[command(about = "Capture subprocess output for token usage tracking")]
-    Headless(HeadlessArgs),
     #[command(about = "Maintain local Tokscale caches")]
     Cache {
         #[command(subcommand)]
@@ -479,26 +469,6 @@ impl From<WrappedRankingArg> for WrappedRanking {
             WrappedRankingArg::Clients => Self::Clients,
         }
     }
-}
-
-#[derive(Args, Debug)]
-pub(crate) struct HeadlessArgs {
-    #[arg(value_enum, help = "Usage adapter for the captured process")]
-    pub(crate) source: HeadlessSource,
-    #[arg(long, value_enum, help = "Captured output format")]
-    pub(crate) format: Option<HeadlessFormat>,
-    #[arg(long, value_name = "PATH", help = "Write captured output to this file")]
-    pub(crate) output: Option<String>,
-    #[arg(long, help = "Do not add source-specific structured-output flags")]
-    pub(crate) no_auto_flags: bool,
-    #[arg(
-        last = true,
-        required = true,
-        num_args = 1..,
-        value_name = "COMMAND",
-        help = "Child command and arguments after `--`"
-    )]
-    pub(crate) command: Vec<String>,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -692,34 +662,6 @@ impl PricingSource {
     }
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HeadlessSource {
-    Codex,
-}
-
-impl HeadlessSource {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Codex => "codex",
-        }
-    }
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HeadlessFormat {
-    Json,
-    Jsonl,
-}
-
-impl HeadlessFormat {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Json => "json",
-            Self::Jsonl => "jsonl",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TerminalState {
     pub(crate) stdin: bool,
@@ -808,16 +750,6 @@ pub(crate) struct WrappedPlan {
 }
 
 #[derive(Debug)]
-pub(crate) struct HeadlessPlan {
-    pub(crate) source: HeadlessSource,
-    pub(crate) command: Vec<String>,
-    pub(crate) format: Option<HeadlessFormat>,
-    pub(crate) output: Option<String>,
-    pub(crate) no_auto_flags: bool,
-    pub(crate) timeout: Duration,
-}
-
-#[derive(Debug)]
 pub(crate) enum ExecutionPlan {
     Tui(TuiPlan),
     Models(ModelsPlan),
@@ -829,7 +761,6 @@ pub(crate) enum ExecutionPlan {
     Pricing(PricingSubcommand),
     Usage { json: bool },
     Wrapped(WrappedPlan),
-    Headless(HeadlessPlan),
     CachePrune,
     CacheWarm(ResolvedSourceScope),
     Antigravity(AntigravitySubcommand),
@@ -861,7 +792,6 @@ impl ExecutionPlan {
             Commands::Pricing { subcommand } => Ok(Self::Pricing(subcommand)),
             Commands::Usage { json } => Ok(Self::Usage { json }),
             Commands::Wrapped(args) => resolve_wrapped(args).map(Self::Wrapped),
-            Commands::Headless(args) => resolve_headless(args).map(Self::Headless),
             Commands::Cache { subcommand } => match subcommand {
                 CacheSubcommand::Prune => Ok(Self::CachePrune),
                 CacheSubcommand::Warm { source } => resolve_source(source).map(Self::CacheWarm),
@@ -947,30 +877,6 @@ fn resolve_report(args: ReportArgs) -> Result<LocalReportPlan, CliFailure> {
         date: resolve_date(args.date)?,
         benchmark: args.benchmark,
         no_spinner: args.no_spinner,
-    })
-}
-
-fn resolve_headless(args: HeadlessArgs) -> Result<HeadlessPlan, CliFailure> {
-    if args
-        .command
-        .first()
-        .is_none_or(|program| program.trim().is_empty())
-    {
-        return Err(CliFailure::invalid_message(
-            "headless child command must start with a non-empty executable".to_string(),
-        ));
-    }
-
-    let settings = tui::settings::Settings::load()?;
-    let timeout = settings.get_native_timeout()?;
-
-    Ok(HeadlessPlan {
-        source: args.source,
-        command: args.command,
-        format: args.format,
-        output: args.output,
-        no_auto_flags: args.no_auto_flags,
-        timeout,
     })
 }
 

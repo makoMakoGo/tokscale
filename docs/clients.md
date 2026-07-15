@@ -20,7 +20,7 @@ When using an installed binary, use `tokscale clients` instead.
 | --- | --- | --- | --- |
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode*.db` | Reads only current-format SQLite databases and combines multiple release channels when present. |
 | `claude` | Claude Code | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Claude Desktop chat history is not treated as Claude Code token accounting. |
-| `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Also supports `tokscale headless codex ...` capture. |
+| `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Includes provider-owned interactive and `codex exec` sessions. |
 | `gemini` | Gemini CLI | `$GEMINI_CLI_HOME/tmp/**/chats/*`, fallback `~/.gemini/tmp/` | Reads local chat files. |
 | `amp` | Amp | `~/.local/share/amp/threads/T-*.json` | Reads local thread files. |
 | `droid` | Droid | `~/.factory/sessions/**/*.settings.json`, related session JSONL and Mission `features.json` | Reads Factory Droid sessions and attributes subagent usage to `Droid Explorer`, `Droid Worker`, `Droid Orchestrator`, or `Droid Validator`. |

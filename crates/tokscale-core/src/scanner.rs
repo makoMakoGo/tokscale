@@ -222,32 +222,6 @@ impl ScanResult {
     }
 }
 
-pub fn headless_roots_with_env_strategy(home_dir: &Path, use_env_roots: bool) -> Vec<PathBuf> {
-    if use_env_roots {
-        if let Some(path) = configured_path_env("TOKSCALE_HEADLESS_DIR") {
-            return vec![path];
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        vec![
-            home_dir.join(".config/tokscale/headless"),
-            home_dir.join("Library/Application Support/tokscale/headless"),
-        ]
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        vec![home_dir.join(".config/tokscale/headless")]
-    }
-}
-
-#[cfg(test)]
-fn headless_roots(home_dir: &Path) -> Vec<PathBuf> {
-    headless_roots_with_env_strategy(home_dir, true)
-}
-
 pub fn copilot_exporter_path_with_env_strategy(use_env_roots: bool) -> Option<PathBuf> {
     if !use_env_roots {
         return None;
@@ -845,8 +819,6 @@ fn scan_all_clients_with_env_strategy_inner(
     };
 
     let home_path = Path::new(home_dir);
-    let headless_roots = headless_roots_with_env_strategy(home_path, use_env_roots);
-
     // Define scan tasks
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
     let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
@@ -967,16 +939,6 @@ fn scan_all_clients_with_env_strategy_inner(
             ClientId::Codex,
             codex_archived_path,
         );
-
-        // Codex headless: <headless_root>/codex/*.jsonl
-        for root in &headless_roots {
-            push_unique_scan_task(
-                &mut tasks,
-                &mut seen_scan_roots,
-                ClientId::Codex,
-                root.join("codex"),
-            );
-        }
     }
 
     if enabled.contains(&ClientId::OpenClaw) {
@@ -1799,93 +1761,6 @@ mod tests {
         File::create(macos.join("ui_messages.json")).unwrap();
         File::create(windows.join("ui_messages.json")).unwrap();
         File::create(server.join("ui_messages.json")).unwrap();
-    }
-
-    #[test]
-    #[serial]
-    fn test_headless_roots_default() {
-        let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-        unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") };
-
-        let home = Path::new("/tmp/tokscale-test-home");
-        let roots = headless_roots(home);
-        let config_root = home.join(".config/tokscale/headless");
-
-        assert!(roots.contains(&config_root));
-        #[cfg(target_os = "macos")]
-        {
-            let mac_root = home.join("Library/Application Support/tokscale/headless");
-            assert_eq!(roots.len(), 2);
-            assert!(roots.contains(&mac_root));
-        }
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(roots, vec![config_root]);
-
-        restore_env("TOKSCALE_HEADLESS_DIR", previous);
-    }
-
-    #[test]
-    #[serial]
-    fn test_headless_roots_blank_override_falls_back_to_default() {
-        let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-        unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "   ") };
-
-        let home = Path::new("/tmp/tokscale-test-home");
-        let roots = headless_roots(home);
-        let config_root = home.join(".config/tokscale/headless");
-
-        assert!(roots.contains(&config_root));
-        assert!(!roots.contains(&PathBuf::from("   ")));
-
-        restore_env("TOKSCALE_HEADLESS_DIR", previous);
-    }
-
-    #[test]
-    #[serial]
-    fn test_headless_roots_override() {
-        let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-        unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "/custom/headless") };
-
-        let roots = headless_roots(Path::new("/tmp/home"));
-        assert_eq!(roots, vec![PathBuf::from("/custom/headless")]);
-
-        restore_env("TOKSCALE_HEADLESS_DIR", previous);
-    }
-
-    #[test]
-    #[serial]
-    fn test_headless_roots_trim_override() {
-        let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-        unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "  /custom/headless  ") };
-
-        let roots = headless_roots(Path::new("/tmp/home"));
-        assert_eq!(roots, vec![PathBuf::from("/custom/headless")]);
-
-        restore_env("TOKSCALE_HEADLESS_DIR", previous);
-    }
-
-    #[test]
-    #[serial]
-    fn test_headless_roots_ignore_env_override_when_disabled() {
-        let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-        unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "/custom/headless") };
-
-        let roots = headless_roots_with_env_strategy(Path::new("/tmp/home"), false);
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            roots,
-            vec![
-                PathBuf::from("/tmp/home/.config/tokscale/headless"),
-                PathBuf::from("/tmp/home/Library/Application Support/tokscale/headless")
-            ]
-        );
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(
-            roots,
-            vec![PathBuf::from("/tmp/home/.config/tokscale/headless")]
-        );
-
-        restore_env("TOKSCALE_HEADLESS_DIR", previous);
     }
 
     #[test]
@@ -2890,36 +2765,6 @@ mod tests {
             explicit_warp.get(ClientId::Warp),
             &vec![default_warp_db, extra_warp_db]
         );
-    }
-
-    #[test]
-    #[serial]
-    fn test_scan_all_clients_headless_paths() {
-        let previous_headless = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-        unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") };
-
-        let dir = TempDir::new().unwrap();
-        let home = dir.path();
-
-        let headless_root = home.join(".config").join("tokscale").join("headless");
-
-        fs::create_dir_all(headless_root.join("codex")).unwrap();
-        File::create(headless_root.join("codex").join("codex.jsonl")).unwrap();
-
-        let result = scan_all_clients(
-            home.to_str().unwrap(),
-            &[
-                "claude".to_string(),
-                "codex".to_string(),
-                "gemini".to_string(),
-            ],
-        );
-
-        assert!(result.get(ClientId::Claude).is_empty());
-        assert_eq!(result.get(ClientId::Codex).len(), 1);
-        assert!(result.get(ClientId::Gemini).is_empty());
-
-        restore_env("TOKSCALE_HEADLESS_DIR", previous_headless);
     }
 
     #[test]

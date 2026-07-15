@@ -4,7 +4,7 @@ use predicates::prelude::*;
 use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 // ── Fixture helpers ────────────────────────────────────────────────────────
@@ -147,146 +147,6 @@ fn create_temp_fixture_dir_with_pricing_cache(with_pricing_cache: bool) -> TempD
 
 fn create_temp_fixture_dir() -> TempDir {
     create_temp_fixture_dir_with_pricing_cache(true)
-}
-
-fn create_fake_codex_bin() -> TempDir {
-    let tmp = TempDir::new().expect("failed to create fake codex dir");
-    let codex_path = tmp.path().join("codex");
-    fs::write(
-        &codex_path,
-        r#"#!/bin/sh
-case "$TOKSCALE_FAKE_CODEX_MODE" in
-  success)
-    printf 'captured ok'
-    exit 0
-    ;;
-  fail)
-    printf 'captured fail'
-    exit 17
-    ;;
-  slow)
-    exec sleep 20
-    ;;
-  *)
-    echo "unknown TOKSCALE_FAKE_CODEX_MODE" >&2
-    exit 2
-    ;;
-esac
-"#,
-    )
-    .unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&codex_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&codex_path, permissions).unwrap();
-    }
-
-    tmp
-}
-
-fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> Command {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let joined_path = std::env::join_paths(
-        std::iter::once(fake_bin.to_path_buf()).chain(std::env::split_paths(&path)),
-    )
-    .unwrap();
-
-    cmd.env("HOME", fake_bin)
-        .env("TOKSCALE_FAKE_CODEX_MODE", mode)
-        .env("TOKSCALE_NATIVE_TIMEOUT_MS", "10000")
-        .env("PATH", joined_path)
-        .args([
-            "headless",
-            "--output",
-            output_path.to_str().unwrap(),
-            "--no-auto-flags",
-            "codex",
-            "--",
-            "codex",
-        ]);
-
-    cmd
-}
-
-#[test]
-fn headless_capture_fast_success_does_not_wait_for_timeout() {
-    let fake_bin = create_fake_codex_bin();
-    let output_path = fake_bin.path().join("success.jsonl");
-
-    let started = Instant::now();
-    headless_capture_command(fake_bin.path(), &output_path, "success")
-        .assert()
-        .success();
-    let elapsed = started.elapsed();
-
-    assert!(
-        elapsed < Duration::from_secs(8),
-        "fast success waited too long: {elapsed:?}"
-    );
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "captured ok");
-}
-
-#[test]
-fn headless_capture_fast_nonzero_preserves_exit_code() {
-    let fake_bin = create_fake_codex_bin();
-    let output_path = fake_bin.path().join("fail.jsonl");
-
-    let started = Instant::now();
-    headless_capture_command(fake_bin.path(), &output_path, "fail")
-        .assert()
-        .failure()
-        .code(17);
-    let elapsed = started.elapsed();
-
-    assert!(
-        elapsed < Duration::from_secs(8),
-        "fast failure waited too long: {elapsed:?}"
-    );
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "captured fail");
-}
-
-#[test]
-fn headless_rejects_invalid_native_timeout_before_starting_child() {
-    for value in ["bogus", "1"] {
-        let fake_bin = create_fake_codex_bin();
-        let output_path = fake_bin
-            .path()
-            .join(format!("invalid-timeout-{value}.jsonl"));
-
-        headless_capture_command(fake_bin.path(), &output_path, "success")
-            .env("TOKSCALE_NATIVE_TIMEOUT_MS", value)
-            .assert()
-            .code(2)
-            .stdout(predicate::str::is_empty())
-            .stderr(predicate::str::contains("TOKSCALE_NATIVE_TIMEOUT_MS"));
-
-        assert!(
-            !output_path.exists(),
-            "invalid execution environment must fail before creating output"
-        );
-    }
-}
-
-#[test]
-fn headless_capture_slow_command_times_out() {
-    let fake_bin = create_fake_codex_bin();
-    let output_path = fake_bin.path().join("slow.jsonl");
-
-    let started = Instant::now();
-    headless_capture_command(fake_bin.path(), &output_path, "slow")
-        .assert()
-        .failure()
-        .code(124);
-    let elapsed = started.elapsed();
-
-    assert!(
-        elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(14),
-        "slow command timeout duration was unexpected: {elapsed:?}"
-    );
 }
 
 fn create_temp_fixture_dir_without_pricing_cache() -> TempDir {
@@ -651,7 +511,6 @@ fn cmd_with_home(tmp: &Path) -> Command {
         // codefuse mirror tracking) makes the scanner read real session data
         // and breaks fixture-count assertions. Hermetic on CI either way.
         .env_remove("TOKSCALE_EXTRA_DIRS")
-        .env_remove("TOKSCALE_HEADLESS_DIR")
         .env_remove("CODEX_HOME")
         .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
         .env_remove("GOOSE_PATH_ROOT")
@@ -687,7 +546,6 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
         .env("ALL_PROXY", "http://127.0.0.1:9")
         // Clear scan-path overrides (mirrors cmd_with_home)
         .env_remove("TOKSCALE_EXTRA_DIRS")
-        .env_remove("TOKSCALE_HEADLESS_DIR")
         .env_remove("CODEX_HOME")
         .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
         .env_remove("GOOSE_PATH_ROOT")
@@ -1046,13 +904,20 @@ fn test_help_exposes_only_leaf_owned_options() {
 }
 
 #[test]
-fn test_headless_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("headless")
+fn test_headless_command_is_not_registered() {
+    cargo_bin_cmd!("tokscale")
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Capture subprocess output"));
+        .stdout(predicate::str::contains("headless").not());
+
+    cargo_bin_cmd!("tokscale")
+        .arg("headless")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "unrecognized subcommand 'headless'",
+        ));
 }
 
 #[test]
@@ -1086,33 +951,6 @@ fn test_invalid_subcommand() {
 fn test_pricing_command_missing_model() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("pricing").assert().failure();
-}
-
-#[test]
-fn test_headless_command_missing_client() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("headless").assert().failure();
-}
-
-#[test]
-fn test_headless_command_invalid_client() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("headless")
-        .arg("invalid-client")
-        .arg("test")
-        .assert()
-        .failure();
-}
-
-#[test]
-fn test_headless_requires_explicit_child_command_separator() {
-    cargo_bin_cmd!("tokscale")
-        .args(["headless", "codex", "codex", "exec"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "separate Tokscale options from the child command with `--`",
-        ));
 }
 
 #[test]
@@ -3141,10 +2979,7 @@ fn excluded_crush_default_client_fails_before_report_output() {
 #[test]
 fn invalid_settings_range_is_invalid_execution_environment() {
     let tmp = create_empty_fixture_dir();
-    write_settings_json(
-        tmp.path(),
-        r#"{"autoRefreshMs":1,"nativeTimeoutMs":300000}"#,
-    );
+    write_settings_json(tmp.path(), r#"{"autoRefreshMs":1}"#);
 
     cmd_with_home(tmp.path())
         .args(["clients", "--home", tmp.path().to_str().unwrap()])
@@ -3213,14 +3048,8 @@ fn test_clients_json() {
         json["data"].get("clients").is_some(),
         "Should have 'clients' field"
     );
-    assert!(
-        json["data"].get("headlessRoots").is_some(),
-        "Should have 'headlessRoots' field"
-    );
-    assert!(
-        json["data"].get("note").is_some(),
-        "Should have 'note' field"
-    );
+    assert!(json["data"].get("headlessRoots").is_none());
+    assert!(json["data"].get("note").is_none());
     assert_eq!(json["health"]["complete"], true);
 
     let arr = json["data"]["clients"].as_array().unwrap();

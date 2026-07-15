@@ -45,8 +45,8 @@ pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
 pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
 pub(crate) const ZED_RECORD_FILTER_REVISION: ParserRevision = EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
-pub(crate) const CODEX_OPTIONAL_TOKEN_INFO_REVISION: ParserRevision =
-    MODEL_ID_CANONICALIZATION_REVISION + 1;
+pub(crate) const CODEX_EXEC_IDENTITY_REVISION: ParserRevision =
+    MODEL_ID_CANONICALIZATION_REVISION + 2;
 
 pub(crate) trait LocalSourceAdapter: Sync {
     fn client(&self) -> ClientId;
@@ -355,14 +355,7 @@ impl SourceUnit {
                     CodeBuddyLogSource::Host => "host",
                 }),
             ),
-            SourceUnitMeta::Codex { is_headless } => (
-                "codex",
-                Some(if is_headless {
-                    "headless"
-                } else {
-                    "interactive"
-                }),
-            ),
+            SourceUnitMeta::Codex => ("codex", None),
         };
         message_cache::hash_inventory_bytes(hasher, name.as_bytes());
         message_cache::hash_inventory_bytes(hasher, detail.unwrap_or("").as_bytes());
@@ -459,9 +452,7 @@ pub(crate) enum SourceUnitMeta {
     CodeBuddyExtensionLog {
         source: CodeBuddyLogSource,
     },
-    Codex {
-        is_headless: bool,
-    },
+    Codex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,9 +492,7 @@ impl SourceUnitMeta {
             Self::CodeBuddyJsonl | Self::CodeBuddyExtensionLog { .. } => {
                 ParserVersion::new(ParserId::CodeBuddy, MODEL_ID_CANONICALIZATION_REVISION)
             }
-            Self::Codex { .. } => {
-                ParserVersion::new(ParserId::Codex, CODEX_OPTIONAL_TOKEN_INFO_REVISION)
-            }
+            Self::Codex => ParserVersion::new(ParserId::Codex, CODEX_EXEC_IDENTITY_REVISION),
         }
     }
 }
@@ -563,15 +552,9 @@ pub(crate) enum FingerprintPolicy {
 #[derive(Debug)]
 pub(crate) enum UnitMessageSource {
     Fresh(Vec<UnifiedMessage>),
-    CodexFresh {
-        messages: Vec<UnifiedMessage>,
-        is_headless: bool,
-    },
+    CodexFresh(Vec<UnifiedMessage>),
     CacheHit(message_cache::CacheReadPlan),
-    CodexCacheHit {
-        read_plan: message_cache::CacheReadPlan,
-        is_headless: bool,
-    },
+    CodexCacheHit(message_cache::CacheReadPlan),
     CodexAppend(Box<codex::CodexAppendSource>),
 }
 

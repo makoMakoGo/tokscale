@@ -70,7 +70,6 @@ pub struct LocalClientDef {
     pub root: PathRoot,
     pub relative_path: &'static str,
     pub pattern: &'static str,
-    pub headless: bool,
 }
 
 impl LocalClientDef {
@@ -98,7 +97,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::XdgData,
             relative_path: "opencode",
             pattern: "*.db",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -107,7 +105,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".claude/projects",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -119,7 +116,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             },
             relative_path: "sessions",
             pattern: "*.jsonl",
-            headless: true,
         },
     },
     LocalClientEntry {
@@ -131,7 +127,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             },
             relative_path: "tmp",
             pattern: "*.json|*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -140,7 +135,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::XdgData,
             relative_path: "amp/threads",
             pattern: "T-*.json",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -149,7 +143,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".factory/sessions",
             pattern: "*.settings.json",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -158,7 +151,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".openclaw/agents",
             pattern: "*.jsonl*",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -167,7 +159,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".pi/agent/sessions",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -176,7 +167,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".omp/agent/sessions",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -188,7 +178,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             },
             relative_path: "sessions",
             pattern: "wire.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -197,7 +186,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".qwen/projects",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -206,7 +194,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
             pattern: "ui_messages.json",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -215,7 +202,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
             pattern: "ui_messages.json",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -224,7 +210,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".mux/sessions",
             pattern: "session-usage.json",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -233,7 +218,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::XdgData,
             relative_path: "kilo/kilo.db",
             pattern: "kilo.db",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -245,7 +229,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             },
             relative_path: "state.db",
             pattern: "state.db",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -254,7 +237,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".copilot/otel",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -263,7 +245,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::XdgData,
             relative_path: "goose/sessions/sessions.db",
             pattern: "sessions.db",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -275,7 +256,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             },
             relative_path: "projects",
             pattern: "chat-messages.json",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -284,7 +264,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".codebuddy/projects",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -293,7 +272,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Config,
             relative_path: "antigravity-cache/sessions",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -302,7 +280,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::XdgData,
             relative_path: "zed/threads/threads.db",
             pattern: "threads.db",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -311,7 +288,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".zcode/projects",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -320,7 +296,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".kiro/sessions/cli",
             pattern: "*.json",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -329,7 +304,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".junie/sessions",
             pattern: "events.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -338,7 +312,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".local/state/warp-terminal",
             pattern: "warp.sqlite",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -347,7 +320,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
             pattern: "ui_messages.json",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -356,7 +328,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             root: PathRoot::Home,
             relative_path: ".commandcode/projects",
             pattern: "*.jsonl",
-            headless: false,
         },
     },
     LocalClientEntry {
@@ -368,7 +339,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             },
             relative_path: "sessions",
             pattern: "updates.jsonl",
-            headless: false,
         },
     },
 ];
@@ -449,10 +419,6 @@ impl ClientId {
 
     pub fn file_pattern(self) -> Option<&'static str> {
         self.local_def().map(|def| def.pattern)
-    }
-
-    pub fn supports_headless(self) -> bool {
-        self.local_def().is_some_and(|def| def.headless)
     }
 }
 
@@ -644,7 +610,6 @@ mod tests {
             root: PathRoot::Home,
             relative_path: ".test/sessions",
             pattern: "*.jsonl",
-            headless: false,
         };
 
         assert_eq!(

@@ -22,7 +22,7 @@ Group `Agents` rows by stable agent identity only.
   as the primary aggregation key.
 - Instance identifiers belong in `agent_instance` and may contribute to the
   `Instances` count.
-- Codex uses stable role, subagent, or headless labels; `agent_nickname` is not
+- Codex uses stable role, subagent, or exec-session labels; `agent_nickname` is not
   a grouping identity.
 - Claude preserves known stable subagent types and collapses unknown temporary
   sidechain names to `Claude Subagent`.

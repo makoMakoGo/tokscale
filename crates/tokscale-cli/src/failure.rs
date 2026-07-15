@@ -2,7 +2,7 @@ use std::fmt;
 
 use tokscale_core::LocalReportError;
 
-use crate::tui::settings::{NativeTimeoutError, SettingsLoadError};
+use crate::tui::settings::SettingsLoadError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailureClass {
@@ -37,7 +37,6 @@ impl CliFailure {
 
     fn classify(error: &anyhow::Error) -> FailureClass {
         if error.is::<InvalidConfiguration>()
-            || error.is::<NativeTimeoutError>()
             || error
                 .downcast_ref::<LocalReportError>()
                 .is_some_and(LocalReportError::is_invalid_invocation)
@@ -63,12 +62,6 @@ impl From<anyhow::Error> for CliFailure {
 
 impl From<SettingsLoadError> for CliFailure {
     fn from(error: SettingsLoadError) -> Self {
-        Self::from(anyhow::Error::new(error))
-    }
-}
-
-impl From<NativeTimeoutError> for CliFailure {
-    fn from(error: NativeTimeoutError) -> Self {
         Self::from(anyhow::Error::new(error))
     }
 }

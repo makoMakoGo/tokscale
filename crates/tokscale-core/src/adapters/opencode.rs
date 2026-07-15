@@ -69,7 +69,7 @@ impl LocalSourceAdapter for OpenCodeAdapter {
                 | SourceUnitMeta::KiroGlobalStorage
                 | SourceUnitMeta::CodeBuddyJsonl
                 | SourceUnitMeta::CodeBuddyExtensionLog { .. }
-                | SourceUnitMeta::Codex { .. } => {
+                | SourceUnitMeta::Codex => {
                     unreachable!("unexpected OpenCode source unit meta")
                 }
             })

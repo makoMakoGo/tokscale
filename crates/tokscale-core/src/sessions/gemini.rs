@@ -152,7 +152,7 @@ pub fn parse_gemini_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
 fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedSource> {
     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-        return parse_gemini_headless_jsonl(path);
+        return parse_gemini_jsonl(path);
     }
 
     // JSON session files are valid only in the current
@@ -201,7 +201,7 @@ fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedSource> {
     }
 
     let session_id = extract_string(value.get("session_id").or_else(|| value.get("sessionId")));
-    Ok(parse_gemini_headless_value(&value, session_id.as_deref()))
+    Ok(parse_gemini_usage_value(&value, session_id.as_deref()))
 }
 
 fn parse_gemini_session(session: GeminiSessionEnvelope) -> SessionParseResult<ScannedSource> {
@@ -388,7 +388,7 @@ fn parse_direct_gemini_token_message(
     )))
 }
 
-fn parse_gemini_headless_jsonl(path: &Path) -> SessionParseResult<ScannedSource> {
+fn parse_gemini_jsonl(path: &Path) -> SessionParseResult<ScannedSource> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
@@ -585,7 +585,7 @@ fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-fn parse_gemini_headless_value(value: &Value, session_id: Option<&str>) -> ScannedSource {
+fn parse_gemini_usage_value(value: &Value, session_id: Option<&str>) -> ScannedSource {
     let mut scanned = ScannedSource::default();
     if value.get("tokens").is_some() {
         match parse_direct_gemini_token_message(value, None, session_id) {
@@ -638,7 +638,7 @@ fn parse_gemini_headless_value(value: &Value, session_id: Option<&str>) -> Scann
 }
 
 fn build_messages_from_usages(
-    usages: Vec<GeminiHeadlessUsage>,
+    usages: Vec<GeminiUsageStats>,
     session_id: &str,
     timestamp: i64,
 ) -> Vec<UnifiedMessage> {
@@ -646,7 +646,7 @@ fn build_messages_from_usages(
         .into_iter()
         .map(|usage| {
             let (input, cache_read) = if usage.input_includes_cache {
-                normalize_gemini_headless_input_and_cache(usage.input, usage.cached)
+                normalize_gemini_usage_input_and_cache(usage.input, usage.cached)
             } else {
                 (usage.input.max(0), usage.cached.max(0))
             };
@@ -676,7 +676,7 @@ fn subtract_cached_overlap(input: i64, cached: i64) -> (i64, i64) {
     (input - cached_portion, cached)
 }
 
-fn normalize_gemini_headless_input_and_cache(input: i64, cached: i64) -> (i64, i64) {
+fn normalize_gemini_usage_input_and_cache(input: i64, cached: i64) -> (i64, i64) {
     // Gemini usage_metadata promptTokenCount is cache-inclusive, while Tokscale
     // represents non-cached input and cache hits as separate buckets.
     subtract_cached_overlap(input, cached)
@@ -707,7 +707,7 @@ fn normalize_gemini_session_input_and_cache(
     (input, cached)
 }
 
-struct GeminiHeadlessUsage {
+struct GeminiUsageStats {
     model: String,
     input: i64,
     output: i64,
@@ -717,7 +717,7 @@ struct GeminiHeadlessUsage {
 }
 
 struct GeminiUsageScan {
-    usages: Vec<GeminiHeadlessUsage>,
+    usages: Vec<GeminiUsageStats>,
     rejections: Vec<SessionParseError>,
 }
 
@@ -772,7 +772,7 @@ fn extract_gemini_usages(
             )
         })?;
     Ok(GeminiUsageScan {
-        usages: vec![GeminiHeadlessUsage { model, ..usage }],
+        usages: vec![GeminiUsageStats { model, ..usage }],
         rejections: Vec::new(),
     })
 }
@@ -780,7 +780,7 @@ fn extract_gemini_usages(
 fn extract_gemini_usage_from_value(
     model: String,
     value: &Value,
-) -> SessionParseResult<Option<GeminiHeadlessUsage>> {
+) -> SessionParseResult<Option<GeminiUsageStats>> {
     if !value.is_object() {
         return Err(SessionParseError::invalid(
             "validate model stats",
@@ -876,7 +876,7 @@ fn extract_gemini_usage_from_value(
         return Ok(None);
     }
 
-    Ok(Some(GeminiHeadlessUsage {
+    Ok(Some(GeminiUsageStats {
         model,
         input,
         output,
@@ -1130,8 +1130,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_headless_json() {
-        let json = r#"{"session_id":"headless-1","timestamp":"2026-05-01T00:01:00Z","response":"Hi","stats":{"models":{"gemini-2.5-pro":{"tokens":{"prompt":12,"candidates":34,"cached":5,"thoughts":2}}}}}"#;
+    fn test_parse_gemini_usage_json() {
+        let json = r#"{"session_id":"usage-1","timestamp":"2026-05-01T00:01:00Z","response":"Hi","stats":{"models":{"gemini-2.5-pro":{"tokens":{"prompt":12,"candidates":34,"cached":5,"thoughts":2}}}}}"#;
         let (_directory, file) = write_current_json(json);
 
         let messages = parse_gemini_file(&file);
@@ -1146,10 +1146,10 @@ mod tests {
     }
 
     #[test]
-    fn headless_models_isolates_bad_model_and_keeps_siblings() {
+    fn usage_models_isolates_bad_model_and_keeps_siblings() {
         let (_directory, file) = write_current_json(
             r#"{
-                "session_id":"headless-mixed",
+                "session_id":"usage-mixed",
                 "timestamp":"2026-05-01T00:01:00Z",
                 "stats":{"models":{
                     "gemini-2.5-flash":{"tokens":{"input":10}},
@@ -1167,10 +1167,10 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_headless_model_is_malformed_and_sibling_model_survives() {
+    fn overflowing_usage_model_is_malformed_and_sibling_model_survives() {
         let (_directory, file) = write_current_json(
             r#"{
-                "session_id":"headless-overflow",
+                "session_id":"usage-overflow",
                 "timestamp":"2026-05-01T00:01:00Z",
                 "stats":{"models":{
                     "gemini-bad":{"tokens":{"input":9223372036854775807,"output":1}},
@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_headless_stream_jsonl() {
+    fn test_parse_gemini_stream_jsonl() {
         let content = r#"{"type":"init","model":"gemini-2.5-pro","session_id":"session-1"}
 {"type":"result","timestamp":"2026-05-01T00:01:00Z","stats":{"input_tokens":10,"output_tokens":20}}"#;
         let mut file = tempfile::Builder::new()
@@ -1231,7 +1231,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_headless_stream_jsonl_normalizes_cached_input() {
+    fn test_parse_gemini_stream_jsonl_normalizes_cached_input() {
         let content = r#"{"type":"init","model":"gemini-2.5-pro","session_id":"session-1"}
 {"type":"result","timestamp":"2026-05-01T00:01:00Z","stats":{"input_tokens":12,"output_tokens":20,"cached_tokens":5,"thoughts_tokens":3}}"#;
         let mut file = tempfile::Builder::new()
@@ -1295,8 +1295,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_headless_stats_tokens_wrapper_preserves_cache_inclusive_input() {
-        let json = r#"{"session_id":"headless-1","timestamp":"2026-05-01T00:01:00Z","stats":{"models":{"gemini-2.5-pro":{"tokens":{"input":12,"output":20,"cached":5}}}}}"#;
+    fn test_parse_gemini_stats_tokens_wrapper_preserves_cache_inclusive_input() {
+        let json = r#"{"session_id":"usage-1","timestamp":"2026-05-01T00:01:00Z","stats":{"models":{"gemini-2.5-pro":{"tokens":{"input":12,"output":20,"cached":5}}}}}"#;
         let (_directory, file) = write_current_json(json);
 
         let messages = parse_gemini_file(&file);
@@ -1442,7 +1442,7 @@ not-json\n\
 
     #[test]
     fn test_parse_gemini_json_direct_tokens() {
-        let json = r#"{"type":"gemini","session_id":"headless-1","timestamp":"2026-05-01T00:01:00Z","model":"gemini-3.1-pro-preview","tokens":{"input":20,"output":2,"cached":5,"thoughts":3,"tool":4,"total":29}}"#;
+        let json = r#"{"type":"gemini","session_id":"usage-1","timestamp":"2026-05-01T00:01:00Z","model":"gemini-3.1-pro-preview","tokens":{"input":20,"output":2,"cached":5,"thoughts":3,"tool":4,"total":29}}"#;
         let (_directory, file) = write_current_json(json);
 
         let messages = parse_gemini_file(&file);
@@ -1457,9 +1457,9 @@ not-json\n\
     }
 
     #[test]
-    fn headless_negative_tokens_are_malformed_instead_of_clamped() {
+    fn usage_negative_tokens_are_malformed_instead_of_clamped() {
         let (_directory, file) = write_current_json(
-            r#"{"type":"gemini","session_id":"headless-negative","timestamp":"2026-05-01T00:01:00Z","model":"gemini-2.5-pro","tokens":{"input":-10,"output":20}}"#,
+            r#"{"type":"gemini","session_id":"usage-negative","timestamp":"2026-05-01T00:01:00Z","model":"gemini-2.5-pro","tokens":{"input":-10,"output":20}}"#,
         );
 
         let scanned = super::parse_gemini_file(&file).unwrap();
@@ -1473,8 +1473,8 @@ not-json\n\
     }
 
     #[test]
-    fn test_parse_headless_json_clamps_cached_input_overlap() {
-        let json = r#"{"session_id":"headless-1","timestamp":"2026-05-01T00:01:00Z","response":"Hi","stats":{"models":{"gemini-2.5-pro":{"tokens":{"prompt":5,"candidates":2,"cached":10}}}}}"#;
+    fn test_parse_gemini_usage_json_clamps_cached_input_overlap() {
+        let json = r#"{"session_id":"usage-1","timestamp":"2026-05-01T00:01:00Z","response":"Hi","stats":{"models":{"gemini-2.5-pro":{"tokens":{"prompt":5,"candidates":2,"cached":10}}}}}"#;
         let (_directory, file) = write_current_json(json);
 
         let messages = parse_gemini_file(&file);
@@ -1719,7 +1719,7 @@ not-json\n\
     }
 
     #[test]
-    fn test_parse_headless_jsonl_non_gemini_type_with_direct_tokens() {
+    fn test_parse_gemini_usage_jsonl_non_gemini_type_with_direct_tokens() {
         let content = r#"{"type":"init","model":"gemini-3-flash-preview","session_id":"session-tokens"}
 {"type":"result","id":"msg-1","timestamp":"2026-05-01T00:01:00Z","tokens":{"input":100,"output":25,"cached":10,"total":125}}"#;
         let dir = TempDir::new().unwrap();

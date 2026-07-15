@@ -45,7 +45,6 @@ Tokscale stores most local settings under the platform config directory:
 | `includeUnusedModels` | boolean | Show zero-token models in reports. |
 | `autoRefreshEnabled` | boolean | Enable TUI auto-refresh for local reports. |
 | `autoRefreshMs` | number | TUI auto-refresh interval in milliseconds. |
-| `nativeTimeoutMs` | number | Maximum processing time for native subprocess work. |
 | `defaultClients` | string[] | Client filter used when no `--client/-c` flag is passed. |
 | `usageTabEnabled` | boolean | Show the subscription quota Usage tab in the TUI. |
 | `usageProviders` | string[] | Explicit allowlist of subscription providers the TUI may fetch. Empty means cache-display mode. |
@@ -65,9 +64,7 @@ reported explicitly.
 | Variable | Meaning |
 | --- | --- |
 | `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Non-empty values are used verbatim. Empty values are treated as unset. |
-| `TOKSCALE_NATIVE_TIMEOUT_MS` | Overrides `nativeTimeoutMs`. |
 | `TOKSCALE_EXTRA_DIRS` | One-off extra scan roots as `client:/abs/path,client:/abs/path`. |
-| `TOKSCALE_HEADLESS_DIR` | Overrides the headless capture root. Surrounding whitespace is trimmed; blank values fall back to the default root. |
 | `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY` | Z.ai/Zhipu GLM Coding Plan quota key. |
 | `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` | Kimi Code Console quota key. |
 | `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY` | MiniMax CN Token Plan subscription key. |
@@ -81,7 +78,7 @@ path when set to a blank value.
 
 Path-like environment variables intentionally use two different policies:
 
-- Client/headless scan roots trim surrounding whitespace and treat blank values
+- Client scan roots trim surrounding whitespace and treat blank values
   as a request to use the default root.
 - Config and XDG roots (`TOKSCALE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and
   `XDG_DATA_HOME`) are system/configuration boundaries. Tokscale keeps
