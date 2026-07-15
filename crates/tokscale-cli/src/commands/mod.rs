@@ -1,7 +1,6 @@
 pub mod cache;
 pub mod clients;
 pub mod graph;
-pub mod headless;
 pub mod hourly;
 pub mod integrations;
 pub mod models;

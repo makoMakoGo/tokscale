@@ -65,7 +65,8 @@ Codex cold parses, append merges, and cache-race reparses keep one owned raw
 message vector. When a shard is cacheable, the fold serializes a borrowed slice
 of that raw vector before applying fallback timestamps or derived fields. It then
 applies timestamp fallback, token normalization/filtering, model and provider
-canonicalization, pricing, and headless attribution to the same vector in place.
+canonicalization, pricing, and exec-session attribution to the same vector in
+place.
 The persisted shard format and its raw-message semantics do not change.
 
 ## Consequences

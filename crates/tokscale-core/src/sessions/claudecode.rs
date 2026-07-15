@@ -563,17 +563,6 @@ pub fn parse_claude_file_with_cache_and_home(
         })?
         .to_string();
 
-    if path.extension().and_then(|s| s.to_str()) == Some("json") {
-        return parse_claude_headless_json(
-            path,
-            &session_id,
-            workspace_key.clone(),
-            workspace_label.clone(),
-            &client_id,
-            metadata_provider_hint,
-        );
-    }
-
     let file = std::fs::File::open(path)
         .map_err(|source| SessionParseError::at_path(path, "open Claude session", source))?;
 
@@ -588,7 +577,6 @@ pub fn parse_claude_file_with_cache_and_home(
     // We merge duplicates using per-field max to always keep the highest value seen
     // for each token type, ensuring we capture the most complete record.
     let mut processed_hashes: HashMap<u64, usize> = HashMap::new();
-    let mut headless_state = ClaudeHeadlessState::default();
     let mut buffer = Vec::with_capacity(4096);
     // Tracks whether the previous entry was a user message,
     // so the next assistant message can be marked as a turn start.
@@ -624,7 +612,6 @@ pub fn parse_claude_file_with_cache_and_home(
             continue;
         }
 
-        let mut handled = false;
         buffer.clear();
         buffer.extend_from_slice(trimmed.as_bytes());
         let entry = match simd_json::from_slice::<ClaudeEntry>(&mut buffer) {
@@ -1073,63 +1060,7 @@ pub fn parse_claude_file_with_cache_and_home(
                 // above, so they merge via merge_claude_duplicate without needing
                 // the global pending value again.
                 pending_request_start_timestamp_ms = None;
-                handled = true;
             }
-        }
-
-        if handled {
-            continue;
-        }
-
-        let headless_message = match process_claude_headless_line(
-            trimmed,
-            ClaudeHeadlessContext {
-                path,
-                line_number: Some(line_index + 1),
-                session_id: &session_id,
-                client_id: &client_id,
-                default_provider_hint: metadata_provider_hint,
-            },
-            &mut headless_state,
-        ) {
-            Ok(message) => message,
-            Err(error) => {
-                record_claude_error_rejection(&mut rejections, &error);
-                if matches!(entry.entry_type.as_str(), "message_start" | "message_stop") {
-                    interrupted = Some(SourceFailure::from(&error));
-                    break;
-                }
-                continue;
-            }
-        };
-        if let Some(message) = headless_message {
-            let mut message = message;
-            message.set_workspace(workspace_key.clone(), workspace_label.clone());
-            let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
-            messages.push(message);
-            provider_confidences.push(provider_confidence);
-        }
-    }
-
-    if interrupted.is_none() {
-        match finalize_headless_state(
-            &mut headless_state,
-            ClaudeHeadlessContext {
-                path,
-                line_number: None,
-                session_id: &session_id,
-                client_id: &client_id,
-                default_provider_hint: metadata_provider_hint,
-            },
-        ) {
-            Ok(Some(mut message)) => {
-                message.set_workspace(workspace_key, workspace_label);
-                let provider_confidence = stored_claude_provider_confidence(&message.provider_id);
-                messages.push(message);
-                provider_confidences.push(provider_confidence);
-            }
-            Ok(None) => {}
-            Err(error) => record_claude_error_rejection(&mut rejections, &error),
         }
     }
 
@@ -1731,217 +1662,6 @@ fn canonicalize_claude_model(model: &str) -> String {
     model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
 }
 
-#[derive(Default)]
-struct ClaudeHeadlessState {
-    model: Option<String>,
-    provider_id: Option<String>,
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    cache_write: i64,
-    timestamp_ms: Option<i64>,
-    timestamp_error: Option<SessionParseError>,
-    source_line_number: Option<usize>,
-}
-
-#[derive(Clone, Copy)]
-struct ClaudeHeadlessContext<'a> {
-    path: &'a Path,
-    line_number: Option<usize>,
-    session_id: &'a str,
-    client_id: &'a str,
-    default_provider_hint: Option<&'a str>,
-}
-
-fn parse_claude_headless_json(
-    path: &Path,
-    session_id: &str,
-    workspace_key: Option<String>,
-    workspace_label: Option<String>,
-    client_id: &str,
-    default_provider_hint: Option<&str>,
-) -> SessionParseResult<ScannedSource> {
-    let mut bytes = std::fs::read(path)
-        .map_err(|source| SessionParseError::at_path(path, "read Claude JSON source", source))?;
-    let value: Value = simd_json::from_slice(&mut bytes)
-        .map_err(|source| SessionParseError::at_path(path, "decode Claude JSON source", source))?;
-
-    let mut scanned = ScannedSource::complete(Vec::with_capacity(1));
-    match extract_claude_headless_message(
-        &value,
-        ClaudeHeadlessContext {
-            path,
-            line_number: None,
-            session_id,
-            client_id,
-            default_provider_hint,
-        },
-    ) {
-        Ok(Some(mut message)) => {
-            message.set_workspace(workspace_key, workspace_label);
-            scanned.messages.push(message);
-        }
-        Ok(None) => {}
-        Err(error) => record_claude_error_rejection(&mut scanned.rejections, &error),
-    }
-
-    Ok(scanned)
-}
-
-fn process_claude_headless_line(
-    line: &str,
-    context: ClaudeHeadlessContext<'_>,
-    state: &mut ClaudeHeadlessState,
-) -> SessionParseResult<Option<UnifiedMessage>> {
-    let mut bytes = line.as_bytes().to_vec();
-    let value: Value = simd_json::from_slice(&mut bytes).map_err(|source| {
-        SessionParseError::at_path(
-            context.path,
-            "decode Claude headless event",
-            std::io::Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "{}: {source}",
-                    claude_headless_location(context.line_number)
-                ),
-            ),
-        )
-    })?;
-
-    let event_type = value.get("type").and_then(|val| val.as_str());
-    let mut completed_message: Option<UnifiedMessage> = None;
-
-    match event_type {
-        Some("message_start") => {
-            completed_message = finalize_headless_state(state, context)?;
-
-            let model = extract_claude_model(&value);
-            if model
-                .as_deref()
-                .is_some_and(is_claude_synthetic_placeholder_model)
-            {
-                *state = ClaudeHeadlessState::default();
-                return Ok(completed_message);
-            }
-            state.model = model;
-            state.provider_id = extract_claude_provider(&value);
-            match extract_claude_timestamp_checked(
-                &value,
-                context.path,
-                context.line_number,
-                "validate Claude headless timestamp",
-            ) {
-                Ok(timestamp) => state.timestamp_ms = timestamp,
-                Err(error) => state.timestamp_error = Some(error),
-            }
-            state.source_line_number = context.line_number;
-            if let Some(usage) = value
-                .get("message")
-                .and_then(|msg| msg.get("usage"))
-                .or_else(|| value.get("usage"))
-            {
-                update_claude_usage(state, usage);
-            }
-        }
-        Some("message_delta") => {
-            if let Some(usage) = value
-                .get("usage")
-                .or_else(|| value.get("delta").and_then(|delta| delta.get("usage")))
-            {
-                update_claude_usage(state, usage);
-            }
-        }
-        Some("message_stop") => {
-            completed_message = finalize_headless_state(state, context)?;
-        }
-        _ => {
-            if let Some(message) = extract_claude_headless_message(&value, context)? {
-                completed_message = Some(message);
-            }
-        }
-    }
-
-    Ok(completed_message)
-}
-
-fn extract_claude_headless_message(
-    value: &Value,
-    context: ClaudeHeadlessContext<'_>,
-) -> SessionParseResult<Option<UnifiedMessage>> {
-    let Some(usage) = value
-        .get("usage")
-        .or_else(|| value.get("message").and_then(|msg| msg.get("usage")))
-    else {
-        return Ok(None);
-    };
-    let token_breakdown = TokenBreakdown {
-        input: extract_i64(usage.get("input_tokens")).unwrap_or(0).max(0),
-        output: extract_i64(usage.get("output_tokens")).unwrap_or(0).max(0),
-        cache_read: extract_i64(usage.get("cache_read_input_tokens"))
-            .unwrap_or(0)
-            .max(0),
-        cache_write: extract_i64(usage.get("cache_creation_input_tokens"))
-            .unwrap_or(0)
-            .max(0),
-        reasoning: 0,
-    };
-    if !crate::has_positive_tokens(&token_breakdown) {
-        return Ok(None);
-    }
-    let raw_model = extract_claude_model(value).ok_or_else(|| {
-        SessionParseError::at_path(
-            context.path,
-            "validate Claude headless message",
-            std::io::Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "{}: token-bearing headless message is missing model",
-                    claude_headless_location(context.line_number)
-                ),
-            ),
-        )
-    })?;
-    if is_claude_synthetic_placeholder_model(&raw_model) {
-        return Ok(None);
-    }
-    let provider_hint = extract_claude_provider(value);
-    let model = canonicalize_claude_model(&raw_model);
-    let provider_id = claude_provider_id_for_models(
-        &raw_model,
-        &model,
-        provider_hint.as_deref().or(context.default_provider_hint),
-    );
-    let timestamp = extract_claude_timestamp_checked(
-        value,
-        context.path,
-        context.line_number,
-        "validate Claude headless timestamp",
-    )?
-    .ok_or_else(|| {
-        SessionParseError::at_path(
-            context.path,
-            "validate Claude headless timestamp",
-            std::io::Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "{}: token-bearing headless message is missing timestamp",
-                    claude_headless_location(context.line_number)
-                ),
-            ),
-        )
-    })?;
-
-    Ok(Some(UnifiedMessage::new(
-        context.client_id,
-        model,
-        provider_id,
-        context.session_id,
-        timestamp,
-        token_breakdown,
-        0.0,
-    )))
-}
-
 /// Internal Claude Code system/tool tags that should NOT be counted as human turns.
 /// User prompts containing arbitrary HTML/XML (e.g. `<div>hello</div>`) are still
 /// counted, only this narrow allowlist is excluded.
@@ -2019,14 +1739,6 @@ const CLAUDE_PROVIDER_DEFAULT_CONFIDENCE: u8 = 1;
 const CLAUDE_PROVIDER_INFERRED_CONFIDENCE: u8 = 2;
 const CLAUDE_PROVIDER_EXPLICIT_CONFIDENCE: u8 = 3;
 const CLAUDE_PROVIDER_MODEL_OVERRIDE_CONFIDENCE: u8 = 4;
-
-fn claude_provider_id_for_models(
-    raw_model: &str,
-    canonical_model: &str,
-    provider_hint: Option<&str>,
-) -> String {
-    claude_provider_choice_for_models(raw_model, canonical_model, provider_hint).id
-}
 
 fn claude_provider_choice_for_models(
     raw_model: &str,
@@ -2169,107 +1881,17 @@ fn extract_claude_timestamp_checked(
                     ErrorKind::InvalidData,
                     format!(
                         "{}: invalid timestamp value {raw_timestamp}",
-                        claude_headless_location(line_number)
+                        claude_source_location(line_number)
                     ),
                 ),
             )
         })
 }
 
-fn claude_headless_location(line_number: Option<usize>) -> String {
+fn claude_source_location(line_number: Option<usize>) -> String {
     line_number
         .map(|line_number| format!("line {line_number}"))
         .unwrap_or_else(|| "JSON source".to_string())
-}
-
-fn update_claude_usage(state: &mut ClaudeHeadlessState, usage: &Value) {
-    if let Some(input) = extract_i64(usage.get("input_tokens")) {
-        state.input = state.input.max(input);
-    }
-    if let Some(output) = extract_i64(usage.get("output_tokens")) {
-        state.output = state.output.max(output);
-    }
-    if let Some(cache_read) = extract_i64(usage.get("cache_read_input_tokens")) {
-        state.cache_read = state.cache_read.max(cache_read);
-    }
-    if let Some(cache_write) = extract_i64(usage.get("cache_creation_input_tokens")) {
-        state.cache_write = state.cache_write.max(cache_write);
-    }
-}
-
-fn finalize_headless_state(
-    state: &mut ClaudeHeadlessState,
-    context: ClaudeHeadlessContext<'_>,
-) -> SessionParseResult<Option<UnifiedMessage>> {
-    if state.input == 0 && state.output == 0 && state.cache_read == 0 && state.cache_write == 0 {
-        *state = ClaudeHeadlessState::default();
-        return Ok(None);
-    }
-
-    if let Some(error) = state.timestamp_error.take() {
-        *state = ClaudeHeadlessState::default();
-        return Err(error);
-    }
-
-    let source_line_number = state.source_line_number.or(context.line_number);
-    let raw_model = state.model.clone().ok_or_else(|| {
-        SessionParseError::at_path(
-            context.path,
-            "validate Claude headless message",
-            std::io::Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "{}: token-bearing headless message is missing model",
-                    claude_headless_location(source_line_number)
-                ),
-            ),
-        )
-    })?;
-    if is_claude_synthetic_placeholder_model(&raw_model) {
-        *state = ClaudeHeadlessState::default();
-        return Ok(None);
-    }
-    let model = canonicalize_claude_model(&raw_model);
-    let provider_id = claude_provider_id_for_models(
-        &raw_model,
-        &model,
-        state
-            .provider_id
-            .as_deref()
-            .or(context.default_provider_hint),
-    );
-    let timestamp = state.timestamp_ms.ok_or_else(|| {
-        SessionParseError::at_path(
-            context.path,
-            "validate Claude headless timestamp",
-            std::io::Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "{}: token-bearing headless message is missing timestamp",
-                    claude_headless_location(source_line_number)
-                ),
-            ),
-        )
-    })?;
-
-    let message = UnifiedMessage::new(
-        context.client_id,
-        model,
-        provider_id,
-        context.session_id,
-        timestamp,
-        TokenBreakdown {
-            input: state.input.max(0),
-            output: state.output.max(0),
-            cache_read: state.cache_read.max(0),
-            cache_write: state.cache_write.max(0),
-            reasoning: 0,
-        },
-        0.0,
-    );
-
-    *state = ClaudeHeadlessState::default();
-    Ok(Some(message))
 }
 
 #[cfg(test)]
@@ -2527,40 +2149,6 @@ mod tests {
     }
 
     #[test]
-    fn token_bearing_headless_json_without_model_is_rejected() {
-        let mut file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
-        writeln!(
-            file,
-            r#"{{"usage":{{"input_tokens":1,"output_tokens":1}}}}"#
-        )
-        .unwrap();
-
-        let scanned = super::parse_claude_file(file.path()).unwrap();
-
-        assert!(scanned.messages.is_empty());
-        assert_eq!(scanned.rejections.total(), 1);
-        assert_eq!(
-            scanned.rejections.entries().next().unwrap().key,
-            "missing-model"
-        );
-        assert!(scanned.interrupted.is_none());
-    }
-
-    #[test]
-    fn zero_usage_headless_json_without_metadata_is_an_intentional_filter() {
-        let mut file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
-        writeln!(
-            file,
-            r#"{{"timestamp":"not-a-timestamp","usage":{{"input_tokens":0,"output_tokens":0}}}}"#
-        )
-        .unwrap();
-
-        let messages = parse_claude_file(file.path()).unwrap();
-
-        assert!(messages.is_empty());
-    }
-
-    #[test]
     fn token_bearing_assistant_without_timestamp_is_rejected() {
         let file = create_test_file(
             r#"{"type":"assistant","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1,"output_tokens":1}}}"#,
@@ -2571,26 +2159,6 @@ mod tests {
         assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-timestamp");
-        assert!(scanned.interrupted.is_none());
-    }
-
-    #[test]
-    fn token_bearing_headless_json_without_timestamp_is_rejected() {
-        let mut file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
-        writeln!(
-            file,
-            r#"{{"type":"message","message":{{"model":"claude-sonnet-4.6","usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
-        )
-        .unwrap();
-
-        let scanned = super::parse_claude_file(file.path()).unwrap();
-
-        assert!(scanned.messages.is_empty());
-        assert_eq!(scanned.rejections.total(), 1);
-        assert_eq!(
-            scanned.rejections.entries().next().unwrap().key,
-            "missing-timestamp"
-        );
         assert!(scanned.interrupted.is_none());
     }
 
@@ -2636,67 +2204,6 @@ mod tests {
         assert_eq!(scanned.messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(scanned.messages[0].tokens.input, 4);
         assert!(scanned.rejections.is_empty());
-        assert!(scanned.interrupted.is_none());
-    }
-
-    #[test]
-    fn token_bearing_headless_stream_without_timestamp_is_partial() {
-        let file = create_test_file(
-            r#"{"type":"message_start","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1}}}
-{"type":"message_stop"}"#,
-        );
-
-        let scanned = super::parse_claude_file(file.path()).unwrap();
-
-        assert!(scanned.messages.is_empty());
-        let rejection = scanned.rejections.entries().next().unwrap();
-        assert_eq!(rejection.key, "missing-timestamp");
-        let failure = scanned.interrupted.unwrap();
-        assert_eq!(failure.operation, "validate Claude headless timestamp");
-    }
-
-    #[test]
-    fn zero_usage_headless_stream_with_invalid_timestamp_is_an_intentional_filter() {
-        let file = create_test_file(
-            r#"{"type":"message_start","timestamp":"not-a-timestamp","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":0,"output_tokens":0}}}
-{"type":"message_stop"}"#,
-        );
-
-        let scanned = super::parse_claude_file(file.path()).unwrap();
-
-        assert!(scanned.messages.is_empty());
-        assert!(scanned.rejections.is_empty());
-        assert!(scanned.interrupted.is_none());
-    }
-
-    #[test]
-    fn positive_headless_delta_surfaces_deferred_start_timestamp_error() {
-        let file = create_test_file(
-            r#"{"type":"message_start","timestamp":"not-a-timestamp","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":0,"output_tokens":0}}}
-{"type":"message_delta","usage":{"output_tokens":1}}
-{"type":"message_stop"}"#,
-        );
-
-        let scanned = super::parse_claude_file(file.path()).unwrap();
-
-        assert!(scanned.messages.is_empty());
-        let rejection = scanned.rejections.entries().next().unwrap();
-        assert_eq!(rejection.key, "missing-timestamp");
-        let failure = scanned.interrupted.unwrap();
-        assert_eq!(failure.operation, "validate Claude headless timestamp");
-    }
-
-    #[test]
-    fn token_bearing_headless_stream_without_model_is_rejected_at_eof() {
-        let file = create_test_file(
-            r#"{"type":"message_start","timestamp":"2026-07-14T00:00:00Z","message":{"usage":{"input_tokens":1}}}"#,
-        );
-
-        let scanned = super::parse_claude_file(file.path()).unwrap();
-
-        assert!(scanned.messages.is_empty());
-        let rejection = scanned.rejections.entries().next().unwrap();
-        assert_eq!(rejection.key, "missing-model");
         assert!(scanned.interrupted.is_none());
     }
 
@@ -3125,7 +2632,7 @@ mod tests {
 
     #[test]
     fn test_turn_start_without_user_message() {
-        // No user message → no turn starts (e.g. headless or partial log)
+        // No user message → no turn starts (e.g. a partial log)
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":100}}}"#;
 
@@ -3394,77 +2901,6 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "openrouter");
-    }
-
-    #[test]
-    fn test_headless_json_output() {
-        let content = r#"{"type":"message","timestamp":"2025-01-01T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
-        let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
-        std::fs::write(file.path(), content).unwrap();
-
-        let messages = parse_claude_file(file.path()).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
-        assert_eq!(messages[0].tokens.input, 120);
-        assert_eq!(messages[0].tokens.output, 60);
-        assert_eq!(messages[0].tokens.cache_read, 10);
-    }
-
-    #[test]
-    fn test_headless_json_output_infers_subprovider() {
-        let content = r#"{"type":"message","timestamp":"2025-01-01T00:00:00Z","message":{"model":"gpt-5.3-codex","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
-        let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
-        std::fs::write(file.path(), content).unwrap();
-
-        let messages = parse_claude_file(file.path()).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.3-codex");
-        assert_eq!(messages[0].provider_id.as_ref(), "openai");
-    }
-
-    #[test]
-    fn test_headless_json_output_keeps_workspace_metadata() {
-        let content = r#"{"type":"message","timestamp":"2025-01-01T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":10}}}"#;
-        let (_dir, path) = create_project_file(content, "myproject", "session.json");
-
-        let messages = parse_claude_file(&path).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key.as_deref(), Some("myproject"));
-        assert_eq!(messages[0].workspace_label.as_deref(), Some("myproject"));
-    }
-
-    #[test]
-    fn test_headless_stream_output() {
-        let content = r#"{"type":"message_start","timestamp":"2025-01-01T00:00:00Z","message":{"id":"msg_1","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}
-{"type":"message_delta","usage":{"output_tokens":80}}
-{"type":"message_stop"}"#;
-        let file = create_test_file(content);
-        let messages = parse_claude_file(file.path()).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
-        assert_eq!(messages[0].tokens.input, 200);
-        assert_eq!(messages[0].tokens.output, 80);
-        assert_eq!(messages[0].tokens.cache_read, 20);
-        assert_eq!(messages[0].tokens.cache_write, 5);
-    }
-
-    #[test]
-    fn test_headless_stream_output_infers_subprovider() {
-        let content = r#"{"type":"message_start","timestamp":"2026-02-18T10:00:00Z","message":{"id":"msg_1","model":"gemini-3-pro-preview","usage":{"input_tokens":200,"cache_read_input_tokens":20}}}
-{"type":"message_delta","usage":{"output_tokens":80}}
-{"type":"message_stop"}"#;
-        let file = create_test_file(content);
-        let messages = parse_claude_file(file.path()).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id.as_ref(), "gemini-3-pro-preview");
-        assert_eq!(messages[0].provider_id.as_ref(), "google");
-        assert_eq!(messages[0].tokens.input, 200);
-        assert_eq!(messages[0].tokens.output, 80);
     }
 
     #[test]

@@ -268,7 +268,6 @@ impl ModelPerformance {
 #[derive(Debug)]
 pub struct LocalClientMessageCounts {
     pub counts: ClientCounts,
-    pub headless_codex_count: i32,
     pub processing_time_ms: u32,
     pub health: source_health::HealthReport,
 }
@@ -744,7 +743,6 @@ impl adapters::MessageSink for AggregationSink<'_> {
 
 struct ClientCountSink {
     counts: ClientCounts,
-    headless_codex_count: i32,
     date_range: DateRange,
 }
 
@@ -752,7 +750,6 @@ impl ClientCountSink {
     fn new(date_range: DateRange) -> Self {
         Self {
             counts: ClientCounts::new(),
-            headless_codex_count: 0,
             date_range,
         }
     }
@@ -763,10 +760,6 @@ impl adapters::MessageSink for ClientCountSink {
         let date = message.date_string();
         if !self.date_range.contains(&date) {
             return;
-        }
-
-        if message.client.as_ref() == "codex" && message.agent.as_deref() == Some("headless") {
-            self.headless_codex_count += message.message_count.max(0);
         }
 
         if let Some(client) = client_count_bucket(&message.client) {
@@ -1502,7 +1495,6 @@ pub fn count_local_client_messages(
     let (_, health) = fold_prepared_local_sources_with_pricing(prepared, None, &mut sink)?;
     Ok(LocalClientMessageCounts {
         counts: sink.counts,
-        headless_codex_count: sink.headless_codex_count,
         processing_time_ms: start.elapsed().as_millis() as u32,
         health: health.to_report(),
     })

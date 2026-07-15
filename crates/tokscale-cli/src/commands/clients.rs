@@ -59,10 +59,6 @@ pub(crate) fn run_clients_command(
     .map_err(anyhow::Error::new)?;
     let mut health = client_counts.health.clone();
 
-    let headless_roots =
-        tokscale_core::scanner::headless_roots_with_env_strategy(&home_dir, use_env_roots);
-    let headless_codex_count = client_counts.headless_codex_count;
-
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct ClientRow {
@@ -75,10 +71,6 @@ pub(crate) fn run_clients_command(
         #[serde(skip_serializing_if = "Vec::is_empty")]
         legacy_paths: Vec<LegacyPath>,
         message_count: i32,
-        headless_supported: bool,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        headless_paths: Vec<HeadlessPath>,
-        headless_message_count: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         exporter_status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -97,13 +89,6 @@ pub(crate) fn run_clients_command(
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct LegacyPath {
-        path: String,
-        exists: bool,
-    }
-
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct HeadlessPath {
         path: String,
         exists: bool,
     }
@@ -232,26 +217,6 @@ pub(crate) fn run_clients_command(
                 } else {
                     vec![]
                 };
-                let (headless_supported, headless_paths, headless_message_count) =
-                    if client == ClientId::Codex {
-                        (
-                            true,
-                            headless_roots
-                                .iter()
-                                .map(|root| {
-                                    let path = root.join(client.as_str());
-                                    HeadlessPath {
-                                        path: path.to_string_lossy().to_string(),
-                                        exists: path.exists(),
-                                    }
-                                })
-                                .collect(),
-                            headless_codex_count,
-                        )
-                    } else {
-                        (false, vec![], 0)
-                    };
-
                 let label = client.display_name().to_string();
 
                 let mut extra_paths: Vec<ExtraPath> = settings_extra_dirs
@@ -293,9 +258,6 @@ pub(crate) fn run_clients_command(
                     additional_paths,
                     legacy_paths,
                     message_count: client_counts.counts.get(client),
-                    headless_supported,
-                    headless_paths,
-                    headless_message_count,
                     exporter_status: (client == ClientId::Copilot
                         && copilot_exporter_path.is_some())
                     .then(|| "configured".to_string()),
@@ -311,19 +273,10 @@ pub(crate) fn run_clients_command(
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
         struct ClientsData {
-            headless_roots: Vec<String>,
             clients: Vec<ClientRow>,
-            note: String,
         }
 
-        let data = ClientsData {
-            headless_roots: headless_roots
-                .iter()
-                .map(|p| p.to_string_lossy().to_string())
-                .collect(),
-            clients,
-            note: "Headless capture is supported for Codex CLI only.".to_string(),
-        };
+        let data = ClientsData { clients };
         let output = ReportEnvelope::new(data, health, start.elapsed().as_millis() as u64);
 
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -331,18 +284,6 @@ pub(crate) fn run_clients_command(
         use colored::Colorize;
 
         println!("\n  {}", "Local clients & session counts".cyan());
-        println!(
-            "  {}",
-            format!(
-                "Headless roots: {}",
-                headless_roots
-                    .iter()
-                    .map(|p| p.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-            .bright_black()
-        );
         println!();
 
         for row in clients {
@@ -416,31 +357,10 @@ pub(crate) fn run_clients_command(
                 );
             }
 
-            if row.headless_supported {
-                let headless_desc: Vec<String> = row
-                    .headless_paths
-                    .iter()
-                    .map(|hp| describe_path_for_home(&hp.path, hp.exists, &home_dir))
-                    .collect();
-                println!(
-                    "  {}",
-                    format!("headless: {}", headless_desc.join(", ")).bright_black()
-                );
-                println!(
-                    "  {}",
-                    format!(
-                        "messages: {} (headless: {})",
-                        format_number(row.message_count),
-                        format_number(row.headless_message_count)
-                    )
-                    .bright_black()
-                );
-            } else {
-                println!(
-                    "  {}",
-                    format!("messages: {}", format_number(row.message_count)).bright_black()
-                );
-            }
+            println!(
+                "  {}",
+                format!("messages: {}", format_number(row.message_count)).bright_black()
+            );
 
             for diagnostic in &row.diagnostics {
                 println!(
@@ -452,12 +372,6 @@ pub(crate) fn run_clients_command(
 
             println!();
         }
-
-        println!(
-            "  {}",
-            "Note: Headless capture is supported for Codex CLI only.".bright_black()
-        );
-        println!();
     }
 
     Ok(())

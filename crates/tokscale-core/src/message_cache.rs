@@ -1770,7 +1770,7 @@ struct LegacyV1CodexParseState {
     current_model: Option<String>,
     current_turn_start_ms: Option<i64>,
     previous_totals: Option<LegacyV1CodexTotals>,
-    session_is_headless: bool,
+    session_is_exec: bool,
     session_id_from_meta: Option<String>,
     session_forked_from_id: Option<String>,
     forked_child_session_id: Option<String>,

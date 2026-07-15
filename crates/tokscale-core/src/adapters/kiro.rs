@@ -101,7 +101,7 @@ impl LocalSourceAdapter for KiroAdapter {
                 | SourceUnitMeta::OpenCodeSqlite
                 | SourceUnitMeta::CodeBuddyJsonl
                 | SourceUnitMeta::CodeBuddyExtensionLog { .. }
-                | SourceUnitMeta::Codex { .. } => unreachable!("unexpected Kiro source unit meta"),
+                | SourceUnitMeta::Codex => unreachable!("unexpected Kiro source unit meta"),
             })
             .collect()
     }

@@ -96,8 +96,9 @@ Pricing is `pricing lookup <model>` or `pricing overrides`; the lookup's
 catalog selector is named `--source`. Cache maintenance is `cache warm` or
 `cache prune`. Reports never write the TUI aggregate cache, and the removed
 `--write-cache`, `--no-write-cache`, and `light.writeCache` controls have no
-replacement inside a report command. `headless` requires `--` between
-Tokscale options and the child command.
+replacement inside a report command. Tokscale does not expose a subprocess
+capture command; provider-owned non-interactive sessions are discovered as
+ordinary local usage under ADR 0005.
 
 The old spellings are not aliases and are never rewritten into a successful
 command. Known v4 invocations may receive one migration hint only after Clap

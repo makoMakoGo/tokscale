@@ -3,7 +3,7 @@ use crate::commands::clients::*;
 use crate::commands::render::*;
 use crate::commands::shared::*;
 use clap::Parser;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokscale_core::ClientId;
 
 #[test]
@@ -709,11 +709,6 @@ fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
         None,
         "migration hints must never suggest another invalid invocation"
     );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["headless", "codex", "--", "tui", "--json"])),
-        None,
-        "child-process arguments after -- must not influence migration hints"
-    );
     for unrelated in [
         &["wrapped", "--json"][..],
         &["clients", "--benchmark"],
@@ -804,23 +799,6 @@ fn effective_spinner_policy_keeps_json_quiet_without_erasing_explicit_intent() {
     assert!(super::effective_no_spinner(false, true));
     assert!(super::effective_no_spinner(true, false));
     assert!(super::effective_no_spinner(true, true));
-}
-
-#[test]
-fn headless_plan_rejects_a_blank_child_executable() {
-    let cli = Cli::try_parse_from(["tokscale", "headless", "codex", "--", ""])
-        .expect("Clap accepts the present but empty COMMAND token");
-    let error = ExecutionPlan::resolve(
-        cli,
-        TerminalState {
-            stdin: false,
-            stdout: false,
-        },
-    )
-    .expect_err("a blank executable must not enter the execution plan");
-
-    assert_eq!(error.exit_code(), 2);
-    assert!(error.to_string().contains("non-empty executable"));
 }
 
 #[test]
@@ -983,46 +961,5 @@ fn antigravity_cli_conversations_path_falls_back_for_blank_env() {
     match previous {
         Some(value) => unsafe { std::env::set_var("GEMINI_CLI_HOME", value) },
         None => unsafe { std::env::remove_var("GEMINI_CLI_HOME") },
-    }
-}
-
-#[test]
-#[serial_test::serial]
-fn headless_roots_ignore_blank_env_override() {
-    let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-    unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "   ") };
-
-    let roots = tokscale_core::scanner::headless_roots_with_env_strategy(
-        Path::new("/tmp/tokscale-home"),
-        true,
-    );
-
-    assert!(!roots.contains(&PathBuf::from("   ")));
-    assert!(roots.contains(&PathBuf::from(
-        "/tmp/tokscale-home/.config/tokscale/headless"
-    )));
-
-    match previous {
-        Some(value) => unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", value) },
-        None => unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") },
-    }
-}
-
-#[test]
-#[serial_test::serial]
-fn headless_roots_trim_env_override() {
-    let previous = std::env::var("TOKSCALE_HEADLESS_DIR").ok();
-    unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", "  /tmp/custom-headless  ") };
-
-    let roots = tokscale_core::scanner::headless_roots_with_env_strategy(
-        Path::new("/tmp/tokscale-home"),
-        true,
-    );
-
-    assert_eq!(roots, vec![PathBuf::from("/tmp/custom-headless")]);
-
-    match previous {
-        Some(value) => unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", value) },
-        None => unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") },
     }
 }

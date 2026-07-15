@@ -490,8 +490,8 @@ pub(crate) fn resolve_messages(
             crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
             Ok(messages)
         }
-        UnitMessageSource::CodexFresh { .. }
-        | UnitMessageSource::CodexCacheHit { .. }
+        UnitMessageSource::CodexFresh(_)
+        | UnitMessageSource::CodexCacheHit(_)
         | UnitMessageSource::CodexAppend(_) => {
             unreachable!("codex deferred messages must be resolved by CodexAdapter")
         }

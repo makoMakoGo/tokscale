@@ -515,7 +515,8 @@ prepared snapshots on indeterminate misses, no repeated header lookup after a
 definitive miss, direct-parser adapters ignoring seeded shards, Rayon-width
 message ownership, batch release before the next parse, cross-batch dedup and
 merge state, OpenCode precedence, OMP parent attribution, and Codex raw cache,
-append, fallback-coordinate, pricing, headless, and cache-race semantics.
+append, fallback-coordinate, pricing, exec-session attribution, and cache-race
+semantics.
 
 ```text
 cargo test -p tokscale-core

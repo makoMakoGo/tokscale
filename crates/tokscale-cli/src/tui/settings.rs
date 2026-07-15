@@ -13,10 +13,6 @@ const DEFAULT_AUTO_REFRESH_MS: u64 = 60_000;
 const MIN_AUTO_REFRESH_MS: u64 = 30_000;
 const MAX_AUTO_REFRESH_MS: u64 = 3_600_000;
 
-const DEFAULT_NATIVE_TIMEOUT_MS: u64 = 300_000;
-const MIN_NATIVE_TIMEOUT_MS: u64 = 5_000;
-const MAX_NATIVE_TIMEOUT_MS: u64 = 3_600_000;
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SettingsLoadError {
     #[error(transparent)]
@@ -51,28 +47,10 @@ impl SettingsLoadError {
 pub(crate) enum SettingsValidationError {
     #[error("invalid autoRefreshMs {value}; expected {min}..={max}")]
     AutoRefreshRange { value: u64, min: u64, max: u64 },
-    #[error("invalid nativeTimeoutMs {value}; expected {min}..={max}")]
-    NativeTimeoutRange { value: u64, min: u64, max: u64 },
     #[error("invalid colorPalette `{value}`; expected one of: {valid}")]
     ColorPalette { value: String, valid: String },
     #[error("invalid scanner settings: {0}")]
     Scanner(#[from] ScannerSettingsError),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum NativeTimeoutError {
-    #[error("TOKSCALE_NATIVE_TIMEOUT_MS must be a positive integer: {source}")]
-    NotInteger {
-        #[source]
-        source: std::num::ParseIntError,
-    },
-    #[error("failed to read TOKSCALE_NATIVE_TIMEOUT_MS: {source}")]
-    NotUnicode {
-        #[source]
-        source: std::env::VarError,
-    },
-    #[error("invalid TOKSCALE_NATIVE_TIMEOUT_MS {value}; expected {min}..={max}")]
-    OutOfRange { value: u64, min: u64, max: u64 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,8 +80,6 @@ pub struct Settings {
     pub auto_refresh_ms: u64,
     #[serde(default)]
     pub include_unused_models: bool,
-    #[serde(default = "default_native_timeout_ms")]
-    pub native_timeout_ms: u64,
     /// Persistent scanner configuration. Allows users to pin additional
     /// OpenCode SQLite paths (and, in future, other scanner overrides)
     /// without having to set env vars on every invocation.
@@ -147,10 +123,6 @@ fn default_auto_refresh_ms() -> u64 {
     DEFAULT_AUTO_REFRESH_MS
 }
 
-fn default_native_timeout_ms() -> u64 {
-    DEFAULT_NATIVE_TIMEOUT_MS
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -158,7 +130,6 @@ impl Default for Settings {
             auto_refresh_enabled: false,
             auto_refresh_ms: DEFAULT_AUTO_REFRESH_MS,
             include_unused_models: false,
-            native_timeout_ms: DEFAULT_NATIVE_TIMEOUT_MS,
             scanner: ScannerSettings::default(),
             default_clients: Vec::new(),
             usage_tab_enabled: false,
@@ -195,13 +166,6 @@ impl Settings {
                 value: self.auto_refresh_ms,
                 min: MIN_AUTO_REFRESH_MS,
                 max: MAX_AUTO_REFRESH_MS,
-            });
-        }
-        if !(MIN_NATIVE_TIMEOUT_MS..=MAX_NATIVE_TIMEOUT_MS).contains(&self.native_timeout_ms) {
-            return Err(SettingsValidationError::NativeTimeoutRange {
-                value: self.native_timeout_ms,
-                min: MIN_NATIVE_TIMEOUT_MS,
-                max: MAX_NATIVE_TIMEOUT_MS,
             });
         }
         if self.color_palette.parse::<ThemeName>().is_err() {
@@ -352,26 +316,6 @@ impl Settings {
             None
         }
     }
-
-    pub fn get_native_timeout(&self) -> std::result::Result<Duration, NativeTimeoutError> {
-        let timeout_ms = match std::env::var("TOKSCALE_NATIVE_TIMEOUT_MS") {
-            Ok(value) => value
-                .parse::<u64>()
-                .map_err(|source| NativeTimeoutError::NotInteger { source })?,
-            Err(std::env::VarError::NotPresent) => self.native_timeout_ms,
-            Err(source) => {
-                return Err(NativeTimeoutError::NotUnicode { source });
-            }
-        };
-        if !(MIN_NATIVE_TIMEOUT_MS..=MAX_NATIVE_TIMEOUT_MS).contains(&timeout_ms) {
-            return Err(NativeTimeoutError::OutOfRange {
-                value: timeout_ms,
-                min: MIN_NATIVE_TIMEOUT_MS,
-                max: MAX_NATIVE_TIMEOUT_MS,
-            });
-        }
-        Ok(Duration::from_millis(timeout_ms))
-    }
 }
 
 #[cfg(test)]
@@ -516,7 +460,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let path = Settings::explicit_home_config_path(temp.path());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"autoRefreshMs":1,"nativeTimeoutMs":300000}"#).unwrap();
+        fs::write(&path, r#"{"autoRefreshMs":1}"#).unwrap();
 
         let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
         let message = format!("{error:#}");
@@ -541,24 +485,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
-    fn native_timeout_environment_rejects_invalid_values() {
-        let previous = std::env::var_os("TOKSCALE_NATIVE_TIMEOUT_MS");
-        unsafe { std::env::set_var("TOKSCALE_NATIVE_TIMEOUT_MS", "not-a-number") };
-
-        let error = Settings::default().get_native_timeout().unwrap_err();
-        assert!(
-            format!("{error:#}").contains("must be a positive integer"),
-            "{error:#}"
-        );
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var("TOKSCALE_NATIVE_TIMEOUT_MS", value) },
-            None => unsafe { std::env::remove_var("TOKSCALE_NATIVE_TIMEOUT_MS") },
-        }
-    }
-
-    #[test]
     fn settings_load_backfills_scanner_when_missing_from_json() {
         // Older settings.json files predate the `scanner` key. They must
         // still deserialize cleanly and fall through to ScannerSettings::default.
@@ -566,8 +492,7 @@ mod tests {
             "colorPalette": "blue",
             "autoRefreshEnabled": false,
             "autoRefreshMs": 60000,
-            "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000
+            "includeUnusedModels": false
         }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
         assert!(parsed.scanner.opencode_db_paths.is_empty());
@@ -580,7 +505,6 @@ mod tests {
             "autoRefreshEnabled": false,
             "autoRefreshMs": 60000,
             "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000,
             "scanner": {
                 "opencodeDbPaths": [
                     "/custom/one.db",
@@ -605,7 +529,6 @@ mod tests {
             "autoRefreshEnabled": false,
             "autoRefreshMs": 60000,
             "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000,
             "scanner": {
                 "extraScanPaths": {
                     "codex": ["/tmp/project-a/.codex/sessions"],
@@ -634,7 +557,6 @@ mod tests {
             "autoRefreshEnabled": false,
             "autoRefreshMs": 60000,
             "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000,
             "scanner": {}
         }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
@@ -662,7 +584,6 @@ mod tests {
             "autoRefreshEnabled": false,
             "autoRefreshMs": 60000,
             "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000,
             "scanner": {
                 "extraScanPaths": {
                     "gemini": ["/tmp/imports/gemini/tmp"]
@@ -704,8 +625,7 @@ mod tests {
             "colorPalette": "blue",
             "autoRefreshEnabled": false,
             "autoRefreshMs": 60000,
-            "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000
+            "includeUnusedModels": false
         }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
         assert!(parsed.default_clients.is_empty());
@@ -721,7 +641,6 @@ mod tests {
             "autoRefreshEnabled": false,
             "autoRefreshMs": 60000,
             "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000,
             "defaultClients": ["opencode", "claude", "zed"]
         }"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
