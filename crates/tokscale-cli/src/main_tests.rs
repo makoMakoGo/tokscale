@@ -664,6 +664,18 @@ fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
         Some("use `tokscale models --json`")
     );
     assert_eq!(
+        legacy_invocation_hint(&strings(&["graph", "--json"])).as_deref(),
+        Some("use `tokscale graph`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--json", "graph"])).as_deref(),
+        Some("use `tokscale graph`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["graph", "--json", "--output", "graph.json"])).as_deref(),
+        Some("use `tokscale graph --output graph.json`")
+    );
+    assert_eq!(
         legacy_invocation_hint(&strings(&["--client=codex", "models"])).as_deref(),
         Some("use `tokscale models --client=codex`")
     );
@@ -689,6 +701,18 @@ fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
         None,
         "child-process arguments after -- must not influence migration hints"
     );
+    for unrelated in [
+        &["wrapped", "--json"][..],
+        &["clients", "--benchmark"],
+        &["pricing", "--json"],
+        &["graph", "--group-by", "model"],
+    ] {
+        assert_eq!(
+            legacy_invocation_hint(&strings(unrelated)),
+            None,
+            "migration hints must not change an explicit command's product"
+        );
+    }
 }
 
 #[test]
@@ -696,6 +720,7 @@ fn misplaced_and_equals_form_options_remain_parse_errors() {
     for args in [
         vec!["tokscale", "tui", "--json"],
         vec!["tokscale", "--client=codex"],
+        vec!["tokscale", "graph", "--json"],
     ] {
         let error = Cli::try_parse_from(args).expect_err("legacy invocation must be rejected");
         assert_eq!(error.exit_code(), 2);

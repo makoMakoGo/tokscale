@@ -105,7 +105,10 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
                 })
                 .map(|(_, argument)| argument.clone()),
         );
-        return valid_replacement_hint(replacement);
+        if let Some(hint) = valid_replacement_hint(replacement.clone()) {
+            return Some(hint);
+        }
+        return explicit_command_migration_hint(&command, replacement);
     }
 
     if command_index == Some(0) && arguments.iter().any(|argument| argument == "--light") {
@@ -119,15 +122,14 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
         }
     }
 
-    let target = migration_target(&command, arguments)?;
-    if command_index == Some(0) && first == target {
-        return None;
+    if command_index == Some(0) {
+        return explicit_command_migration_hint(&command, arguments.to_vec());
     }
+
+    let target = migration_target(&command, arguments)?;
     let migrated = arguments
         .iter()
-        .enumerate()
-        .filter(|(index, argument)| Some(*index) != command_index && argument.as_str() != "--light")
-        .map(|(_, argument)| argument)
+        .filter(|argument| argument.as_str() != "--light")
         .cloned()
         .collect::<Vec<_>>();
     valid_replacement_hint(
@@ -135,6 +137,33 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
             .chain(migrated)
             .collect(),
     )
+}
+
+fn explicit_command_migration_hint(command: &Command, arguments: Vec<String>) -> Option<String> {
+    let current = arguments.first()?.as_str();
+
+    // Graph already emits JSON, so its removed --json flag is redundant. A
+    // migration hint must preserve the graph product rather than redirecting
+    // the user to a syntactically valid but unrelated report command.
+    if current == "graph" && arguments.iter().any(|argument| argument == "--json") {
+        let replacement = arguments
+            .iter()
+            .filter(|argument| argument.as_str() != "--json")
+            .cloned()
+            .collect::<Vec<_>>();
+        return valid_replacement_hint(replacement);
+    }
+
+    // Cross-command migration is an explicit product decision, not something
+    // Clap ownership can prove. The only intentional explicit-command move is
+    // from the interactive TUI to the canonical Models report.
+    if current != "tui" || migration_target(command, &arguments)? != "models" {
+        return None;
+    }
+    let replacement = std::iter::once("models".to_string())
+        .chain(arguments.into_iter().skip(1))
+        .collect();
+    valid_replacement_hint(replacement)
 }
 
 #[derive(Clone, Copy)]
