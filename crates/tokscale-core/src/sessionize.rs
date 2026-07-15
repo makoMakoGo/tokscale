@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn test_compute_daily_active_time_matches_local_day_boundaries_for_fixed_offset() {
         let interval = time_interval(
-            "trae",
+            "droid",
             "session-local-boundary",
             FixedOffset::east_opt(9 * 3600)
                 .unwrap()

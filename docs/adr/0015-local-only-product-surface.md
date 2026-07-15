@@ -4,6 +4,9 @@
 
 Accepted.
 
+Superseded in part by ADR 0024's Subscription Usage boundary: Cursor and Trae
+are no longer maintained integrations.
+
 ## Context
 
 This fork is maintained for local CLI and TUI usage accounting on

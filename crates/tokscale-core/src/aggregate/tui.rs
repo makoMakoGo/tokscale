@@ -1677,7 +1677,7 @@ mod tests {
                         1.0,
                     ),
                     UnifiedMessage::new(
-                        "cursor",
+                        "gemini",
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
@@ -1706,12 +1706,12 @@ mod tests {
         assert_eq!(claude_model.display_name, "claude-sonnet-4.5");
         assert_eq!(claude_model.tokens.total(), 15);
 
-        let cursor = usage.daily[0].source_breakdown.get("cursor").unwrap();
-        assert_eq!(cursor.cost, 2.0);
-        assert_eq!(cursor.models.len(), 1);
-        let cursor_model = cursor.models.get("v1|m|17:claude-sonnet-4.5").unwrap();
-        assert_eq!(cursor_model.display_name, "claude-sonnet-4.5");
-        assert_eq!(cursor_model.tokens.total(), 30);
+        let gemini = usage.daily[0].source_breakdown.get("gemini").unwrap();
+        assert_eq!(gemini.cost, 2.0);
+        assert_eq!(gemini.models.len(), 1);
+        let gemini_model = gemini.models.get("v1|m|17:claude-sonnet-4.5").unwrap();
+        assert_eq!(gemini_model.display_name, "claude-sonnet-4.5");
+        assert_eq!(gemini_model.tokens.total(), 30);
     }
 
     #[test]

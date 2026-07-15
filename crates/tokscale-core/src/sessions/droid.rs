@@ -7,7 +7,20 @@ use super::UnifiedMessage;
 use crate::source_health::{RecordRejectionReason, ScannedSource};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
-use std::path::Path;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+
+const DROID_EXPLORER_AGENT: &str = "Droid Explorer";
+const DROID_WORKER_AGENT: &str = "Droid Worker";
+const DROID_ORCHESTRATOR_AGENT: &str = "Droid Orchestrator";
+const DROID_VALIDATOR_AGENT: &str = "Droid Validator";
+
+const MISSION_ORCHESTRATOR_TAG: &str = "mission-orchestrator";
+const MISSION_SESSION_TAG: &str = "mission-session";
+const MISSION_WORKER_TAG: &str = "mission-worker";
+const SUBAGENT_TAG: &str = "subagent";
+const SCRUTINY_VALIDATOR_SKILL: &str = "scrutiny-validator";
+const USER_TESTING_VALIDATOR_SKILL: &str = "user-testing-validator";
 
 /// Droid settings.json structure
 #[derive(Debug, Deserialize)]
@@ -19,6 +32,53 @@ pub struct DroidSettingsJson {
     pub provider_lock_timestamp: Option<String>,
     #[serde(rename = "tokenUsage")]
     pub token_usage: Option<DroidTokenUsage>,
+    #[serde(default)]
+    tags: Vec<DroidTag>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DroidTag {
+    name: String,
+    metadata: Option<DroidTagMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DroidTagMetadata {
+    role: Option<String>,
+    #[serde(rename = "missionId")]
+    mission_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DroidSessionStart {
+    #[serde(rename = "type")]
+    record_type: String,
+    title: Option<String>,
+    #[serde(rename = "callingSessionId")]
+    calling_session_id: Option<String>,
+}
+
+impl DroidSessionStart {
+    fn parent_session_id(&self) -> Option<&str> {
+        self.calling_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DroidMissionFeatures {
+    #[serde(default)]
+    features: Vec<DroidMissionFeature>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DroidMissionFeature {
+    #[serde(rename = "skillName")]
+    skill_name: Option<String>,
+    #[serde(default, rename = "workerSessionIds")]
+    worker_session_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +184,179 @@ fn invalid_at_path(
     )
 }
 
+fn settings_session_id(path: &Path) -> Option<&str> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".settings.json"))
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+}
+
+fn transcript_path(path: &Path) -> Option<PathBuf> {
+    settings_session_id(path).map(|session_id| path.with_file_name(format!("{session_id}.jsonl")))
+}
+
+fn read_settings(path: &Path) -> Option<DroidSettingsJson> {
+    let mut bytes = std::fs::read(path).ok()?;
+    simd_json::from_slice(&mut bytes).ok()
+}
+
+fn read_session_start(path: &Path) -> Option<DroidSessionStart> {
+    let transcript = transcript_path(path)?;
+    let mut first_line = String::new();
+    BufReader::new(std::fs::File::open(transcript).ok()?)
+        .read_line(&mut first_line)
+        .ok()?;
+    let start: DroidSessionStart = serde_json::from_str(&first_line).ok()?;
+    (start.record_type == "session_start").then_some(start)
+}
+
+fn factory_root(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some("sessions"))
+        .and_then(Path::parent)
+}
+
+fn mission_features_path(path: &Path, mission_id: &str) -> Option<PathBuf> {
+    Some(
+        factory_root(path)?
+            .join("missions")
+            .join(mission_id)
+            .join("features.json"),
+    )
+}
+
+fn has_tag(settings: &DroidSettingsJson, name: &str) -> bool {
+    settings.tags.iter().any(|tag| tag.name == name)
+}
+
+fn mission_session_metadata(settings: &DroidSettingsJson) -> Option<&DroidTagMetadata> {
+    settings
+        .tags
+        .iter()
+        .find(|tag| tag.name == MISSION_SESSION_TAG)
+        .and_then(|tag| tag.metadata.as_ref())
+}
+
+fn mission_session_role(settings: &DroidSettingsJson) -> Option<&str> {
+    mission_session_metadata(settings).and_then(|metadata| metadata.role.as_deref())
+}
+
+fn mission_id(settings: &DroidSettingsJson) -> Option<&str> {
+    mission_session_metadata(settings)
+        .and_then(|metadata| metadata.mission_id.as_deref())
+        .map(str::trim)
+        .filter(|mission_id| !mission_id.is_empty())
+}
+
+fn mission_worker_is_validator(
+    path: &Path,
+    settings: &DroidSettingsJson,
+    session_id: &str,
+) -> bool {
+    let Some(features_path) =
+        mission_id(settings).and_then(|mission_id| mission_features_path(path, mission_id))
+    else {
+        return false;
+    };
+    let Ok(mut bytes) = std::fs::read(features_path) else {
+        return false;
+    };
+    let Ok(features) = simd_json::from_slice::<DroidMissionFeatures>(&mut bytes) else {
+        return false;
+    };
+
+    features.features.iter().any(|feature| {
+        feature
+            .worker_session_ids
+            .iter()
+            .any(|worker_id| worker_id == session_id)
+            && matches!(
+                feature.skill_name.as_deref(),
+                Some(SCRUTINY_VALIDATOR_SKILL | USER_TESTING_VALIDATOR_SKILL)
+            )
+    })
+}
+
+fn agent_from_title(title: &str) -> Option<&'static str> {
+    let label = title
+        .split(':')
+        .next()
+        .unwrap_or(title)
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '_'], "-");
+
+    match label.as_str() {
+        "explorer" => Some(DROID_EXPLORER_AGENT),
+        "scrutiny-feature-reviewer" | "user-testing-flow-validator" => Some(DROID_VALIDATOR_AGENT),
+        _ => None,
+    }
+}
+
+fn resolve_droid_agent(
+    path: &Path,
+    settings: &DroidSettingsJson,
+    inherit_validator_parent: bool,
+) -> Option<&'static str> {
+    if has_tag(settings, MISSION_ORCHESTRATOR_TAG)
+        || mission_session_role(settings) == Some("orchestrator")
+    {
+        return Some(DROID_ORCHESTRATOR_AGENT);
+    }
+    // The built-in tag is the authoritative Mission Worker marker.
+    if has_tag(settings, MISSION_WORKER_TAG) {
+        let session_id = settings_session_id(path)?;
+        return Some(if mission_worker_is_validator(path, settings, session_id) {
+            DROID_VALIDATOR_AGENT
+        } else {
+            DROID_WORKER_AGENT
+        });
+    }
+    if !has_tag(settings, SUBAGENT_TAG) {
+        return None;
+    }
+
+    let start = read_session_start(path);
+    if let Some(agent) = start
+        .as_ref()
+        .and_then(|start| start.title.as_deref())
+        .and_then(agent_from_title)
+    {
+        return Some(agent);
+    }
+    if inherit_validator_parent {
+        let parent_is_validator = start
+            .as_ref()
+            .and_then(DroidSessionStart::parent_session_id)
+            .map(|parent_id| path.with_file_name(format!("{parent_id}.settings.json")))
+            .and_then(|parent_path| {
+                let parent_settings = read_settings(&parent_path)?;
+                resolve_droid_agent(&parent_path, &parent_settings, false)
+            })
+            == Some(DROID_VALIDATOR_AGENT);
+        if parent_is_validator {
+            return Some(DROID_VALIDATOR_AGENT);
+        }
+    }
+
+    Some(DROID_WORKER_AGENT)
+}
+
+/// Return the role-bearing companion file that participates in Droid cache
+/// invalidation. Task subagents derive their role from the session header;
+/// Mission workers derive it from the Mission feature assigned to the worker.
+pub(crate) fn droid_agent_dependency_path(path: &Path) -> Option<PathBuf> {
+    let settings = read_settings(path)?;
+    if has_tag(&settings, MISSION_WORKER_TAG) {
+        return mission_id(&settings)
+            .and_then(|mission_id| mission_features_path(path, mission_id));
+    }
+    has_tag(&settings, SUBAGENT_TAG)
+        .then(|| transcript_path(path))
+        .flatten()
+}
+
 /// Parse a Droid settings.json file
 pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let data = std::fs::read(path)
@@ -132,6 +365,8 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
     let mut bytes = data;
     let settings: DroidSettingsJson = simd_json::from_slice(&mut bytes)
         .map_err(|error| SessionParseError::at_path(path, "decode JSON", error))?;
+
+    let agent = resolve_droid_agent(path, &settings, true).map(str::to_string);
 
     // Skip if no token usage data
     let usage = match settings.token_usage {
@@ -236,8 +471,8 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
         return Ok(scanned);
     }
 
-    scanned.messages.push(UnifiedMessage::new(
-        "droid", model, provider, session_id, timestamp, tokens, 0.0,
+    scanned.messages.push(UnifiedMessage::new_with_agent(
+        "droid", model, provider, session_id, timestamp, tokens, 0.0, agent,
     ));
     Ok(scanned)
 }
@@ -245,9 +480,214 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         super::parse_droid_file(path).unwrap().messages
+    }
+
+    fn write_json(path: &Path, value: serde_json::Value) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+
+    fn write_settings(path: &Path, tags: serde_json::Value) {
+        write_json(
+            path,
+            json!({
+                "model": "custom:gpt-5.6-sol-xhigh",
+                "providerLock": "openai",
+                "providerLockTimestamp": "2026-07-15T08:55:13.871Z",
+                "tokenUsage": {
+                    "inputTokens": 10,
+                    "outputTokens": 5
+                },
+                "tags": tags
+            }),
+        );
+    }
+
+    fn write_session_start(path: &Path, title: &str, calling_session_id: Option<&str>) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let value = json!({
+            "type": "session_start",
+            "id": path.file_stem().and_then(|stem| stem.to_str()),
+            "title": title,
+            "callingSessionId": calling_session_id
+        });
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    fn agent_for(path: &Path) -> Option<String> {
+        parse_droid_file(path)
+            .into_iter()
+            .next()
+            .and_then(|message| message.agent.map(|agent| agent.to_string()))
+    }
+
+    fn mission_worker_tags(mission_id: &str) -> serde_json::Value {
+        json!([
+            {"name": "exec"},
+            {"name": "mission-worker"},
+            {
+                "name": "mission-session",
+                "metadata": {"role": "worker", "missionId": mission_id}
+            }
+        ])
+    }
+
+    #[test]
+    fn test_parse_droid_file_attributes_four_agent_roles() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let factory = temp_dir.path().join(".factory");
+        let sessions = factory.join("sessions/project");
+        let mission_id = "mission-session";
+        let features_path = factory
+            .join("missions")
+            .join(mission_id)
+            .join("features.json");
+
+        let orchestrator = sessions.join(format!("{mission_id}.settings.json"));
+        write_settings(
+            &orchestrator,
+            json!([{
+                "name": "mission-session",
+                "metadata": {"role": "orchestrator", "missionId": mission_id}
+            }]),
+        );
+
+        let explorer = sessions.join("explorer.settings.json");
+        write_settings(&explorer, json!([{"name": "subagent"}]));
+        write_session_start(
+            &sessions.join("explorer.jsonl"),
+            "Explorer: inspect parser flow",
+            Some(mission_id),
+        );
+
+        let worker = sessions.join("worker.settings.json");
+        write_settings(&worker, json!([{"name": "subagent"}]));
+        write_session_start(
+            &sessions.join("worker.jsonl"),
+            "Worker: implement parser flow",
+            Some(mission_id),
+        );
+
+        let implementation_worker = sessions.join("implementation-worker.settings.json");
+        write_settings(&implementation_worker, mission_worker_tags(mission_id));
+
+        let scrutiny_validator = sessions.join("scrutiny-validator.settings.json");
+        write_settings(&scrutiny_validator, mission_worker_tags(mission_id));
+
+        let user_testing_validator = sessions.join("user-testing-validator.settings.json");
+        write_settings(&user_testing_validator, mission_worker_tags(mission_id));
+
+        write_json(
+            &features_path,
+            json!({
+                "features": [
+                    {
+                        "id": "implementation",
+                        "skillName": "backend-worker",
+                        "workerSessionIds": ["implementation-worker"]
+                    },
+                    {
+                        "id": "scrutiny",
+                        "skillName": "scrutiny-validator",
+                        "workerSessionIds": ["scrutiny-validator"]
+                    },
+                    {
+                        "id": "user-testing",
+                        "skillName": "user-testing-validator",
+                        "workerSessionIds": ["user-testing-validator"]
+                    }
+                ]
+            }),
+        );
+
+        let scrutiny_reviewer = sessions.join("scrutiny-reviewer.settings.json");
+        write_settings(&scrutiny_reviewer, json!([{"name": "subagent"}]));
+        write_session_start(
+            &sessions.join("scrutiny-reviewer.jsonl"),
+            "Worker: review implementation",
+            Some("scrutiny-validator"),
+        );
+
+        let flow_validator = sessions.join("flow-validator.settings.json");
+        write_settings(&flow_validator, json!([{"name": "subagent"}]));
+        write_session_start(
+            &sessions.join("flow-validator.jsonl"),
+            "Worker: validate user flow",
+            Some("user-testing-validator"),
+        );
+
+        assert_eq!(
+            agent_for(&orchestrator).as_deref(),
+            Some(DROID_ORCHESTRATOR_AGENT)
+        );
+        assert_eq!(agent_for(&explorer).as_deref(), Some(DROID_EXPLORER_AGENT));
+        assert_eq!(agent_for(&worker).as_deref(), Some(DROID_WORKER_AGENT));
+        assert_eq!(
+            agent_for(&implementation_worker).as_deref(),
+            Some(DROID_WORKER_AGENT)
+        );
+        assert_eq!(
+            agent_for(&scrutiny_validator).as_deref(),
+            Some(DROID_VALIDATOR_AGENT)
+        );
+        assert_eq!(
+            agent_for(&user_testing_validator).as_deref(),
+            Some(DROID_VALIDATOR_AGENT)
+        );
+        assert_eq!(
+            agent_for(&scrutiny_reviewer).as_deref(),
+            Some(DROID_VALIDATOR_AGENT)
+        );
+        assert_eq!(
+            agent_for(&flow_validator).as_deref(),
+            Some(DROID_VALIDATOR_AGENT)
+        );
+
+        assert_eq!(
+            droid_agent_dependency_path(&explorer),
+            Some(sessions.join("explorer.jsonl"))
+        );
+        assert_eq!(
+            droid_agent_dependency_path(&scrutiny_validator),
+            Some(features_path)
+        );
+    }
+
+    #[test]
+    fn test_parse_droid_file_requires_mission_worker_tag() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let factory = temp_dir.path().join(".factory");
+        let sessions = factory.join("sessions/project");
+        let mission_id = "mission-session";
+        let worker = sessions.join("metadata-only-worker.settings.json");
+
+        write_settings(
+            &worker,
+            json!([{
+                "name": "mission-session",
+                "metadata": {"role": "worker", "missionId": mission_id}
+            }]),
+        );
+        write_json(
+            &factory
+                .join("missions")
+                .join(mission_id)
+                .join("features.json"),
+            json!({
+                "features": [{
+                    "id": "implementation",
+                    "skillName": "backend-worker",
+                    "workerSessionIds": ["metadata-only-worker"]
+                }]
+            }),
+        );
+
+        assert_eq!(agent_for(&worker), None);
+        assert_eq!(droid_agent_dependency_path(&worker), None);
     }
 
     #[test]

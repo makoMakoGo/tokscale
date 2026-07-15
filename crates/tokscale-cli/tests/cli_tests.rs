@@ -205,6 +205,8 @@ fn headless_capture_command(fake_bin: &Path, output_path: &Path, mode: &str) -> 
             output_path.to_str().unwrap(),
             "--no-auto-flags",
             "codex",
+            "--",
+            "codex",
         ]);
 
     cmd
@@ -245,6 +247,28 @@ fn headless_capture_fast_nonzero_preserves_exit_code() {
         "fast failure waited too long: {elapsed:?}"
     );
     assert_eq!(fs::read_to_string(output_path).unwrap(), "captured fail");
+}
+
+#[test]
+fn headless_rejects_invalid_native_timeout_before_starting_child() {
+    for value in ["bogus", "1"] {
+        let fake_bin = create_fake_codex_bin();
+        let output_path = fake_bin
+            .path()
+            .join(format!("invalid-timeout-{value}.jsonl"));
+
+        headless_capture_command(fake_bin.path(), &output_path, "success")
+            .env("TOKSCALE_NATIVE_TIMEOUT_MS", value)
+            .assert()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("TOKSCALE_NATIVE_TIMEOUT_MS"));
+
+        assert!(
+            !output_path.exists(),
+            "invalid execution environment must fail before creating output"
+        );
+    }
 }
 
 #[test]
@@ -807,34 +831,6 @@ fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, ou
     .unwrap();
 }
 
-fn write_cursor_usage_cache(base: &Path) {
-    let cache_dir = base.join(".config/tokscale/cursor-cache");
-    fs::create_dir_all(&cache_dir).unwrap();
-    fs::write(cache_dir.join("usage.csv"), "Date,Model\n").unwrap();
-}
-
-fn write_cursor_credentials(base: &Path) {
-    let config_dir = base.join(".config/tokscale");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("cursor-credentials.json"),
-        serde_json::json!({
-            "version": 1,
-            "activeAccountId": "active-account",
-            "accounts": {
-                "active-account": {
-                    "sessionToken": "test-session-token",
-                    "userId": "active-account",
-                    "createdAt": "2026-01-01T00:00:00Z",
-                    "label": "work"
-                }
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-}
-
 // ── Existing tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -894,7 +890,9 @@ fn test_pricing_command_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Show pricing for a model"));
+        .stdout(predicate::str::contains("Query model pricing"))
+        .stdout(predicate::str::contains("lookup"))
+        .stdout(predicate::str::contains("overrides"));
 }
 
 #[test]
@@ -912,7 +910,7 @@ fn test_cache_prune_reports_empty_cache_stats() {
     let config_dir = TempDir::new().unwrap();
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("TOKSCALE_CONFIG_DIR", config_dir.path())
-        .args(["--no-spinner", "cache", "prune"])
+        .args(["cache", "prune"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -931,7 +929,7 @@ fn test_cache_prune_surfaces_unknown_shard_magic() {
 
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("TOKSCALE_CONFIG_DIR", config_dir.path())
-        .args(["--no-spinner", "cache", "prune"])
+        .args(["cache", "prune"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("has unrecognized magic"))
@@ -939,15 +937,13 @@ fn test_cache_prune_surfaces_unknown_shard_magic() {
 }
 
 #[test]
-fn test_codex_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("codex")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Codex account integration commands",
-        ));
+fn test_removed_integration_namespaces_are_not_registered() {
+    for command in ["codex", "cursor", "trae"] {
+        cargo_bin_cmd!("tokscale")
+            .args([command, "--help"])
+            .assert()
+            .code(2);
+    }
 }
 
 #[test]
@@ -967,7 +963,86 @@ fn test_tui_command_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Launch interactive TUI"));
+        .stdout(predicate::str::contains(
+            "Launch the interactive terminal interface",
+        ));
+}
+
+#[test]
+fn test_wrapped_ranking_rejects_ambiguous_and_irrelevant_options() {
+    cargo_bin_cmd!("tokscale")
+        .args(["wrapped", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--ranking <RANKING>"))
+        .stdout(predicate::str::contains("--agents").not())
+        .stdout(predicate::str::contains("--clients").not());
+
+    cargo_bin_cmd!("tokscale")
+        .args(["wrapped", "--agents", "--clients", "--no-spinner"])
+        .assert()
+        .code(2);
+
+    cargo_bin_cmd!("tokscale")
+        .args([
+            "wrapped",
+            "--ranking",
+            "agents",
+            "--client",
+            "claude",
+            "--no-spinner",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "--ranking agents requires `opencode`",
+        ));
+
+    cargo_bin_cmd!("tokscale")
+        .args([
+            "wrapped",
+            "--ranking",
+            "clients",
+            "--disable-pinned",
+            "--no-spinner",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--disable-pinned does not apply"));
+}
+
+#[test]
+fn test_help_exposes_only_leaf_owned_options() {
+    cargo_bin_cmd!("tokscale")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json").not())
+        .stdout(predicate::str::contains("--client").not())
+        .stdout(predicate::str::contains("--group-by").not());
+
+    cargo_bin_cmd!("tokscale")
+        .args(["models", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--client"))
+        .stdout(predicate::str::contains("--group-by"));
+
+    cargo_bin_cmd!("tokscale")
+        .args(["monthly", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--group-by").not());
+
+    cargo_bin_cmd!("tokscale")
+        .args(["tui", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--tab"))
+        .stdout(predicate::str::contains("--theme"))
+        .stdout(predicate::str::contains("--json").not());
 }
 
 #[test]
@@ -1008,18 +1083,6 @@ fn test_invalid_subcommand() {
 }
 
 #[test]
-fn test_codex_accounts_empty_json() {
-    let tmp = TempDir::new().expect("failed to create temp home");
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.env("HOME", tmp.path())
-        .env_remove("CODEX_HOME")
-        .args(["codex", "accounts", "--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(r#""accounts": []"#));
-}
-
-#[test]
 fn test_pricing_command_missing_model() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("pricing").assert().failure();
@@ -1042,17 +1105,27 @@ fn test_headless_command_invalid_client() {
 }
 
 #[test]
+fn test_headless_requires_explicit_child_command_separator() {
+    cargo_bin_cmd!("tokscale")
+        .args(["headless", "codex", "codex", "exec"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "separate Tokscale options from the child command with `--`",
+        ));
+}
+
+#[test]
 fn test_models_with_invalid_date_format() {
     let tmp = create_empty_fixture_dir();
     cmd_with_home(tmp.path())
         .arg("models")
-        .arg("--light")
         .args(["--client", "opencode"])
         .arg("--no-spinner")
         .arg("--since")
         .arg("invalid-date")
         .assert()
-        .success();
+        .code(2);
 }
 
 #[test]
@@ -1060,29 +1133,101 @@ fn test_models_with_invalid_year() {
     let tmp = create_empty_fixture_dir();
     cmd_with_home(tmp.path())
         .arg("models")
-        .arg("--light")
         .args(["--client", "opencode"])
         .arg("--no-spinner")
         .arg("--year")
         .arg("not-a-year")
         .assert()
-        .success();
+        .code(2);
 }
 
 #[test]
-fn test_global_theme_flag() {
+fn test_local_scope_rejects_nonexistent_home() {
+    cargo_bin_cmd!("tokscale")
+        .args([
+            "models",
+            "--home",
+            "/definitely/not/a/tokscale/home",
+            "--no-spinner",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "--home must be an existing directory",
+        ));
+}
+
+#[test]
+fn test_date_presets_are_mutually_exclusive() {
+    cargo_bin_cmd!("tokscale")
+        .args(["models", "--week", "--month", "--no-spinner"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_custom_date_range_must_be_ordered() {
+    cargo_bin_cmd!("tokscale")
+        .args([
+            "models",
+            "--since",
+            "2026-07-15",
+            "--until",
+            "2026-07-14",
+            "--no-spinner",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("must not be later"));
+}
+
+#[test]
+fn json_report_suppresses_spinner_without_explicit_no_spinner() {
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "opencode"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("valid JSON report");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Scanning session data..."), "{stderr}");
+    assert!(!stderr.contains("\x1b[?25l"), "{stderr}");
+}
+
+#[test]
+fn test_theme_flag_is_owned_by_tui() {
     let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("--theme")
-        .arg("blue")
-        .arg("--help")
+    cmd.args(["tui", "--theme", "blue", "--help"])
         .assert()
         .success();
+
+    let mut root = cargo_bin_cmd!("tokscale");
+    root.args(["--theme", "blue"]).assert().code(2);
 }
 
 #[test]
-fn test_global_debug_flag() {
+fn test_debug_flag_is_owned_by_tui() {
     let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("--debug").arg("--help").assert().success();
+    cmd.args(["tui", "--debug", "--help"]).assert().success();
+
+    let mut root = cargo_bin_cmd!("tokscale");
+    root.arg("--debug").assert().code(2);
+}
+
+#[test]
+fn test_tui_refresh_modes_are_mutually_exclusive() {
+    cargo_bin_cmd!("tokscale")
+        .args(["tui", "--refresh", "30", "--no-refresh"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]
@@ -1233,9 +1378,9 @@ fn test_models_home_override_ignores_conflicting_xdg_env() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["totalMessages"].as_i64().unwrap(), 3);
-    assert_eq!(json["totalInput"].as_i64().unwrap(), 2400);
-    assert_eq!(json["totalOutput"].as_i64().unwrap(), 1000);
+    assert_eq!(json["data"]["totalMessages"].as_i64().unwrap(), 3);
+    assert_eq!(json["data"]["totalInput"].as_i64().unwrap(), 2400);
+    assert_eq!(json["data"]["totalOutput"].as_i64().unwrap(), 1000);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("gemini-2.5-pro"));
 }
 
@@ -1264,7 +1409,7 @@ fn test_monthly_home_override_ignores_conflicting_xdg_env() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().any(|entry| entry["month"] == "2024-06"));
     assert!(entries.iter().any(|entry| entry["month"] == "2025-01"));
@@ -1295,7 +1440,7 @@ fn test_graph_home_override_ignores_conflicting_xdg_env() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["contributions"].as_array().unwrap();
+    let contributions = json["data"]["contributions"].as_array().unwrap();
     assert_eq!(contributions.len(), 2);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("gemini-2.5-pro"));
 }
@@ -1326,23 +1471,23 @@ fn test_models_home_override_ignores_conflicting_codex_home_env() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
-    assert_eq!(json["totalInput"].as_i64().unwrap(), 100);
-    assert_eq!(json["totalOutput"].as_i64().unwrap(), 30);
-    assert_eq!(json["totalCacheRead"].as_i64().unwrap(), 20);
+    assert_eq!(json["data"]["totalMessages"].as_i64().unwrap(), 1);
+    assert_eq!(json["data"]["totalInput"].as_i64().unwrap(), 100);
+    assert_eq!(json["data"]["totalOutput"].as_i64().unwrap(), 30);
+    assert_eq!(json["data"]["totalCacheRead"].as_i64().unwrap(), 20);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("\"gpt-5\""));
 }
 
 #[test]
-fn test_tui_rejects_home_override() {
+fn test_tui_accepts_home_but_requires_an_interactive_terminal() {
     let tmp = TempDir::new().unwrap();
 
     cargo_bin_cmd!("tokscale")
-        .args(["--home", tmp.path().to_str().unwrap(), "tui"])
+        .args(["tui", "--home", tmp.path().to_str().unwrap()])
         .assert()
-        .failure()
+        .code(2)
         .stderr(predicate::str::contains(
-            "--home is currently supported for local report commands only",
+            "TUI requires an interactive terminal",
         ));
 }
 
@@ -1361,9 +1506,9 @@ fn test_clients_home_override_uses_explicit_home_for_json() {
     let output = cmd_with_conflicting_env(conflicting_home.path())
         .env("CODEX_HOME", conflicting_home.path().join(".codex"))
         .args([
+            "clients",
             "--home",
             real_home.path().to_str().unwrap(),
-            "clients",
             "--json",
         ])
         .output()
@@ -1376,7 +1521,7 @@ fn test_clients_home_override_uses_explicit_home_for_json() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let codex = json["clients"]
+    let codex = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -1399,9 +1544,9 @@ fn test_clients_home_override_ignores_copilot_exporter_env() {
     let output = cmd_with_conflicting_env(conflicting_home.path())
         .env("COPILOT_OTEL_FILE_EXPORTER_PATH", &exporter_file)
         .args([
+            "clients",
             "--home",
             real_home.path().to_str().unwrap(),
-            "clients",
             "--json",
         ])
         .output()
@@ -1414,7 +1559,7 @@ fn test_clients_home_override_ignores_copilot_exporter_env() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let copilot = json["clients"]
+    let copilot = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -1460,7 +1605,7 @@ fn test_models_with_no_matching_date() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert!(
         entries.is_empty(),
         "No entries expected for future date range"
@@ -1483,7 +1628,7 @@ fn test_graph_single_day_filter_uses_local_timezone_boundaries() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["contributions"].as_array().unwrap();
+    let contributions = json["data"]["contributions"].as_array().unwrap();
     assert_eq!(
         contributions.len(),
         1,
@@ -1504,7 +1649,7 @@ fn test_graph_with_year_filter() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["contributions"].as_array().unwrap();
+    let contributions = json["data"]["contributions"].as_array().unwrap();
     for c in contributions {
         let date = c["date"].as_str().unwrap();
         assert!(
@@ -1526,7 +1671,7 @@ fn test_models_with_client_filter_opencode() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     for entry in entries {
         assert_eq!(entry["client"].as_str().unwrap(), "opencode");
     }
@@ -1549,221 +1694,19 @@ fn test_models_with_client_filter_multiple() {
         .success();
 }
 
-fn assert_cursor_setup_warning(json: &serde_json::Value) {
-    let warnings = json["warnings"]
-        .as_array()
-        .expect("explicit Cursor report should expose setup warnings");
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.as_str().is_some_and(|text| text
-                .contains("tokscale cursor login")
-                && text.contains("tokscale cursor sync --json")
-                && text.contains("cursor-cache/usage*.csv")
-                && text.contains("Tokscale does not parse local `~/.cursor`"))),
-        "warnings did not explain Cursor setup: {warnings:?}"
-    );
-}
-
 #[test]
-fn test_models_cursor_explicit_missing_cache_reports_setup_warning_json() {
+fn test_reports_reject_removed_client_ids() {
     let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_cursor_setup_warning(&json);
-}
-
-#[test]
-fn test_models_cursor_explicit_local_cursor_state_still_reports_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    fs::create_dir_all(
-        tmp.path()
-            .join(".cursor/projects/demo/agent-transcripts/session"),
-    )
-    .unwrap();
-    fs::write(
-        tmp.path()
-            .join(".cursor/projects/demo/agent-transcripts/session/session.jsonl"),
-        r#"{"role":"user","content":"hello"}"#,
-    )
-    .unwrap();
-
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_cursor_setup_warning(&json);
-}
-
-#[test]
-fn test_monthly_cursor_explicit_missing_cache_reports_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_cursor_setup_warning(&json);
-}
-
-#[test]
-fn test_hourly_cursor_explicit_missing_cache_reports_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["hourly", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_cursor_setup_warning(&json);
-}
-
-#[test]
-fn test_models_cursor_explicit_home_override_reports_fixture_cache_path() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args([
-            "--home",
-            tmp.path().to_str().unwrap(),
-            "models",
-            "--json",
-            "--client",
-            "cursor",
-            "--no-spinner",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let warnings = json["warnings"]
-        .as_array()
-        .expect("explicit Cursor --home report should expose setup warnings");
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.as_str().is_some_and(|text| text
-                .contains(tmp.path().to_str().unwrap())
-                && text.contains("tokscale cursor login")
-                && text.contains("tokscale cursor sync --json")
-                && text.contains("cursor-cache/usage*.csv"))),
-        "warnings did not explain Cursor --home setup: {warnings:?}"
-    );
-}
-
-#[test]
-fn test_models_cursor_explicit_missing_cache_reports_setup_warning_text() {
-    let tmp = create_empty_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["models", "--client", "cursor", "--no-spinner"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Cursor usage requires"))
-        .stderr(predicate::str::contains("tokscale cursor login"))
-        .stderr(predicate::str::contains("tokscale cursor sync --json"))
-        .stderr(predicate::str::contains(
-            "Tokscale does not parse local `~/.cursor`",
-        ));
-}
-
-#[test]
-fn test_models_default_missing_cursor_cache_does_not_emit_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(
-        json.get("warnings")
-            .and_then(serde_json::Value::as_array)
-            .is_none_or(Vec::is_empty),
-        "default all-client report should not warn about unrequested Cursor setup"
-    );
-}
-
-#[test]
-fn test_models_cursor_explicit_existing_cache_suppresses_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    write_cursor_usage_cache(tmp.path());
-
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(
-        json.get("warnings")
-            .and_then(serde_json::Value::as_array)
-            .is_none_or(Vec::is_empty),
-        "existing Cursor cache should suppress setup warnings"
-    );
-}
-
-#[test]
-fn test_models_cursor_logged_in_missing_cache_suggests_sync_only_json() {
-    let tmp = create_empty_fixture_dir();
-    write_cursor_credentials(tmp.path());
-
-    let output = cmd_with_home(tmp.path())
-        .env("HTTPS_PROXY", "http://127.0.0.1:9")
-        .env("HTTP_PROXY", "http://127.0.0.1:9")
-        .env("ALL_PROXY", "http://127.0.0.1:9")
-        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let warnings = json["warnings"].as_array().unwrap();
-    let warning = warnings[0].as_str().unwrap();
-    assert!(warning.contains("tokscale cursor sync --json"));
-    assert!(
-        !warning.contains("tokscale cursor login"),
-        "logged-in users with no cache should be told to sync, not log in again: {warning}"
-    );
-}
-
-#[test]
-fn test_time_metrics_cursor_explicit_missing_cache_reports_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args([
-            "time-metrics",
-            "--json",
-            "--client",
-            "cursor",
-            "--no-spinner",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_cursor_setup_warning(&json);
+    for client in ["cursor", "trae"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--client", client, "--no-spinner"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid value"), "stderr: {stderr}");
+        assert!(stderr.contains(client), "stderr: {stderr}");
+    }
 }
 
 #[test]
@@ -1829,43 +1772,6 @@ fn test_time_metrics_text_reports_degraded_source_health_without_failing() {
 }
 
 #[test]
-fn test_graph_cursor_explicit_missing_cache_reports_setup_warning_text() {
-    let tmp = create_empty_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["graph", "--client", "cursor", "--no-spinner"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Cursor usage requires"))
-        .stderr(predicate::str::contains("tokscale cursor login"));
-}
-
-#[test]
-fn test_graph_fresh_cursor_cache_skips_auto_sync_warning() {
-    let tmp = create_empty_fixture_dir();
-    write_cursor_credentials(tmp.path());
-    write_cursor_usage_cache(tmp.path());
-
-    let output = cmd_with_home(tmp.path())
-        .env("HTTPS_PROXY", "http://127.0.0.1:9")
-        .env("HTTP_PROXY", "http://127.0.0.1:9")
-        .env("ALL_PROXY", "http://127.0.0.1:9")
-        .args(["graph", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("Cursor sync failed") && !stderr.contains("Cursor sync warning"),
-        "fresh Cursor cache should skip implicit graph sync; stderr: {stderr}"
-    );
-}
-
-#[test]
 fn test_models_with_repeated_client_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
@@ -1881,8 +1787,6 @@ fn test_models_with_repeated_client_filter() {
             "codex",
             "--client",
             "gemini",
-            "--client",
-            "cursor",
             "--client",
             "amp",
             "--client",
@@ -1920,31 +1824,49 @@ fn test_models_json_output() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert!(json.get("groupBy").is_some(), "Missing groupBy field");
-    assert!(json.get("entries").is_some(), "Missing entries field");
-    assert!(json.get("totalInput").is_some(), "Missing totalInput");
-    assert!(json.get("totalOutput").is_some(), "Missing totalOutput");
     assert!(
-        json.get("totalCacheRead").is_some(),
+        json["data"].get("groupBy").is_some(),
+        "Missing groupBy field"
+    );
+    assert!(
+        json["data"].get("entries").is_some(),
+        "Missing entries field"
+    );
+    assert!(
+        json["data"].get("totalInput").is_some(),
+        "Missing totalInput"
+    );
+    assert!(
+        json["data"].get("totalOutput").is_some(),
+        "Missing totalOutput"
+    );
+    assert!(
+        json["data"].get("totalCacheRead").is_some(),
         "Missing totalCacheRead"
     );
     assert!(
-        json.get("totalCacheWrite").is_some(),
+        json["data"].get("totalCacheWrite").is_some(),
         "Missing totalCacheWrite"
     );
     assert!(
-        json.get("totalReasoning").is_none(),
+        json["data"].get("totalReasoning").is_none(),
         "JSON report must fold reasoning into totalOutput"
     );
-    assert!(json.get("totalTokens").is_some(), "Missing totalTokens");
-    assert!(json.get("totalMessages").is_some(), "Missing totalMessages");
-    assert!(json.get("totalCost").is_some(), "Missing totalCost");
     assert!(
-        json.get("processingTimeMs").is_some(),
+        json["data"].get("totalTokens").is_some(),
+        "Missing totalTokens"
+    );
+    assert!(
+        json["data"].get("totalMessages").is_some(),
+        "Missing totalMessages"
+    );
+    assert!(json["data"].get("totalCost").is_some(), "Missing totalCost");
+    assert!(
+        json["metadata"].get("processingTimeMs").is_some(),
         "Missing processingTimeMs"
     );
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert!(!entries.is_empty(), "Should have entries from fixture data");
     let first = &entries[0];
     assert!(first.get("client").is_some());
@@ -1973,6 +1895,56 @@ fn test_models_json_output() {
 }
 
 #[test]
+fn test_every_local_json_command_uses_the_common_envelope() {
+    let tmp = create_empty_fixture_dir();
+    let invocations: &[&[&str]] = &[
+        &["models", "--json", "--client", "opencode", "--no-spinner"],
+        &["monthly", "--json", "--client", "opencode", "--no-spinner"],
+        &["hourly", "--json", "--client", "opencode", "--no-spinner"],
+        &[
+            "time-metrics",
+            "--json",
+            "--client",
+            "opencode",
+            "--no-spinner",
+        ],
+        &["graph", "--client", "opencode", "--no-spinner"],
+        &["clients", "--json", "--client", "opencode"],
+    ];
+
+    for invocation in invocations {
+        let output = cmd_with_home(tmp.path())
+            .args(*invocation)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} failed: {}",
+            invocation.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!("{} returned invalid JSON: {error}", invocation.join(" "))
+            });
+        let mut keys = document
+            .as_object()
+            .expect("report envelope must be an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["data", "health", "metadata"],
+            "{} returned a non-standard envelope",
+            invocation.join(" ")
+        );
+        assert!(document["metadata"]["processingTimeMs"].is_number());
+    }
+}
+
+#[test]
 fn test_models_json_offline_without_pricing_cache_still_succeeds() {
     let tmp = create_temp_fixture_dir_without_pricing_cache();
     let output = offline_cmd_with_home(tmp.path())
@@ -1986,11 +1958,11 @@ fn test_models_json_offline_without_pricing_cache_still_succeeds() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["totalInput"].as_i64().unwrap(), 2400);
-    assert_eq!(json["totalOutput"].as_i64().unwrap(), 1000);
-    assert_eq!(json["totalMessages"].as_i64().unwrap(), 3);
-    assert_eq!(json["entries"].as_array().unwrap().len(), 2);
-    let total_cost = json["totalCost"].as_f64().unwrap();
+    assert_eq!(json["data"]["totalInput"].as_i64().unwrap(), 2400);
+    assert_eq!(json["data"]["totalOutput"].as_i64().unwrap(), 1000);
+    assert_eq!(json["data"]["totalMessages"].as_i64().unwrap(), 3);
+    assert_eq!(json["data"]["entries"].as_array().unwrap().len(), 2);
+    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
     assert_eq!(total_cost, 0.0);
 }
 
@@ -2008,11 +1980,11 @@ fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["month"].as_str().unwrap(), "2024-06");
     assert_eq!(entries[1]["month"].as_str().unwrap(), "2025-01");
-    let total_cost = json["totalCost"].as_f64().unwrap();
+    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
     assert_eq!(total_cost, 0.0);
 }
 
@@ -2030,10 +2002,13 @@ fn test_graph_offline_without_pricing_cache_still_succeeds() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["summary"]["totalTokens"].as_i64().unwrap(), 3950);
-    assert_eq!(json["summary"]["activeDays"].as_i64().unwrap(), 2);
-    assert_eq!(json["contributions"].as_array().unwrap().len(), 2);
-    let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
+    assert_eq!(
+        json["data"]["summary"]["totalTokens"].as_i64().unwrap(),
+        3950
+    );
+    assert_eq!(json["data"]["summary"]["activeDays"].as_i64().unwrap(), 2);
+    assert_eq!(json["data"]["contributions"].as_array().unwrap().len(), 2);
+    let total_cost = json["data"]["summary"]["totalCost"].as_f64().unwrap();
     assert_eq!(total_cost, 0.0);
 }
 
@@ -2051,7 +2026,7 @@ fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
     for entry in entries {
         let hour = entry["hour"].as_str().unwrap();
@@ -2083,7 +2058,7 @@ fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
             .sum::<i64>(),
         1000
     );
-    let total_cost = json["totalCost"].as_f64().unwrap();
+    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
     assert_eq!(total_cost, 0.0);
 }
 
@@ -2129,7 +2104,7 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let total_cost = json["totalCost"].as_f64().unwrap();
+    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
     assert!(
         (total_cost - 0.0209).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
@@ -2154,7 +2129,7 @@ fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let total_cost = json["totalCost"].as_f64().unwrap();
+    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
     assert!(
         (total_cost - 0.0209).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
@@ -2179,7 +2154,7 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let total_cost = json["summary"]["totalCost"].as_f64().unwrap();
+    let total_cost = json["data"]["summary"]["totalCost"].as_f64().unwrap();
     assert!(
         (total_cost - 0.0209).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
@@ -2204,7 +2179,7 @@ fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(
         entries
@@ -2220,7 +2195,7 @@ fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
             .sum::<i64>(),
         1000
     );
-    let total_cost = json["totalCost"].as_f64().unwrap();
+    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
     assert!(
         (total_cost - 0.0209).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
@@ -2238,11 +2213,11 @@ fn test_models_json_total_consistency() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     let sum_input: i64 = entries.iter().map(|e| e["input"].as_i64().unwrap()).sum();
     let sum_output: i64 = entries.iter().map(|e| e["output"].as_i64().unwrap()).sum();
-    let total_input = json["totalInput"].as_i64().unwrap();
-    let total_output = json["totalOutput"].as_i64().unwrap();
+    let total_input = json["data"]["totalInput"].as_i64().unwrap();
+    let total_output = json["data"]["totalOutput"].as_i64().unwrap();
 
     assert_eq!(json["health"]["complete"], true);
 
@@ -2266,15 +2241,21 @@ fn test_monthly_json_output() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert!(json.get("entries").is_some(), "Missing entries field");
-    assert!(json.get("totalCost").is_some(), "Missing totalCost field");
+    assert!(
+        json["data"].get("entries").is_some(),
+        "Missing entries field"
+    );
+    assert!(
+        json["data"].get("totalCost").is_some(),
+        "Missing totalCost field"
+    );
     assert_eq!(json["health"]["complete"], true);
     assert!(
-        json.get("processingTimeMs").is_some(),
+        json["metadata"].get("processingTimeMs").is_some(),
         "Missing processingTimeMs"
     );
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert!(
         !entries.is_empty(),
         "Should have monthly entries from fixture data"
@@ -2343,9 +2324,9 @@ fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["entries"].as_array().unwrap().len(), 1);
-    assert_eq!(json["entries"][0]["input"].as_i64().unwrap(), 210);
-    assert_eq!(json["entries"][0]["output"].as_i64().unwrap(), 40);
+    assert_eq!(json["data"]["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(json["data"]["entries"][0]["input"].as_i64().unwrap(), 210);
+    assert_eq!(json["data"]["entries"][0]["output"].as_i64().unwrap(), 40);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("gpt-5"));
 }
 
@@ -2359,7 +2340,7 @@ fn test_monthly_json_with_client_filter() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     for entry in entries {
         let month = entry["month"].as_str().unwrap();
         assert!(
@@ -2380,12 +2361,39 @@ fn test_graph_json_output() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert!(json.get("meta").is_some(), "Missing meta field");
-    assert!(json.get("summary").is_some(), "Missing summary field");
-    assert!(json.get("years").is_some(), "Missing years field");
+    assert!(json["data"].get("meta").is_some(), "Missing meta field");
     assert!(
-        json.get("contributions").is_some(),
+        json["data"].get("summary").is_some(),
+        "Missing summary field"
+    );
+    assert!(json["data"].get("years").is_some(), "Missing years field");
+    assert!(
+        json["data"].get("contributions").is_some(),
         "Missing contributions field"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn graph_output_preserves_non_utf8_path_bytes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = create_empty_fixture_dir();
+    let output_path = tmp
+        .path()
+        .join(OsString::from_vec(b"graph-\xff.json".to_vec()));
+
+    cmd_with_home(tmp.path())
+        .args(["graph", "--client", "opencode", "--output"])
+        .arg(&output_path)
+        .arg("--no-spinner")
+        .assert()
+        .success();
+
+    assert!(
+        output_path.is_file(),
+        "Graph must write to the exact OS path supplied by the user"
     );
 }
 
@@ -2398,7 +2406,7 @@ fn test_graph_json_has_meta() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let meta = &json["meta"];
+    let meta = &json["data"]["meta"];
     assert!(
         meta.get("generatedAt").is_some(),
         "Missing meta.generatedAt"
@@ -2416,7 +2424,7 @@ fn test_graph_json_has_summary() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let summary = &json["summary"];
+    let summary = &json["data"]["summary"];
     assert!(
         summary.get("totalTokens").is_some(),
         "Missing summary.totalTokens"
@@ -2448,7 +2456,7 @@ fn test_models_group_by_default() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "client,model");
+    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "client,model");
 }
 
 #[test]
@@ -2478,11 +2486,11 @@ fn test_models_reports_project_reasoning_into_output() {
         "command failed: {json_output:?}"
     );
     let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(json["entries"][0]["output"], 50);
-    assert!(json["entries"][0].get("reasoning").is_none());
-    assert_eq!(json["totalOutput"], 50);
+    assert_eq!(json["data"]["entries"][0]["output"], 50);
+    assert!(json["data"]["entries"][0].get("reasoning").is_none());
+    assert_eq!(json["data"]["totalOutput"], 50);
     assert!(json.get("totalReasoning").is_none());
-    assert_eq!(json["totalTokens"], 165);
+    assert_eq!(json["data"]["totalTokens"], 165);
 
     let table_output = cmd_with_home(base)
         .args(["models", "--client", "omp", "--no-spinner"])
@@ -2532,8 +2540,8 @@ fn test_monthly_reports_project_reasoning_into_output() {
         "command failed: {json_output:?}"
     );
     let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(json["entries"][0]["output"], 50);
-    assert!(json["entries"][0].get("reasoning").is_none());
+    assert_eq!(json["data"]["entries"][0]["output"], 50);
+    assert!(json["data"]["entries"][0].get("reasoning").is_none());
 
     let table_output = cmd_with_home(base)
         .args(["monthly", "--client", "omp", "--no-spinner"])
@@ -2580,8 +2588,8 @@ fn test_hourly_reports_project_reasoning_into_output() {
         "command failed: {json_output:?}"
     );
     let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(json["entries"][0]["output"], 50);
-    assert!(json["entries"][0].get("reasoning").is_none());
+    assert_eq!(json["data"]["entries"][0]["output"], 50);
+    assert!(json["data"]["entries"][0].get("reasoning").is_none());
 
     let table_output = cmd_with_home(base)
         .args(["hourly", "--client", "omp", "--no-spinner"])
@@ -2624,11 +2632,11 @@ fn test_models_report_clamps_reasoning_above_output() {
     assert!(output.status.success(), "command failed: {output:?}");
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["entries"][0]["output"], 50);
-    assert!(json["entries"][0].get("reasoning").is_none());
-    assert_eq!(json["totalOutput"], 50);
+    assert_eq!(json["data"]["entries"][0]["output"], 50);
+    assert!(json["data"]["entries"][0].get("reasoning").is_none());
+    assert_eq!(json["data"]["totalOutput"], 50);
     assert!(json.get("totalReasoning").is_none());
-    assert_eq!(json["totalTokens"], 165);
+    assert_eq!(json["data"]["totalTokens"], 165);
     assert!(json.get("warnings").is_none());
 }
 
@@ -2642,9 +2650,9 @@ fn test_models_group_by_model() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "model");
+    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "model");
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     let models: Vec<&str> = entries
         .iter()
         .map(|e| e["model"].as_str().unwrap())
@@ -2667,9 +2675,12 @@ fn test_models_group_by_client_provider_model() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "client,provider,model");
+    assert_eq!(
+        json["data"]["groupBy"].as_str().unwrap(),
+        "client,provider,model"
+    );
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     for entry in entries {
         assert!(entry.get("client").is_some(), "Entry must have client");
         assert!(entry.get("provider").is_some(), "Entry must have provider");
@@ -2687,7 +2698,7 @@ fn test_models_json_with_group_by_model() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     for entry in entries {
         assert!(
             entry.get("mergedClients").is_some(),
@@ -2718,9 +2729,9 @@ fn test_models_group_by_session_emits_session_id_per_entry() {
         .unwrap();
     assert!(output.status.success(), "command failed: {:?}", output);
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "session,model");
+    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "session,model");
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert!(!entries.is_empty(), "expected at least one entry");
 
     let mut session_ids: Vec<&str> = entries
@@ -2761,9 +2772,12 @@ fn test_models_group_by_client_session_includes_client_and_session() {
         .unwrap();
     assert!(output.status.success(), "command failed: {:?}", output);
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "client,session,model");
+    assert_eq!(
+        json["data"]["groupBy"].as_str().unwrap(),
+        "client,session,model"
+    );
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert!(!entries.is_empty());
     for entry in entries {
         assert!(entry.get("sessionId").and_then(|v| v.as_str()).is_some());
@@ -2782,9 +2796,9 @@ fn test_models_group_by_workspace_model_uses_unknown_bucket_for_unsupported_clie
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert!(!entries.is_empty());
     for entry in entries {
         assert!(
@@ -2813,9 +2827,9 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["workspaceKey"].as_str().unwrap(),
@@ -2838,9 +2852,9 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["workspaceKey"].as_str().unwrap(),
@@ -2869,9 +2883,9 @@ fn test_models_group_by_workspace_model_merges_claude_codex_pi_by_cwd() {
         .unwrap();
     assert!(output.status.success(), "command failed: {:?}", output);
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["workspaceKey"].as_str().unwrap(),
@@ -2909,7 +2923,7 @@ fn test_models_client_filter_splits_pi_and_omp_sessions() {
         pi_output
     );
     let pi_json: serde_json::Value = serde_json::from_slice(&pi_output.stdout).unwrap();
-    let pi_entries = pi_json["entries"].as_array().unwrap();
+    let pi_entries = pi_json["data"]["entries"].as_array().unwrap();
     assert_eq!(pi_entries.len(), 1);
     assert_eq!(pi_entries[0]["client"].as_str().unwrap(), "pi");
     assert_eq!(pi_entries[0]["input"].as_i64().unwrap(), 30);
@@ -2925,7 +2939,7 @@ fn test_models_client_filter_splits_pi_and_omp_sessions() {
         omp_output
     );
     let omp_json: serde_json::Value = serde_json::from_slice(&omp_output.stdout).unwrap();
-    let omp_entries = omp_json["entries"].as_array().unwrap();
+    let omp_entries = omp_json["data"]["entries"].as_array().unwrap();
     assert_eq!(omp_entries.len(), 1);
     assert_eq!(omp_entries[0]["client"].as_str().unwrap(), "omp");
     assert_eq!(omp_entries[0]["input"].as_i64().unwrap(), 40);
@@ -2942,9 +2956,9 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode()
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "workspace,model");
+    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["workspaceKey"].as_str().unwrap(),
@@ -2963,12 +2977,17 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode()
 fn test_pricing_command_success() {
     let tmp = create_pricing_fixture_dir();
     let mut cmd = cmd_with_home(tmp.path());
-    cmd.args(["pricing", "claude-sonnet-4-20250514", "--no-spinner"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Pricing for"))
-        .stdout(predicate::str::contains("Input"))
-        .stdout(predicate::str::contains("Output"));
+    cmd.args([
+        "pricing",
+        "lookup",
+        "claude-sonnet-4-20250514",
+        "--no-spinner",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Pricing for"))
+    .stdout(predicate::str::contains("Input"))
+    .stdout(predicate::str::contains("Output"));
 }
 
 #[test]
@@ -2977,6 +2996,7 @@ fn test_pricing_command_json() {
     let output = cmd_with_home(tmp.path())
         .args([
             "pricing",
+            "lookup",
             "claude-sonnet-4-20250514",
             "--json",
             "--no-spinner",
@@ -2996,13 +3016,14 @@ fn test_pricing_command_json() {
 }
 
 #[test]
-fn test_pricing_command_with_provider() {
+fn test_pricing_command_with_source() {
     let tmp = create_pricing_fixture_dir();
     let mut cmd = cmd_with_home(tmp.path());
     cmd.args([
         "pricing",
+        "lookup",
         "claude-sonnet-4-20250514",
-        "--provider",
+        "--source",
         "litellm",
         "--no-spinner",
     ])
@@ -3011,18 +3032,36 @@ fn test_pricing_command_with_provider() {
 }
 
 #[test]
-fn test_pricing_command_invalid_provider() {
+fn test_pricing_command_invalid_source() {
     let tmp = create_pricing_fixture_dir();
     let mut cmd = cmd_with_home(tmp.path());
     cmd.args([
         "pricing",
+        "lookup",
         "claude-sonnet-4-20250514",
-        "--provider",
-        "invalid-provider",
+        "--source",
+        "invalid-source",
         "--no-spinner",
     ])
     .assert()
     .failure();
+}
+
+#[test]
+fn test_pricing_v4_spellings_are_rejected_with_exact_replacements() {
+    cargo_bin_cmd!("tokscale")
+        .args(["pricing", "list-overrides"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("use `tokscale pricing overrides`"));
+
+    cargo_bin_cmd!("tokscale")
+        .args(["pricing", "gpt-5", "--json"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "use `tokscale pricing lookup gpt-5 --json`",
+        ));
 }
 
 #[test]
@@ -3033,6 +3072,7 @@ fn test_pricing_command_does_not_fuzzy_match_provider_scoped_fireworks_model() {
     let output = cmd_with_home(tmp.path())
         .args([
             "pricing",
+            "lookup",
             "accounts/fireworks/models/deepseek-v4-pro",
             "--no-spinner",
         ])
@@ -3040,14 +3080,14 @@ fn test_pricing_command_does_not_fuzzy_match_provider_scoped_fireworks_model() {
         .unwrap();
 
     assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("Model not found: accounts/fireworks/models/deepseek-v4-pro"),
-        "expected a not-found message, got: {stdout}"
+        stderr.contains("Model not found: accounts/fireworks/models/deepseek-v4-pro"),
+        "expected a not-found message, got: {stderr}"
     );
     assert!(
-        !stdout.contains("deepseek-r1-0528-distill-qwen3-8b"),
-        "provider-scoped pricing lookup must not report the wrong Fireworks match: {stdout}"
+        !stderr.contains("deepseek-r1-0528-distill-qwen3-8b"),
+        "provider-scoped pricing lookup must not report the wrong Fireworks match: {stderr}"
     );
 }
 
@@ -3072,7 +3112,7 @@ fn test_clients_command_reports_malformed_settings() {
     cmd_with_home(tmp.path())
         .args(["clients", "--home", tmp.path().to_str().unwrap()])
         .assert()
-        .failure()
+        .code(2)
         .stderr(predicate::str::contains("failed to parse settings JSON"))
         .stderr(predicate::str::contains(
             settings_json_path(tmp.path()).display().to_string(),
@@ -3086,9 +3126,9 @@ fn excluded_crush_default_client_fails_before_report_output() {
 
     cmd_with_home(tmp.path())
         .env("RUST_BACKTRACE", "1")
-        .args(["--light", "--no-spinner"])
+        .args(["models", "--no-spinner"])
         .assert()
-        .failure()
+        .code(2)
         .stdout(predicate::str::is_empty())
         .stderr(
             predicate::str::contains("invalid client id(s) in settings.json defaultClients: crush")
@@ -3096,6 +3136,67 @@ fn excluded_crush_default_client_fails_before_report_output() {
                 .and(predicate::str::contains("panicked at").not())
                 .and(predicate::str::contains("stack backtrace").not()),
         );
+}
+
+#[test]
+fn invalid_settings_range_is_invalid_execution_environment() {
+    let tmp = create_empty_fixture_dir();
+    write_settings_json(
+        tmp.path(),
+        r#"{"autoRefreshMs":1,"nativeTimeoutMs":300000}"#,
+    );
+
+    cmd_with_home(tmp.path())
+        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("invalid autoRefreshMs 1"));
+}
+
+#[test]
+fn non_utf8_settings_is_invalid_execution_environment() {
+    let tmp = create_empty_fixture_dir();
+    let path = settings_json_path(tmp.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"{\"colorPalette\":\"\xff\"}").unwrap();
+
+    cmd_with_home(tmp.path())
+        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("failed to parse settings JSON"));
+}
+
+#[test]
+fn malformed_scanner_environment_is_invalid_execution_environment() {
+    let tmp = create_empty_fixture_dir();
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_EXTRA_DIRS", "broken")
+        .args(["models", "--client", "amp", "--no-spinner"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("TOKSCALE_EXTRA_DIRS")
+                .and(predicate::str::contains("expected `client:path`")),
+        );
+}
+
+#[test]
+fn unreadable_settings_path_remains_an_operational_error() {
+    let tmp = create_empty_fixture_dir();
+    let path = settings_json_path(tmp.path());
+    fs::create_dir_all(&path).unwrap();
+
+    cmd_with_home(tmp.path())
+        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("failed to read settings file"));
 }
 
 #[test]
@@ -3108,15 +3209,21 @@ fn test_clients_json() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(json.is_object(), "Clients JSON should be an object");
-    assert!(json.get("clients").is_some(), "Should have 'clients' field");
     assert!(
-        json.get("headlessRoots").is_some(),
+        json["data"].get("clients").is_some(),
+        "Should have 'clients' field"
+    );
+    assert!(
+        json["data"].get("headlessRoots").is_some(),
         "Should have 'headlessRoots' field"
     );
-    assert!(json.get("note").is_some(), "Should have 'note' field");
+    assert!(
+        json["data"].get("note").is_some(),
+        "Should have 'note' field"
+    );
     assert_eq!(json["health"]["complete"], true);
 
-    let arr = json["clients"].as_array().unwrap();
+    let arr = json["data"]["clients"].as_array().unwrap();
     assert!(!arr.is_empty(), "Should list at least one client");
 
     let first = &arr[0];
@@ -3153,6 +3260,34 @@ fn test_clients_json() {
 }
 
 #[test]
+fn test_clients_filter_does_not_discover_unselected_opencode() {
+    let tmp = create_empty_fixture_dir();
+    let opencode_data_root = tmp.path().join(".local/share/opencode");
+    fs::remove_dir_all(&opencode_data_root).unwrap();
+    fs::create_dir_all(opencode_data_root.parent().unwrap()).unwrap();
+    fs::write(&opencode_data_root, "not a directory").unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json", "--client", "claude"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let clients = json["data"]["clients"].as_array().unwrap();
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0]["client"], "claude");
+    assert_eq!(json["health"]["failedSources"], 0);
+    assert!(!serde_json::to_string(&json["health"])
+        .unwrap()
+        .contains("opencode"));
+}
+
+#[test]
 fn test_clients_json_reports_degraded_source_health_without_losing_payload() {
     let tmp = create_empty_fixture_dir();
     let missing_db = tmp.path().join("missing/clients-opencode.db");
@@ -3175,7 +3310,7 @@ fn test_clients_json_reports_degraded_source_health_without_losing_payload() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["clients"]
+    assert!(json["data"]["clients"]
         .as_array()
         .is_some_and(|rows| !rows.is_empty()));
     assert_eq!(json["health"]["complete"], false);
@@ -3229,7 +3364,7 @@ fn test_clients_json_reports_broken_claude_mirror_without_losing_payload() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["clients"]
+    assert!(json["data"]["clients"]
         .as_array()
         .is_some_and(|rows| !rows.is_empty()));
     assert_eq!(json["health"]["failedSources"], 1);
@@ -3290,7 +3425,7 @@ fn test_clients_json_opencode_diagnostics_match_adapter_for_non_utf8_xdg() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let opencode = json["clients"]
+    let opencode = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -3322,7 +3457,7 @@ fn test_clients_json_warp_sessions_path_exists_tracks_selected_root() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let warp = json["clients"]
+    let warp = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -3353,7 +3488,7 @@ fn test_clients_json_includes_claude_transcripts_path() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let claude = json["clients"]
+    let claude = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -3393,7 +3528,7 @@ fn test_clients_json_includes_claude_desktop_diagnostic() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let claude = json["clients"]
+    let claude = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -3429,7 +3564,7 @@ fn test_clients_command_includes_claude_desktop_diagnostic_text() {
 }
 
 #[test]
-fn test_models_json_includes_claude_desktop_diagnostic_for_empty_explicit_claude_report() {
+fn test_models_json_routes_claude_desktop_diagnostic_to_stderr() {
     let tmp = create_empty_fixture_dir();
     fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
 
@@ -3440,15 +3575,9 @@ fn test_models_json_includes_claude_desktop_diagnostic_for_empty_explicit_claude
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let diagnostics = json["diagnostics"].as_array().unwrap();
-
-    assert!(diagnostics.iter().any(|item| {
-        item["code"] == "claude_desktop_not_scanned"
-            && item["message"]
-                .as_str()
-                .unwrap()
-                .contains("Tokscale counts Claude Code JSONL transcripts")
-    }));
+    assert!(json.get("diagnostics").is_none());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("Tokscale counts Claude Code JSONL transcripts"));
 }
 
 #[test]
@@ -3472,7 +3601,7 @@ fn test_clients_json_includes_settings_extra_paths() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let codex = json["clients"]
+    let codex = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -3515,7 +3644,7 @@ fn test_clients_json_includes_hermes_settings_extra_profile_path() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let hermes = json["clients"]
+    let hermes = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -3587,7 +3716,7 @@ fn test_clients_command_groups_opencode_database_paths_by_source() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let opencode = json["clients"]
+    let opencode = json["data"]["clients"]
         .as_array()
         .unwrap()
         .iter()
@@ -3604,13 +3733,13 @@ fn test_clients_command_groups_opencode_database_paths_by_source() {
         }));
 }
 
-// ── Light mode tests ───────────────────────────────────────────────────────
+// ── Table report tests ─────────────────────────────────────────────────────
 
 #[test]
-fn test_models_light_output() {
+fn test_models_table_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
+        .args(["models", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"))
@@ -3618,20 +3747,57 @@ fn test_models_light_output() {
 }
 
 #[test]
-fn test_monthly_light_output() {
+fn test_monthly_table_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["monthly", "--light", "--client", "opencode", "--no-spinner"])
+        .args(["monthly", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Monthly Token Usage Report"));
 }
 
 #[test]
-fn test_models_light_with_client_filter() {
+fn test_hourly_table_output() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
+        .args(["hourly", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hourly Usage"));
+}
+
+#[test]
+fn test_time_metrics_table_output() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .args(["time-metrics", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Session Time Metrics"));
+}
+
+#[test]
+fn test_time_metrics_benchmark_flag() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .args([
+            "time-metrics",
+            "--client",
+            "opencode",
+            "--no-spinner",
+            "--benchmark",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Processing time").not())
+        .stderr(predicate::str::contains("Processing time"));
+}
+
+#[test]
+fn test_models_table_with_client_filter() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .args(["models", "--client", "opencode", "--no-spinner"])
         .args(["--year", "2024"])
         .assert()
         .success()
@@ -3646,7 +3812,6 @@ fn test_models_benchmark_flag() {
     cmd_with_home(tmp.path())
         .args([
             "models",
-            "--light",
             "--client",
             "opencode",
             "--no-spinner",
@@ -3654,7 +3819,8 @@ fn test_models_benchmark_flag() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Processing time"));
+        .stdout(predicate::str::contains("Processing time").not())
+        .stderr(predicate::str::contains("Processing time"));
 }
 
 #[test]
@@ -3663,7 +3829,6 @@ fn test_monthly_benchmark_flag() {
     cmd_with_home(tmp.path())
         .args([
             "monthly",
-            "--light",
             "--client",
             "opencode",
             "--no-spinner",
@@ -3671,7 +3836,8 @@ fn test_monthly_benchmark_flag() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Processing time"));
+        .stdout(predicate::str::contains("Processing time").not())
+        .stderr(predicate::str::contains("Processing time"));
 }
 
 // ── Empty fixture tests ────────────────────────────────────────────────────
@@ -3685,13 +3851,13 @@ fn test_models_empty_fixture() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["entries"].as_array().unwrap();
+    let entries = json["data"]["entries"].as_array().unwrap();
     assert!(
         entries.is_empty(),
         "Empty fixture should produce no entries"
     );
-    assert_eq!(json["totalInput"].as_i64().unwrap(), 0);
-    assert_eq!(json["totalOutput"].as_i64().unwrap(), 0);
+    assert_eq!(json["data"]["totalInput"].as_i64().unwrap(), 0);
+    assert_eq!(json["data"]["totalOutput"].as_i64().unwrap(), 0);
 }
 
 #[test]
@@ -3703,7 +3869,7 @@ fn test_graph_empty_contributions() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["contributions"].as_array().unwrap();
+    let contributions = json["data"]["contributions"].as_array().unwrap();
     assert!(
         contributions.is_empty(),
         "Empty fixture should produce no contributions"
@@ -3716,7 +3882,7 @@ fn test_graph_empty_contributions() {
 fn test_models_no_spinner_flag() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
-        .args(["models", "--light", "--client", "opencode", "--no-spinner"])
+        .args(["models", "--client", "opencode", "--no-spinner"])
         .assert()
         .success();
 }
@@ -3741,7 +3907,7 @@ fn test_graph_with_client_filter() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["contributions"].as_array().unwrap();
+    let contributions = json["data"]["contributions"].as_array().unwrap();
     for c in contributions {
         let clients = c["clients"].as_array().unwrap();
         for cl in clients {
@@ -3760,51 +3926,55 @@ fn test_graph_with_client_filter() {
 fn test_graph_output_to_file() {
     let tmp = create_temp_fixture_dir();
     let output_file = tmp.path().join("graph-output.json");
-    cmd_with_home(tmp.path())
+    let output = cmd_with_home(tmp.path())
         .args(["graph", "--client", "opencode", "--no-spinner"])
         .args(["--output", output_file.to_str().unwrap()])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", output_file.display())
+    );
     assert!(output_file.exists(), "Output file should be created");
     let content = fs::read_to_string(&output_file).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-    assert!(json.get("meta").is_some());
-    assert!(json.get("contributions").is_some());
+    assert!(json["data"].get("meta").is_some());
+    assert!(json["data"].get("contributions").is_some());
 }
 
-// ── Root command tests (no subcommand) ─────────────────────────────────────
+// ── Root command ownership tests ───────────────────────────────────────────
 
 #[test]
-fn test_root_json_output() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["--json", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json.get("entries").is_some());
-    assert!(json.get("totalCost").is_some());
-}
-
-#[test]
-fn test_root_light_output() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["--light", "--client", "opencode", "--no-spinner"])
+fn test_root_rejects_json_report_options() {
+    cargo_bin_cmd!("tokscale")
+        .args(["--json", "models"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Token Usage Report by Model"));
+        .code(2)
+        .stderr(predicate::str::contains("use `tokscale models --json`"));
 }
 
 #[test]
-fn light_report_surfaces_malformed_display_config_without_panicking() {
+fn test_root_rejects_removed_light_option() {
+    cargo_bin_cmd!("tokscale")
+        .arg("--light")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("use `tokscale models`"));
+}
+
+#[test]
+fn table_report_surfaces_malformed_display_config_without_panicking() {
     let tmp = create_temp_fixture_dir();
     let config_path = tmp.path().join(".tokscale");
     fs::write(&config_path, "[display_names.providers\n").unwrap();
 
     cmd_with_home(tmp.path())
-        .args(["--light", "--client", "opencode", "--no-spinner"])
+        .args(["models", "--client", "opencode", "--no-spinner"])
         .assert()
         .failure()
         .stdout(predicate::str::is_empty())
@@ -3816,16 +3986,16 @@ fn light_report_surfaces_malformed_display_config_without_panicking() {
 }
 
 #[test]
-fn home_write_cache_conflict_fails_before_report_output() {
+fn removed_write_cache_flag_fails_before_report_output() {
     let tmp = create_temp_fixture_dir();
     let scoped_home = tmp.path().join("scoped-home");
     fs::create_dir_all(&scoped_home).unwrap();
 
     cmd_with_home(tmp.path())
         .args([
+            "models",
             "--home",
             scoped_home.to_str().unwrap(),
-            "--light",
             "--write-cache",
             "--client",
             "opencode",
@@ -3834,13 +4004,11 @@ fn home_write_cache_conflict_fails_before_report_output() {
         .assert()
         .failure()
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains(
-            "--write-cache cannot be combined with --home",
-        ));
+        .stderr(predicate::str::contains("--write-cache"));
 }
 
 #[test]
-fn home_settings_write_cache_conflict_fails_before_report_output() {
+fn removed_light_setting_has_no_report_cache_side_effect() {
     let tmp = create_temp_fixture_dir();
     let scoped_home = tmp.path().join("scoped-home");
     fs::create_dir_all(&scoped_home).unwrap();
@@ -3848,66 +4016,56 @@ fn home_settings_write_cache_conflict_fails_before_report_output() {
 
     cmd_with_home(tmp.path())
         .args([
+            "models",
             "--home",
             scoped_home.to_str().unwrap(),
-            "--light",
             "--client",
             "opencode",
             "--no-spinner",
         ])
         .assert()
-        .failure()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains(
-            "--write-cache cannot be combined with --home",
-        ));
+        .success();
+    assert!(!tmp
+        .path()
+        .join(".cache/tokscale/tui-data-cache.json")
+        .exists());
 }
 
 #[test]
-fn light_with_write_cache_writes_to_canonical_path() {
+fn cache_warm_writes_to_canonical_path() {
     let tmp = create_temp_fixture_dir();
     let config_dir = tmp.path().join("custom-config-root");
     prime_override_pricing_cache(&config_dir);
 
     cmd_with_home(tmp.path())
         .env("TOKSCALE_CONFIG_DIR", &config_dir)
-        .args([
-            "--light",
-            "--client",
-            "opencode",
-            "--write-cache",
-            "--no-spinner",
-        ])
+        .args(["cache", "warm", "--client", "opencode"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Token Usage Report by Model"));
+        .stdout(predicate::str::contains("TUI cache warmed"));
 
     assert!(
         config_dir.join("cache/tui-data-cache.json").exists(),
-        "--write-cache should populate the canonical cache path"
+        "cache warm should populate the canonical cache path"
     );
 }
 
 #[test]
-fn test_root_with_date_filter() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["--json", "--client", "opencode", "--no-spinner"])
+fn test_root_rejects_date_filter() {
+    cargo_bin_cmd!("tokscale")
         .args(["--year", "2025"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("gpt-4o"));
+        .code(2)
+        .stderr(predicate::str::contains("use `tokscale tui --year 2025`"));
 }
 
 #[test]
-fn test_root_with_group_by() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["--json", "--client", "opencode", "--no-spinner"])
+fn test_root_rejects_group_by() {
+    cargo_bin_cmd!("tokscale")
         .args(["--group-by", "model"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["groupBy"].as_str().unwrap(), "model");
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "use `tokscale models --group-by model`",
+        ));
 }

@@ -1,11 +1,8 @@
 use crate::commands::render::format_currency;
-use crate::commands::shared::{
-    auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
-    emit_cursor_setup_warnings, emit_cursor_sync_warning, has_cursor_usage_cache_for_report,
-    setup_warnings_for_report, use_env_roots,
-};
+use crate::commands::shared::{use_env_roots, ReportEnvelope};
 use crate::tui;
 use anyhow::Result;
+use std::path::PathBuf;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,7 +100,6 @@ pub(crate) struct GraphExportData {
     contributions: Vec<GraphDailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     time_metrics: Option<GraphTimeMetrics>,
-    health: tokscale_core::source_health::HealthReport,
 }
 
 pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphExportData {
@@ -188,13 +184,12 @@ pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphE
             max_concurrent_sessions: tm.max_concurrent_sessions,
             session_count: tm.session_count,
         }),
-        health: graph.health.clone(),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_graph_command(
-    output: Option<String>,
+    output: Option<PathBuf>,
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
     since: Option<String>,
@@ -208,10 +203,6 @@ pub(crate) fn run_graph_command(
     use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
-    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
-    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
 
     if show_progress {
         eprintln!("  Scanning session data...");
@@ -238,33 +229,32 @@ pub(crate) fn run_graph_command(
             })
             .await
         })
-        .map_err(|e| anyhow::anyhow!(e))?;
-    emit_cursor_sync_warning(
-        cursor_sync_result.as_ref(),
-        had_cursor_cache,
-        explicit_cursor_filter,
-    );
+        .map_err(anyhow::Error::new)?;
     super::shared::emit_health_summary(&graph_result.health);
-    emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
     let output_data = to_graph_export_data(&graph_result);
-    let json_output = serde_json::to_string_pretty(&output_data)?;
+    let output_document = ReportEnvelope::new(
+        output_data,
+        graph_result.health.clone(),
+        processing_time_ms as u64,
+    );
+    let json_output = serde_json::to_string_pretty(&output_document)?;
 
     if let Some(output_path) = output {
         std::fs::write(&output_path, json_output)?;
 
         eprintln!(
             "{}",
-            format!("✓ Graph data written to {}", output_path).green()
+            format!("✓ Graph data written to {}", output_path.display()).green()
         );
         eprintln!(
             "{}",
             format!(
                 "  {} days, {} clients, {} models",
-                output_data.contributions.len(),
-                output_data.summary.clients.len(),
-                output_data.summary.models.len()
+                output_document.data.contributions.len(),
+                output_document.data.summary.clients.len(),
+                output_document.data.summary.models.len()
             )
             .bright_black()
         );
@@ -272,35 +262,20 @@ pub(crate) fn run_graph_command(
             "{}",
             format!(
                 "  Total: {}",
-                format_currency(output_data.summary.total_cost)
+                format_currency(output_document.data.summary.total_cost)
             )
             .bright_black()
         );
-
-        if benchmark {
-            eprintln!(
-                "{}",
-                format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
-            );
-            if let Some(sync) = cursor_sync_result {
-                if sync.synced {
-                    eprintln!(
-                        "{}",
-                        format!(
-                            "  Cursor: {} usage events synced (full lifetime data)",
-                            sync.rows
-                        )
-                        .bright_black()
-                    );
-                } else if let Some(err) = sync.error {
-                    if had_cursor_cache {
-                        eprintln!("{}", format!("  Cursor: sync failed - {}", err).yellow());
-                    }
-                }
-            }
-        }
+        println!("{}", output_path.display());
     } else {
         println!("{}", json_output);
+    }
+
+    if benchmark {
+        eprintln!(
+            "{}",
+            format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
+        );
     }
 
     Ok(())
@@ -345,7 +320,12 @@ mod tests {
             },
         };
 
-        let json = serde_json::to_value(to_graph_export_data(&graph)).unwrap();
+        let json = serde_json::to_value(ReportEnvelope::new(
+            to_graph_export_data(&graph),
+            graph.health,
+            0_u64,
+        ))
+        .unwrap();
 
         assert_eq!(json["health"]["complete"], false);
         assert_eq!(json["health"]["cleanSources"], 4);

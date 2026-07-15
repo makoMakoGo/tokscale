@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokscale_core::scanner::ScannerSettings;
+use tokscale_core::paths::ConfigDirUnavailable;
+use tokscale_core::scanner::{ScannerSettings, ScannerSettingsError};
 
 use super::themes::ThemeName;
 
@@ -15,6 +16,64 @@ const MAX_AUTO_REFRESH_MS: u64 = 3_600_000;
 const DEFAULT_NATIVE_TIMEOUT_MS: u64 = 300_000;
 const MIN_NATIVE_TIMEOUT_MS: u64 = 5_000;
 const MAX_NATIVE_TIMEOUT_MS: u64 = 3_600_000;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SettingsLoadError {
+    #[error(transparent)]
+    ConfigDirectory(#[from] ConfigDirUnavailable),
+    #[error("failed to read settings file `{path}`: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse settings JSON `{path}`: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("invalid settings in `{path}`: {source}")]
+    Invalid {
+        path: PathBuf,
+        #[source]
+        source: SettingsValidationError,
+    },
+}
+
+impl SettingsLoadError {
+    pub(crate) const fn is_invalid_environment(&self) -> bool {
+        !matches!(self, Self::Read { .. })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SettingsValidationError {
+    #[error("invalid autoRefreshMs {value}; expected {min}..={max}")]
+    AutoRefreshRange { value: u64, min: u64, max: u64 },
+    #[error("invalid nativeTimeoutMs {value}; expected {min}..={max}")]
+    NativeTimeoutRange { value: u64, min: u64, max: u64 },
+    #[error("invalid colorPalette `{value}`; expected one of: {valid}")]
+    ColorPalette { value: String, valid: String },
+    #[error("invalid scanner settings: {0}")]
+    Scanner(#[from] ScannerSettingsError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NativeTimeoutError {
+    #[error("TOKSCALE_NATIVE_TIMEOUT_MS must be a positive integer: {source}")]
+    NotInteger {
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error("failed to read TOKSCALE_NATIVE_TIMEOUT_MS: {source}")]
+    NotUnicode {
+        #[source]
+        source: std::env::VarError,
+    },
+    #[error("invalid TOKSCALE_NATIVE_TIMEOUT_MS {value}; expected {min}..={max}")]
+    OutOfRange { value: u64, min: u64, max: u64 },
+}
 
 #[derive(Debug, Clone, Copy)]
 enum ExplicitHomeConfigLayout {
@@ -30,16 +89,6 @@ impl ExplicitHomeConfigLayout {
             Self::UnixDotConfig
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LightSettings {
-    /// When true, every `tokscale --light` run atomically overwrites the
-    /// TUI cache (same semantics as `--light --write-cache`). The CLI
-    /// flags `--write-cache` / `--no-write-cache` override this per-invocation.
-    #[serde(default)]
-    pub write_cache: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,8 +124,6 @@ pub struct Settings {
     /// override this list completely.
     #[serde(default)]
     pub default_clients: Vec<String>,
-    #[serde(default)]
-    pub light: LightSettings,
     /// Opt-in toggle for the subscription quota Usage tab. Default is
     /// `false` so the tab strip stays focused on local token usage unless
     /// the user explicitly wants subscription usage lookups.
@@ -88,7 +135,6 @@ pub struct Settings {
     /// such as `codex`, `zai`, and `minimax-token-plan-cn`.
     #[serde(default)]
     pub usage_providers: Vec<String>,
-    #[cfg(test)]
     #[serde(skip)]
     pub save_path_override: Option<PathBuf>,
 }
@@ -115,26 +161,16 @@ impl Default for Settings {
             native_timeout_ms: DEFAULT_NATIVE_TIMEOUT_MS,
             scanner: ScannerSettings::default(),
             default_clients: Vec::new(),
-            light: LightSettings::default(),
             usage_tab_enabled: false,
             usage_providers: Vec::new(),
-            #[cfg(test)]
             save_path_override: None,
         }
     }
 }
 
-/// Thin helper that loads settings and returns just the scanner portion.
-///
-/// Every CLI entry point that builds `LocalParseOptions`/`ReportOptions`
-/// calls this so user-configured scanner paths are honored on every
-/// invocation. A missing file means the user has not configured scanner
-/// overrides; malformed or unreadable files are reported to the command.
-pub fn load_scanner_settings() -> Result<ScannerSettings> {
-    Settings::load().map(|settings| settings.scanner)
-}
-
-pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> Result<ScannerSettings> {
+pub fn load_scanner_settings_for_home(
+    home_dir: &Option<String>,
+) -> std::result::Result<ScannerSettings, SettingsLoadError> {
     Settings::load_for_home_override(home_dir.as_deref().map(Path::new))
         .map(|settings| settings.scanner)
 }
@@ -145,44 +181,48 @@ pub fn load_scanner_settings_for_home(home_dir: &Option<String>) -> Result<Scann
 ///
 /// A missing file or unset field produces an empty list. Malformed or
 /// unreadable settings are reported to the command.
-pub fn load_default_clients() -> Result<Vec<String>> {
-    Settings::load().map(|settings| settings.default_clients)
-}
-
-pub fn load_default_clients_for_home(home_dir: &Option<String>) -> Result<Vec<String>> {
+pub fn load_default_clients_for_home(
+    home_dir: &Option<String>,
+) -> std::result::Result<Vec<String>, SettingsLoadError> {
     Settings::load_for_home_override(home_dir.as_deref().map(Path::new))
         .map(|settings| settings.default_clients)
 }
 
 impl Settings {
-    fn validate(self) -> Result<Self> {
+    fn validate(self) -> std::result::Result<Self, SettingsValidationError> {
         if !(MIN_AUTO_REFRESH_MS..=MAX_AUTO_REFRESH_MS).contains(&self.auto_refresh_ms) {
-            anyhow::bail!(
-                "invalid autoRefreshMs {}; expected {}..={}",
-                self.auto_refresh_ms,
-                MIN_AUTO_REFRESH_MS,
-                MAX_AUTO_REFRESH_MS
-            );
+            return Err(SettingsValidationError::AutoRefreshRange {
+                value: self.auto_refresh_ms,
+                min: MIN_AUTO_REFRESH_MS,
+                max: MAX_AUTO_REFRESH_MS,
+            });
         }
         if !(MIN_NATIVE_TIMEOUT_MS..=MAX_NATIVE_TIMEOUT_MS).contains(&self.native_timeout_ms) {
-            anyhow::bail!(
-                "invalid nativeTimeoutMs {}; expected {}..={}",
-                self.native_timeout_ms,
-                MIN_NATIVE_TIMEOUT_MS,
-                MAX_NATIVE_TIMEOUT_MS
-            );
+            return Err(SettingsValidationError::NativeTimeoutRange {
+                value: self.native_timeout_ms,
+                min: MIN_NATIVE_TIMEOUT_MS,
+                max: MAX_NATIVE_TIMEOUT_MS,
+            });
         }
-        self.theme_name()?;
-        self.scanner
-            .validate()
-            .context("invalid scanner settings")?;
+        if self.color_palette.parse::<ThemeName>().is_err() {
+            let valid = ThemeName::all()
+                .iter()
+                .map(ThemeName::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(SettingsValidationError::ColorPalette {
+                value: self.color_palette.clone(),
+                valid,
+            });
+        }
+        self.scanner.validate()?;
         Ok(self)
     }
 
-    fn config_path() -> Result<PathBuf> {
+    fn config_path() -> std::result::Result<PathBuf, SettingsLoadError> {
         crate::paths::try_get_config_dir()
             .map(|directory| directory.join("settings.json"))
-            .map_err(anyhow::Error::new)
+            .map_err(SettingsLoadError::from)
     }
 
     fn writable_config_path() -> Result<PathBuf> {
@@ -217,40 +257,54 @@ impl Settings {
         Self::explicit_home_config_path_for_layout(home_dir, ExplicitHomeConfigLayout::current())
     }
 
-    fn load_from_path(path: &Path) -> Result<Self> {
-        let content = match fs::read_to_string(path) {
+    fn load_from_path(path: &Path) -> std::result::Result<Self, SettingsLoadError> {
+        let content = match fs::read(path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
             }
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to read settings file `{}`", path.display()));
+                return Err(SettingsLoadError::Read {
+                    path: path.to_path_buf(),
+                    source: error,
+                });
             }
         };
 
-        serde_json::from_str::<Self>(&content)
-            .with_context(|| format!("failed to parse settings JSON `{}`", path.display()))?
+        let settings = serde_json::from_slice::<Self>(&content).map_err(|source| {
+            SettingsLoadError::Parse {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        settings
             .validate()
-            .with_context(|| format!("invalid settings in `{}`", path.display()))
+            .map_err(|source| SettingsLoadError::Invalid {
+                path: path.to_path_buf(),
+                source,
+            })
     }
 
-    pub fn load() -> Result<Self> {
+    pub fn load() -> std::result::Result<Self, SettingsLoadError> {
         Self::load_from_path(&Self::config_path()?)
     }
 
-    pub fn load_for_home_override(home_dir: Option<&Path>) -> Result<Self> {
+    pub fn load_for_home_override(
+        home_dir: Option<&Path>,
+    ) -> std::result::Result<Self, SettingsLoadError> {
         let Some(home_dir) = home_dir else {
             return Self::load();
         };
 
-        Self::load_from_path(&Self::explicit_home_config_path(home_dir))
+        let path = Self::explicit_home_config_path(home_dir);
+        let mut settings = Self::load_from_path(&path)?;
+        settings.save_path_override = Some(path);
+        Ok(settings)
     }
 
     pub fn save(&self) -> Result<()> {
         self.clone().validate()?;
 
-        #[cfg(test)]
         let path = self.save_path_override.clone().map_or_else(
             Self::writable_config_path,
             |path| -> Result<PathBuf> {
@@ -260,9 +314,6 @@ impl Settings {
                 Ok(path)
             },
         )?;
-
-        #[cfg(not(test))]
-        let path = Self::writable_config_path()?;
 
         let content = serde_json::to_string_pretty(self)?;
 
@@ -302,20 +353,22 @@ impl Settings {
         }
     }
 
-    pub fn get_native_timeout(&self) -> Result<Duration> {
+    pub fn get_native_timeout(&self) -> std::result::Result<Duration, NativeTimeoutError> {
         let timeout_ms = match std::env::var("TOKSCALE_NATIVE_TIMEOUT_MS") {
             Ok(value) => value
                 .parse::<u64>()
-                .with_context(|| "TOKSCALE_NATIVE_TIMEOUT_MS must be a positive integer")?,
+                .map_err(|source| NativeTimeoutError::NotInteger { source })?,
             Err(std::env::VarError::NotPresent) => self.native_timeout_ms,
             Err(source) => {
-                return Err(source).context("failed to read TOKSCALE_NATIVE_TIMEOUT_MS");
+                return Err(NativeTimeoutError::NotUnicode { source });
             }
         };
         if !(MIN_NATIVE_TIMEOUT_MS..=MAX_NATIVE_TIMEOUT_MS).contains(&timeout_ms) {
-            anyhow::bail!(
-                "invalid TOKSCALE_NATIVE_TIMEOUT_MS {timeout_ms}; expected {MIN_NATIVE_TIMEOUT_MS}..={MAX_NATIVE_TIMEOUT_MS}"
-            );
+            return Err(NativeTimeoutError::OutOfRange {
+                value: timeout_ms,
+                min: MIN_NATIVE_TIMEOUT_MS,
+                max: MAX_NATIVE_TIMEOUT_MS,
+            });
         }
         Ok(Duration::from_millis(timeout_ms))
     }
@@ -324,6 +377,7 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as _;
     use std::path::PathBuf;
 
     #[test]
@@ -375,6 +429,19 @@ mod tests {
     }
 
     #[test]
+    fn settings_loaded_for_explicit_home_save_back_to_that_home() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        let mut loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
+        loaded.color_palette = "halloween".to_string();
+
+        loaded.save().unwrap();
+
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["colorPalette"], "halloween");
+    }
+
+    #[test]
     fn load_for_home_override_does_not_read_legacy_macos_path() {
         let temp = tempfile::TempDir::new().unwrap();
         let legacy_path = temp
@@ -400,9 +467,29 @@ mod tests {
 
         assert!(message.contains("parse settings JSON"), "{message}");
         assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(error.is_invalid_environment());
         assert!(
             error.source().is_some(),
             "parse error must remain in the chain"
+        );
+    }
+
+    #[test]
+    fn load_for_home_override_reports_non_utf8_json_as_invalid_environment() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{\"colorPalette\":\"\xff\"}").unwrap();
+
+        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("parse settings JSON"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(error.is_invalid_environment());
+        assert!(
+            error.source().is_some(),
+            "UTF-8 decoding failure must remain in the parse error chain"
         );
     }
 
@@ -417,6 +504,7 @@ mod tests {
 
         assert!(message.contains("read settings file"), "{message}");
         assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(!error.is_invalid_environment());
         assert!(
             error.source().is_some(),
             "I/O error must remain in the chain"
@@ -435,6 +523,7 @@ mod tests {
         assert!(message.contains("invalid settings"), "{message}");
         assert!(message.contains("autoRefreshMs 1"), "{message}");
         assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(error.is_invalid_environment());
     }
 
     #[test]
@@ -448,6 +537,7 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("colorPalette `ultraviolet`"), "{message}");
         assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(error.is_invalid_environment());
     }
 
     #[test]
@@ -624,7 +714,7 @@ mod tests {
     #[test]
     fn settings_default_clients_round_trips() {
         // User-configured list must survive load+save unchanged. This is
-        // what `tokscale --client opencode,claude` consults when no CLI
+        // what `tokscale models --client opencode,claude` consults when no CLI
         // flag is present.
         let json = r#"{
             "colorPalette": "blue",
@@ -659,27 +749,6 @@ mod tests {
             "defaultClients": ["opencode", 123, null, "claude", true, {"x":1}]
         }"#;
         assert!(serde_json::from_str::<Settings>(json).is_err());
-    }
-
-    #[test]
-    fn settings_load_accepts_legacy_json_without_light_section() {
-        let json = r#"{
-            "colorPalette": "blue",
-            "autoRefreshEnabled": false,
-            "autoRefreshMs": 60000,
-            "includeUnusedModels": false,
-            "nativeTimeoutMs": 300000
-        }"#;
-        let parsed: Settings = serde_json::from_str(json).unwrap();
-        assert!(!parsed.light.write_cache);
-    }
-
-    #[test]
-    fn light_settings_round_trip() {
-        let light = LightSettings { write_cache: true };
-        let serialized = serde_json::to_string(&light).unwrap();
-        let parsed: LightSettings = serde_json::from_str(&serialized).unwrap();
-        assert!(parsed.write_cache);
     }
 
     #[test]

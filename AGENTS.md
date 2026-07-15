@@ -162,5 +162,5 @@ For ordinary validation, prefer source-build checks:
 ```bash
 bun install
 bun run build:core
-bun run cli -- --no-spinner --light
+bun run cli -- models --no-spinner
 ```

@@ -226,7 +226,8 @@ mod tests {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
-            sessions_path: None,
+            no_refresh: false,
+            home_dir: None,
             clients: None,
             since: None,
             until: None,

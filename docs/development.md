@@ -41,7 +41,7 @@ For quick local CLI runs:
 
 ```bash
 bun run cli
-bun run cli -- --no-spinner --light
+bun run cli -- models --no-spinner
 ```
 
 ## Test

@@ -85,11 +85,6 @@ codspeed-criterion-compat = "4.7.0"
 tempfile = "3"
 serial_test = "3"
 
-# Trae iCubeAuthInfo decryption: AES-128-CBC + base64
-aes = "0.8"
-cbc = { version = "0.1", features = ["std"] }
-base64 = "0.22"
-
 # Clipboard
 arboard = "3"
 

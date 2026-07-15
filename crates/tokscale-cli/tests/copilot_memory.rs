@@ -160,19 +160,18 @@ fn extract_max_rss_kb(stderr: &[u8]) -> u64 {
         .unwrap_or_else(|| panic!("missing /usr/bin/time max RSS output: {stderr}"))
 }
 
-fn run_light_copilot(home: &Path) -> (Vec<u8>, u64) {
+fn run_copilot_report(home: &Path) -> (Vec<u8>, u64) {
     let output = Command::new("/usr/bin/time")
         .arg("-f")
         .arg("MAXRSS_KB=%M")
         .arg(assert_cmd::cargo::cargo_bin!("tokscale"))
         .args([
+            "models",
             "--home",
             home.to_str().unwrap(),
-            "--light",
             "--client",
             "copilot",
             "--no-spinner",
-            "--no-write-cache",
         ])
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -208,7 +207,7 @@ fn copilot_large_otel_cold_and_warm_source_cache_stay_below_memory_limit() {
     prime_pricing_cache(home.path());
     write_large_copilot_fixture(home.path());
 
-    let (cold_stdout, cold_rss_kb) = run_light_copilot(home.path());
+    let (cold_stdout, cold_rss_kb) = run_copilot_report(home.path());
     let cold_shards = source_cache_shards(home.path());
     assert_eq!(
         cold_shards.len(),
@@ -218,7 +217,7 @@ fn copilot_large_otel_cold_and_warm_source_cache_stay_below_memory_limit() {
     let shard_path = cold_shards[0].clone();
     let cold_shard_identity = shard_identity(&shard_path);
 
-    let (warm_stdout, warm_rss_kb) = run_light_copilot(home.path());
+    let (warm_stdout, warm_rss_kb) = run_copilot_report(home.path());
     let warm_shards = source_cache_shards(home.path());
 
     assert_eq!(warm_stdout, cold_stdout);

@@ -6,6 +6,7 @@ mod client_catalog;
 pub mod clients;
 pub mod fs_atomic;
 mod local_clients;
+mod local_report_error;
 mod message_cache;
 mod model_aliases;
 pub mod paths;
@@ -31,6 +32,7 @@ pub use clients::{
     warp_sqlite_roots_with_env_strategy, ClientCounts, ClientId, ClientIdentity, LocalClientDef,
     PathRoot,
 };
+pub use local_report_error::{LocalReportError, LocalReportErrorKind};
 pub use message_cache::{prune_source_message_cache, SourceCachePruneError, SourceCachePruneStats};
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
 pub use sessionize::{
@@ -593,7 +595,7 @@ fn parse_all_messages_with_pricing(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
-) -> Result<Vec<UnifiedMessage>, String> {
+) -> Result<Vec<UnifiedMessage>, LocalReportError> {
     parse_all_messages_with_pricing_with_env_strategy(
         home_dir,
         clients,
@@ -610,7 +612,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     pricing: Option<&pricing::PricingService>,
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
-) -> Result<Vec<UnifiedMessage>, String> {
+) -> Result<Vec<UnifiedMessage>, LocalReportError> {
     parse_all_messages_with_health_with_env_strategy(
         home_dir,
         clients,
@@ -626,7 +628,7 @@ fn parse_all_messages_with_health(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
-) -> Result<(Vec<UnifiedMessage>, DataHealth), String> {
+) -> Result<(Vec<UnifiedMessage>, DataHealth), LocalReportError> {
     parse_all_messages_with_health_with_env_strategy(
         home_dir,
         clients,
@@ -643,7 +645,7 @@ fn parse_all_messages_with_health_with_env_strategy(
     pricing: Option<&pricing::PricingService>,
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
-) -> Result<(Vec<UnifiedMessage>, DataHealth), String> {
+) -> Result<(Vec<UnifiedMessage>, DataHealth), LocalReportError> {
     let prepared = prepare_local_sources(LocalParseOptions {
         home_dir: Some(home_dir.to_string()),
         use_env_roots,
@@ -661,7 +663,7 @@ fn fold_prepared_local_sources_with_pricing(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn adapters::MessageSink,
-) -> Result<(SourceInventorySignature, DataHealth), String> {
+) -> Result<(SourceInventorySignature, DataHealth), LocalReportError> {
     let PreparedLocalSources {
         clients,
         groups,
@@ -670,7 +672,7 @@ fn fold_prepared_local_sources_with_pricing(
     } = prepared;
     let mut source_cache = message_cache::SourceMessageCache::load()
         .map_err(adapters::SourcePipelineError::from)
-        .map_err(|error| error.to_string())?;
+        .map_err(LocalReportError::operational)?;
 
     let parse_result = if clients.is_empty() {
         adapters::run_prepared_local_source_adapters(
@@ -711,7 +713,7 @@ fn fold_prepared_local_sources_with_pricing(
                 health,
             )
         })
-        .map_err(|error| error.to_string())
+        .map_err(LocalReportError::operational)
 }
 
 struct RequestedClientFilterSink<'a> {
@@ -777,18 +779,21 @@ fn stream_local_sources_into_engine(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
     engine: &mut crate::aggregate::AggregationEngine,
-) -> Result<(SourceInventorySignature, DataHealth), String> {
+) -> Result<(SourceInventorySignature, DataHealth), LocalReportError> {
     let mut sink = AggregationSink(engine);
     fold_prepared_local_sources_with_pricing(prepared, pricing, &mut sink)
 }
 
-pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocalSources, String> {
+pub fn prepare_local_sources(
+    options: LocalParseOptions,
+) -> Result<PreparedLocalSources, LocalReportError> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
     options
         .scanner_settings
         .validate()
-        .map_err(|error| error.to_string())?;
-    let selected_adapters = adapters::selected_adapters(&clients)?;
+        .map_err(LocalReportError::invalid_environment)?;
+    let selected_adapters =
+        adapters::selected_adapters(&clients).map_err(LocalReportError::invalid_request_message)?;
     let scan_ctx = adapters::AdapterScanContext {
         home_dir: &home_dir,
         use_env_roots: options.use_env_roots,
@@ -797,7 +802,7 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
     let mut health = DataHealth::default();
     let groups: Vec<_> = selected_adapters
         .into_iter()
-        .map(|adapter| -> Result<_, String> {
+        .map(|adapter| -> Result<_, LocalReportError> {
             #[cfg(test)]
             PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
             // Third-party source and snapshot failures stay inside their
@@ -808,7 +813,7 @@ pub fn prepare_local_sources(options: LocalParseOptions) -> Result<PreparedLocal
                 Err(error)
                     if error.kind == adapters::error::SourceDiscoveryErrorKind::Configuration =>
                 {
-                    return Err(error.to_string());
+                    return Err(LocalReportError::invalid_environment(error));
                 }
                 Err(error) => {
                     health.record(SourceHealth {
@@ -933,53 +938,6 @@ fn confirmed_source_inventory_signature(
     SourceInventorySignature(hasher.finalize().into())
 }
 
-#[derive(Default)]
-struct TraeMessageAccumulator {
-    latest_by_session: HashMap<std::sync::Arc<str>, UnifiedMessage>,
-}
-
-impl TraeMessageAccumulator {
-    fn push_messages(&mut self, messages: Vec<UnifiedMessage>) {
-        for message in messages {
-            let session_id = std::sync::Arc::clone(&message.session_id);
-            match self.latest_by_session.get_mut(&session_id) {
-                Some(existing) => {
-                    let should_replace = message.timestamp > existing.timestamp
-                        || (message.timestamp == existing.timestamp
-                            && message.dedup_key.as_ref().is_some_and(|key| {
-                                existing
-                                    .dedup_key
-                                    .as_ref()
-                                    .is_none_or(|existing_key| key > existing_key)
-                            }));
-                    if should_replace {
-                        *existing = message;
-                    }
-                }
-                None => {
-                    let _ = self.latest_by_session.insert(session_id, message);
-                }
-            }
-        }
-    }
-
-    fn finish(self) -> Vec<UnifiedMessage> {
-        let mut deduped: Vec<UnifiedMessage> = self.latest_by_session.into_values().collect();
-        deduped.sort_unstable_by(|a, b| {
-            a.session_id
-                .cmp(&b.session_id)
-                .then_with(|| a.timestamp.cmp(&b.timestamp))
-        });
-        deduped
-    }
-}
-
-fn dedupe_latest_trae_messages(messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
-    let mut accumulator = TraeMessageAccumulator::default();
-    accumulator.push_messages(messages);
-    accumulator.finish()
-}
-
 /// Date-range retain shared by the report and local-parse filters. One
 /// `date_string()` per message, only when a date filter is active.
 fn retain_messages_in_date_range(
@@ -1071,14 +1029,15 @@ fn normalize_token_breakdown(tokens: &mut TokenBreakdown) {
     tokens.reasoning = tokens.reasoning.max(0);
 }
 
-fn resolve_report_request(options: &ReportOptions) -> Result<(String, Vec<String>), String> {
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-    let clients = options.clients.clone().unwrap_or_else(|| {
-        ClientId::iter()
-            .filter(|client| client.parse_local())
-            .map(|c| c.as_str().to_string())
-            .collect()
-    });
+fn resolve_report_request(
+    options: &ReportOptions,
+) -> Result<(String, Vec<String>), LocalReportError> {
+    let home_dir = get_home_dir_string(&options.home_dir)
+        .map_err(LocalReportError::invalid_environment_message)?;
+    let clients = options
+        .clients
+        .clone()
+        .unwrap_or_else(|| ClientId::iter().map(|c| c.as_str().to_string()).collect());
     Ok((home_dir, clients))
 }
 
@@ -1095,7 +1054,7 @@ struct ResolvedAggregationRequest<'a> {
 
 fn load_aggregated_views_resolved(
     request: ResolvedAggregationRequest<'_>,
-) -> Result<AggregatedViews, String> {
+) -> Result<AggregatedViews, LocalReportError> {
     let prepared = prepare_local_sources(LocalParseOptions {
         home_dir: Some(request.home_dir.to_string()),
         use_env_roots: request.use_env_roots,
@@ -1121,7 +1080,7 @@ fn load_prepared_aggregated_views(
     date_range: DateRange,
     views: ViewSet,
     pricing: Option<&pricing::PricingService>,
-) -> Result<(AggregatedViews, SourceInventorySignature), String> {
+) -> Result<(AggregatedViews, SourceInventorySignature), LocalReportError> {
     let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
         group_by,
         date_range,
@@ -1152,7 +1111,7 @@ fn load_aggregated_views_for_resolved_report(
     clients: &[String],
     views: ViewSet,
     pricing: Option<&pricing::PricingService>,
-) -> Result<AggregatedViews, String> {
+) -> Result<AggregatedViews, LocalReportError> {
     load_aggregated_views_resolved(ResolvedAggregationRequest {
         home_dir,
         clients,
@@ -1176,12 +1135,12 @@ pub fn load_aggregated_views_with_pricing(
     options: &ReportOptions,
     views: ViewSet,
     pricing: Option<&pricing::PricingService>,
-) -> Result<AggregatedViews, String> {
+) -> Result<AggregatedViews, LocalReportError> {
     let (home_dir, clients) = resolve_report_request(options)?;
     load_aggregated_views_for_resolved_report(options, &home_dir, &clients, views, pricing)
 }
 
-pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
+pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, LocalReportError> {
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
@@ -1198,7 +1157,7 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     Ok(report)
 }
 
-pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, String> {
+pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, LocalReportError> {
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
@@ -1219,7 +1178,7 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
 ///
 /// Derives the hour slot from `UnifiedMessage.timestamp` (Unix ms). Messages
 /// without a valid timestamp are not included in the hourly distribution.
-pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, String> {
+pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, LocalReportError> {
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
@@ -1239,7 +1198,7 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 async fn generate_graph_with_loaded_pricing(
     options: ReportOptions,
     pricing: Option<&pricing::PricingService>,
-) -> Result<GraphResult, String> {
+) -> Result<GraphResult, LocalReportError> {
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
     let mut views = load_aggregated_views_for_resolved_report(
@@ -1262,7 +1221,9 @@ pub struct TimeMetricsReport {
     pub health: source_health::HealthReport,
 }
 
-pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetricsReport, String> {
+pub async fn get_time_metrics_report(
+    options: ReportOptions,
+) -> Result<TimeMetricsReport, LocalReportError> {
     let start = Instant::now();
     let (home_dir, clients) = resolve_report_request(&options)?;
     let views = load_aggregated_views_for_resolved_report(
@@ -1278,12 +1239,14 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
     Ok(report)
 }
 
-pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, String> {
+pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, LocalReportError> {
     let pricing = pricing::PricingService::get_or_init().await?;
     generate_graph_with_loaded_pricing(options, Some(&pricing)).await
 }
 
-pub async fn generate_local_graph_report(options: ReportOptions) -> Result<GraphResult, String> {
+pub async fn generate_local_graph_report(
+    options: ReportOptions,
+) -> Result<GraphResult, LocalReportError> {
     let pricing = load_pricing_for_local_parse().await;
     generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
 }
@@ -1494,16 +1457,17 @@ async fn load_pricing_for_local_parse_with_diagnostics(
 
 fn resolve_local_parse_request(
     options: &LocalParseOptions,
-) -> Result<(String, Vec<String>), String> {
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-    let clients = options.clients.clone().unwrap_or_else(|| {
-        ClientId::iter()
-            .filter(|c| c.parse_local())
-            .map(|c| c.as_str().to_string())
-            .collect()
-    });
+) -> Result<(String, Vec<String>), LocalReportError> {
+    let home_dir = get_home_dir_string(&options.home_dir)
+        .map_err(LocalReportError::invalid_environment_message)?;
+    let clients = options
+        .clients
+        .clone()
+        .unwrap_or_else(|| ClientId::iter().map(|c| c.as_str().to_string()).collect());
     for client in &clients {
-        ClientId::from_str(client).ok_or_else(|| format!("unknown local client `{client}`"))?;
+        ClientId::from_str(client).ok_or_else(|| {
+            LocalReportError::invalid_request_message(format!("unknown local client `{client}`"))
+        })?;
     }
     Ok((home_dir, clients))
 }
@@ -1511,7 +1475,7 @@ fn resolve_local_parse_request(
 fn parse_prepared_local_unified_messages(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
-) -> Result<LocalReport<Vec<UnifiedMessage>>, String> {
+) -> Result<LocalReport<Vec<UnifiedMessage>>, LocalReportError> {
     let filters = prepared.options.clone();
     let mut messages = Vec::new();
     let (source_inventory_signature, health) =
@@ -1527,7 +1491,7 @@ fn parse_prepared_local_unified_messages(
 #[doc(hidden)]
 pub fn count_local_client_messages(
     options: LocalParseOptions,
-) -> Result<LocalClientMessageCounts, String> {
+) -> Result<LocalClientMessageCounts, LocalReportError> {
     let start = Instant::now();
     let prepared = prepare_local_sources(options)?;
     let mut sink = ClientCountSink::new(DateRange {
@@ -1548,14 +1512,14 @@ pub fn count_local_client_messages(
 pub async fn parse_local_unified_messages_with_pricing(
     options: LocalParseOptions,
     pricing: Option<&pricing::PricingService>,
-) -> Result<LocalReport<Vec<UnifiedMessage>>, String> {
+) -> Result<LocalReport<Vec<UnifiedMessage>>, LocalReportError> {
     let prepared = prepare_local_sources(options)?;
     parse_prepared_local_unified_messages(prepared, pricing)
 }
 
 pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
-) -> Result<LocalReport<Vec<UnifiedMessage>>, String> {
+) -> Result<LocalReport<Vec<UnifiedMessage>>, LocalReportError> {
     let prepared = prepare_local_sources(options)?;
     let pricing = load_pricing_for_local_parse().await;
     parse_prepared_local_unified_messages(prepared, pricing.as_deref())
@@ -1566,7 +1530,7 @@ pub fn load_usage_data_with_pricing(
     options: LocalParseOptions,
     group_by: GroupBy,
     pricing: Option<&pricing::PricingService>,
-) -> Result<usage_views::UsageData, String> {
+) -> Result<usage_views::UsageData, LocalReportError> {
     let prepared = prepare_local_sources(options)?;
     load_prepared_usage_data_with_pricing(prepared, group_by, pricing)
 }
@@ -1576,7 +1540,7 @@ pub fn load_prepared_usage_data_with_pricing(
     prepared: PreparedLocalSources,
     group_by: GroupBy,
     pricing: Option<&pricing::PricingService>,
-) -> Result<usage_views::UsageData, String> {
+) -> Result<usage_views::UsageData, LocalReportError> {
     let date_range = DateRange {
         since: prepared.options.since.clone(),
         until: prepared.options.until.clone(),
@@ -1600,7 +1564,7 @@ pub struct UsageDataWithDiagnostics {
 pub async fn load_usage_data_with_diagnostics(
     options: LocalParseOptions,
     group_by: GroupBy,
-) -> Result<UsageDataWithDiagnostics, String> {
+) -> Result<UsageDataWithDiagnostics, LocalReportError> {
     let prepared = prepare_local_sources(options)?;
     load_prepared_usage_data_with_diagnostics(prepared, group_by).await
 }
@@ -1608,7 +1572,7 @@ pub async fn load_usage_data_with_diagnostics(
 pub async fn load_prepared_usage_data_with_diagnostics(
     prepared: PreparedLocalSources,
     group_by: GroupBy,
-) -> Result<UsageDataWithDiagnostics, String> {
+) -> Result<UsageDataWithDiagnostics, LocalReportError> {
     let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
     let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
     let date_range = DateRange {
@@ -1636,7 +1600,7 @@ pub async fn load_prepared_usage_data_with_diagnostics(
 pub async fn load_usage_data(
     options: LocalParseOptions,
     group_by: GroupBy,
-) -> Result<usage_views::UsageData, String> {
+) -> Result<usage_views::UsageData, LocalReportError> {
     let prepared = prepare_local_sources(options)?;
     let pricing = load_pricing_for_local_parse().await;
     load_prepared_usage_data_with_pricing(prepared, group_by, pricing.as_deref())

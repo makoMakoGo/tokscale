@@ -70,7 +70,7 @@ Run the local wrapper:
 bun run cli
 
 # Script-friendly report
-bun run cli -- --no-spinner --light
+bun run cli -- models --no-spinner
 
 # Inspect detected clients and scan locations
 bun run cli -- clients
@@ -90,23 +90,23 @@ npm install -g @juya-ai/tokscale
 # TUI
 tokscale
 tokscale tui
-tokscale models
-tokscale monthly
-tokscale hourly
+tokscale tui --tab models
 
-# Scriptable reports
-tokscale --no-spinner --light
+# Deterministic table and JSON reports
+tokscale models --no-spinner
+tokscale monthly --no-spinner
+tokscale hourly --no-spinner
 tokscale models --no-spinner --json
 tokscale graph --no-spinner --output graph.json
 
 # Filters
-tokscale --client opencode,claude --week
+tokscale tui --client opencode,claude --week
 tokscale models --since 2026-01-01 --until 2026-01-31
 tokscale models --group-by client,provider,model --json
 
 # Pricing catalog lookup
-tokscale pricing claude-sonnet-4-5 --no-spinner
-tokscale pricing list-overrides --json
+tokscale pricing lookup claude-sonnet-4-5 --no-spinner
+tokscale pricing overrides --json
 ```
 
 When running from source, replace `tokscale` with `bun run cli --`.
@@ -119,10 +119,10 @@ The canonical client identity list lives in
 
 Current catalog entries include:
 
-OpenCode, Claude Code, Codex CLI, Cursor, Gemini CLI, Amp, Droid, OpenClaw,
+OpenCode, Claude Code, Codex CLI, Gemini CLI, Amp, Droid, OpenClaw,
 Pi, OMP, Kimi, Qwen CLI, Roo Code, KiloCode, Mux, Kilo CLI,
 Hermes Agent, Copilot, Goose, Codebuff, CodeBuddy, Antigravity, Zed Agent,
-ZCode, Kiro, Junie, Trae, Warp, Cline, Command Code, and Grok Build.
+ZCode, Kiro, Junie, Warp, Cline, Command Code, and Grok Build.
 
 Some catalog entries have explicit boundaries:
 
@@ -130,11 +130,7 @@ Some catalog entries have explicit boundaries:
   Tokscale applies the fixed total-only bucket allocation from ADR 0017.
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
   accounting.
-- `cursor` reads a local API cache. Logged-in local reports and the TUI can
-  refresh a stale cache automatically when no `--home` override is used, Cursor
-  is in scope, and the cache is older than five minutes; `tokscale cursor sync`
-  forces a refresh.
-- `antigravity` and `trae` use local caches refreshed by explicit sync commands.
+- `antigravity` uses a local cache refreshed by an explicit sync command.
 
 ## Data and pricing semantics
 

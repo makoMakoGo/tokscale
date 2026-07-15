@@ -73,6 +73,12 @@ mod tests {
     }
 
     #[test]
+    fn removed_clients_are_not_client_identities() {
+        assert_eq!(ClientId::from_str("cursor"), None);
+        assert_eq!(ClientId::from_str("trae"), None);
+    }
+
+    #[test]
     fn pi_and_omp_have_separate_identity_facts() {
         assert_eq!(ClientId::Pi.as_str(), "pi");
         assert_eq!(ClientId::Omp.as_str(), "omp");

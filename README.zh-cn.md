@@ -57,7 +57,7 @@ bun run build:core
 bun run cli
 
 # 适合脚本的报表
-bun run cli -- --no-spinner --light
+bun run cli -- models --no-spinner
 
 # 查看检测到的客户端和扫描位置
 bun run cli -- clients
@@ -71,23 +71,23 @@ bun run cli -- clients
 # TUI
 tokscale
 tokscale tui
-tokscale models
-tokscale monthly
-tokscale hourly
+tokscale tui --tab models
 
-# 脚本化报表
-tokscale --no-spinner --light
+# 报表
+tokscale models --no-spinner
 tokscale models --no-spinner --json
+tokscale monthly --no-spinner
+tokscale hourly --no-spinner
 tokscale graph --no-spinner --output graph.json
 
 # 过滤
-tokscale --client opencode,claude --week
+tokscale tui --client opencode,claude --week
 tokscale models --since 2026-01-01 --until 2026-01-31
 tokscale models --group-by client,provider,model --json
 
 # 查询价格目录
-tokscale pricing claude-sonnet-4-5 --no-spinner
-tokscale pricing list-overrides --json
+tokscale pricing lookup claude-sonnet-4-5 --no-spinner
+tokscale pricing overrides --json
 ```
 
 从源码运行时，把 `tokscale` 替换成 `bun run cli --`。
@@ -99,14 +99,13 @@ tokscale pricing list-overrides --json
 
 当前 catalog 包括：
 
-OpenCode、Claude Code、Codex CLI、Cursor、Gemini CLI、Amp、Droid、OpenClaw、Pi、OMP、Kimi、Qwen CLI、Roo Code、KiloCode、Mux、Kilo CLI、Hermes Agent、Copilot、Goose、Codebuff、Antigravity、Zed Agent、ZCode、Kiro、Junie、Trae、Warp、Cline、Command Code 和 Grok Build。
+OpenCode、Claude Code、Codex CLI、Gemini CLI、Amp、Droid、OpenClaw、Pi、OMP、Kimi、Qwen CLI、Roo Code、KiloCode、Mux、Kilo CLI、Hermes Agent、Copilot、Goose、Codebuff、Antigravity、Zed Agent、ZCode、Kiro、Junie、Warp、Cline、Command Code 和 Grok Build。
 
 部分 catalog 条目有明确边界：
 
 - `grok` 和本地 `warp.sqlite` 只提供没有 bucket 拆分的 token 总数，因此 Tokscale 使用 ADR 0017 定义的固定 bucket 分配。
 - `commandcode` 是基于 transcript 的估算用量，不是供应商权威 token 记账。
-- `cursor` 读取本地 API 缓存。已登录时，如果没有使用 `--home`，且 Cursor 在客户端范围内，并且缓存超过五分钟，普通本地报表和 TUI 可以自动刷新过期缓存；`tokscale cursor sync` 用于强制刷新。
-- `antigravity` 和 `trae` 使用显式 sync 命令刷新的本地缓存。
+- `antigravity` 使用显式 sync 命令刷新的本地缓存。
 
 ## 数据和定价语义
 

@@ -1,4 +1,3 @@
-use crate::tui;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -96,31 +95,31 @@ pub(crate) fn run_capture_command(
 
 pub(crate) fn run_headless_command(
     source: &str,
-    args: Vec<String>,
-    format: Option<String>,
+    command: Vec<String>,
+    format: Option<&str>,
     output: Option<String>,
     no_auto_flags: bool,
+    timeout: Duration,
 ) -> Result<()> {
     use chrono::Utc;
     use uuid::Uuid;
 
     let source_lower = source.to_lowercase();
-    if source_lower != "codex" {
-        eprintln!("\n  Error: Unknown headless source '{}'.", source);
-        eprintln!("  Currently only 'codex' is supported.\n");
-        std::process::exit(1);
-    }
+    anyhow::ensure!(
+        source_lower == "codex",
+        "unsupported headless source `{source}`"
+    );
+    let (program, child_args) = command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("headless child command must not be empty"))?;
 
     let resolved_format = match format {
-        Some(f) if f == "json" || f == "jsonl" => f,
-        Some(f) => {
-            eprintln!("\n  Error: Invalid format '{}'. Use json or jsonl.\n", f);
-            std::process::exit(1);
-        }
+        Some(f) if f == "json" || f == "jsonl" => f.to_string(),
+        Some(f) => anyhow::bail!("invalid headless format `{f}`"),
         None => "jsonl".to_string(),
     };
 
-    let mut final_args = args.clone();
+    let mut final_args = child_args.to_vec();
     if !no_auto_flags && source_lower == "codex" && !final_args.contains(&"--json".to_string()) {
         final_args.push("--json".to_string());
     }
@@ -158,23 +157,20 @@ pub(crate) fn run_headless_command(
         dir.join(filename)
     };
 
-    let settings = tui::settings::Settings::load()?;
-    let timeout = settings.get_native_timeout()?;
-
     use colored::Colorize;
-    println!("\n  {}", "Headless capture".cyan());
-    println!("  {}", format!("source: {}", source_lower).bright_black());
-    println!(
+    eprintln!("\n  {}", "Headless capture".cyan());
+    eprintln!("  {}", format!("source: {}", source_lower).bright_black());
+    eprintln!(
         "  {}",
         format!("output: {}", output_path.display()).bright_black()
     );
-    println!(
+    eprintln!(
         "  {}",
         format!("timeout: {}s", timeout.as_secs()).bright_black()
     );
-    println!();
+    eprintln!();
 
-    let outcome = run_capture_command(&source_lower, &final_args, &output_path, timeout)?;
+    let outcome = run_capture_command(program, &final_args, &output_path, timeout)?;
 
     if outcome.timed_out {
         eprintln!(
@@ -182,15 +178,11 @@ pub(crate) fn run_headless_command(
             format!("\n  Subprocess timed out after {}s", timeout.as_secs()).red()
         );
         eprintln!("{}", "  Partial output saved. Increase timeout with TOKSCALE_NATIVE_TIMEOUT_MS or settings.json".bright_black());
-        println!();
         std::process::exit(124);
     }
 
-    println!(
-        "{}",
-        format!("✓ Saved headless output to {}", output_path.display()).green()
-    );
-    println!();
+    eprintln!("{}", "✓ Headless output saved".green());
+    println!("{}", output_path.display());
 
     if outcome.exit_code != 0 {
         std::process::exit(outcome.exit_code);

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
@@ -19,7 +19,6 @@ const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVIS
 const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const QWEN_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const ZCODE_OVERLAP_NORMALIZATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-const CURSOR_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const KIMI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const COMMANDCODE_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const ZCODE_RECORD_REJECTION_REVISION: u32 = ZCODE_OVERLAP_NORMALIZATION_REVISION + 1;
@@ -30,6 +29,7 @@ const GROK_RECORD_REJECTION_REVISION: u32 = GROK_TOTAL_ONLY_IMPUTATION_REVISION 
 const GROK_RELATED_METADATA_REVISION: u32 = GROK_RECORD_REJECTION_REVISION + 1;
 const GEMINI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const DROID_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const DROID_AGENT_ATTRIBUTION_REVISION: u32 = DROID_RECORD_REJECTION_REVISION + 1;
 const GROK_RELATED_METADATA_SIBLINGS: &[&str] = &["summary.json", "events.jsonl"];
 
 pub(crate) struct CachedFileAdapter {
@@ -37,6 +37,7 @@ pub(crate) struct CachedFileAdapter {
     parser_version: ParserVersion,
     fingerprint_policy: FingerprintPolicy,
     optional_related_inputs: bool,
+    dependency_path: Option<fn(&Path) -> Option<PathBuf>>,
     parse: fn(&Path) -> SessionParseResult<ScannedSource>,
 }
 
@@ -52,6 +53,24 @@ impl CachedFileAdapter {
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
             optional_related_inputs: false,
+            dependency_path: None,
+            parse,
+        }
+    }
+
+    pub(crate) const fn new_with_dependency(
+        client: ClientId,
+        parser_id: ParserId,
+        revision: u32,
+        dependency_path: fn(&Path) -> Option<PathBuf>,
+        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+    ) -> Self {
+        Self {
+            client,
+            parser_version: ParserVersion::new(parser_id, revision),
+            fingerprint_policy: FingerprintPolicy::PlainFile,
+            optional_related_inputs: false,
+            dependency_path: Some(dependency_path),
             parse,
         }
     }
@@ -68,6 +87,7 @@ impl CachedFileAdapter {
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings { sibling_names },
             optional_related_inputs: true,
+            dependency_path: None,
             parse,
         }
     }
@@ -88,7 +108,16 @@ impl LocalSourceAdapter for CachedFileAdapter {
             self.fingerprint_policy.clone(),
         )?
         .into_iter()
-        .map(|unit| unit.with_parser_version(self.parser_version))
+        .map(|unit| {
+            let dependency_path = self
+                .dependency_path
+                .and_then(|dependency_path| dependency_path(&unit.path));
+            let unit = match dependency_path {
+                Some(dependency_path) => unit.with_dependency(dependency_path),
+                None => unit,
+            };
+            unit.with_parser_version(self.parser_version)
+        })
         .collect())
     }
 
@@ -200,12 +229,6 @@ impl LocalSourceAdapter for CopilotAdapter {
 }
 
 pub(crate) static COPILOT_ADAPTER: CopilotAdapter = CopilotAdapter;
-pub(crate) static CURSOR_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::Cursor,
-    ParserId::Cursor,
-    CURSOR_RECORD_REJECTION_REVISION,
-    sessions::cursor::parse_cursor_file,
-);
 pub(crate) static GEMINI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Gemini,
     ParserId::Gemini,
@@ -225,10 +248,11 @@ pub(crate) static AMP_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     AMP_RECORD_REJECTION_REVISION,
     sessions::amp::parse_amp_file,
 );
-pub(crate) static DROID_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
+pub(crate) static DROID_ADAPTER: CachedFileAdapter = CachedFileAdapter::new_with_dependency(
     ClientId::Droid,
     ParserId::Droid,
-    DROID_RECORD_REJECTION_REVISION,
+    DROID_AGENT_ATTRIBUTION_REVISION,
+    sessions::droid::droid_agent_dependency_path,
     sessions::droid::parse_droid_file,
 );
 pub(crate) static KIMI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
@@ -571,13 +595,71 @@ not-json
     }
 
     #[test]
+    fn droid_adapter_invalidates_cached_mission_worker_role_from_features() {
+        let home = tempfile::TempDir::new().unwrap();
+        let session_dir = home.path().join(".factory/sessions/project");
+        let settings_path = session_dir.join("mission-worker.settings.json");
+        let features_path = home
+            .path()
+            .join(".factory/missions/mission-root/features.json");
+        write_file(
+            &settings_path,
+            r#"{
+                "model": "custom:gpt-5.6-sol-xhigh",
+                "providerLock": "openai",
+                "providerLockTimestamp": "2026-07-15T08:55:13.871Z",
+                "tokenUsage": {"inputTokens": 10, "outputTokens": 5},
+                "tags": [
+                    {"name": "exec"},
+                    {"name": "mission-worker"},
+                    {
+                        "name": "mission-session",
+                        "metadata": {"role": "worker", "missionId": "mission-root"}
+                    }
+                ]
+            }"#,
+        );
+        write_file(
+            &features_path,
+            r#"{"features":[{"id":"implementation","skillName":"backend-worker","workerSessionIds":["mission-worker"]}]}"#,
+        );
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        assert_eq!(
+            unit.fingerprint_policy,
+            FingerprintPolicy::PrimaryWithDependency {
+                dependency_path: features_path.clone()
+            }
+        );
+
+        let mut cache = message_cache::SourceMessageCache::default();
+        let worker_messages = fold_with_adapter(&DROID_ADAPTER, vec![unit], &mut cache);
+        assert_eq!(worker_messages.len(), 1);
+        assert_eq!(worker_messages[0].agent.as_deref(), Some("Droid Worker"));
+
+        write_file(
+            &features_path,
+            r#"{"features":[{"id":"scrutiny","skillName":"scrutiny-validator","workerSessionIds":["mission-worker"]}]}"#,
+        );
+        let changed_unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let changed_unit = match DROID_ADAPTER.plan_cache_hit(changed_unit, &cache).unwrap() {
+            crate::adapters::CacheHitPlan::Miss(unit) => unit,
+            crate::adapters::CacheHitPlan::Hit(_) => {
+                panic!("changed Mission feature must invalidate the Droid source cache")
+            }
+        };
+        let validator_messages = fold_with_adapter(&DROID_ADAPTER, vec![changed_unit], &mut cache);
+        assert_eq!(validator_messages.len(), 1);
+        assert_eq!(
+            validator_messages[0].agent.as_deref(),
+            Some("Droid Validator")
+        );
+    }
+
+    #[test]
     fn cached_file_adapters_use_their_actual_record_rejection_revisions() {
         for (actual, parser_id, revision) in [
-            (
-                CURSOR_ADAPTER.parser_version,
-                ParserId::Cursor,
-                CURSOR_RECORD_REJECTION_REVISION,
-            ),
             (
                 GEMINI_ADAPTER.parser_version,
                 ParserId::Gemini,
@@ -596,7 +678,7 @@ not-json
             (
                 DROID_ADAPTER.parser_version,
                 ParserId::Droid,
-                DROID_RECORD_REJECTION_REVISION,
+                DROID_AGENT_ATTRIBUTION_REVISION,
             ),
             (
                 KIMI_ADAPTER.parser_version,

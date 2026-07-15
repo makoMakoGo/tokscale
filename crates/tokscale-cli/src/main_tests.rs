@@ -1,43 +1,21 @@
-use super::*;
-use crate::commands::cache::*;
+use crate::cli::*;
 use crate::commands::clients::*;
-use crate::commands::integrations::*;
 use crate::commands::render::*;
 use crate::commands::shared::*;
 use clap::Parser;
 use std::path::{Path, PathBuf};
+use tokscale_core::ClientId;
 
 #[test]
-fn test_parse_variant_arg_accepts_known_values() {
+fn tui_exit_maps_to_process_execution_outcome() {
     assert_eq!(
-        parse_variant_arg(Some("solo")).unwrap(),
-        Some(trae::auth::TraeVariant::Solo)
+        super::ExecutionOutcome::from(crate::tui::TuiExit::Quit),
+        super::ExecutionOutcome::Completed
     );
     assert_eq!(
-        parse_variant_arg(Some("ide")).unwrap(),
-        Some(trae::auth::TraeVariant::Ide)
+        super::ExecutionOutcome::from(crate::tui::TuiExit::Interrupted),
+        super::ExecutionOutcome::Interrupted
     );
-}
-
-#[test]
-fn test_parse_variant_arg_none_when_omitted() {
-    assert_eq!(parse_variant_arg(None).unwrap(), None);
-}
-
-#[test]
-fn test_parse_variant_arg_rejects_unknown_value() {
-    // The earlier `Option`-returning version converted this to `None`
-    // and the caller fell through to "all variants" — a typo like
-    // `--variant slo` would log out every variant. Now we error out.
-    let err = parse_variant_arg(Some("slo")).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("unknown variant"), "got: {msg}");
-    assert!(msg.contains("slo"), "got: {msg}");
-}
-
-#[test]
-fn test_parse_variant_arg_rejects_empty_string() {
-    assert!(parse_variant_arg(Some("")).is_err());
 }
 
 // Tests below call `build_client_filter_with_defaults` directly with
@@ -60,6 +38,14 @@ fn test_parse_client_id_arg_rejects_unknown_ids() {
         err.contains("opencode"),
         "valid ids missing from error: {err}"
     );
+}
+
+#[test]
+fn removed_clients_are_not_valid_source_ids() {
+    for client in ["cursor", "trae"] {
+        let error = parse_client_id_arg(client).unwrap_err();
+        assert!(error.contains(client), "unexpected error: {error}");
+    }
 }
 
 #[test]
@@ -95,67 +81,6 @@ fn test_build_client_filter_canonical_dedups_repeats() {
     assert_eq!(
         build_client_filter_with_defaults(flags, &[]).unwrap(),
         Some(vec!["claude".to_string(), "opencode".to_string()])
-    );
-}
-
-#[test]
-fn test_resolve_default_tui_filter_set_uses_configured_defaults() {
-    // When `defaultClients` is set, the warm-cache resolver must use
-    // it verbatim — otherwise the warm cache would store every real
-    // client while the next no-flag TUI launch wants only the configured
-    // ones, producing a guaranteed cache miss.
-    let configured = vec!["opencode".to_string(), "claude".to_string()];
-    let set = resolve_default_tui_filter_set_with(&configured).unwrap();
-    let mut expected = std::collections::HashSet::new();
-    expected.insert(ClientId::OpenCode);
-    expected.insert(ClientId::Claude);
-    assert_eq!(set, expected);
-}
-
-#[test]
-fn test_resolve_default_tui_filter_set_uses_catalog_when_empty() {
-    // No defaultClients configured → use the complete accepted catalog.
-    let set = resolve_default_tui_filter_set_with(&[]).unwrap();
-    let expected = ClientId::iter().collect();
-    assert_eq!(set, expected);
-    assert!(set.contains(&ClientId::Cursor));
-}
-
-#[test]
-fn test_light_cache_no_filter_uses_catalog() {
-    let set = resolve_light_cache_filter_set(&None);
-    let expected = ClientId::iter().collect();
-    assert_eq!(set, expected);
-    assert!(set.contains(&ClientId::Cursor));
-}
-
-#[test]
-fn test_resolve_default_tui_filter_set_rejects_unknown_ids() {
-    let configured = vec!["opencode".to_string(), "not-a-real-client".to_string()];
-    let err = resolve_default_tui_filter_set_with(&configured).unwrap_err();
-    assert!(
-        err.to_string().contains("not-a-real-client"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn test_resolve_default_tui_filter_set_rejects_all_unknown_ids() {
-    let configured = vec!["not-real".to_string(), "also-fake".to_string()];
-    let err = resolve_default_tui_filter_set_with(&configured).unwrap_err();
-    assert!(
-        err.to_string().contains("not-real, also-fake"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn test_resolve_default_tui_filter_set_rejects_removed_synthetic_id() {
-    let configured = vec!["claude".to_string(), "synthetic".to_string()];
-    let err = resolve_default_tui_filter_set_with(&configured).unwrap_err();
-    assert!(
-        err.to_string().contains("synthetic"),
-        "unexpected error: {err}"
     );
 }
 
@@ -228,68 +153,109 @@ fn test_build_client_filter_defaults_dedup_preserves_order() {
 fn test_client_flags_parses_canonical_form() {
     // End-to-end smoke test: ensure clap derives accept the new
     // `--client a,b` and `-c a -c b` shapes through the CLI parser.
-    let cli = Cli::try_parse_from(["tokscale", "--client", "opencode,claude"]).expect("parse ok");
-    assert_eq!(
-        cli.clients.clients,
-        vec![ClientId::OpenCode, ClientId::Claude]
-    );
-
-    let cli =
-        Cli::try_parse_from(["tokscale", "-c", "opencode", "-c", "claude"]).expect("parse ok");
-    assert_eq!(
-        cli.clients.clients,
-        vec![ClientId::OpenCode, ClientId::Claude]
-    );
-}
-
-#[test]
-fn test_wrapped_parses_clients_view_flag() {
-    let cli = Cli::try_parse_from(["tokscale", "wrapped"]).expect("parse ok");
-    let Some(Commands::Wrapped {
-        show_clients,
-        agents,
-        ..
-    }) = cli.command
-    else {
-        panic!("expected wrapped command");
-    };
-    assert!(!show_clients);
-    assert!(!agents);
-
-    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients"]).expect("parse ok");
-    let Some(Commands::Wrapped { show_clients, .. }) = cli.command else {
-        panic!("expected wrapped command");
-    };
-    assert!(show_clients);
-}
-
-#[test]
-fn test_wrapped_client_filter_coexists_with_clients_view_flag() {
-    let cli =
-        Cli::try_parse_from(["tokscale", "wrapped", "--client", "opencode"]).expect("parse ok");
-    let Some(Commands::Wrapped {
-        client_flags,
-        show_clients,
-        ..
-    }) = cli.command
-    else {
-        panic!("expected wrapped command");
-    };
-    assert_eq!(client_flags.clients, vec![ClientId::OpenCode]);
-    assert!(!show_clients);
-
-    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--clients", "--client", "opencode"])
+    let cli = Cli::try_parse_from(["tokscale", "models", "--client", "opencode,claude"])
         .expect("parse ok");
-    let Some(Commands::Wrapped {
-        client_flags,
-        show_clients,
-        ..
-    }) = cli.command
-    else {
+    let Some(Commands::Models(args)) = cli.command else {
+        panic!("expected models command");
+    };
+    assert_eq!(
+        args.report.source.clients.clients,
+        vec![ClientId::OpenCode, ClientId::Claude]
+    );
+
+    let cli = Cli::try_parse_from(["tokscale", "tui", "-c", "opencode", "-c", "claude"])
+        .expect("parse ok");
+    let Some(Commands::Tui(args)) = cli.command else {
+        panic!("expected tui command");
+    };
+    assert_eq!(
+        args.source.clients.clients,
+        vec![ClientId::OpenCode, ClientId::Claude]
+    );
+}
+
+#[test]
+fn wrapped_ranking_is_one_typed_selection() {
+    let cli = Cli::try_parse_from(["tokscale", "wrapped"]).expect("parse ok");
+    let Some(Commands::Wrapped(args)) = cli.command else {
         panic!("expected wrapped command");
     };
-    assert_eq!(client_flags.clients, vec![ClientId::OpenCode]);
-    assert!(show_clients);
+    assert_eq!(args.ranking, None);
+
+    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "agents"])
+        .expect("agents ranking parses");
+    let Some(Commands::Wrapped(args)) = cli.command else {
+        panic!("expected wrapped command");
+    };
+    assert_eq!(args.ranking, Some(WrappedRankingArg::Agents));
+
+    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "clients"])
+        .expect("clients ranking parses");
+    let Some(Commands::Wrapped(args)) = cli.command else {
+        panic!("expected wrapped command");
+    };
+    assert_eq!(args.ranking, Some(WrappedRankingArg::Clients));
+
+    for removed in ["--agents", "--clients"] {
+        assert!(Cli::try_parse_from(["tokscale", "wrapped", removed]).is_err());
+    }
+}
+
+#[test]
+fn wrapped_ranking_resolves_without_boolean_precedence() {
+    let resolve = |args: &[&str]| {
+        let cli = Cli::try_parse_from(args).expect("wrapped arguments parse");
+        ExecutionPlan::resolve(
+            cli,
+            TerminalState {
+                stdin: false,
+                stdout: false,
+            },
+        )
+    };
+
+    let ExecutionPlan::Wrapped(plan) =
+        resolve(&["tokscale", "wrapped"]).expect("default ranking resolves")
+    else {
+        panic!("expected wrapped plan");
+    };
+    assert_eq!(plan.ranking, WrappedRanking::Auto);
+
+    let ExecutionPlan::Wrapped(plan) = resolve(&[
+        "tokscale",
+        "wrapped",
+        "--ranking",
+        "agents",
+        "--client",
+        "opencode",
+    ])
+    .expect("agents ranking resolves") else {
+        panic!("expected wrapped plan");
+    };
+    assert_eq!(plan.ranking, WrappedRanking::Agents);
+
+    let error = resolve(&[
+        "tokscale",
+        "wrapped",
+        "--ranking",
+        "agents",
+        "--client",
+        "claude",
+    ])
+    .expect_err("agents ranking without OpenCode must fail during resolve");
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("requires `opencode`"));
+
+    let error = resolve(&[
+        "tokscale",
+        "wrapped",
+        "--ranking",
+        "clients",
+        "--disable-pinned",
+    ])
+    .expect_err("client ranking cannot accept an ignored agent option");
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("does not apply"));
 }
 
 #[test]
@@ -300,25 +266,31 @@ fn test_legacy_client_flags_are_removed() {
 
 #[test]
 fn test_client_flag_accepts_uppercase() {
-    let cli = Cli::try_parse_from(["tokscale", "--client", "OPENCODE"]).expect("uppercase parses");
-    assert_eq!(cli.clients.clients, vec![ClientId::OpenCode]);
+    let cli = Cli::try_parse_from(["tokscale", "models", "--client", "OPENCODE"])
+        .expect("uppercase parses");
+    let Some(Commands::Models(args)) = cli.command else {
+        panic!("expected models command");
+    };
+    assert_eq!(args.report.source.clients.clients, vec![ClientId::OpenCode]);
 
-    let cli =
-        Cli::try_parse_from(["tokscale", "-c", "Codebuff,Antigravity"]).expect("mixed-case parses");
+    let cli = Cli::try_parse_from(["tokscale", "models", "-c", "Codebuff,Antigravity"])
+        .expect("mixed-case parses");
+    let Some(Commands::Models(args)) = cli.command else {
+        panic!("expected models command");
+    };
     assert_eq!(
-        cli.clients.clients,
+        args.report.source.clients.clients,
         vec![ClientId::Codebuff, ClientId::Antigravity]
     );
 }
 
 #[test]
 fn test_client_flag_rejects_unknown_and_empty_values() {
-    assert!(Cli::try_parse_from(["tokscale", "--client", "unknown"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "--client", ""]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "models", "--client", "unknown"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "models", "--client", ""]).is_err());
 
-    let error = Cli::try_parse_from(["tokscale", "--client", "crush"])
-        .err()
-        .expect("excluded clients must not remain valid CLI values")
+    let error = Cli::try_parse_from(["tokscale", "models", "--client", "crush"])
+        .expect_err("excluded clients must not remain valid CLI values")
         .to_string();
     assert!(error.contains("invalid client id `crush`"), "{error}");
     assert!(!error.contains("does not support local parsing"), "{error}");
@@ -326,34 +298,49 @@ fn test_client_flag_rejects_unknown_and_empty_values() {
 
 #[test]
 fn test_home_arg_rejects_empty_and_blank_values() {
-    assert!(Cli::try_parse_from(["tokscale", "--home", "", "--light"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "--home", "   ", "--light"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "models", "--home", ""]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "models", "--home", "   "]).is_err());
 }
 
 #[test]
-fn test_pricing_provider_accepts_known_values_case_insensitive() {
-    let cli = Cli::try_parse_from(["tokscale", "pricing", "gpt-4o", "--provider", "OpenRouter"])
-        .expect("provider parses");
-    let Some(Commands::Pricing { provider, .. }) = cli.command else {
-        panic!("expected pricing command");
-    };
-    assert_eq!(provider.as_deref(), Some("OpenRouter"));
-}
-
-#[test]
-fn test_pricing_provider_rejects_unknown_values() {
-    assert!(
-        Cli::try_parse_from(["tokscale", "pricing", "gpt-4o", "--provider", "unknown",]).is_err()
-    );
-    assert!(Cli::try_parse_from([
+fn test_pricing_source_accepts_known_values() {
+    let cli = Cli::try_parse_from([
         "tokscale",
         "pricing",
+        "lookup",
         "gpt-4o",
-        "--json",
-        "--provider",
-        "unknown",
+        "--source",
+        "openrouter",
+    ])
+    .expect("source parses");
+    let Some(Commands::Pricing {
+        subcommand: PricingSubcommand::Lookup { source, .. },
+    }) = cli.command
+    else {
+        panic!("expected pricing command");
+    };
+    assert_eq!(source, Some(PricingSource::Openrouter));
+}
+
+#[test]
+fn test_pricing_source_rejects_unknown_values() {
+    assert!(Cli::try_parse_from([
+        "tokscale", "pricing", "lookup", "gpt-4o", "--source", "unknown",
     ])
     .is_err());
+}
+
+#[test]
+fn pricing_overrides_is_the_registered_user_facing_subcommand() {
+    let cli = Cli::try_parse_from(["tokscale", "pricing", "overrides", "--json"])
+        .expect("documented pricing overrides command must parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Pricing {
+            subcommand: PricingSubcommand::Overrides { json: true }
+        })
+    ));
 }
 
 #[test]
@@ -644,70 +631,269 @@ fn test_light_spinner_scanner_state_cycle_wrap() {
 }
 
 #[test]
-fn resolve_cli_write_overrides_settings_false() {
-    let settings = tui::settings::Settings {
-        light: tui::settings::LightSettings { write_cache: false },
-        ..tui::settings::Settings::default()
+fn root_rejects_business_options() {
+    for args in [
+        vec!["tokscale", "--json"],
+        vec!["tokscale", "--light"],
+        vec!["tokscale", "--client", "codex"],
+        vec!["tokscale", "--week"],
+        vec!["tokscale", "--json", "models"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
+fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
+    let strings = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>()
     };
-    assert!(resolve_should_write_cache(true, false, &settings));
-}
 
-#[test]
-fn resolve_cli_no_write_overrides_settings_true() {
-    let settings = tui::settings::Settings {
-        light: tui::settings::LightSettings { write_cache: true },
-        ..tui::settings::Settings::default()
-    };
-    assert!(!resolve_should_write_cache(false, true, &settings));
-}
-
-#[test]
-fn resolve_settings_true_with_no_cli_flag() {
-    let settings = tui::settings::Settings {
-        light: tui::settings::LightSettings { write_cache: true },
-        ..tui::settings::Settings::default()
-    };
-    assert!(resolve_should_write_cache(false, false, &settings));
-}
-
-#[test]
-fn resolve_settings_false_with_no_cli_flag() {
-    let settings = tui::settings::Settings {
-        light: tui::settings::LightSettings { write_cache: false },
-        ..tui::settings::Settings::default()
-    };
-    assert!(!resolve_should_write_cache(false, false, &settings));
-}
-
-#[test]
-fn resolve_settings_default_returns_false() {
-    assert!(!resolve_should_write_cache(
-        false,
-        false,
-        &tui::settings::Settings::default()
-    ));
-}
-
-#[test]
-fn clap_rejects_write_cache_without_light() {
-    assert!(Cli::try_parse_from(["tokscale", "--write-cache"]).is_err());
-}
-
-#[test]
-fn clap_rejects_no_write_cache_without_light() {
-    assert!(Cli::try_parse_from(["tokscale", "--no-write-cache"]).is_err());
-}
-
-#[test]
-fn clap_rejects_both_write_flags_together() {
-    assert!(
-        Cli::try_parse_from(["tokscale", "--light", "--write-cache", "--no-write-cache",]).is_err()
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--json", "models"])).as_deref(),
+        Some("use `tokscale models --json`")
     );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--light"])).as_deref(),
+        Some("use `tokscale models`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["models", "--light"])).as_deref(),
+        Some("use `tokscale models`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--client", "codex"])).as_deref(),
+        Some("use `tokscale tui --client codex`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--client=codex"])).as_deref(),
+        Some("use `tokscale tui --client=codex`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["tui", "--json"])).as_deref(),
+        Some("use `tokscale models --json`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["graph", "--json"])).as_deref(),
+        Some("use `tokscale graph`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--json", "graph"])).as_deref(),
+        Some("use `tokscale graph`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["graph", "--json", "--output", "graph.json"])).as_deref(),
+        Some("use `tokscale graph --output graph.json`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--client=codex", "models"])).as_deref(),
+        Some("use `tokscale models --client=codex`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["pricing", "list-overrides"])).as_deref(),
+        Some("use `tokscale pricing overrides`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["pricing", "list-overrides", "--json"])).as_deref(),
+        Some("use `tokscale pricing overrides --json`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["pricing", "gpt-5", "--json"])).as_deref(),
+        Some("use `tokscale pricing lookup gpt-5 --json`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--json", "pricing", "gpt-5"])),
+        None,
+        "migration hints must never suggest another invalid invocation"
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["headless", "codex", "--", "tui", "--json"])),
+        None,
+        "child-process arguments after -- must not influence migration hints"
+    );
+    for unrelated in [
+        &["wrapped", "--json"][..],
+        &["clients", "--benchmark"],
+        &["pricing", "--json"],
+        &["graph", "--group-by", "model"],
+    ] {
+        assert_eq!(
+            legacy_invocation_hint(&strings(unrelated)),
+            None,
+            "migration hints must not change an explicit command's product"
+        );
+    }
 }
 
 #[test]
-fn clap_accepts_models_light_write_cache_after_subcommand() {
-    assert!(Cli::try_parse_from(["tokscale", "models", "--light", "--write-cache"]).is_ok());
+fn misplaced_and_equals_form_options_remain_parse_errors() {
+    for args in [
+        vec!["tokscale", "tui", "--json"],
+        vec!["tokscale", "--client=codex"],
+        vec!["tokscale", "graph", "--json"],
+    ] {
+        let error = Cli::try_parse_from(args).expect_err("legacy invocation must be rejected");
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+#[test]
+fn report_execution_plan_does_not_depend_on_terminal_state() {
+    for terminal in [
+        TerminalState {
+            stdin: true,
+            stdout: true,
+        },
+        TerminalState {
+            stdin: false,
+            stdout: false,
+        },
+    ] {
+        let cli = Cli::try_parse_from(["tokscale", "models", "--client", "opencode", "--json"])
+            .expect("models command parses");
+        let plan = ExecutionPlan::resolve(cli, terminal).expect("models plan resolves");
+        let ExecutionPlan::Models(plan) = plan else {
+            panic!("models must never resolve to a TUI plan");
+        };
+        assert!(plan.report.json);
+        assert_eq!(
+            plan.report.source.clients,
+            Some(vec!["opencode".to_string()])
+        );
+    }
+}
+
+#[test]
+fn json_report_plan_preserves_explicit_no_spinner() {
+    let home = tempfile::TempDir::new().unwrap();
+    let home = home.path().to_str().unwrap();
+    let resolve = |explicit_no_spinner: bool| {
+        let mut argv = vec!["tokscale", "models", "--home", home, "--json"];
+        if explicit_no_spinner {
+            argv.push("--no-spinner");
+        }
+        let cli = Cli::try_parse_from(argv).expect("models command parses");
+        let plan = ExecutionPlan::resolve(
+            cli,
+            TerminalState {
+                stdin: false,
+                stdout: false,
+            },
+        )
+        .expect("models plan resolves");
+        let ExecutionPlan::Models(plan) = plan else {
+            panic!("expected models plan");
+        };
+        plan.report
+    };
+
+    let implicit = resolve(false);
+    let explicit = resolve(true);
+    assert!(implicit.json);
+    assert!(explicit.json);
+    assert!(!implicit.no_spinner);
+    assert!(explicit.no_spinner);
+}
+
+#[test]
+fn effective_spinner_policy_keeps_json_quiet_without_erasing_explicit_intent() {
+    assert!(!super::effective_no_spinner(false, false));
+    assert!(super::effective_no_spinner(false, true));
+    assert!(super::effective_no_spinner(true, false));
+    assert!(super::effective_no_spinner(true, true));
+}
+
+#[test]
+fn headless_plan_rejects_a_blank_child_executable() {
+    let cli = Cli::try_parse_from(["tokscale", "headless", "codex", "--", ""])
+        .expect("Clap accepts the present but empty COMMAND token");
+    let error = ExecutionPlan::resolve(
+        cli,
+        TerminalState {
+            stdin: false,
+            stdout: false,
+        },
+    )
+    .expect_err("a blank executable must not enter the execution plan");
+
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("non-empty executable"));
+}
+
+#[test]
+fn tui_execution_plan_requires_both_interactive_streams() {
+    for terminal in [
+        TerminalState {
+            stdin: false,
+            stdout: true,
+        },
+        TerminalState {
+            stdin: true,
+            stdout: false,
+        },
+    ] {
+        let cli = Cli::try_parse_from(["tokscale", "tui"]).expect("TUI command parses");
+        let error = ExecutionPlan::resolve(cli, terminal).expect_err("non-TTY TUI must fail");
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains("interactive terminal"));
+    }
+}
+
+#[test]
+fn tui_execution_plan_rejects_disabled_optional_tab() {
+    let home = tempfile::TempDir::new().unwrap();
+    let cli = Cli::try_parse_from([
+        "tokscale",
+        "tui",
+        "--home",
+        home.path().to_str().unwrap(),
+        "--tab",
+        "usage",
+    ])
+    .expect("TUI command parses");
+    let error = ExecutionPlan::resolve(
+        cli,
+        TerminalState {
+            stdin: true,
+            stdout: true,
+        },
+    )
+    .expect_err("disabled explicit tab must fail before entering the TUI");
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("disabled in settings.json"));
+}
+
+#[test]
+fn resolve_rejects_reversed_custom_date_range() {
+    let cli = Cli::try_parse_from([
+        "tokscale",
+        "models",
+        "--since",
+        "2026-07-15",
+        "--until",
+        "2026-07-14",
+    ])
+    .expect("individually valid dates parse");
+    let error = ExecutionPlan::resolve(
+        cli,
+        TerminalState {
+            stdin: false,
+            stdout: false,
+        },
+    )
+    .expect_err("reversed range must fail");
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("must not be later"));
+}
+
+#[test]
+fn removed_report_and_cache_flags_are_rejected() {
+    for flag in ["--light", "--write-cache", "--no-write-cache"] {
+        assert!(Cli::try_parse_from(["tokscale", "models", flag]).is_err());
+    }
 }
 
 #[test]
@@ -722,9 +908,24 @@ fn clap_accepts_source_cache_prune_command() {
 }
 
 #[test]
-fn clap_accepts_cursor_sync_command() {
-    assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "cursor", "sync", "--json"]).is_ok());
+fn clap_accepts_explicit_cache_warm_scope() {
+    let cli = Cli::try_parse_from(["tokscale", "cache", "warm", "--client", "codex"])
+        .expect("cache warm parses");
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Cache {
+            subcommand: CacheSubcommand::Warm { .. }
+        })
+    ));
+}
+
+#[test]
+fn cli_rejects_removed_account_management_namespaces() {
+    assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "cursor", "logout", "--all"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "codex", "accounts"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "codex", "switch", "work"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "trae", "status"]).is_err());
 }
 
 #[test]
@@ -743,41 +944,6 @@ fn clap_accepts_usage_without_light_flag() {
 }
 
 #[test]
-fn usage_rejects_parent_flags() {
-    for flag in USAGE_PARENT_FLAGS {
-        let args = usage_parent_flag_test_args(flag.display);
-        let matches = Cli::command().try_get_matches_from(args).unwrap();
-        let error = reject_usage_parent_flags(&matches)
-            .expect_err("usage should reject parent CLI flags")
-            .to_string();
-        assert!(
-            error.contains(flag.display),
-            "expected error to mention {} but got {error}",
-            flag.display
-        );
-    }
-
-    let matches = Cli::command()
-        .try_get_matches_from(["tokscale", "usage", "--json"])
-        .unwrap();
-    assert!(reject_usage_parent_flags(&matches).is_ok());
-}
-
-fn usage_parent_flag_test_args(flag: &'static str) -> Vec<&'static str> {
-    match flag {
-        "--write-cache" | "--no-write-cache" => vec!["tokscale", "--light", flag, "usage"],
-        "--client" => vec!["tokscale", flag, "claude", "usage"],
-        "--since" => vec!["tokscale", flag, "2026-01-01", "usage"],
-        "--until" => vec!["tokscale", flag, "2026-01-02", "usage"],
-        "--year" => vec!["tokscale", flag, "2026", "usage"],
-        "--group-by" => vec!["tokscale", flag, "model", "usage"],
-        "--theme" => vec!["tokscale", flag, "red", "usage"],
-        "--refresh" => vec!["tokscale", flag, "1", "usage"],
-        _ => vec!["tokscale", flag, "usage"],
-    }
-}
-
-#[test]
 fn client_id_parses_warp() {
     assert_eq!(ClientId::from_str("warp"), Some(ClientId::Warp));
     assert_eq!(ClientId::Warp.as_str(), "warp");
@@ -791,8 +957,8 @@ fn client_id_parses_grok() {
 
 #[test]
 fn clap_rejects_antigravity_cli_as_separate_client() {
-    assert!(Cli::try_parse_from(["tokscale", "--client", "antigravity"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "--client", "antigravity-cli"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "models", "--client", "antigravity"]).is_ok());
+    assert!(Cli::try_parse_from(["tokscale", "models", "--client", "antigravity-cli"]).is_err());
 }
 
 #[test]
@@ -859,61 +1025,4 @@ fn headless_roots_trim_env_override() {
         Some(value) => unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", value) },
         None => unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") },
     }
-}
-
-#[test]
-fn cursor_auto_sync_enabled_for_default_report() {
-    assert!(should_auto_sync_cursor_for_local_report(&None, &None));
-}
-
-#[test]
-fn cursor_auto_sync_enabled_when_cursor_filter_is_explicit() {
-    assert!(should_auto_sync_cursor_for_local_report(
-        &None,
-        &Some(vec!["cursor".to_string()])
-    ));
-}
-
-#[test]
-fn cursor_auto_sync_disabled_when_filter_excludes_cursor() {
-    assert!(!should_auto_sync_cursor_for_local_report(
-        &None,
-        &Some(vec!["codex".to_string()])
-    ));
-}
-
-#[test]
-fn cursor_auto_sync_disabled_for_home_override() {
-    assert!(!should_auto_sync_cursor_for_local_report(
-        &Some("/tmp/other-home".to_string()),
-        &None
-    ));
-    assert!(!should_auto_sync_cursor_for_local_report(
-        &Some("/tmp/other-home".to_string()),
-        &Some(vec!["cursor".to_string()])
-    ));
-}
-
-#[test]
-fn cursor_auto_sync_runtime_init_failure_is_best_effort() {
-    let result = run_best_effort_cursor_sync_with_runtime_factory(|| {
-        Err(std::io::Error::other("runtime unavailable"))
-    });
-
-    assert!(!result.synced);
-    assert_eq!(result.rows, 0);
-    assert!(result
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("runtime unavailable")));
-}
-
-#[test]
-fn light_cache_write_allows_default_home() {
-    assert!(can_write_light_cache(&None));
-}
-
-#[test]
-fn light_cache_write_refuses_when_home_dir_set() {
-    assert!(!can_write_light_cache(&Some("/tmp/fake-home".to_string())));
 }

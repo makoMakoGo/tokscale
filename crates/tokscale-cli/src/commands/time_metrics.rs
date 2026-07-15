@@ -1,9 +1,5 @@
 use crate::commands::render::LightSpinner;
-use crate::commands::shared::{
-    auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
-    emit_cursor_setup_warnings, emit_cursor_sync_warning, has_cursor_usage_cache_for_report,
-    setup_warnings_for_report, use_env_roots,
-};
+use crate::commands::shared::{use_env_roots, ReportEnvelope};
 use crate::tui;
 use anyhow::Result;
 
@@ -15,20 +11,17 @@ pub(crate) fn run_time_metrics_report(
     since: Option<String>,
     until: Option<String>,
     year: Option<String>,
+    benchmark: bool,
     no_spinner: bool,
 ) -> Result<()> {
     use tokio::runtime::Runtime;
     use tokscale_core::{get_time_metrics_report, GroupBy, ReportOptions};
 
-    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
-    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Computing time metrics..."))
     };
-    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let rt = Runtime::new()?;
@@ -46,16 +39,11 @@ pub(crate) fn run_time_metrics_report(
             })
             .await
         })
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(anyhow::Error::new)?;
 
     if let Some(spinner) = spinner {
         spinner.stop();
     }
-    emit_cursor_sync_warning(
-        cursor_sync_result.as_ref(),
-        had_cursor_cache,
-        explicit_cursor_filter,
-    );
     super::shared::emit_health_summary(&report.health);
 
     let m = &report.metrics;
@@ -63,23 +51,20 @@ pub(crate) fn run_time_metrics_report(
     if json {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct TimeMetricsReportJson<'a> {
+        struct TimeMetricsData<'a> {
             metrics: &'a tokscale_core::TimeMetrics,
-            processing_time_ms: u32,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            warnings: Vec<String>,
-            health: &'a tokscale_core::source_health::HealthReport,
         }
 
-        let output = TimeMetricsReportJson {
+        let data = TimeMetricsData {
             metrics: &report.metrics,
-            processing_time_ms: report.processing_time_ms,
-            warnings: cursor_setup_warnings,
-            health: &report.health,
         };
+        let output = ReportEnvelope::new(
+            data,
+            report.health.clone(),
+            report.processing_time_ms as u64,
+        );
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        emit_cursor_setup_warnings(&cursor_setup_warnings);
         println!("Session Time Metrics");
         println!("====================");
         println!(
@@ -96,7 +81,10 @@ pub(crate) fn run_time_metrics_report(
         );
         println!("Max concurrent sessions: {}", m.max_concurrent_sessions);
         println!("Total sessions:          {}", m.session_count);
-        println!("Processing time:         {}ms", report.processing_time_ms);
+    }
+
+    if benchmark {
+        eprintln!("Processing time: {}ms", report.processing_time_ms);
     }
 
     Ok(())

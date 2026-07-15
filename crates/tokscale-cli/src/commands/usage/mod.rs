@@ -232,14 +232,12 @@ pub fn load_cache() -> Option<Vec<UsageOutput>> {
 #[derive(Clone, Copy)]
 enum Fetch {
     Single(fn() -> Result<UsageOutput>),
-    Multi(fn() -> Result<Vec<UsageOutput>>),
 }
 
 impl Fetch {
     fn call(self) -> Result<Vec<UsageOutput>> {
         match self {
             Fetch::Single(fetch) => fetch().map(|output| vec![output]),
-            Fetch::Multi(fetch) => fetch(),
         }
     }
 }
@@ -267,7 +265,7 @@ fn all_providers() -> Vec<UsageProvider> {
             label: "Codex",
             is_available: codex::has_credentials,
             unavailable_message: "enabled in usageProviders but no Codex OAuth credentials were found",
-            fetch: Fetch::Multi(codex::fetch_all),
+            fetch: Fetch::Single(codex::fetch),
         },
         UsageProvider {
             id: UsageProviderId::Zai,

@@ -89,7 +89,7 @@ Overrides are exact-only and case-insensitive:
   necessarily the raw source label emitted by a client or parser.
 - For local report overrides, key the entry by that final canonical id unless a
   parser intentionally preserves the full route.
-- `tokscale pricing <model>` matches the command argument as a catalog query.
+- `tokscale pricing lookup <model>` matches the command argument as a catalog query.
 - Full gateway paths are only needed when you intentionally query or override
   that exact route as a catalog key.
 
@@ -110,9 +110,9 @@ lookup or report that needs pricing.
 ## Standalone lookup
 
 ```bash
-tokscale pricing claude-sonnet-4-5 --no-spinner
-tokscale pricing grok-code --provider openrouter --no-spinner
-tokscale pricing list-overrides --json
+tokscale pricing lookup claude-sonnet-4-5 --no-spinner
+tokscale pricing lookup grok-code --source openrouter --no-spinner
+tokscale pricing overrides --json
 ```
 
 Standalone lookup does not infer arbitrary source prefixes, route prefixes,

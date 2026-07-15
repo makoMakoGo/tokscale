@@ -1,16 +1,11 @@
 use crate::claude_diagnostics;
-use crate::commands::cache::{
-    resolve_should_write_cache, validate_light_cache_write, write_light_cache,
-};
 use crate::commands::render::{
     aggregate_model_report_performance, dim_borders, format_currency, format_model_name,
     format_ms_per_1k, format_tokens_with_commas, LightSpinner, TABLE_PRESET,
 };
 use crate::commands::shared::{
-    auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
-    emit_client_diagnostics, emit_cursor_setup_warnings, emit_cursor_sync_warning,
-    get_date_range_label, has_cursor_usage_cache_for_report, model_usage_includes_client,
-    resolve_effective_home_dir, setup_warnings_for_report, use_env_roots,
+    emit_client_diagnostics, get_date_range_label, model_usage_includes_client,
+    resolve_effective_home_dir, use_env_roots, ReportEnvelope,
 };
 use crate::tui::{
     self, get_client_display_name, get_provider_display_name, truncate_model_display_name,
@@ -52,8 +47,6 @@ pub(crate) fn run_models_report(
     week: bool,
     month_flag: bool,
     group_by: tokscale_core::GroupBy,
-    cli_write_cache: bool,
-    cli_no_write_cache: bool,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
@@ -62,30 +55,14 @@ pub(crate) fn run_models_report(
     if !json {
         tui::config::TokscaleConfig::initialize()?;
     }
-    let should_write_cache = if json {
-        false
-    } else {
-        let settings = tui::settings::Settings::load()?;
-        let should_write =
-            resolve_should_write_cache(cli_write_cache, cli_no_write_cache, &settings);
-        if should_write {
-            validate_light_cache_write(&home_dir)?;
-        }
-        should_write
-    };
-
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
     let effective_home_dir = resolve_effective_home_dir(&home_dir);
 
-    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
-    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
-    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
@@ -104,16 +81,11 @@ pub(crate) fn run_models_report(
             })
             .await
         })
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(anyhow::Error::new)?;
 
     if let Some(spinner) = spinner {
         spinner.stop();
     }
-    emit_cursor_sync_warning(
-        cursor_sync_result.as_ref(),
-        had_cursor_cache,
-        explicit_cursor_filter,
-    );
     super::shared::emit_health_summary(&report.health);
     let processing_time_ms = start.elapsed().as_millis();
     let claude_message_count = report
@@ -140,6 +112,7 @@ pub(crate) fn run_models_report(
         report.total_cache_read,
         report.total_cache_write,
     ]);
+    emit_client_diagnostics(&diagnostics);
 
     if json {
         #[derive(serde::Serialize)]
@@ -166,7 +139,7 @@ pub(crate) fn run_models_report(
 
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct ModelReportJson {
+        struct ModelReportData {
             group_by: String,
             entries: Vec<ModelUsageJson>,
             total_input: i64,
@@ -176,16 +149,11 @@ pub(crate) fn run_models_report(
             total_tokens: i64,
             total_messages: i32,
             total_cost: f64,
-            processing_time_ms: u32,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            warnings: Vec<String>,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            diagnostics: Vec<claude_diagnostics::ClientDiagnostic>,
-            health: tokscale_core::source_health::HealthReport,
         }
 
         let health = report.health.clone();
-        let output = ModelReportJson {
+        let report_processing_time_ms = report.processing_time_ms;
+        let data = ModelReportData {
             group_by: group_by.to_string(),
             entries: report
                 .entries
@@ -234,17 +202,11 @@ pub(crate) fn run_models_report(
             total_tokens: report_token_total,
             total_messages: report.total_messages,
             total_cost: report.total_cost,
-            processing_time_ms: report.processing_time_ms,
-            warnings: cursor_setup_warnings,
-            diagnostics,
-            health,
         };
+        let output = ReportEnvelope::new(data, health, report_processing_time_ms as u64);
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
-        emit_client_diagnostics(&diagnostics);
-
-        emit_cursor_setup_warnings(&cursor_setup_warnings);
         let total_performance = aggregate_model_report_performance(&report.entries);
         let term_width = crossterm::terminal::size()
             .map(|(w, _)| w as usize)
@@ -770,19 +732,15 @@ pub(crate) fn run_models_report(
             format_currency(report.total_cost)
         );
 
-        if benchmark {
-            use colored::Colorize;
-            println!(
-                "{}",
-                format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
-            );
-        }
-
         io::stdout().flush()?;
+    }
 
-        if should_write_cache {
-            write_light_cache(&clients, &since, &until, &year, &group_by)?;
-        }
+    if benchmark {
+        use colored::Colorize;
+        eprintln!(
+            "{}",
+            format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
+        );
     }
 
     Ok(())

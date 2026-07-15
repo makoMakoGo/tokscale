@@ -2,11 +2,7 @@ use crate::commands::render::{
     dim_borders, format_currency, format_tokens_with_commas, formatted_unique_model_names,
     LightSpinner, TABLE_PRESET,
 };
-use crate::commands::shared::{
-    auto_sync_cursor_for_local_report, client_filter_explicitly_requests_cursor,
-    emit_cursor_setup_warnings, emit_cursor_sync_warning, get_date_range_label,
-    has_cursor_usage_cache_for_report, setup_warnings_for_report, use_env_roots,
-};
+use crate::commands::shared::{get_date_range_label, use_env_roots, ReportEnvelope};
 use crate::tui;
 use anyhow::Result;
 use std::io::IsTerminal;
@@ -51,15 +47,11 @@ pub(crate) fn run_monthly_report(
 
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
 
-    let had_cursor_cache = has_cursor_usage_cache_for_report(&home_dir);
-    let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
     let spinner = if no_spinner {
         None
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
-    let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
-    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
@@ -78,16 +70,11 @@ pub(crate) fn run_monthly_report(
             })
             .await
         })
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(anyhow::Error::new)?;
 
     if let Some(spinner) = spinner {
         spinner.stop();
     }
-    emit_cursor_sync_warning(
-        cursor_sync_result.as_ref(),
-        had_cursor_cache,
-        explicit_cursor_filter,
-    );
     super::shared::emit_health_summary(&report.health);
 
     let processing_time_ms = start.elapsed().as_millis();
@@ -108,16 +95,14 @@ pub(crate) fn run_monthly_report(
 
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct MonthlyReportJson {
+        struct MonthlyReportData {
             entries: Vec<MonthlyUsageJson>,
             total_cost: f64,
-            processing_time_ms: u32,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            warnings: Vec<String>,
-            health: tokscale_core::source_health::HealthReport,
         }
 
-        let output = MonthlyReportJson {
+        let health = report.health.clone();
+        let report_processing_time_ms = report.processing_time_ms;
+        let data = MonthlyReportData {
             entries: report
                 .entries
                 .into_iter()
@@ -136,16 +121,12 @@ pub(crate) fn run_monthly_report(
                 })
                 .collect(),
             total_cost: report.total_cost,
-            processing_time_ms: report.processing_time_ms,
-            warnings: cursor_setup_warnings,
-            health: report.health.clone(),
         };
+        let output = ReportEnvelope::new(data, health, report_processing_time_ms as u64);
 
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
-
-        emit_cursor_setup_warnings(&cursor_setup_warnings);
         let term_width = crossterm::terminal::size()
             .map(|(w, _)| w as usize)
             .unwrap_or(120);
@@ -302,14 +283,14 @@ pub(crate) fn run_monthly_report(
             "\x1b[90m\n  Total Cost: \x1b[32m{}\x1b[90m\x1b[0m",
             format_currency(report.total_cost)
         );
+    }
 
-        if benchmark {
-            use colored::Colorize;
-            println!(
-                "{}",
-                format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
-            );
-        }
+    if benchmark {
+        use colored::Colorize;
+        eprintln!(
+            "{}",
+            format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
+        );
     }
 
     Ok(())

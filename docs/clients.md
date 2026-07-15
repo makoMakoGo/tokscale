@@ -21,10 +21,9 @@ When using an installed binary, use `tokscale clients` instead.
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode*.db` | Reads only current-format SQLite databases and combines multiple release channels when present. |
 | `claude` | Claude Code | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Claude Desktop chat history is not treated as Claude Code token accounting. |
 | `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Also supports `tokscale headless codex ...` capture. |
-| `cursor` | Cursor | `~/.config/tokscale/cursor-cache/usage*.csv` | Reads a local API cache. Logged-in reports and the TUI may auto-refresh stale cache data; local `~/.cursor` state is not parsed. |
 | `gemini` | Gemini CLI | `$GEMINI_CLI_HOME/tmp/**/chats/*`, fallback `~/.gemini/tmp/` | Reads local chat files. |
 | `amp` | Amp | `~/.local/share/amp/threads/T-*.json` | Reads local thread files. |
-| `droid` | Droid | `~/.factory/sessions/**/*.settings.json` | Reads Factory Droid sessions. |
+| `droid` | Droid | `~/.factory/sessions/**/*.settings.json`, related session JSONL and Mission `features.json` | Reads Factory Droid sessions and attributes subagent usage to `Droid Explorer`, `Droid Worker`, `Droid Orchestrator`, or `Droid Validator`. |
 | `openclaw` | OpenClaw | `~/.openclaw/agents/` plus legacy `.clawdbot`, `.moltbot`, `.moldbot` roots | Reads agent session indexes and JSONL session files. |
 | `pi` | Pi | `~/.pi/agent/sessions/**/*.jsonl` | Separate from OMP by design. |
 | `omp` | OMP | `~/.omp/agent/sessions/**/*.jsonl` | Separate from Pi by design. |
@@ -44,7 +43,6 @@ When using an installed binary, use `tokscale clients` instead.
 | `zcode` | ZCode | `~/.zcode/projects/**/*.jsonl` | Reads Z.ai ADE JSONL sessions. |
 | `kiro` | Kiro | `~/.kiro/sessions/cli/`, `~/.local/share/kiro-cli/data.sqlite3`, and Kiro IDE globalStorage snapshots | Combines CLI and IDE local sources when present. |
 | `junie` | Junie | `~/.junie/sessions/**/events.jsonl` | Reads JetBrains Junie session events. |
-| `trae` | Trae | `~/.config/tokscale/trae-cache/sessions/*.json` | Requires `tokscale trae login` and `tokscale trae sync`. China variants are not supported. |
 | `cline` | Cline | VS Code globalStorage `saoudrizwan.claude-dev/tasks/**/ui_messages.json` | Same task-log family as Roo Code and KiloCode. |
 | `commandcode` | Command Code | `~/.commandcode/projects/**/*.jsonl` | Estimated from transcripts. |
 | `grok` | Grok Build | `$GROK_HOME/sessions/**/updates.jsonl`, fallback `~/.grok/sessions/` | Reads total-token deltas and applies the fixed total-only bucket allocation from ADR 0017. |
@@ -108,39 +106,17 @@ Use `TOKSCALE_EXTRA_DIRS` for one-off runs:
 
 ```bash
 TOKSCALE_EXTRA_DIRS='codex:/abs/path/.codex/sessions,gemini:/abs/path/gemini/tmp' \
-  tokscale --no-spinner --light
+  tokscale models --no-spinner
 ```
 
 ## Cache-backed integrations
 
-Cursor reads a local API cache, but it is not purely manual-sync-backed. Ordinary
-local reports and the TUI may call the Cursor API before reading reports when
-all of these are true:
-
-- no `--home` override is active;
-- the client filter includes Cursor, including the default unfiltered report;
-- saved Cursor credentials exist;
-- the expected Cursor cache files are older than five minutes.
-
-Manual commands are still available:
-
-```bash
-tokscale cursor login --name work
-tokscale cursor sync --json
-```
-
-`tokscale cursor sync --json` forces a refresh. Filtering Cursor out with
-`--client` or using `--home` prevents the implicit pre-report refresh.
-
-Antigravity and Trae are different: they do not refresh from the root report or
-TUI command. Run their sync commands before reports when you need fresh data:
+Antigravity does not refresh from the root report or TUI command. Run its sync
+command before reports when you need fresh data:
 
 ```bash
 tokscale antigravity status
 tokscale antigravity sync
-
-tokscale trae login
-tokscale trae sync --since 30
 ```
 
 `warp` has two separate surfaces. Local reports read `warp.sqlite` when it is

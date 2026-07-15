@@ -1,4 +1,3 @@
-use crate::cursor;
 use ab_glyph::{point, Font, FontArc, GlyphId, PxScale, ScaleFont};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -14,6 +13,8 @@ use tokscale_core::{
     inferred_provider_from_model, load_aggregated_views_with_pricing, ClientId, GroupBy,
     ReportOptions, ViewSet,
 };
+
+use crate::cli::WrappedRanking;
 
 const SCALE: i32 = 2;
 const IMAGE_WIDTH: i32 = 1200 * SCALE;
@@ -59,9 +60,10 @@ const COLOR_SISYPHUS: Rgba<u8> = Rgba([0x00, 0xCE, 0xD1, 0xFF]);
 pub struct WrappedOptions {
     pub output: Option<String>,
     pub year: Option<String>,
+    pub home_dir: Option<String>,
     pub clients: Option<Vec<String>>,
     pub short: bool,
-    pub include_agents: bool,
+    pub ranking: WrappedRanking,
     pub pin_sisyphus: bool,
 }
 
@@ -117,8 +119,14 @@ struct FontSet {
 #[derive(Debug, Clone)]
 struct RenderOptions {
     short: bool,
-    include_agents: bool,
+    ranking: RenderRanking,
     pin_sisyphus: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderRanking {
+    Agents,
+    Clients,
 }
 
 pub fn run(options: WrappedOptions) -> Result<String> {
@@ -130,7 +138,6 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
     let data = load_wrapped_data(&options).await?;
     crate::commands::shared::emit_health_summary(&data.health);
 
-    let agents_requested = options.include_agents;
     let has_agent_data = data
         .top_agents
         .as_ref()
@@ -140,17 +147,27 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
         .clients
         .as_ref()
         .is_none_or(|clients| clients.iter().any(|s| s == "opencode"));
-    let effective_include_agents = agents_requested && has_agent_data;
+    let render_ranking = select_render_ranking(options.ranking, has_agent_data);
 
-    if agents_requested && opencode_enabled && !has_agent_data {
-        println!(
+    if options.ranking == WrappedRanking::Auto && opencode_enabled && !has_agent_data {
+        eprintln!(
             "{}",
             format!("\n  ⚠ No OpenCode agent data found for {}.", data.year).yellow()
         );
-        println!("{}", "    Falling back to clients view.".bright_black());
-        println!(
+        eprintln!(
             "{}",
-            "    Use --clients to always show clients view.\n".bright_black()
+            "    Automatic ranking selected the clients view. Use --ranking clients to select it explicitly.\n"
+                .bright_black()
+        );
+    } else if options.ranking == WrappedRanking::Agents && !has_agent_data {
+        eprintln!(
+            "{}",
+            format!("\n  ⚠ No OpenCode agent data found for {}.", data.year).yellow()
+        );
+        eprintln!(
+            "{}",
+            "    Rendering the requested agents view with an explicit empty-state panel.\n"
+                .bright_black()
         );
     }
 
@@ -158,7 +175,7 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
         &data,
         &RenderOptions {
             short: options.short,
-            include_agents: effective_include_agents,
+            ranking: render_ranking,
             pin_sisyphus: options.pin_sisyphus,
         },
     )
@@ -182,74 +199,31 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
     Ok(absolute.to_string_lossy().to_string())
 }
 
+fn select_render_ranking(ranking: WrappedRanking, has_agent_data: bool) -> RenderRanking {
+    match ranking {
+        WrappedRanking::Auto if has_agent_data => RenderRanking::Agents,
+        WrappedRanking::Auto => RenderRanking::Clients,
+        WrappedRanking::Agents => RenderRanking::Agents,
+        WrappedRanking::Clients => RenderRanking::Clients,
+    }
+}
+
 async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let year = options
         .year
         .clone()
         .unwrap_or_else(|| Local::now().year().to_string());
     let clients = options.clients.clone().unwrap_or_else(default_clients);
-    let local_clients: Vec<String> = clients
-        .iter()
-        .filter(|src| src.as_str() != ClientId::Cursor.as_str())
-        .cloned()
-        .collect();
-    let include_cursor = clients.iter().any(|src| src == ClientId::Cursor.as_str());
-    let explicit_cursor = options
-        .clients
-        .as_ref()
-        .is_some_and(|sources| sources.iter().any(|src| src == ClientId::Cursor.as_str()));
+    let include_agent_view = options.ranking != WrappedRanking::Clients
+        && clients
+            .iter()
+            .any(|client| client == ClientId::OpenCode.as_str());
 
     let since = format!("{}-01-01", year);
     let until = format!("{}-12-31", year);
 
-    let has_cursor_cache = cursor::has_cursor_usage_cache();
-    let cursor_logged_in = cursor::is_cursor_logged_in();
-    let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
-
-    if include_cursor && cursor_logged_in {
-        cursor_sync_result = Some(cursor::sync_cursor_cache().await);
-    }
-
-    if let Some(sync) = cursor_sync_result.as_ref() {
-        if let Some(error) = sync.error.as_ref() {
-            if sync.synced || has_cursor_cache {
-                let prefix = if sync.synced {
-                    "Cursor sync warning"
-                } else {
-                    "Cursor sync failed; using cached data"
-                };
-                println!("{}", format!("  {}: {}", prefix, error).yellow());
-            }
-        }
-    }
-
-    let include_cursor_in_graph = if include_cursor {
-        let synced = cursor_sync_result
-            .as_ref()
-            .map(|sync| sync.synced)
-            .unwrap_or(false);
-        synced || has_cursor_cache
-    } else {
-        false
-    };
-    if let Some(warning) =
-        cursor_setup_warning_for_wrapped(explicit_cursor, include_cursor_in_graph, cursor_logged_in)
-    {
-        eprintln!("{}", format!("  Warning: {warning}").yellow());
-    }
-
-    let graph_clients = if include_cursor && !include_cursor_in_graph {
-        clients
-            .iter()
-            .filter(|src| src.as_str() != ClientId::Cursor.as_str())
-            .cloned()
-            .collect::<Vec<_>>()
-    } else {
-        clients.clone()
-    };
-
     let mut views = ViewSet::GRAPH | ViewSet::TIME_METRICS;
-    if options.include_agents && !local_clients.is_empty() {
+    if include_agent_view {
         views |= ViewSet::AGENTS;
     }
 
@@ -258,19 +232,21 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .map_err(anyhow::Error::msg)?;
     let aggregated = load_aggregated_views_with_pricing(
         &ReportOptions {
-            home_dir: None,
-            use_env_roots: true,
-            clients: Some(graph_clients),
+            home_dir: options.home_dir.clone(),
+            use_env_roots: crate::commands::shared::use_env_roots(&options.home_dir),
+            clients: Some(clients),
             since: Some(since),
             until: Some(until),
             year: Some(year.clone()),
             group_by: GroupBy::default(),
-            scanner_settings: crate::tui::settings::load_scanner_settings()?,
+            scanner_settings: crate::tui::settings::load_scanner_settings_for_home(
+                &options.home_dir,
+            )?,
         },
         views,
         Some(pricing.as_ref()),
     )
-    .map_err(anyhow::Error::msg)?;
+    .map_err(anyhow::Error::new)?;
     let health = wrapped_health_report(&aggregated);
     let graph = aggregated.graph.expect("graph view requested");
 
@@ -294,7 +270,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     top_clients.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(Ordering::Equal));
     top_clients.truncate(3);
 
-    let top_agents = if options.include_agents {
+    let top_agents = if include_agent_view {
         aggregated
             .agent_usage
             .as_ref()
@@ -583,7 +559,7 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
     }
     y_pos += 40 * SCALE;
 
-    if options.include_agents {
+    if options.ranking == RenderRanking::Agents {
         draw_text_mut_baseline(
             &mut canvas,
             &fonts.regular,
@@ -596,6 +572,17 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
         y_pos += 48 * SCALE;
 
         let agents = data.top_agents.clone().unwrap_or_default();
+        if agents.is_empty() {
+            draw_text_mut_baseline(
+                &mut canvas,
+                &fonts.regular,
+                (28 * SCALE) as f32,
+                COLOR_TEXT_SECONDARY,
+                PADDING,
+                y_pos,
+                "No OpenCode agent data",
+            );
+        }
         let mut rank_index = 1;
 
         for agent in agents {
@@ -1717,7 +1704,6 @@ fn capitalize_word(word: &str) -> String {
 
 fn default_clients() -> Vec<String> {
     ClientId::iter()
-        .filter(|client| client.parse_local())
         .map(|client| client.as_str().to_string())
         .collect()
 }
@@ -1729,6 +1715,30 @@ mod tests {
     use std::env;
     use tempfile::TempDir;
     use tokscale_core::{DataHealth, RejectionSummary, SourceFailure, SourceHealth, SourceStatus};
+
+    #[test]
+    fn automatic_ranking_uses_agents_only_when_agent_data_exists() {
+        assert_eq!(
+            select_render_ranking(WrappedRanking::Auto, true),
+            RenderRanking::Agents
+        );
+        assert_eq!(
+            select_render_ranking(WrappedRanking::Auto, false),
+            RenderRanking::Clients
+        );
+    }
+
+    #[test]
+    fn explicit_agents_ranking_never_changes_to_clients() {
+        assert_eq!(
+            select_render_ranking(WrappedRanking::Agents, false),
+            RenderRanking::Agents
+        );
+        assert_eq!(
+            select_render_ranking(WrappedRanking::Clients, true),
+            RenderRanking::Clients
+        );
+    }
 
     fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
         unsafe {
@@ -2327,17 +2337,15 @@ mod tests {
     }
 
     #[test]
-    fn default_clients_use_local_parse_policy_from_catalog() {
+    fn default_clients_use_the_complete_catalog() {
         let clients = default_clients();
         let expected = ClientId::iter()
-            .filter(|client| client.parse_local())
             .map(|client| client.as_str().to_string())
             .collect::<Vec<_>>();
 
         assert_eq!(clients, expected);
         assert!(clients.iter().any(|client| client == "grok"));
         assert!(clients.iter().any(|client| client == "kiro"));
-        assert!(clients.iter().any(|client| client == "trae"));
         assert!(clients.iter().any(|client| client == "warp"));
     }
 
@@ -2740,50 +2748,5 @@ mod tests {
         ];
         let (_current, longest) = calculate_streaks(&dates);
         assert_eq!(longest, 4);
-    }
-}
-
-fn cursor_setup_warning_for_wrapped(
-    explicit_cursor: bool,
-    include_cursor_in_graph: bool,
-    cursor_logged_in: bool,
-) -> Option<String> {
-    if !explicit_cursor || include_cursor_in_graph {
-        return None;
-    }
-
-    let action = if cursor_logged_in {
-        "run `tokscale cursor sync --json`"
-    } else {
-        "run `tokscale cursor login` and `tokscale cursor sync --json`"
-    };
-
-    Some(format!(
-        "Cursor usage requires Tokscale's Cursor API cache at `~/.config/tokscale/cursor-cache/usage*.csv`; {action}. Tokscale does not parse local `~/.cursor` session data."
-    ))
-}
-
-#[cfg(test)]
-mod cursor_setup_warning_tests {
-    use super::cursor_setup_warning_for_wrapped;
-
-    #[test]
-    fn wrapped_cursor_warning_suggests_login_when_not_authenticated() {
-        let warning = cursor_setup_warning_for_wrapped(true, false, false).unwrap();
-        assert!(warning.contains("tokscale cursor login"));
-        assert!(warning.contains("tokscale cursor sync --json"));
-    }
-
-    #[test]
-    fn wrapped_cursor_warning_suggests_sync_only_when_authenticated() {
-        let warning = cursor_setup_warning_for_wrapped(true, false, true).unwrap();
-        assert!(!warning.contains("tokscale cursor login"));
-        assert!(warning.contains("tokscale cursor sync --json"));
-    }
-
-    #[test]
-    fn wrapped_cursor_warning_is_suppressed_without_explicit_missing_cursor() {
-        assert!(cursor_setup_warning_for_wrapped(false, false, false).is_none());
-        assert!(cursor_setup_warning_for_wrapped(true, true, false).is_none());
     }
 }

@@ -34,12 +34,19 @@ pub use tokscale_core::{
 /// hermetic across developer machines; production builds still honor
 /// user-configured paths.
 #[cfg(not(test))]
-fn data_loader_scanner_settings() -> Result<tokscale_core::scanner::ScannerSettings> {
-    crate::tui::settings::load_scanner_settings()
+fn data_loader_scanner_settings(
+    home_dir: &Option<PathBuf>,
+) -> Result<tokscale_core::scanner::ScannerSettings> {
+    let home = home_dir
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    Ok(crate::tui::settings::load_scanner_settings_for_home(&home)?)
 }
 
 #[cfg(test)]
-fn data_loader_scanner_settings() -> Result<tokscale_core::scanner::ScannerSettings> {
+fn data_loader_scanner_settings(
+    _home_dir: &Option<PathBuf>,
+) -> Result<tokscale_core::scanner::ScannerSettings> {
     Ok(tokscale_core::scanner::ScannerSettings::default())
 }
 
@@ -54,7 +61,7 @@ pub(super) fn trim_allocator() {
 }
 
 pub struct DataLoader {
-    _sessions_path: Option<PathBuf>,
+    pub home_dir: Option<PathBuf>,
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
@@ -81,13 +88,13 @@ impl PreparedDataLoad {
 
 impl DataLoader {
     pub fn with_filters(
-        sessions_path: Option<PathBuf>,
+        home_dir: Option<PathBuf>,
         since: Option<String>,
         until: Option<String>,
         year: Option<String>,
     ) -> Self {
         Self {
-            _sessions_path: sessions_path,
+            home_dir,
             since,
             until,
             year,
@@ -110,10 +117,16 @@ impl DataLoader {
     }
 
     pub fn prepare(&self, enabled_clients: &[ClientId]) -> Result<PreparedDataLoad> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-            .to_string_lossy()
-            .to_string();
+        let (home, use_env_roots) = match &self.home_dir {
+            Some(home) => (home.to_string_lossy().into_owned(), false),
+            None => (
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                    .to_string_lossy()
+                    .into_owned(),
+                true,
+            ),
+        };
 
         let sources: Vec<String> = enabled_clients
             .iter()
@@ -122,17 +135,17 @@ impl DataLoader {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
-            use_env_roots: true,
+            use_env_roots,
             clients: Some(sources),
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
-            scanner_settings: data_loader_scanner_settings()?,
+            scanner_settings: data_loader_scanner_settings(&self.home_dir)?,
         };
 
         prepare_local_sources(opts)
             .map(|sources| PreparedDataLoad { sources })
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::new)
     }
 
     pub fn execute_with_diagnostics(
@@ -142,34 +155,35 @@ impl DataLoader {
     ) -> Result<DataLoadResult> {
         let group_by = group_by.clone();
 
-        let usage_data = if Handle::try_current().is_ok() {
+        let usage_data: Result<_> = if Handle::try_current().is_ok() {
             std::thread::scope(|s| {
-                s.spawn(move || {
-                    let rt = Runtime::new().map_err(|e| e.to_string())?;
+                s.spawn(move || -> Result<_> {
+                    let rt = Runtime::new()?;
                     rt.block_on(load_prepared_usage_data_with_diagnostics(
                         prepared.sources,
                         group_by,
                     ))
+                    .map_err(anyhow::Error::new)
                 })
                 .join()
-                .unwrap_or_else(|_| Err("data loader thread panicked".to_string()))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("data loader thread panicked")))
             })
         } else {
-            Runtime::new()?.block_on(load_prepared_usage_data_with_diagnostics(
-                prepared.sources,
-                group_by,
-            ))
+            Runtime::new()?
+                .block_on(load_prepared_usage_data_with_diagnostics(
+                    prepared.sources,
+                    group_by,
+                ))
+                .map_err(anyhow::Error::new)
         };
 
         trim_allocator();
-        usage_data
-            .map(|result| DataLoadResult {
-                data: result.data,
-                pricing_diagnostics: result.pricing_diagnostics,
-                source_inventory_signature: result.source_inventory_signature,
-                source_digest: result.source_inventory_signature.process_digest(),
-            })
-            .map_err(anyhow::Error::msg)
+        usage_data.map(|result| DataLoadResult {
+            data: result.data,
+            pricing_diagnostics: result.pricing_diagnostics,
+            source_inventory_signature: result.source_inventory_signature,
+            source_digest: result.source_inventory_signature.process_digest(),
+        })
     }
 
     #[cfg(test)]
@@ -180,10 +194,16 @@ impl DataLoader {
         group_by: &GroupBy,
         pricing: &tokscale_core::pricing::PricingService,
     ) -> Result<UsageData> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-            .to_string_lossy()
-            .to_string();
+        let (home, use_env_roots) = match &self.home_dir {
+            Some(home) => (home.to_string_lossy().into_owned(), false),
+            None => (
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                    .to_string_lossy()
+                    .into_owned(),
+                true,
+            ),
+        };
 
         let sources: Vec<String> = enabled_clients
             .iter()
@@ -196,13 +216,13 @@ impl DataLoader {
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
-            use_env_roots: false,
-            scanner_settings: data_loader_scanner_settings()?,
+            use_env_roots,
+            scanner_settings: data_loader_scanner_settings(&self.home_dir)?,
         };
 
         let usage_data =
             tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), Some(pricing))
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::new)?;
 
         Ok(usage_data)
     }
@@ -256,10 +276,16 @@ mod tests {
         group_by: &GroupBy,
         pricing: Option<&PricingService>,
     ) -> Result<UsageData> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-            .to_string_lossy()
-            .to_string();
+        let (home, use_env_roots) = match &loader.home_dir {
+            Some(home) => (home.to_string_lossy().into_owned(), false),
+            None => (
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                    .to_string_lossy()
+                    .into_owned(),
+                true,
+            ),
+        };
 
         let sources: Vec<String> = enabled_clients
             .iter()
@@ -268,16 +294,16 @@ mod tests {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
-            use_env_roots: true,
+            use_env_roots,
             clients: Some(sources),
             since: loader.since.clone(),
             until: loader.until.clone(),
             year: loader.year.clone(),
-            scanner_settings: data_loader_scanner_settings()?,
+            scanner_settings: data_loader_scanner_settings(&loader.home_dir)?,
         };
 
         tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), pricing)
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::new)
     }
 
     fn expected_message_cost(
@@ -329,7 +355,6 @@ mod tests {
         assert_eq!(ClientId::short_name(ClientId::Claude), "Claude");
         assert_eq!(ClientId::short_name(ClientId::Codex), "Codex");
         assert_eq!(ClientId::short_name(ClientId::Copilot), "Copilot");
-        assert_eq!(ClientId::short_name(ClientId::Cursor), "Cursor");
         assert_eq!(ClientId::short_name(ClientId::Gemini), "Gemini");
         assert_eq!(ClientId::short_name(ClientId::Amp), "Amp");
         assert_eq!(ClientId::short_name(ClientId::Droid), "Droid");
@@ -349,7 +374,6 @@ mod tests {
         assert_eq!(ClientId::short_name(ClientId::Zed), "Zed Agent");
         assert_eq!(ClientId::short_name(ClientId::Zcode), "ZCode");
         assert_eq!(ClientId::short_name(ClientId::Kiro), "Kiro");
-        assert_eq!(ClientId::short_name(ClientId::Trae), "Trae");
         assert_eq!(ClientId::short_name(ClientId::Cline), "Cline");
     }
 
@@ -359,7 +383,6 @@ mod tests {
         assert_eq!(ClientId::hotkey(ClientId::Claude), Some('2'));
         assert_eq!(ClientId::hotkey(ClientId::Codex), Some('3'));
         assert_eq!(ClientId::hotkey(ClientId::Copilot), Some('c'));
-        assert_eq!(ClientId::hotkey(ClientId::Cursor), Some('4'));
         assert_eq!(ClientId::hotkey(ClientId::Gemini), Some('5'));
         assert_eq!(ClientId::hotkey(ClientId::Amp), Some('6'));
         assert_eq!(ClientId::hotkey(ClientId::Droid), Some('7'));
@@ -379,7 +402,6 @@ mod tests {
         assert_eq!(ClientId::hotkey(ClientId::Zed), Some('z'));
         assert_eq!(ClientId::hotkey(ClientId::Zcode), Some('q'));
         assert_eq!(ClientId::hotkey(ClientId::Kiro), Some('i'));
-        assert_eq!(ClientId::hotkey(ClientId::Trae), Some('y'));
         assert_eq!(ClientId::hotkey(ClientId::Cline), Some('n'));
     }
 
@@ -389,7 +411,7 @@ mod tests {
         assert_eq!(ClientId::from_hotkey('2'), Some(ClientId::Claude));
         assert_eq!(ClientId::from_hotkey('3'), Some(ClientId::Codex));
         assert_eq!(ClientId::from_hotkey('c'), Some(ClientId::Copilot));
-        assert_eq!(ClientId::from_hotkey('4'), Some(ClientId::Cursor));
+        assert_eq!(ClientId::from_hotkey('4'), None);
         assert_eq!(ClientId::from_hotkey('5'), Some(ClientId::Gemini));
         assert_eq!(ClientId::from_hotkey('6'), Some(ClientId::Amp));
         assert_eq!(ClientId::from_hotkey('7'), Some(ClientId::Droid));
@@ -409,7 +431,7 @@ mod tests {
         assert_eq!(ClientId::from_hotkey('z'), Some(ClientId::Zed));
         assert_eq!(ClientId::from_hotkey('q'), Some(ClientId::Zcode));
         assert_eq!(ClientId::from_hotkey('i'), Some(ClientId::Kiro));
-        assert_eq!(ClientId::from_hotkey('y'), Some(ClientId::Trae));
+        assert_eq!(ClientId::from_hotkey('y'), None);
     }
 
     #[test]
@@ -451,7 +473,7 @@ mod tests {
     #[test]
     fn test_data_loader_new() {
         let loader = DataLoader::with_filters(None, None, None, None);
-        assert!(loader._sessions_path.is_none());
+        assert!(loader.home_dir.is_none());
         assert!(loader.since.is_none());
         assert!(loader.until.is_none());
         assert!(loader.year.is_none());
@@ -470,7 +492,7 @@ mod tests {
         // instead it asserts the cfg(test) helper returns a default
         // ScannerSettings regardless of what the real settings file
         // contains on the developer's machine.
-        let settings = super::data_loader_scanner_settings().unwrap();
+        let settings = super::data_loader_scanner_settings(&None).unwrap();
         assert!(
             settings.opencode_db_paths.is_empty(),
             "under #[cfg(test)] data_loader_scanner_settings must return \
@@ -489,7 +511,7 @@ mod tests {
             Some("2024".to_string()),
         );
 
-        assert_eq!(loader._sessions_path, Some(PathBuf::from("/tmp/sessions")));
+        assert_eq!(loader.home_dir, Some(PathBuf::from("/tmp/sessions")));
         assert_eq!(loader.since, Some("2024-01-01".to_string()));
         assert_eq!(loader.until, Some("2024-12-31".to_string()));
         assert_eq!(loader.year, Some("2024".to_string()));

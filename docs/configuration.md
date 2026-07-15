@@ -6,15 +6,6 @@ Tokscale stores most local settings under the platform config directory:
 - Windows default: `%APPDATA%\tokscale\settings.json`
 - Override root: `TOKSCALE_CONFIG_DIR`
 
-Known exceptions that are not moved by `TOKSCALE_CONFIG_DIR` today:
-
-- Cursor integration state:
-  `$HOME/.config/tokscale/cursor-credentials.json` and
-  `$HOME/.config/tokscale/cursor-cache/`
-
-Setting `TOKSCALE_CONFIG_DIR` does not isolate Cursor credentials or Cursor
-usage cache today.
-
 ## Example
 
 ```json
@@ -56,7 +47,6 @@ usage cache today.
 | `autoRefreshMs` | number | TUI auto-refresh interval in milliseconds. |
 | `nativeTimeoutMs` | number | Maximum processing time for native subprocess work. |
 | `defaultClients` | string[] | Client filter used when no `--client/-c` flag is passed. |
-| `light.writeCache` | boolean | Allow `tokscale --light` to refresh the TUI startup cache after rendering. |
 | `usageTabEnabled` | boolean | Show the subscription quota Usage tab in the TUI. |
 | `usageProviders` | string[] | Explicit allowlist of subscription providers the TUI may fetch. Empty means cache-display mode. |
 | `scanner.opencodeDbPaths` | string[] | Authoritative additional current-format OpenCode SQLite database files. Missing, unreadable, or obsolete entries fail explicitly. This is the only custom OpenCode scan setting. |
@@ -74,7 +64,7 @@ reported explicitly.
 
 | Variable | Meaning |
 | --- | --- |
-| `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Non-empty values are used verbatim. Empty values are treated as unset. It does not currently move Cursor credentials or Cursor usage cache. |
+| `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Non-empty values are used verbatim. Empty values are treated as unset. |
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | Overrides `nativeTimeoutMs`. |
 | `TOKSCALE_EXTRA_DIRS` | One-off extra scan roots as `client:/abs/path,client:/abs/path`. |
 | `TOKSCALE_HEADLESS_DIR` | Overrides the headless capture root. Surrounding whitespace is trimmed; blank values fall back to the default root. |
@@ -121,22 +111,17 @@ explicitly want a full traversal that removes classified v2 shards; there is no
 automatic v2 migration. Retired `source-message-cache.bin` and
 `source-message-cache.lock` files are not current cache inputs.
 
+The TUI aggregate cache is separate from source-message shards. Reports never
+write it; use `tokscale cache warm` when you intentionally want to prebuild it.
+
 Integration roots are mixed state, not all disposable caches:
 
 - `antigravity-cache/` contains synced Antigravity artifacts. Use
   `tokscale antigravity purge-cache` when you want to clear them.
-- `trae-cache/` contains both synced Trae usage artifacts and credentials:
-  `credentials-solo.json` and `credentials-ide.json`. Deleting the directory
-  can log you out; preserve those files if you only want to clear synced usage.
 - `warp-cache/` contains both synced Warp aggregate usage and
   `credentials.json`. Deleting the directory can log you out; use
   `tokscale warp logout --purge-cache` when you intentionally want to remove
   credentials and cached usage together.
-
-Cursor is separate from the `TOKSCALE_CONFIG_DIR` roots above: its credentials
-and cache live at
-`$HOME/.config/tokscale/cursor-credentials.json` and
-`$HOME/.config/tokscale/cursor-cache/`, independent of `TOKSCALE_CONFIG_DIR`.
 
 ## Subscription providers
 
@@ -158,3 +143,9 @@ warp
 General-purpose provider API keys such as `ZAI_API_KEY`, `GLM_API_KEY`,
 `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `MINIMAX_API_TOKEN` are not used for
 subscription quota lookups.
+
+Codex subscription usage reads the currently authenticated account from
+provider-owned Codex auth state (`$CODEX_HOME/auth.json`, the standard Codex
+config locations, or the official macOS keychain item). Tokscale does not copy,
+refresh, switch, or modify those credentials. A legacy Tokscale
+`codex-credentials.json` is obsolete and ignored by current versions.
