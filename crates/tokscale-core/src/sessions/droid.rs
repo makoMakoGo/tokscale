@@ -304,7 +304,8 @@ fn resolve_droid_agent(
     {
         return Some(DROID_ORCHESTRATOR_AGENT);
     }
-    if has_tag(settings, MISSION_WORKER_TAG) || mission_session_role(settings) == Some("worker") {
+    // The built-in tag is the authoritative Mission Worker marker.
+    if has_tag(settings, MISSION_WORKER_TAG) {
         let session_id = settings_session_id(path)?;
         return Some(if mission_worker_is_validator(path, settings, session_id) {
             DROID_VALIDATOR_AGENT
@@ -654,6 +655,39 @@ mod tests {
             droid_agent_dependency_path(&scrutiny_validator),
             Some(features_path)
         );
+    }
+
+    #[test]
+    fn test_parse_droid_file_requires_mission_worker_tag() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let factory = temp_dir.path().join(".factory");
+        let sessions = factory.join("sessions/project");
+        let mission_id = "mission-session";
+        let worker = sessions.join("metadata-only-worker.settings.json");
+
+        write_settings(
+            &worker,
+            json!([{
+                "name": "mission-session",
+                "metadata": {"role": "worker", "missionId": mission_id}
+            }]),
+        );
+        write_json(
+            &factory
+                .join("missions")
+                .join(mission_id)
+                .join("features.json"),
+            json!({
+                "features": [{
+                    "id": "implementation",
+                    "skillName": "backend-worker",
+                    "workerSessionIds": ["metadata-only-worker"]
+                }]
+            }),
+        );
+
+        assert_eq!(agent_for(&worker), None);
+        assert_eq!(droid_agent_dependency_path(&worker), None);
     }
 
     #[test]
