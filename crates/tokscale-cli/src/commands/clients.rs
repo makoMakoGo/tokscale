@@ -142,12 +142,16 @@ pub(crate) fn run_clients_command(
     let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients)?;
     let copilot_exporter_path = copilot_exporter_path_with_env_strategy(use_env_roots);
     let opencode_data_root = opencode_data_dir_with_env_strategy(&home_dir_str, use_env_roots);
-    let opencode_auto_dbs = match discover_opencode_dbs(&opencode_data_root) {
-        Ok(paths) => paths,
-        Err(_) => {
-            health.record_unavailable_source(ClientId::OpenCode.as_str());
-            Vec::new()
+    let opencode_auto_dbs = if selected_clients.contains(&ClientId::OpenCode) {
+        match discover_opencode_dbs(&opencode_data_root) {
+            Ok(paths) => paths,
+            Err(_) => {
+                health.record_unavailable_source(ClientId::OpenCode.as_str());
+                Vec::new()
+            }
         }
+    } else {
+        Vec::new()
     };
 
     let clients: Vec<ClientRow> =

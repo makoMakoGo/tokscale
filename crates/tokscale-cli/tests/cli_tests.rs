@@ -3260,6 +3260,34 @@ fn test_clients_json() {
 }
 
 #[test]
+fn test_clients_filter_does_not_discover_unselected_opencode() {
+    let tmp = create_empty_fixture_dir();
+    let opencode_data_root = tmp.path().join(".local/share/opencode");
+    fs::remove_dir_all(&opencode_data_root).unwrap();
+    fs::create_dir_all(opencode_data_root.parent().unwrap()).unwrap();
+    fs::write(&opencode_data_root, "not a directory").unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .args(["clients", "--json", "--client", "claude"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let clients = json["data"]["clients"].as_array().unwrap();
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0]["client"], "claude");
+    assert_eq!(json["health"]["failedSources"], 0);
+    assert!(!serde_json::to_string(&json["health"])
+        .unwrap()
+        .contains("opencode"));
+}
+
+#[test]
 fn test_clients_json_reports_degraded_source_health_without_losing_payload() {
     let tmp = create_empty_fixture_dir();
     let missing_db = tmp.path().join("missing/clients-opencode.db");
