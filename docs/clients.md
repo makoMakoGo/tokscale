@@ -23,7 +23,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Also supports `tokscale headless codex ...` capture. |
 | `gemini` | Gemini CLI | `$GEMINI_CLI_HOME/tmp/**/chats/*`, fallback `~/.gemini/tmp/` | Reads local chat files. |
 | `amp` | Amp | `~/.local/share/amp/threads/T-*.json` | Reads local thread files. |
-| `droid` | Droid | `~/.factory/sessions/**/*.settings.json` | Reads Factory Droid sessions. |
+| `droid` | Droid | `~/.factory/sessions/**/*.settings.json`, related session JSONL and Mission `features.json` | Reads Factory Droid sessions and attributes subagent usage to `Droid Explorer`, `Droid Worker`, `Droid Orchestrator`, or `Droid Validator`. |
 | `openclaw` | OpenClaw | `~/.openclaw/agents/` plus legacy `.clawdbot`, `.moltbot`, `.moldbot` roots | Reads agent session indexes and JSONL session files. |
 | `pi` | Pi | `~/.pi/agent/sessions/**/*.jsonl` | Separate from OMP by design. |
 | `omp` | OMP | `~/.omp/agent/sessions/**/*.jsonl` | Separate from Pi by design. |
