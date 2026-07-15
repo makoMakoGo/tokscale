@@ -71,7 +71,6 @@ pub struct LocalClientDef {
     pub relative_path: &'static str,
     pub pattern: &'static str,
     pub headless: bool,
-    pub parse_local: bool,
 }
 
 impl LocalClientDef {
@@ -100,7 +99,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "opencode",
             pattern: "*.db",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -110,7 +108,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".claude/projects",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -123,17 +120,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "sessions",
             pattern: "*.jsonl",
             headless: true,
-            parse_local: true,
-        },
-    },
-    LocalClientEntry {
-        client: ClientId::Cursor,
-        def: LocalClientDef {
-            root: PathRoot::Home,
-            relative_path: ".config/tokscale/cursor-cache",
-            pattern: "usage*.csv",
-            headless: false,
-            parse_local: false,
         },
     },
     LocalClientEntry {
@@ -146,7 +132,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "tmp",
             pattern: "*.json|*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -156,7 +141,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "amp/threads",
             pattern: "T-*.json",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -166,7 +150,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".factory/sessions",
             pattern: "*.settings.json",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -176,7 +159,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".openclaw/agents",
             pattern: "*.jsonl*",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -186,7 +168,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".pi/agent/sessions",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -196,7 +177,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".omp/agent/sessions",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -209,7 +189,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "sessions",
             pattern: "wire.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -219,7 +198,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".qwen/projects",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -229,7 +207,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
             pattern: "ui_messages.json",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -239,7 +216,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
             pattern: "ui_messages.json",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -249,7 +225,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".mux/sessions",
             pattern: "session-usage.json",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -259,7 +234,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "kilo/kilo.db",
             pattern: "kilo.db",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -272,7 +246,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "state.db",
             pattern: "state.db",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -282,7 +255,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".copilot/otel",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -292,7 +264,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "goose/sessions/sessions.db",
             pattern: "sessions.db",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -305,7 +276,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "projects",
             pattern: "chat-messages.json",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -315,7 +285,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".codebuddy/projects",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -325,7 +294,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "antigravity-cache/sessions",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -335,7 +303,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "zed/threads/threads.db",
             pattern: "threads.db",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -345,7 +312,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".zcode/projects",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -355,7 +321,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".kiro/sessions/cli",
             pattern: "*.json",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -365,17 +330,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".junie/sessions",
             pattern: "events.jsonl",
             headless: false,
-            parse_local: true,
-        },
-    },
-    LocalClientEntry {
-        client: ClientId::Trae,
-        def: LocalClientDef {
-            root: PathRoot::Config,
-            relative_path: "trae-cache/sessions",
-            pattern: "*.json",
-            headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -385,7 +339,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".local/state/warp-terminal",
             pattern: "warp.sqlite",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -395,7 +348,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
             pattern: "ui_messages.json",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -405,7 +357,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: ".commandcode/projects",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
     LocalClientEntry {
@@ -418,7 +369,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
             relative_path: "sessions",
             pattern: "updates.jsonl",
             headless: false,
-            parse_local: true,
         },
     },
 ];
@@ -504,10 +454,6 @@ impl ClientId {
     pub fn supports_headless(self) -> bool {
         self.local_def().is_some_and(|def| def.headless)
     }
-
-    pub fn parse_local(self) -> bool {
-        self.local_def().is_some_and(|def| def.parse_local)
-    }
 }
 
 #[cfg(test)]
@@ -538,21 +484,9 @@ mod tests {
     }
 
     #[test]
-    fn cursor_is_registered_but_not_locally_parsed() {
-        let def = ClientId::Cursor
-            .local_def()
-            .expect("cursor has cache scan policy");
-        assert_eq!(def.relative_path, ".config/tokscale/cursor-cache");
-        assert_eq!(def.pattern, "usage*.csv");
-        assert!(!ClientId::Cursor.parse_local());
-        assert!(crate::adapters::adapter_for(ClientId::Cursor).is_some());
-    }
-
-    #[test]
     fn warp_reads_local_sqlite_usage() {
         let warp = ClientId::Warp.local_def().expect("warp has scan policy");
         assert_eq!(warp.pattern, "warp.sqlite");
-        assert!(ClientId::Warp.parse_local());
     }
 
     #[test]
@@ -598,7 +532,6 @@ mod tests {
         let def = ClientId::Junie.local_def().expect("junie has scan policy");
         assert_eq!(def.relative_path, ".junie/sessions");
         assert_eq!(def.pattern, "events.jsonl");
-        assert!(ClientId::Junie.parse_local());
     }
 
     #[test]
@@ -608,7 +541,6 @@ mod tests {
             .expect("zcode has local scan policy");
         assert_eq!(def.relative_path, ".zcode/projects");
         assert_eq!(def.pattern, "*.jsonl");
-        assert!(ClientId::Zcode.parse_local());
     }
 
     #[test]
@@ -618,7 +550,6 @@ mod tests {
             .expect("omp has local scan policy");
         assert_eq!(def.relative_path, ".omp/agent/sessions");
         assert_eq!(def.pattern, "*.jsonl");
-        assert!(ClientId::Omp.parse_local());
     }
 
     #[test]
@@ -714,7 +645,6 @@ mod tests {
             relative_path: ".test/sessions",
             pattern: "*.jsonl",
             headless: false,
-            parse_local: true,
         };
 
         assert_eq!(

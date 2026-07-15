@@ -119,10 +119,10 @@ The canonical client identity list lives in
 
 Current catalog entries include:
 
-OpenCode, Claude Code, Codex CLI, Cursor, Gemini CLI, Amp, Droid, OpenClaw,
+OpenCode, Claude Code, Codex CLI, Gemini CLI, Amp, Droid, OpenClaw,
 Pi, OMP, Kimi, Qwen CLI, Roo Code, KiloCode, Mux, Kilo CLI,
 Hermes Agent, Copilot, Goose, Codebuff, CodeBuddy, Antigravity, Zed Agent,
-ZCode, Kiro, Junie, Trae, Warp, Cline, Command Code, and Grok Build.
+ZCode, Kiro, Junie, Warp, Cline, Command Code, and Grok Build.
 
 Some catalog entries have explicit boundaries:
 
@@ -130,10 +130,7 @@ Some catalog entries have explicit boundaries:
   Tokscale applies the fixed total-only bucket allocation from ADR 0017.
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
   accounting.
-- `cursor` reads existing `usage*.csv` files from the local Cursor cache.
-  Tokscale does not store Cursor credentials, authenticate with Cursor, or make
-  implicit Cursor API requests.
-- `antigravity` and `trae` use local caches refreshed by explicit sync commands.
+- `antigravity` uses a local cache refreshed by an explicit sync command.
 
 ## Data and pricing semantics
 

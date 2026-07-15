@@ -214,42 +214,13 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .clone()
         .unwrap_or_else(|| Local::now().year().to_string());
     let clients = options.clients.clone().unwrap_or_else(default_clients);
-    let local_clients: Vec<String> = clients
-        .iter()
-        .filter(|src| src.as_str() != ClientId::Cursor.as_str())
-        .cloned()
-        .collect();
     let include_agent_view = options.ranking != WrappedRanking::Clients
-        && local_clients
+        && clients
             .iter()
             .any(|client| client == ClientId::OpenCode.as_str());
-    let include_cursor = clients.iter().any(|src| src == ClientId::Cursor.as_str());
-    let explicit_cursor = options
-        .clients
-        .as_ref()
-        .is_some_and(|sources| sources.iter().any(|src| src == ClientId::Cursor.as_str()));
 
     let since = format!("{}-01-01", year);
     let until = format!("{}-12-31", year);
-
-    let has_cursor_cache =
-        crate::commands::shared::has_cursor_usage_cache_for_report(&options.home_dir);
-    let include_cursor_in_graph = include_cursor && has_cursor_cache;
-    if let Some(warning) =
-        cursor_setup_warning_for_wrapped(explicit_cursor, include_cursor_in_graph)
-    {
-        eprintln!("{}", format!("  Warning: {warning}").yellow());
-    }
-
-    let graph_clients = if include_cursor && !include_cursor_in_graph {
-        clients
-            .iter()
-            .filter(|src| src.as_str() != ClientId::Cursor.as_str())
-            .cloned()
-            .collect::<Vec<_>>()
-    } else {
-        clients.clone()
-    };
 
     let mut views = ViewSet::GRAPH | ViewSet::TIME_METRICS;
     if include_agent_view {
@@ -263,7 +234,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         &ReportOptions {
             home_dir: options.home_dir.clone(),
             use_env_roots: crate::commands::shared::use_env_roots(&options.home_dir),
-            clients: Some(graph_clients),
+            clients: Some(clients),
             since: Some(since),
             until: Some(until),
             year: Some(year.clone()),
@@ -1733,7 +1704,6 @@ fn capitalize_word(word: &str) -> String {
 
 fn default_clients() -> Vec<String> {
     ClientId::iter()
-        .filter(|client| client.parse_local())
         .map(|client| client.as_str().to_string())
         .collect()
 }
@@ -2367,17 +2337,15 @@ mod tests {
     }
 
     #[test]
-    fn default_clients_use_local_parse_policy_from_catalog() {
+    fn default_clients_use_the_complete_catalog() {
         let clients = default_clients();
         let expected = ClientId::iter()
-            .filter(|client| client.parse_local())
             .map(|client| client.as_str().to_string())
             .collect::<Vec<_>>();
 
         assert_eq!(clients, expected);
         assert!(clients.iter().any(|client| client == "grok"));
         assert!(clients.iter().any(|client| client == "kiro"));
-        assert!(clients.iter().any(|client| client == "trae"));
         assert!(clients.iter().any(|client| client == "warp"));
     }
 
@@ -2780,37 +2748,5 @@ mod tests {
         ];
         let (_current, longest) = calculate_streaks(&dates);
         assert_eq!(longest, 4);
-    }
-}
-
-fn cursor_setup_warning_for_wrapped(
-    explicit_cursor: bool,
-    include_cursor_in_graph: bool,
-) -> Option<String> {
-    if !explicit_cursor || include_cursor_in_graph {
-        return None;
-    }
-
-    Some(
-        "Cursor usage is read only from local CSV data at `~/.config/tokscale/cursor-cache/usage*.csv`; no readable usage cache was found. Tokscale does not store Cursor credentials or authenticate to Cursor."
-            .to_string(),
-    )
-}
-
-#[cfg(test)]
-mod cursor_setup_warning_tests {
-    use super::cursor_setup_warning_for_wrapped;
-
-    #[test]
-    fn wrapped_cursor_warning_explains_local_data_boundary() {
-        let warning = cursor_setup_warning_for_wrapped(true, false).unwrap();
-        assert!(warning.contains("read only from local CSV data"));
-        assert!(warning.contains("does not store Cursor credentials"));
-    }
-
-    #[test]
-    fn wrapped_cursor_warning_is_suppressed_without_explicit_missing_cursor() {
-        assert!(cursor_setup_warning_for_wrapped(false, false).is_none());
-        assert!(cursor_setup_warning_for_wrapped(true, true).is_none());
     }
 }

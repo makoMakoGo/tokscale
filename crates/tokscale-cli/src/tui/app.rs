@@ -2540,7 +2540,7 @@ mod tests {
             actual, expected,
             "no-filter TUI must select exactly the accepted client catalog"
         );
-        assert!(actual.contains(&ClientId::Cursor));
+        assert!(actual.contains(&ClientId::Claude));
     }
 
     fn make_app_with_models(n: usize) -> App {

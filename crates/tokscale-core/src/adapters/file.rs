@@ -19,7 +19,6 @@ const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVIS
 const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const QWEN_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const ZCODE_OVERLAP_NORMALIZATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-const CURSOR_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const KIMI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const COMMANDCODE_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const ZCODE_RECORD_REJECTION_REVISION: u32 = ZCODE_OVERLAP_NORMALIZATION_REVISION + 1;
@@ -200,12 +199,6 @@ impl LocalSourceAdapter for CopilotAdapter {
 }
 
 pub(crate) static COPILOT_ADAPTER: CopilotAdapter = CopilotAdapter;
-pub(crate) static CURSOR_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::Cursor,
-    ParserId::Cursor,
-    CURSOR_RECORD_REJECTION_REVISION,
-    sessions::cursor::parse_cursor_file,
-);
 pub(crate) static GEMINI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Gemini,
     ParserId::Gemini,
@@ -573,11 +566,6 @@ not-json
     #[test]
     fn cached_file_adapters_use_their_actual_record_rejection_revisions() {
         for (actual, parser_id, revision) in [
-            (
-                CURSOR_ADAPTER.parser_version,
-                ParserId::Cursor,
-                CURSOR_RECORD_REJECTION_REVISION,
-            ),
             (
                 GEMINI_ADAPTER.parser_version,
                 ParserId::Gemini,

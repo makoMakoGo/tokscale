@@ -1,45 +1,10 @@
-use super::*;
 use crate::cli::*;
 use crate::commands::clients::*;
-use crate::commands::integrations::*;
 use crate::commands::render::*;
 use crate::commands::shared::*;
 use clap::Parser;
 use std::path::{Path, PathBuf};
 use tokscale_core::ClientId;
-
-#[test]
-fn test_parse_variant_arg_accepts_known_values() {
-    assert_eq!(
-        parse_variant_arg(Some("solo")).unwrap(),
-        Some(trae::auth::TraeVariant::Solo)
-    );
-    assert_eq!(
-        parse_variant_arg(Some("ide")).unwrap(),
-        Some(trae::auth::TraeVariant::Ide)
-    );
-}
-
-#[test]
-fn test_parse_variant_arg_none_when_omitted() {
-    assert_eq!(parse_variant_arg(None).unwrap(), None);
-}
-
-#[test]
-fn test_parse_variant_arg_rejects_unknown_value() {
-    // The earlier `Option`-returning version converted this to `None`
-    // and the caller fell through to "all variants" — a typo like
-    // `--variant slo` would log out every variant. Now we error out.
-    let err = parse_variant_arg(Some("slo")).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("unknown variant"), "got: {msg}");
-    assert!(msg.contains("slo"), "got: {msg}");
-}
-
-#[test]
-fn test_parse_variant_arg_rejects_empty_string() {
-    assert!(parse_variant_arg(Some("")).is_err());
-}
 
 // Tests below call `build_client_filter_with_defaults` directly with
 // an explicit `defaults` slice instead of `build_client_filter`, which
@@ -61,6 +26,14 @@ fn test_parse_client_id_arg_rejects_unknown_ids() {
         err.contains("opencode"),
         "valid ids missing from error: {err}"
     );
+}
+
+#[test]
+fn removed_clients_are_not_valid_source_ids() {
+    for client in ["cursor", "trae"] {
+        let error = parse_client_id_arg(client).unwrap_err();
+        assert!(error.contains(client), "unexpected error: {error}");
+    }
 }
 
 #[test]
@@ -818,6 +791,7 @@ fn cli_rejects_removed_account_management_namespaces() {
     assert!(Cli::try_parse_from(["tokscale", "cursor", "logout", "--all"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "codex", "accounts"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "codex", "switch", "work"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "trae", "status"]).is_err());
 }
 
 #[test]
@@ -917,36 +891,4 @@ fn headless_roots_trim_env_override() {
         Some(value) => unsafe { std::env::set_var("TOKSCALE_HEADLESS_DIR", value) },
         None => unsafe { std::env::remove_var("TOKSCALE_HEADLESS_DIR") },
     }
-}
-
-#[test]
-fn cursor_setup_uses_local_usage_csv_without_credentials() {
-    let home = tempfile::TempDir::new().unwrap();
-    let cache = home.path().join(".config/tokscale/cursor-cache");
-    std::fs::create_dir_all(&cache).unwrap();
-    std::fs::write(cache.join("usage.csv"), "Date,Model\n").unwrap();
-
-    let home = Some(home.path().to_string_lossy().into_owned());
-    assert!(has_cursor_usage_cache_for_report(&home));
-    assert!(cursor_setup_warnings_for_report(&home, &Some(vec!["cursor".to_string()])).is_empty());
-}
-
-#[test]
-fn cursor_credentials_file_is_not_treated_as_a_data_source() {
-    let home = tempfile::TempDir::new().unwrap();
-    let config = home.path().join(".config/tokscale");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("cursor-credentials.json"),
-        r#"{"sessionToken":"must-not-be-read"}"#,
-    )
-    .unwrap();
-
-    let home = Some(home.path().to_string_lossy().into_owned());
-    assert!(!has_cursor_usage_cache_for_report(&home));
-    let warnings = cursor_setup_warnings_for_report(&home, &Some(vec!["cursor".to_string()]));
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("does not store Cursor credentials"));
-    assert!(!warnings[0].contains("cursor login"));
-    assert!(!warnings[0].contains("cursor sync"));
 }

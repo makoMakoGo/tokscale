@@ -4,9 +4,8 @@ use crate::commands::render::{
     format_ms_per_1k, format_tokens_with_commas, LightSpinner, TABLE_PRESET,
 };
 use crate::commands::shared::{
-    emit_client_diagnostics, emit_cursor_setup_warnings, get_date_range_label,
-    model_usage_includes_client, resolve_effective_home_dir, setup_warnings_for_report,
-    use_env_roots, ReportEnvelope,
+    emit_client_diagnostics, get_date_range_label, model_usage_includes_client,
+    resolve_effective_home_dir, use_env_roots, ReportEnvelope,
 };
 use crate::tui::{
     self, get_client_display_name, get_provider_display_name, truncate_model_display_name,
@@ -64,7 +63,6 @@ pub(crate) fn run_models_report(
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
-    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
@@ -115,7 +113,6 @@ pub(crate) fn run_models_report(
         report.total_cache_write,
     ]);
     emit_client_diagnostics(&diagnostics);
-    emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     if json {
         #[derive(serde::Serialize)]

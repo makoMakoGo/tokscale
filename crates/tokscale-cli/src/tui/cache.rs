@@ -1268,13 +1268,13 @@ mod tests {
             },
         );
 
-        let mut cursor_daily_models = BTreeMap::new();
-        cursor_daily_models.insert(
-            "cursor-model".to_string(),
+        let mut gemini_daily_models = BTreeMap::new();
+        gemini_daily_models.insert(
+            "gemini-model".to_string(),
             DailyModelInfo {
-                provider: "cursor".to_string(),
-                display_name: "Cursor Model".to_string(),
-                color_key: "cursor-model".to_string(),
+                provider: "google".to_string(),
+                display_name: "Gemini Model".to_string(),
+                color_key: "gemini-model".to_string(),
                 tokens: token_breakdown(33),
                 cost: 3.3,
                 messages: 9,
@@ -1282,11 +1282,11 @@ mod tests {
         );
         let mut source_breakdown = BTreeMap::new();
         source_breakdown.insert(
-            "cursor".to_string(),
+            "gemini".to_string(),
             DailySourceInfo {
                 tokens: token_breakdown(22),
                 cost: 2.2,
-                models: cursor_daily_models,
+                models: gemini_daily_models,
             },
         );
         source_breakdown.insert(
@@ -1319,7 +1319,7 @@ mod tests {
                 cost: 5.2,
             },
         );
-        let hourly_clients = ["claude".to_string(), "cursor".to_string()]
+        let hourly_clients = ["claude".to_string(), "gemini".to_string()]
             .into_iter()
             .collect();
 
@@ -1398,7 +1398,7 @@ mod tests {
             env::remove_var("TOKSCALE_CONFIG_DIR");
         }
 
-        let clients = make_filters(&[ClientId::Cursor, ClientId::Claude]);
+        let clients = make_filters(&[ClientId::Gemini, ClientId::Claude]);
         let scope = CacheReportScope::new(
             None,
             Some("2026-07-01".to_string()),
@@ -1427,7 +1427,7 @@ mod tests {
         assert_eq!(value["schemaVersion"], CACHE_SCHEMA_VERSION);
         assert_eq!(
             value["enabledClients"],
-            serde_json::json!(["claude", "cursor"])
+            serde_json::json!(["claude", "gemini"])
         );
         assert_eq!(value["data"]["daily"][0]["date"], "2026-07-11");
         assert_eq!(
@@ -1444,7 +1444,7 @@ mod tests {
         assert_eq!(value["data"]["health"]["complete"], true);
         assert_eq!(
             tuple_array_keys(&value["data"]["daily"][0]["sourceBreakdown"]),
-            vec!["claude", "cursor"]
+            vec!["claude", "gemini"]
         );
         assert_eq!(
             tuple_array_keys(&value["data"]["daily"][0]["sourceBreakdown"][0][1]["models"]),
@@ -2309,7 +2309,7 @@ mod tests {
             r#"{
   "schemaVersion": 24,
   "timestamp": 0,
-  "enabledClients": ["claude", "cursor"],
+  "enabledClients": ["claude", "gemini"],
   "groupBy": "model",
   "reportScope": {
     "since": null,
@@ -2359,7 +2359,7 @@ mod tests {
 	          ]]
 	        }
       ], [
-        "cursor",
+        "gemini",
         {
           "tokens": {
             "input": 20,
@@ -2406,13 +2406,13 @@ mod tests {
         cached["sourceInventorySignature"] = serde_json::json!(vec![0x5a_u8; 32]);
         fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
-        let clients = make_filters(&[ClientId::Claude, ClientId::Cursor]);
+        let clients = make_filters(&[ClientId::Claude, ClientId::Gemini]);
         match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
             CacheResult::Fresh(data, signature) => {
                 assert_eq!(signature, test_signature());
                 assert_eq!(data.daily[0].source_breakdown.len(), 2);
-                let cursor = data.daily[0].source_breakdown.get("cursor").unwrap();
-                let model = cursor.models.get("claude-sonnet-4").unwrap();
+                let gemini = data.daily[0].source_breakdown.get("gemini").unwrap();
+                let model = gemini.models.get("claude-sonnet-4").unwrap();
                 assert_eq!(model.provider, "anthropic");
                 assert_eq!(model.tokens.total(), 30);
             }

@@ -1,7 +1,5 @@
 use crate::commands::render::LightSpinner;
-use crate::commands::shared::{
-    emit_cursor_setup_warnings, setup_warnings_for_report, use_env_roots, ReportEnvelope,
-};
+use crate::commands::shared::{use_env_roots, ReportEnvelope};
 use crate::tui;
 use anyhow::Result;
 
@@ -24,7 +22,6 @@ pub(crate) fn run_time_metrics_report(
     } else {
         Some(LightSpinner::start("Computing time metrics..."))
     };
-    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let rt = Runtime::new()?;
@@ -48,7 +45,6 @@ pub(crate) fn run_time_metrics_report(
         spinner.stop();
     }
     super::shared::emit_health_summary(&report.health);
-    emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     let m = &report.metrics;
 

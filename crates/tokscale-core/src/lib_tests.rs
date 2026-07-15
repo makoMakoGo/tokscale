@@ -1,15 +1,14 @@
 use super::{
-    aggregate_model_usage_entries, apply_token_pricing, dedupe_latest_trae_messages,
-    finalize_token_priced_messages, generate_graph_with_loaded_pricing,
-    load_aggregated_views_with_pricing, load_cache_only_pricing_with_diagnostics,
-    load_usage_data_with_pricing, message_cache, normalize_model_for_grouping,
-    parse_all_messages_with_health, parse_all_messages_with_health_with_env_strategy,
-    parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-    positive_token_total, pricing, retain_for_requested_clients, scanner,
-    select_local_parse_pricing, AggregatedViews, AggregationConfig, ClientContribution,
-    ClientCounts, ClientId, DailyTotals, DateRange, GraphResult, GroupBy, LocalParseOptions,
-    ReportOptions, SessionContribution, TimeMetricsReport, TokenBreakdown, UnifiedMessage, ViewSet,
-    UNKNOWN_WORKSPACE_LABEL,
+    aggregate_model_usage_entries, apply_token_pricing, finalize_token_priced_messages,
+    generate_graph_with_loaded_pricing, load_aggregated_views_with_pricing,
+    load_cache_only_pricing_with_diagnostics, load_usage_data_with_pricing, message_cache,
+    normalize_model_for_grouping, parse_all_messages_with_health,
+    parse_all_messages_with_health_with_env_strategy, parse_all_messages_with_pricing,
+    parse_all_messages_with_pricing_with_env_strategy, positive_token_total, pricing,
+    retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
+    AggregationConfig, ClientContribution, ClientCounts, ClientId, DailyTotals, DateRange,
+    GraphResult, GroupBy, LocalParseOptions, ReportOptions, SessionContribution, TimeMetricsReport,
+    TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -163,30 +162,6 @@ fn test_session_contribution_serde_round_trip() {
 
     assert_eq!(parsed, contribution);
     assert!(json.contains("\"session_id\":\"019e1e27"));
-}
-
-fn make_trae_message(
-    session_id: &str,
-    timestamp: i64,
-    dedup_key: Option<&str>,
-    cost: f64,
-) -> UnifiedMessage {
-    UnifiedMessage::new_with_dedup(
-        "trae",
-        "gpt-5.2",
-        "openai",
-        session_id,
-        timestamp,
-        TokenBreakdown {
-            input: 10,
-            output: 5,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        },
-        cost,
-        dedup_key.map(crate::sessions::dedup_hash_str),
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1939,35 +1914,6 @@ fn test_retain_for_requested_clients_preserves_kilo_split() {
     assert!(!retain_for_requested_clients(
         "kilocode", "gpt-5", "openai", &kilo_only
     ));
-}
-
-#[test]
-#[serial_test::serial]
-fn test_cursor_parse_path_keeps_zero_cost_for_unpriced_composer_rows() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
-    std::fs::create_dir_all(&cursor_cache_dir).unwrap();
-
-    let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
-"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","0""#;
-    std::fs::write(cursor_cache_dir.join("usage.csv"), csv).unwrap();
-
-    let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
-    let messages = parse_all_messages_with_pricing(
-        temp_dir.path().to_str().unwrap(),
-        &["cursor".to_string()],
-        Some(&pricing),
-    )
-    .unwrap();
-
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].client.as_ref(), "cursor");
-    assert_eq!(messages[0].model_id.as_ref(), "composer 1.5");
-    assert_eq!(messages[0].tokens.input, 1000);
-    assert_eq!(messages[0].tokens.output, 2000);
-    assert_eq!(messages[0].tokens.cache_read, 5000);
-    assert_eq!(messages[0].tokens.cache_write, 200);
-    assert_eq!(messages[0].cost, 0.0);
 }
 
 fn write_kimi_code_usage_fixture(source_home: &std::path::Path) {
@@ -4152,16 +4098,11 @@ fn test_source_cache_does_not_reuse_priced_cost_without_pricing_service() {
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", temp_home.path());
     {
-        let cursor_cache_dir = source_home.path().join(".config/tokscale/cursor-cache");
-        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
-
-        let csv = r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
-"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","0""#;
-        std::fs::write(cursor_cache_dir.join("usage.csv"), csv).unwrap();
+        write_kimi_code_usage_fixture(source_home.path());
 
         let mut litellm = HashMap::new();
         litellm.insert(
-            "composer 1.5".into(),
+            "gpt-5.5".into(),
             pricing::ModelPricing {
                 input_cost_per_token: Some(0.001),
                 output_cost_per_token: Some(0.002),
@@ -4173,22 +4114,22 @@ fn test_source_cache_does_not_reuse_priced_cost_without_pricing_service() {
 
         let repriced_messages = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
-            &["cursor".to_string()],
+            &["kimi".to_string()],
             Some(&pricing),
         )
         .unwrap();
-        assert_eq!(repriced_messages.len(), 1);
-        assert!(repriced_messages[0].cost > 0.0);
+        assert_eq!(repriced_messages.len(), 2);
+        assert!(repriced_messages.iter().all(|message| message.cost > 0.0));
 
         let cached_messages = parse_all_messages_with_pricing(
             source_home.path().to_str().unwrap(),
-            &["cursor".to_string()],
+            &["kimi".to_string()],
             None,
         )
         .unwrap();
 
-        assert_eq!(cached_messages.len(), 1);
-        assert_eq!(cached_messages[0].cost, 0.0);
+        assert_eq!(cached_messages.len(), 2);
+        assert!(cached_messages.iter().all(|message| message.cost == 0.0));
     }
 
     match original_home {
@@ -5597,88 +5538,6 @@ fn test_select_local_parse_pricing_does_not_evaluate_stale_fallback_on_fresh_suc
 }
 
 #[test]
-fn test_dedupe_latest_trae_messages_keeps_latest_timestamp_for_session() {
-    let messages = vec![
-        make_trae_message(
-            "session-stable",
-            1_700_000_002_000,
-            Some("trae:session-stable:1_700_000_002"),
-            0.2,
-        ),
-        make_trae_message(
-            "session-stable",
-            1_700_000_003_000,
-            Some("trae:session-stable:1_700_000_003"),
-            0.3,
-        ),
-        make_trae_message(
-            "session-other",
-            1_700_000_001_000,
-            Some("trae:session-other:1_700_000_001"),
-            0.1,
-        ),
-    ];
-
-    let deduped = dedupe_latest_trae_messages(messages);
-
-    assert_eq!(deduped.len(), 2);
-    let stable = deduped
-        .iter()
-        .find(|msg| msg.session_id.as_ref() == "session-stable")
-        .expect("session-stable should remain after dedupe");
-    assert_eq!(stable.timestamp, 1_700_000_003_000);
-    assert_eq!(stable.cost, 0.3);
-    assert_eq!(
-        stable.dedup_key,
-        Some(crate::sessions::dedup_hash_str(
-            "trae:session-stable:1_700_000_003"
-        ))
-    );
-}
-
-#[test]
-fn test_dedupe_latest_trae_messages_tiebreaks_by_dedup_key() {
-    let messages = vec![
-        make_trae_message(
-            "session-stable",
-            1_700_000_010_000,
-            Some("dedupe-key-a"),
-            0.2,
-        ),
-        make_trae_message(
-            "session-stable",
-            1_700_000_010_000,
-            Some("dedupe-key-z"),
-            0.4,
-        ),
-        make_trae_message(
-            "session-stable",
-            1_700_000_009_000,
-            Some("dedupe-key-m"),
-            0.1,
-        ),
-    ];
-
-    let deduped = dedupe_latest_trae_messages(messages);
-
-    // Equal timestamps tiebreak on the greater dedup hash: arbitrary but
-    // stable across runs and machines (FNV-1a). Real trae keys embed
-    // usage_time = timestamp/1000, so production ties carry equal keys.
-    let key_a = crate::sessions::dedup_hash_str("dedupe-key-a");
-    let key_z = crate::sessions::dedup_hash_str("dedupe-key-z");
-    let (winning_key, winning_cost) = if key_z > key_a {
-        (key_z, 0.4)
-    } else {
-        (key_a, 0.2)
-    };
-
-    assert_eq!(deduped.len(), 1);
-    assert_eq!(deduped[0].timestamp, 1_700_000_010_000);
-    assert_eq!(deduped[0].dedup_key, Some(winning_key));
-    assert_eq!(deduped[0].cost, winning_cost);
-}
-
-#[test]
 #[serial_test::serial]
 fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_real_client_filter() {
     let temp_dir = tempfile::TempDir::new().unwrap();
@@ -6684,38 +6543,4 @@ fn test_local_message_loader_amp_reads_current_thread_files() {
     assert_eq!(parsed.messages[0].provider_id.as_ref(), "anthropic");
     assert_eq!(parsed.messages[0].tokens.input, 10);
     assert_eq!(parsed.messages[0].tokens.output, 2);
-}
-
-#[test]
-#[serial_test::serial]
-fn test_local_message_loader_default_keeps_cursor_out_of_local_count() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let cursor_cache_dir = temp_dir.path().join(".config/tokscale/cursor-cache");
-    std::fs::create_dir_all(&cursor_cache_dir).unwrap();
-    std::fs::write(
-        cursor_cache_dir.join("usage.csv"),
-        r#"Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
-"2026-03-04T12:00:00.000Z","Included","Composer 1.5","No","1200","1000","5000","2000","8000","0""#,
-    )
-    .unwrap();
-
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
-        clients: None,
-        since: None,
-        until: None,
-        year: None,
-        scanner_settings: scanner::ScannerSettings::default(),
-    })
-    .unwrap();
-
-    assert_eq!(parsed.counts.get(ClientId::Cursor), 0);
-    assert!(
-        parsed
-            .messages
-            .iter()
-            .all(|message| message.client.as_ref() != "cursor"),
-        "Cursor cache rows must not enter the default local message loading result"
-    );
 }

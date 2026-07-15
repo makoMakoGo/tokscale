@@ -17,7 +17,6 @@ mod opencode;
 
 mod omp;
 mod pi;
-mod trae;
 mod vscode_tasks;
 mod warp;
 mod zed;
@@ -514,7 +513,6 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::OpenCode => ParserId::OpenCodeSqlite,
         ClientId::Claude => ParserId::Claude,
         ClientId::Codex => ParserId::Codex,
-        ClientId::Cursor => ParserId::Cursor,
         ClientId::Gemini => ParserId::Gemini,
         ClientId::Amp => ParserId::Amp,
         ClientId::Droid => ParserId::Droid,
@@ -537,7 +535,6 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::Zcode => ParserId::Zcode,
         ClientId::Kiro => ParserId::Kiro,
         ClientId::Junie => ParserId::Junie,
-        ClientId::Trae => ParserId::Trae,
         ClientId::Cline => ParserId::Cline,
         ClientId::CommandCode => ParserId::CommandCode,
         ClientId::Grok => ParserId::Grok,
@@ -641,7 +638,7 @@ impl ParsedUnit {
     }
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 31] = [
+static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -649,7 +646,6 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 31] = [
     &codex::CODEX_ADAPTER,
     &opencode::OPENCODE_ADAPTER,
     &file::COPILOT_ADAPTER,
-    &file::CURSOR_ADAPTER,
     &file::GEMINI_ADAPTER,
     &file::GROK_ADAPTER,
     &file::AMP_ADAPTER,
@@ -664,7 +660,6 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 31] = [
     &vscode_tasks::KILOCODE_ADAPTER,
     &vscode_tasks::CLINE_ADAPTER,
     &antigravity::ANTIGRAVITY_ADAPTER,
-    &trae::TRAE_ADAPTER,
     &kilo::KILO_ADAPTER,
     &hermes::HERMES_ADAPTER,
     &goose::GOOSE_ADAPTER,

@@ -2,10 +2,7 @@ use crate::commands::render::{
     dim_borders, format_currency, format_tokens_with_commas, formatted_unique_model_names,
     LightSpinner, TABLE_PRESET,
 };
-use crate::commands::shared::{
-    emit_cursor_setup_warnings, get_date_range_label, setup_warnings_for_report, use_env_roots,
-    ReportEnvelope,
-};
+use crate::commands::shared::{get_date_range_label, use_env_roots, ReportEnvelope};
 use crate::tui::{self, get_client_display_name};
 use anyhow::Result;
 use std::io::IsTerminal;
@@ -46,7 +43,6 @@ pub(crate) fn run_hourly_report(
     } else {
         Some(LightSpinner::start("Scanning session data..."))
     };
-    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
     let use_env_roots = use_env_roots(&home_dir);
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
@@ -73,7 +69,6 @@ pub(crate) fn run_hourly_report(
     super::shared::emit_health_summary(&report.health);
 
     let processing_time_ms = start.elapsed().as_millis();
-    emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     if json {
         #[derive(serde::Serialize)]

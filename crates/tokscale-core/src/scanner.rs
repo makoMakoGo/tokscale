@@ -1373,9 +1373,7 @@ mod tests {
         result
             .get_mut(ClientId::Gemini)
             .push(PathBuf::from("d.json"));
-        result
-            .get_mut(ClientId::Cursor)
-            .push(PathBuf::from("e.csv"));
+        result.get_mut(ClientId::Amp).push(PathBuf::from("e.jsonl"));
         result.get_mut(ClientId::Pi).push(PathBuf::from("f.jsonl"));
 
         let all = result.all_files();
@@ -1383,8 +1381,8 @@ mod tests {
         assert_eq!(all[0], (ClientId::OpenCode, PathBuf::from("a.json")));
         assert_eq!(all[1], (ClientId::Claude, PathBuf::from("b.jsonl")));
         assert_eq!(all[2], (ClientId::Codex, PathBuf::from("c.jsonl")));
-        assert_eq!(all[3], (ClientId::Cursor, PathBuf::from("e.csv")));
-        assert_eq!(all[4], (ClientId::Gemini, PathBuf::from("d.json")));
+        assert_eq!(all[3], (ClientId::Gemini, PathBuf::from("d.json")));
+        assert_eq!(all[4], (ClientId::Amp, PathBuf::from("e.jsonl")));
         assert_eq!(all[5], (ClientId::Pi, PathBuf::from("f.jsonl")));
     }
 
@@ -2892,35 +2890,6 @@ mod tests {
             explicit_warp.get(ClientId::Warp),
             &vec![default_warp_db, extra_warp_db]
         );
-    }
-
-    #[test]
-    fn test_scan_all_clients_keeps_cursor_cache_scanning() {
-        let dir = TempDir::new().unwrap();
-        let home = dir.path();
-
-        let cursor_file = home
-            .join(".config")
-            .join("tokscale")
-            .join("cursor-cache")
-            .join("usage.csv");
-        fs::create_dir_all(cursor_file.parent().unwrap()).unwrap();
-        fs::write(&cursor_file, "Date,Model,Input Tokens,Output Tokens\n").unwrap();
-
-        let all_clients =
-            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &[], false).unwrap();
-        let explicit_cursor = scan_all_clients_with_env_strategy(
-            home.to_str().unwrap(),
-            &["cursor".to_string()],
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(
-            all_clients.get(ClientId::Cursor),
-            &vec![cursor_file.clone()]
-        );
-        assert_eq!(explicit_cursor.get(ClientId::Cursor), &vec![cursor_file]);
     }
 
     #[test]

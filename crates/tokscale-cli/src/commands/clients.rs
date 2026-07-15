@@ -47,7 +47,7 @@ pub(crate) fn run_clients_command(
         use_env_roots,
         clients: Some(
             ClientId::iter()
-                .filter(|client| selected_clients.contains(client) && client.parse_local())
+                .filter(|client| selected_clients.contains(client))
                 .map(|client| client.as_str().to_string())
                 .collect(),
         ),

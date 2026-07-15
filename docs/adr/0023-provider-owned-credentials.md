@@ -2,6 +2,9 @@
 
 Status: Accepted
 
+The Cursor subsection is superseded by ADR 0024: Cursor support has been
+removed completely. The Codex credential boundary remains current.
+
 ## Context
 
 Tokscale reports local token usage and optional subscription quota data. Some

@@ -21,7 +21,6 @@ When using an installed binary, use `tokscale clients` instead.
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode*.db` | Reads only current-format SQLite databases and combines multiple release channels when present. |
 | `claude` | Claude Code | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Claude Desktop chat history is not treated as Claude Code token accounting. |
 | `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Also supports `tokscale headless codex ...` capture. |
-| `cursor` | Cursor | `~/.config/tokscale/cursor-cache/usage*.csv` | Reads existing local CSV data only. Tokscale does not authenticate with Cursor or refresh the data; local `~/.cursor` state is not parsed. |
 | `gemini` | Gemini CLI | `$GEMINI_CLI_HOME/tmp/**/chats/*`, fallback `~/.gemini/tmp/` | Reads local chat files. |
 | `amp` | Amp | `~/.local/share/amp/threads/T-*.json` | Reads local thread files. |
 | `droid` | Droid | `~/.factory/sessions/**/*.settings.json` | Reads Factory Droid sessions. |
@@ -44,7 +43,6 @@ When using an installed binary, use `tokscale clients` instead.
 | `zcode` | ZCode | `~/.zcode/projects/**/*.jsonl` | Reads Z.ai ADE JSONL sessions. |
 | `kiro` | Kiro | `~/.kiro/sessions/cli/`, `~/.local/share/kiro-cli/data.sqlite3`, and Kiro IDE globalStorage snapshots | Combines CLI and IDE local sources when present. |
 | `junie` | Junie | `~/.junie/sessions/**/events.jsonl` | Reads JetBrains Junie session events. |
-| `trae` | Trae | `~/.config/tokscale/trae-cache/sessions/*.json` | Requires `tokscale trae login` and `tokscale trae sync`. China variants are not supported. |
 | `cline` | Cline | VS Code globalStorage `saoudrizwan.claude-dev/tasks/**/ui_messages.json` | Same task-log family as Roo Code and KiloCode. |
 | `commandcode` | Command Code | `~/.commandcode/projects/**/*.jsonl` | Estimated from transcripts. |
 | `grok` | Grok Build | `$GROK_HOME/sessions/**/updates.jsonl`, fallback `~/.grok/sessions/` | Reads total-token deltas and applies the fixed total-only bucket allocation from ADR 0017. |
@@ -113,22 +111,12 @@ TOKSCALE_EXTRA_DIRS='codex:/abs/path/.codex/sessions,gemini:/abs/path/gemini/tmp
 
 ## Cache-backed integrations
 
-Cursor reads existing `usage*.csv` files under
-`~/.config/tokscale/cursor-cache/`. Tokscale does not store Cursor credentials,
-authenticate with Cursor, or make network requests to refresh that directory.
-There is no `tokscale cursor` account-management namespace. When Cursor is
-explicitly selected but no local CSV data exists, Tokscale reports the missing
-local data while preserving results from other selected clients.
-
-Antigravity and Trae are different: they do not refresh from the root report or
-TUI command. Run their sync commands before reports when you need fresh data:
+Antigravity does not refresh from the root report or TUI command. Run its sync
+command before reports when you need fresh data:
 
 ```bash
 tokscale antigravity status
 tokscale antigravity sync
-
-tokscale trae login
-tokscale trae sync --since 30
 ```
 
 `warp` has two separate surfaces. Local reports read `warp.sqlite` when it is

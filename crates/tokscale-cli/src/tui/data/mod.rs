@@ -354,7 +354,6 @@ mod tests {
         assert_eq!(ClientId::short_name(ClientId::Claude), "Claude");
         assert_eq!(ClientId::short_name(ClientId::Codex), "Codex");
         assert_eq!(ClientId::short_name(ClientId::Copilot), "Copilot");
-        assert_eq!(ClientId::short_name(ClientId::Cursor), "Cursor");
         assert_eq!(ClientId::short_name(ClientId::Gemini), "Gemini");
         assert_eq!(ClientId::short_name(ClientId::Amp), "Amp");
         assert_eq!(ClientId::short_name(ClientId::Droid), "Droid");
@@ -374,7 +373,6 @@ mod tests {
         assert_eq!(ClientId::short_name(ClientId::Zed), "Zed Agent");
         assert_eq!(ClientId::short_name(ClientId::Zcode), "ZCode");
         assert_eq!(ClientId::short_name(ClientId::Kiro), "Kiro");
-        assert_eq!(ClientId::short_name(ClientId::Trae), "Trae");
         assert_eq!(ClientId::short_name(ClientId::Cline), "Cline");
     }
 
@@ -384,7 +382,6 @@ mod tests {
         assert_eq!(ClientId::hotkey(ClientId::Claude), Some('2'));
         assert_eq!(ClientId::hotkey(ClientId::Codex), Some('3'));
         assert_eq!(ClientId::hotkey(ClientId::Copilot), Some('c'));
-        assert_eq!(ClientId::hotkey(ClientId::Cursor), Some('4'));
         assert_eq!(ClientId::hotkey(ClientId::Gemini), Some('5'));
         assert_eq!(ClientId::hotkey(ClientId::Amp), Some('6'));
         assert_eq!(ClientId::hotkey(ClientId::Droid), Some('7'));
@@ -404,7 +401,6 @@ mod tests {
         assert_eq!(ClientId::hotkey(ClientId::Zed), Some('z'));
         assert_eq!(ClientId::hotkey(ClientId::Zcode), Some('q'));
         assert_eq!(ClientId::hotkey(ClientId::Kiro), Some('i'));
-        assert_eq!(ClientId::hotkey(ClientId::Trae), Some('y'));
         assert_eq!(ClientId::hotkey(ClientId::Cline), Some('n'));
     }
 
@@ -414,7 +410,7 @@ mod tests {
         assert_eq!(ClientId::from_hotkey('2'), Some(ClientId::Claude));
         assert_eq!(ClientId::from_hotkey('3'), Some(ClientId::Codex));
         assert_eq!(ClientId::from_hotkey('c'), Some(ClientId::Copilot));
-        assert_eq!(ClientId::from_hotkey('4'), Some(ClientId::Cursor));
+        assert_eq!(ClientId::from_hotkey('4'), None);
         assert_eq!(ClientId::from_hotkey('5'), Some(ClientId::Gemini));
         assert_eq!(ClientId::from_hotkey('6'), Some(ClientId::Amp));
         assert_eq!(ClientId::from_hotkey('7'), Some(ClientId::Droid));
@@ -434,7 +430,7 @@ mod tests {
         assert_eq!(ClientId::from_hotkey('z'), Some(ClientId::Zed));
         assert_eq!(ClientId::from_hotkey('q'), Some(ClientId::Zcode));
         assert_eq!(ClientId::from_hotkey('i'), Some(ClientId::Kiro));
-        assert_eq!(ClientId::from_hotkey('y'), Some(ClientId::Trae));
+        assert_eq!(ClientId::from_hotkey('y'), None);
     }
 
     #[test]

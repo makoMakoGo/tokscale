@@ -1,7 +1,5 @@
 use crate::commands::render::format_currency;
-use crate::commands::shared::{
-    emit_cursor_setup_warnings, setup_warnings_for_report, use_env_roots, ReportEnvelope,
-};
+use crate::commands::shared::{use_env_roots, ReportEnvelope};
 use crate::tui;
 use anyhow::Result;
 
@@ -204,7 +202,6 @@ pub(crate) fn run_graph_command(
     use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
-    let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
 
     if show_progress {
         eprintln!("  Scanning session data...");
@@ -233,7 +230,6 @@ pub(crate) fn run_graph_command(
         })
         .map_err(|e| anyhow::anyhow!(e))?;
     super::shared::emit_health_summary(&graph_result.health);
-    emit_cursor_setup_warnings(&cursor_setup_warnings);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
     let output_data = to_graph_export_data(&graph_result);

@@ -5,6 +5,9 @@ Status: Accepted
 OpenCode's retired JSON source-class and precedence details are superseded by
 ADR 0019; this document reflects the current SQLite-only fold contract.
 
+Trae-specific fold clauses are superseded by ADR 0024; the integration and its
+fold state have been removed.
+
 ## Context
 
 Source discovery already produced an ordered inventory, but execution parsed every

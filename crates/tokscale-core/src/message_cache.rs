@@ -252,7 +252,9 @@ pub(crate) enum ParserId {
     OpenCodeSqlite,
     Claude,
     Codex,
-    Cursor,
+    // Retired parser tags keep persisted bincode discriminants stable. No
+    // active adapter can construct or request these parser versions.
+    RetiredCursor,
     Gemini,
     Amp,
     Droid,
@@ -278,7 +280,7 @@ pub(crate) enum ParserId {
     KiroSqlite,
     KiroGlobalStorage,
     Junie,
-    Trae,
+    RetiredTrae,
     Cline,
     CommandCode,
     Grok,
@@ -309,7 +311,7 @@ impl ParserId {
             Self::OpenCodeSqlite => "opencode-sqlite",
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Cursor => "cursor",
+            Self::RetiredCursor => "cursor",
             Self::Gemini => "gemini",
             Self::Amp => "amp",
             Self::Droid => "droid",
@@ -336,7 +338,7 @@ impl ParserId {
             Self::KiroSqlite => "kiro-sqlite",
             Self::KiroGlobalStorage => "kiro-global-storage",
             Self::Junie => "junie",
-            Self::Trae => "trae",
+            Self::RetiredTrae => "trae",
             Self::Cline => "cline",
             Self::CommandCode => "command-code",
             Self::Grok => "grok",
@@ -4246,7 +4248,7 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(loaded
-            .get_meta(source.path(), ParserVersion::new(ParserId::Cursor, 1))
+            .get_meta(source.path(), ParserVersion::new(ParserId::Gemini, 1))
             .unwrap()
             .is_none());
 
@@ -4337,7 +4339,7 @@ mod tests {
         let source = write_temp_file(b"source\n");
         let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
         let copilot_version = ParserVersion::new(ParserId::Copilot, 1);
-        let cursor_version = ParserVersion::new(ParserId::Cursor, 1);
+        let gemini_version = ParserVersion::new(ParserId::Gemini, 1);
         let mut cache = SourceMessageCache::load().unwrap();
         cache.insert(CachedSourceEntry::new_with_version(
             source.path(),
@@ -4362,13 +4364,13 @@ mod tests {
         ));
         cache.insert(CachedSourceEntry::new_with_version(
             source.path(),
-            cursor_version,
+            gemini_version,
             fingerprint.clone(),
             vec![UnifiedMessage::new(
-                "cursor",
+                "gemini",
                 "gpt-5",
                 "openai",
-                "cursor-session",
+                "gemini-session",
                 1,
                 TokenBreakdown {
                     input: 2,
@@ -4384,10 +4386,10 @@ mod tests {
         cache.save_if_dirty().unwrap();
 
         let copilot_shard = shard_path(source.path(), copilot_version).unwrap();
-        let cursor_shard = shard_path(source.path(), cursor_version).unwrap();
-        assert_ne!(copilot_shard, cursor_shard);
+        let gemini_shard = shard_path(source.path(), gemini_version).unwrap();
+        assert_ne!(copilot_shard, gemini_shard);
         assert!(copilot_shard.exists());
-        assert!(cursor_shard.exists());
+        assert!(gemini_shard.exists());
 
         let mut loaded = SourceMessageCache::load().unwrap();
         assert!(loaded
@@ -4395,7 +4397,7 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(loaded
-            .get_meta(source.path(), cursor_version)
+            .get_meta(source.path(), gemini_version)
             .unwrap()
             .is_some());
         let copilot_messages = loaded
@@ -4405,15 +4407,15 @@ mod tests {
                 fingerprint.clone(),
             ))
             .unwrap();
-        let cursor_messages = loaded
+        let gemini_messages = loaded
             .take_messages(&CacheReadPlan::new(
                 source.path(),
-                cursor_version,
+                gemini_version,
                 fingerprint,
             ))
             .unwrap();
         assert_eq!(copilot_messages[0].session_id.as_ref(), "copilot-session");
-        assert_eq!(cursor_messages[0].session_id.as_ref(), "cursor-session");
+        assert_eq!(gemini_messages[0].session_id.as_ref(), "gemini-session");
 
         restore_cache_env(prev_env);
     }

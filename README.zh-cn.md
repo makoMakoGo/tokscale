@@ -99,14 +99,13 @@ tokscale pricing overrides --json
 
 当前 catalog 包括：
 
-OpenCode、Claude Code、Codex CLI、Cursor、Gemini CLI、Amp、Droid、OpenClaw、Pi、OMP、Kimi、Qwen CLI、Roo Code、KiloCode、Mux、Kilo CLI、Hermes Agent、Copilot、Goose、Codebuff、Antigravity、Zed Agent、ZCode、Kiro、Junie、Trae、Warp、Cline、Command Code 和 Grok Build。
+OpenCode、Claude Code、Codex CLI、Gemini CLI、Amp、Droid、OpenClaw、Pi、OMP、Kimi、Qwen CLI、Roo Code、KiloCode、Mux、Kilo CLI、Hermes Agent、Copilot、Goose、Codebuff、Antigravity、Zed Agent、ZCode、Kiro、Junie、Warp、Cline、Command Code 和 Grok Build。
 
 部分 catalog 条目有明确边界：
 
 - `grok` 和本地 `warp.sqlite` 只提供没有 bucket 拆分的 token 总数，因此 Tokscale 使用 ADR 0017 定义的固定 bucket 分配。
 - `commandcode` 是基于 transcript 的估算用量，不是供应商权威 token 记账。
-- `cursor` 只读取本地 Cursor cache 中已有的 `usage*.csv`。Tokscale 不保存 Cursor 凭据、不替 Cursor 登录，也不会隐式调用 Cursor API。
-- `antigravity` 和 `trae` 使用显式 sync 命令刷新的本地缓存。
+- `antigravity` 使用显式 sync 命令刷新的本地缓存。
 
 ## 数据和定价语义
 

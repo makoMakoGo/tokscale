@@ -105,7 +105,6 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
         "headless",
         "cache",
         "antigravity",
-        "trae",
         "warp",
     ];
     let mut command_index = None;
@@ -257,11 +256,6 @@ pub(crate) enum Commands {
     Antigravity {
         #[command(subcommand)]
         subcommand: AntigravitySubcommand,
-    },
-    #[command(about = "Trae IDE integration commands")]
-    Trae {
-        #[command(subcommand)]
-        subcommand: TraeSubcommand,
     },
     #[command(about = "Warp/Oz aggregate usage integration commands")]
     Warp {
@@ -522,34 +516,6 @@ pub(crate) enum AntigravitySubcommand {
 }
 
 #[derive(Subcommand, Debug)]
-pub(crate) enum TraeSubcommand {
-    #[command(about = "Authenticate Trae from the desktop client or a supplied JWT")]
-    Login {
-        #[arg(long, help = "Paste an access token directly")]
-        manual: bool,
-        #[arg(long, help = "Target Trae variant (solo, ide)")]
-        variant: Option<String>,
-    },
-    #[command(about = "Remove cached Trae credentials")]
-    Logout {
-        #[arg(long, help = "Target Trae variant (solo, ide)")]
-        variant: Option<String>,
-    },
-    #[command(about = "Show Trae authentication status")]
-    Status {
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-    },
-    #[command(about = "Sync Trae usage data into local cache")]
-    Sync {
-        #[arg(long, help = "Number of days to sync")]
-        since: Option<i64>,
-        #[arg(long, help = "Include auxiliary usage types")]
-        include_aux: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
 pub(crate) enum WarpSubcommand {
     #[command(about = "Save Warp GraphQL authentication")]
     Login {
@@ -757,7 +723,6 @@ pub(crate) enum ExecutionPlan {
     CachePrune,
     CacheWarm(ResolvedSourceScope),
     Antigravity(AntigravitySubcommand),
-    Trae(TraeSubcommand),
     Warp(WarpSubcommand),
 }
 
@@ -804,7 +769,6 @@ impl ExecutionPlan {
                 CacheSubcommand::Warm { source } => resolve_source(source).map(Self::CacheWarm),
             },
             Commands::Antigravity { subcommand } => Ok(Self::Antigravity(subcommand)),
-            Commands::Trae { subcommand } => Ok(Self::Trae(subcommand)),
             Commands::Warp { subcommand } => Ok(Self::Warp(subcommand)),
         }
     }

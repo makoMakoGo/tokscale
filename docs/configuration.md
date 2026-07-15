@@ -6,12 +6,6 @@ Tokscale stores most local settings under the platform config directory:
 - Windows default: `%APPDATA%\tokscale\settings.json`
 - Override root: `TOKSCALE_CONFIG_DIR`
 
-Known exceptions that are not moved by `TOKSCALE_CONFIG_DIR` today:
-
-- Cursor local usage data: `$HOME/.config/tokscale/cursor-cache/`
-
-Setting `TOKSCALE_CONFIG_DIR` does not move this Cursor data directory today.
-
 ## Example
 
 ```json
@@ -70,7 +64,7 @@ reported explicitly.
 
 | Variable | Meaning |
 | --- | --- |
-| `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Non-empty values are used verbatim. Empty values are treated as unset. It does not currently move the Cursor local usage data directory. |
+| `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Non-empty values are used verbatim. Empty values are treated as unset. |
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | Overrides `nativeTimeoutMs`. |
 | `TOKSCALE_EXTRA_DIRS` | One-off extra scan roots as `client:/abs/path,client:/abs/path`. |
 | `TOKSCALE_HEADLESS_DIR` | Overrides the headless capture root. Surrounding whitespace is trimmed; blank values fall back to the default root. |
@@ -124,19 +118,10 @@ Integration roots are mixed state, not all disposable caches:
 
 - `antigravity-cache/` contains synced Antigravity artifacts. Use
   `tokscale antigravity purge-cache` when you want to clear them.
-- `trae-cache/` contains both synced Trae usage artifacts and credentials:
-  `credentials-solo.json` and `credentials-ide.json`. Deleting the directory
-  can log you out; preserve those files if you only want to clear synced usage.
 - `warp-cache/` contains both synced Warp aggregate usage and
   `credentials.json`. Deleting the directory can log you out; use
   `tokscale warp logout --purge-cache` when you intentionally want to remove
   credentials and cached usage together.
-
-Cursor local usage data is separate from the `TOKSCALE_CONFIG_DIR` roots above.
-Tokscale only reads existing `usage*.csv` files from
-`$HOME/.config/tokscale/cursor-cache/`; it does not store Cursor credentials or
-refresh those files. A legacy `cursor-credentials.json` is obsolete and ignored
-by current versions.
 
 ## Subscription providers
 

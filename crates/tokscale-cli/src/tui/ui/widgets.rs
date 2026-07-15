@@ -197,7 +197,6 @@ fn get_single_provider_display_name(provider: &str) -> String {
         "anthropic" => "Anthropic".to_string(),
         "openai" => "OpenAI".to_string(),
         "google" => "Google".to_string(),
-        "cursor" => "Cursor".to_string(),
         "deepseek" => "DeepSeek".to_string(),
         "zai" => "Z.AI".to_string(),
         "xiaomi" => "XiaoMi".to_string(),

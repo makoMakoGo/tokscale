@@ -44,7 +44,6 @@ pub fn get_provider_shade(provider: &str, rank: usize) -> Color {
         s if s.contains("deepseek") => &DEEPSEEK_SHADES,
         s if s.contains("xai") || s.contains("grok") => &XAI_SHADES,
         s if s.contains("meta") || s.contains("llama") => &META_SHADES,
-        s if s.contains("cursor") => &CURSOR_SHADES,
         _ => &UNKNOWN_SHADES,
     };
 
@@ -128,16 +127,6 @@ const META_SHADES: [(u8, u8, u8); 7] = [
     (189, 190, 249), // #BDBEF9
     (207, 208, 251), // #CFD0FB
     (225, 226, 252), // #E1E2FC
-];
-
-const CURSOR_SHADES: [(u8, u8, u8); 7] = [
-    (139, 92, 246),  // #8B5CF6
-    (154, 114, 247), // #9A72F7
-    (169, 135, 248), // #A987F8
-    (184, 156, 250), // #B89CFA
-    (199, 177, 251), // #C7B1FB
-    (215, 199, 252), // #D7C7FC
-    (230, 220, 253), // #E6DCFD
 ];
 
 /// Neutral gray ramp for providers that don't match any known palette.
@@ -309,14 +298,6 @@ mod tests {
         assert_eq!(provider_color_key("openai"), "openai");
         assert_eq!(provider_color_key("openai, anthropic"), "openai");
         assert_eq!(provider_color_key(" , anthropic"), "anthropic");
-    }
-
-    #[test]
-    fn cursor_provider_has_distinct_shades_per_rank() {
-        TokscaleConfig::initialize_default_for_tests();
-        let rank_0 = get_provider_shade("cursor", 0);
-        let rank_6 = get_provider_shade("cursor", 6);
-        assert_ne!(rank_0, rank_6);
     }
 
     #[test]

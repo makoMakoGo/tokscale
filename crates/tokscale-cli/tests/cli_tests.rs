@@ -809,12 +809,6 @@ fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, ou
     .unwrap();
 }
 
-fn write_cursor_usage_cache(base: &Path) {
-    let cache_dir = base.join(".config/tokscale/cursor-cache");
-    fs::create_dir_all(&cache_dir).unwrap();
-    fs::write(cache_dir.join("usage.csv"), "Date,Model\n").unwrap();
-}
-
 // ── Existing tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -921,8 +915,8 @@ fn test_cache_prune_surfaces_unknown_shard_magic() {
 }
 
 #[test]
-fn test_account_management_namespaces_are_not_registered() {
-    for command in ["codex", "cursor"] {
+fn test_removed_integration_namespaces_are_not_registered() {
+    for command in ["codex", "cursor", "trae"] {
         cargo_bin_cmd!("tokscale")
             .args([command, "--help"])
             .assert()
@@ -1659,213 +1653,19 @@ fn test_models_with_client_filter_multiple() {
         .success();
 }
 
-fn assert_cursor_setup_warning(output: &std::process::Output) {
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json.get("warnings").is_none());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Cursor usage is read only from local CSV data"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("cursor-cache/usage*.csv"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("Tokscale does not store Cursor credentials"),
-        "stderr: {stderr}"
-    );
-}
-
 #[test]
-fn test_models_cursor_explicit_missing_cache_reports_setup_warning_json() {
+fn test_reports_reject_removed_client_ids() {
     let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert_cursor_setup_warning(&output);
-}
-
-#[test]
-fn test_models_cursor_explicit_local_cursor_state_still_reports_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    fs::create_dir_all(
-        tmp.path()
-            .join(".cursor/projects/demo/agent-transcripts/session"),
-    )
-    .unwrap();
-    fs::write(
-        tmp.path()
-            .join(".cursor/projects/demo/agent-transcripts/session/session.jsonl"),
-        r#"{"role":"user","content":"hello"}"#,
-    )
-    .unwrap();
-
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert_cursor_setup_warning(&output);
-}
-
-#[test]
-fn test_monthly_cursor_explicit_missing_cache_reports_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert_cursor_setup_warning(&output);
-}
-
-#[test]
-fn test_hourly_cursor_explicit_missing_cache_reports_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["hourly", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert_cursor_setup_warning(&output);
-}
-
-#[test]
-fn test_models_cursor_explicit_home_override_reports_fixture_cache_path() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args([
-            "models",
-            "--home",
-            tmp.path().to_str().unwrap(),
-            "--json",
-            "--client",
-            "cursor",
-            "--no-spinner",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let _: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let warning = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        warning.contains(tmp.path().to_str().unwrap())
-            && warning.contains("read only from local CSV data")
-            && warning.contains("does not store Cursor credentials")
-            && warning.contains("cursor-cache/usage*.csv"),
-        "warning did not explain Cursor --home setup: {warning}"
-    );
-}
-
-#[test]
-fn test_models_cursor_explicit_missing_cache_reports_setup_warning_text() {
-    let tmp = create_empty_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["models", "--client", "cursor", "--no-spinner"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Cursor usage is read only from local CSV data",
-        ))
-        .stderr(predicate::str::contains(
-            "Tokscale does not store Cursor credentials",
-        ));
-}
-
-#[test]
-fn test_models_default_missing_cursor_cache_does_not_emit_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("Cursor usage is read only from local CSV data"),
-        "default all-client report should not warn about unrequested Cursor setup"
-    );
-}
-
-#[test]
-fn test_models_cursor_explicit_existing_cache_suppresses_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    write_cursor_usage_cache(tmp.path());
-
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("Cursor usage is read only from local CSV data"),
-        "existing Cursor cache should suppress setup warnings"
-    );
-}
-
-#[test]
-fn test_models_cursor_legacy_credentials_do_not_enable_network_sync() {
-    let tmp = create_empty_fixture_dir();
-    let config_dir = tmp.path().join(".config/tokscale");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("cursor-credentials.json"),
-        r#"{"sessionToken":"must-not-be-read"}"#,
-    )
-    .unwrap();
-
-    let output = cmd_with_home(tmp.path())
-        .env("HTTPS_PROXY", "http://127.0.0.1:9")
-        .env("HTTP_PROXY", "http://127.0.0.1:9")
-        .env("ALL_PROXY", "http://127.0.0.1:9")
-        .args(["models", "--json", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let _: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let warning = String::from_utf8_lossy(&output.stderr);
-    assert!(warning.contains("read only from local CSV data"));
-    assert!(warning.contains("does not store Cursor credentials"));
-    assert!(!warning.contains("cursor login"));
-    assert!(!warning.contains("cursor sync"));
-}
-
-#[test]
-fn test_time_metrics_cursor_explicit_missing_cache_reports_setup_warning_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args([
-            "time-metrics",
-            "--json",
-            "--client",
-            "cursor",
-            "--no-spinner",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_cursor_setup_warning(&output);
+    for client in ["cursor", "trae"] {
+        let output = cmd_with_home(tmp.path())
+            .args(["models", "--client", client, "--no-spinner"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid value"), "stderr: {stderr}");
+        assert!(stderr.contains(client), "stderr: {stderr}");
+    }
 }
 
 #[test]
@@ -1931,43 +1731,6 @@ fn test_time_metrics_text_reports_degraded_source_health_without_failing() {
 }
 
 #[test]
-fn test_graph_cursor_explicit_missing_cache_reports_setup_warning_text() {
-    let tmp = create_empty_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["graph", "--client", "cursor", "--no-spinner"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Cursor usage is read only from local CSV data",
-        ));
-}
-
-#[test]
-fn test_graph_reads_cursor_cache_without_network_sync() {
-    let tmp = create_empty_fixture_dir();
-    write_cursor_usage_cache(tmp.path());
-
-    let output = cmd_with_home(tmp.path())
-        .env("HTTPS_PROXY", "http://127.0.0.1:9")
-        .env("HTTP_PROXY", "http://127.0.0.1:9")
-        .env("ALL_PROXY", "http://127.0.0.1:9")
-        .args(["graph", "--client", "cursor", "--no-spinner"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("Cursor sync failed") && !stderr.contains("Cursor sync warning"),
-        "local Cursor cache must not trigger graph sync; stderr: {stderr}"
-    );
-}
-
-#[test]
 fn test_models_with_repeated_client_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
@@ -1983,8 +1746,6 @@ fn test_models_with_repeated_client_filter() {
             "codex",
             "--client",
             "gemini",
-            "--client",
-            "cursor",
             "--client",
             "amp",
             "--client",

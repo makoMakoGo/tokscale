@@ -8,6 +8,9 @@ Superseded in part by ADR 0015: the hosted frontend registry and
 Narrowed by ADR 0012: excluded clients do not retain catalog-only identities
 in this local-only fork.
 
+Narrowed by ADR 0024: every remaining catalog identity participates in ordinary
+local reports; the former `parse_local` capability split has been removed.
+
 ## Decision
 
 Use `crates/tokscale-core/client-catalog.json` as the canonical source for
@@ -31,11 +34,6 @@ adapter. The catalog, local scan definitions, and adapter registry must cover
 the same `ClientId` set without duplicates. Identity-only, remote-only, and
 display-placeholder catalog entries require a new explicit decision rather
 than a capability branch in callers.
-
-`parse_local` only controls whether an integration participates in ordinary
-reports without an explicit client filter. It does not indicate whether an
-adapter exists; for example, Cursor remains an accepted adapter-backed client
-while opting out of the ordinary no-filter report set.
 
 `ClientId` is the only Rust client identity type. Do not add a second enum,
 hand-written base-client list, or hidden per-client CLI flag set.
