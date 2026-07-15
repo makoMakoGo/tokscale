@@ -3356,6 +3356,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokscale-core",
  "toml",

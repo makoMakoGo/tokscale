@@ -78,6 +78,10 @@ or environment is exit code `2`; internal, I/O, network, and authentication
 failures are exit code `1`; user interruption remains `130` where the child or
 terminal supplies it.
 
+Invalid environment includes malformed or out-of-range environment variables
+and settings values. Failure to read or write an otherwise valid settings path
+is an operational I/O failure, so it remains exit code `1`.
+
 Inside the TUI, `q` is an ordinary successful quit and returns `0`. `Ctrl-C`
 is a typed user interruption and returns `130`, but only after terminal modes
 and the alternate screen have been restored.

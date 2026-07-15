@@ -1,4 +1,5 @@
 use crate::cli::ClientFlags;
+use crate::failure::InvalidConfiguration;
 use crate::{claude_diagnostics, tui};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -87,11 +88,12 @@ pub(crate) fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<Cl
         return Ok(parsed);
     }
 
-    anyhow::bail!(
+    Err(InvalidConfiguration::new(format!(
         "invalid client id(s) in settings.json defaultClients: {}. Remove stale entries such as `synthetic` or use one of: {}",
         invalid.join(", "),
         valid_client_ids()
-    );
+    ))
+    .into())
 }
 
 pub(crate) fn parse_persisted_default_client_id(raw: &str) -> Option<ClientId> {

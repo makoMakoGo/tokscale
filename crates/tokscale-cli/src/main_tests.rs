@@ -243,9 +243,8 @@ fn wrapped_ranking_resolves_without_boolean_precedence() {
         "claude",
     ])
     .expect_err("agents ranking without OpenCode must fail during resolve");
-    assert!(
-        matches!(error, ResolveError::Usage(message) if message.contains("requires `opencode`"))
-    );
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("requires `opencode`"));
 
     let error = resolve(&[
         "tokscale",
@@ -255,7 +254,8 @@ fn wrapped_ranking_resolves_without_boolean_precedence() {
         "--disable-pinned",
     ])
     .expect_err("client ranking cannot accept an ignored agent option");
-    assert!(matches!(error, ResolveError::Usage(message) if message.contains("does not apply")));
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("does not apply"));
 }
 
 #[test]
@@ -714,9 +714,8 @@ fn tui_execution_plan_requires_both_interactive_streams() {
     ] {
         let cli = Cli::try_parse_from(["tokscale", "tui"]).expect("TUI command parses");
         let error = ExecutionPlan::resolve(cli, terminal).expect_err("non-TTY TUI must fail");
-        assert!(
-            matches!(error, ResolveError::Usage(message) if message.contains("interactive terminal"))
-        );
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains("interactive terminal"));
     }
 }
 
@@ -740,9 +739,8 @@ fn tui_execution_plan_rejects_disabled_optional_tab() {
         },
     )
     .expect_err("disabled explicit tab must fail before entering the TUI");
-    assert!(
-        matches!(error, ResolveError::Usage(message) if message.contains("disabled in settings.json"))
-    );
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("disabled in settings.json"));
 }
 
 #[test]
@@ -764,7 +762,8 @@ fn resolve_rejects_reversed_custom_date_range() {
         },
     )
     .expect_err("reversed range must fail");
-    assert!(matches!(error, ResolveError::Usage(message) if message.contains("must not be later")));
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("must not be later"));
 }
 
 #[test]

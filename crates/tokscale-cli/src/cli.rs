@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -10,6 +11,7 @@ use tokscale_core::{ClientId, GroupBy};
 use crate::commands::shared::{
     build_client_filter, build_date_filter, normalize_year_filter, parse_client_id_arg,
 };
+use crate::failure::CliFailure;
 use crate::tui::{self, Tab};
 
 #[derive(Parser, Debug)]
@@ -708,6 +710,16 @@ pub(crate) struct WrappedPlan {
 }
 
 #[derive(Debug)]
+pub(crate) struct HeadlessPlan {
+    pub(crate) source: HeadlessSource,
+    pub(crate) command: Vec<String>,
+    pub(crate) format: Option<HeadlessFormat>,
+    pub(crate) output: Option<String>,
+    pub(crate) no_auto_flags: bool,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug)]
 pub(crate) enum ExecutionPlan {
     Tui(TuiPlan),
     Models(ModelsPlan),
@@ -719,27 +731,15 @@ pub(crate) enum ExecutionPlan {
     Pricing(PricingSubcommand),
     Usage { json: bool },
     Wrapped(WrappedPlan),
-    Headless(HeadlessArgs),
+    Headless(HeadlessPlan),
     CachePrune,
     CacheWarm(ResolvedSourceScope),
     Antigravity(AntigravitySubcommand),
     Warp(WarpSubcommand),
 }
 
-#[derive(Debug)]
-pub(crate) enum ResolveError {
-    Usage(String),
-    Runtime(anyhow::Error),
-}
-
-impl From<anyhow::Error> for ResolveError {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Runtime(value)
-    }
-}
-
 impl ExecutionPlan {
-    pub(crate) fn resolve(cli: Cli, terminal: TerminalState) -> Result<Self, ResolveError> {
+    pub(crate) fn resolve(cli: Cli, terminal: TerminalState) -> Result<Self, CliFailure> {
         match cli.command.unwrap_or(Commands::Tui(TuiArgs::default())) {
             Commands::Tui(args) => resolve_tui(args, terminal).map(Self::Tui),
             Commands::Models(args) => Ok(Self::Models(ModelsPlan {
@@ -763,7 +763,7 @@ impl ExecutionPlan {
             Commands::Pricing { subcommand } => Ok(Self::Pricing(subcommand)),
             Commands::Usage { json } => Ok(Self::Usage { json }),
             Commands::Wrapped(args) => resolve_wrapped(args).map(Self::Wrapped),
-            Commands::Headless(args) => Ok(Self::Headless(args)),
+            Commands::Headless(args) => resolve_headless(args).map(Self::Headless),
             Commands::Cache { subcommand } => match subcommand {
                 CacheSubcommand::Prune => Ok(Self::CachePrune),
                 CacheSubcommand::Warm { source } => resolve_source(source).map(Self::CacheWarm),
@@ -774,7 +774,7 @@ impl ExecutionPlan {
     }
 }
 
-fn resolve_wrapped(args: WrappedArgs) -> Result<WrappedPlan, ResolveError> {
+fn resolve_wrapped(args: WrappedArgs) -> Result<WrappedPlan, CliFailure> {
     let source = resolve_source(args.source)?;
     let ranking = args
         .ranking
@@ -788,13 +788,13 @@ fn resolve_wrapped(args: WrappedArgs) -> Result<WrappedPlan, ResolveError> {
                 .any(|client| client == ClientId::OpenCode.as_str())
         })
     {
-        return Err(ResolveError::Usage(
+        return Err(CliFailure::invalid_message(
             "--ranking agents requires `opencode` in the --client scope".to_string(),
         ));
     }
 
     if ranking == WrappedRanking::Clients && args.disable_pinned {
-        return Err(ResolveError::Usage(
+        return Err(CliFailure::invalid_message(
             "--disable-pinned does not apply to --ranking clients".to_string(),
         ));
     }
@@ -810,9 +810,9 @@ fn resolve_wrapped(args: WrappedArgs) -> Result<WrappedPlan, ResolveError> {
     })
 }
 
-fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, ResolveError> {
+fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, CliFailure> {
     if !terminal.interactive() {
-        return Err(ResolveError::Usage(
+        return Err(CliFailure::invalid_message(
             "TUI requires an interactive terminal\nhint: use `tokscale models --json` for structured output"
                 .to_string(),
         ));
@@ -825,7 +825,7 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, Resolv
             source.home.as_deref().map(std::path::Path::new),
         )?;
         if !settings.usage_tab_enabled {
-            return Err(ResolveError::Usage(
+            return Err(CliFailure::invalid_message(
                 "TUI tab `usage` is disabled in settings.json".to_string(),
             ));
         }
@@ -842,7 +842,7 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, Resolv
     })
 }
 
-fn resolve_report(args: ReportArgs) -> Result<LocalReportPlan, ResolveError> {
+fn resolve_report(args: ReportArgs) -> Result<LocalReportPlan, CliFailure> {
     Ok(LocalReportPlan {
         json: args.json,
         source: resolve_source(args.source)?,
@@ -852,20 +852,34 @@ fn resolve_report(args: ReportArgs) -> Result<LocalReportPlan, ResolveError> {
     })
 }
 
-fn resolve_source(args: SourceScopeArgs) -> Result<ResolvedSourceScope, ResolveError> {
+fn resolve_headless(args: HeadlessArgs) -> Result<HeadlessPlan, CliFailure> {
+    let settings = tui::settings::Settings::load()?;
+    let timeout = settings.get_native_timeout()?;
+
+    Ok(HeadlessPlan {
+        source: args.source,
+        command: args.command,
+        format: args.format,
+        output: args.output,
+        no_auto_flags: args.no_auto_flags,
+        timeout,
+    })
+}
+
+fn resolve_source(args: SourceScopeArgs) -> Result<ResolvedSourceScope, CliFailure> {
     let home = args.home.map(|path| path.to_string_lossy().into_owned());
     let clients = build_client_filter(args.clients, &home)?;
     Ok(ResolvedSourceScope { home, clients })
 }
 
-fn resolve_date(date: DateRangeFlags) -> Result<ResolvedDateRange, ResolveError> {
+fn resolve_date(date: DateRangeFlags) -> Result<ResolvedDateRange, CliFailure> {
     if let (Some(since), Some(until)) = (&date.since, &date.until) {
         let since_date = NaiveDate::parse_from_str(since, "%Y-%m-%d")
             .expect("Clap date parser must validate --since");
         let until_date = NaiveDate::parse_from_str(until, "%Y-%m-%d")
             .expect("Clap date parser must validate --until");
         if since_date > until_date {
-            return Err(ResolveError::Usage(format!(
+            return Err(CliFailure::invalid_message(format!(
                 "--since ({since}) must not be later than --until ({until})"
             )));
         }

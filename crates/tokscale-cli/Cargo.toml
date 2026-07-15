@@ -19,6 +19,7 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 comfy-table = { workspace = true }
 colored = { workspace = true }
 indicatif = { workspace = true }

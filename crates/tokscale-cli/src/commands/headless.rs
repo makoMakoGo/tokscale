@@ -1,4 +1,3 @@
-use crate::tui;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -100,6 +99,7 @@ pub(crate) fn run_headless_command(
     format: Option<&str>,
     output: Option<String>,
     no_auto_flags: bool,
+    timeout: Duration,
 ) -> Result<()> {
     use chrono::Utc;
     use uuid::Uuid;
@@ -156,9 +156,6 @@ pub(crate) fn run_headless_command(
 
         dir.join(filename)
     };
-
-    let settings = tui::settings::Settings::load()?;
-    let timeout = settings.get_native_timeout()?;
 
     use colored::Colorize;
     eprintln!("\n  {}", "Headless capture".cyan());

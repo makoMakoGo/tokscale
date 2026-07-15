@@ -2,14 +2,15 @@ mod antigravity;
 mod claude_diagnostics;
 mod cli;
 mod commands;
+mod failure;
 mod paths;
 mod tui;
 mod warp;
 
 use anyhow::Result;
 use cli::{
-    Cli, ExecutionPlan, HeadlessFormat, PricingSource, PricingSubcommand, ResolveError,
-    TerminalState, WrappedPlan,
+    Cli, ExecutionPlan, HeadlessFormat, PricingSource, PricingSubcommand, TerminalState,
+    WrappedPlan,
 };
 use commands::cache::{run_source_cache_prune, run_warm_tui_cache};
 use commands::clients::run_clients_command;
@@ -21,29 +22,27 @@ use commands::models::run_models_report;
 use commands::monthly::run_monthly_report;
 use commands::pricing::{run_pricing_list_overrides, run_pricing_lookup};
 use commands::time_metrics::run_time_metrics_report;
+use failure::{CliFailure, FailureClass};
 
 fn main() {
-    let cli = Cli::parse_from_env();
-    let plan = match ExecutionPlan::resolve(cli, TerminalState::detect()) {
-        Ok(plan) => plan,
-        Err(ResolveError::Usage(message)) => {
-            eprintln!("error: {message}");
-            std::process::exit(2);
-        }
-        Err(ResolveError::Runtime(error)) => {
-            eprintln!("Error: {error:#}");
-            std::process::exit(1);
-        }
-    };
-
-    match execute(plan) {
+    match run() {
         Ok(ExecutionOutcome::Completed) => {}
         Ok(ExecutionOutcome::Interrupted) => std::process::exit(130),
         Err(error) => {
-            eprintln!("Error: {error:#}");
-            std::process::exit(1);
+            let prefix = match error.class() {
+                FailureClass::InvalidInvocation => "error",
+                FailureClass::Operational => "Error",
+            };
+            eprintln!("{prefix}: {error}");
+            std::process::exit(error.exit_code());
         }
     }
+}
+
+fn run() -> std::result::Result<ExecutionOutcome, CliFailure> {
+    let cli = Cli::parse_from_env();
+    let plan = ExecutionPlan::resolve(cli, TerminalState::detect())?;
+    execute(plan)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +60,7 @@ impl From<tui::TuiExit> for ExecutionOutcome {
     }
 }
 
-fn execute(plan: ExecutionPlan) -> Result<ExecutionOutcome> {
+fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFailure> {
     match plan {
         ExecutionPlan::Tui(plan) => {
             return tui::run(
@@ -76,7 +75,8 @@ fn execute(plan: ExecutionPlan) -> Result<ExecutionOutcome> {
                 plan.date.year,
                 plan.initial_tab,
             )
-            .map(ExecutionOutcome::from);
+            .map(ExecutionOutcome::from)
+            .map_err(CliFailure::from);
         }
         ExecutionPlan::Models(plan) => {
             let report = plan.report;
@@ -166,6 +166,7 @@ fn execute(plan: ExecutionPlan) -> Result<ExecutionOutcome> {
             args.format.map(HeadlessFormat::as_str),
             args.output,
             args.no_auto_flags,
+            args.timeout,
         ),
         ExecutionPlan::CachePrune => run_source_cache_prune(),
         ExecutionPlan::CacheWarm(source) => run_warm_tui_cache(source.home, source.clients),

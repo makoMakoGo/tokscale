@@ -250,6 +250,28 @@ fn headless_capture_fast_nonzero_preserves_exit_code() {
 }
 
 #[test]
+fn headless_rejects_invalid_native_timeout_before_starting_child() {
+    for value in ["bogus", "1"] {
+        let fake_bin = create_fake_codex_bin();
+        let output_path = fake_bin
+            .path()
+            .join(format!("invalid-timeout-{value}.jsonl"));
+
+        headless_capture_command(fake_bin.path(), &output_path, "success")
+            .env("TOKSCALE_NATIVE_TIMEOUT_MS", value)
+            .assert()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("TOKSCALE_NATIVE_TIMEOUT_MS"));
+
+        assert!(
+            !output_path.exists(),
+            "invalid execution environment must fail before creating output"
+        );
+    }
+}
+
+#[test]
 fn headless_capture_slow_command_times_out() {
     let fake_bin = create_fake_codex_bin();
     let output_path = fake_bin.path().join("slow.jsonl");
@@ -3039,7 +3061,7 @@ fn test_clients_command_reports_malformed_settings() {
     cmd_with_home(tmp.path())
         .args(["clients", "--home", tmp.path().to_str().unwrap()])
         .assert()
-        .failure()
+        .code(2)
         .stderr(predicate::str::contains("failed to parse settings JSON"))
         .stderr(predicate::str::contains(
             settings_json_path(tmp.path()).display().to_string(),
@@ -3063,7 +3085,7 @@ fn excluded_crush_default_client_fails_before_report_output() {
         .env("RUST_BACKTRACE", "1")
         .args(["models", "--no-spinner"])
         .assert()
-        .failure()
+        .code(2)
         .stdout(predicate::str::is_empty())
         .stderr(
             predicate::str::contains("invalid client id(s) in settings.json defaultClients: crush")
@@ -3071,6 +3093,36 @@ fn excluded_crush_default_client_fails_before_report_output() {
                 .and(predicate::str::contains("panicked at").not())
                 .and(predicate::str::contains("stack backtrace").not()),
         );
+}
+
+#[test]
+fn invalid_settings_range_is_invalid_execution_environment() {
+    let tmp = create_empty_fixture_dir();
+    write_settings_json(
+        tmp.path(),
+        r#"{"autoRefreshMs":1,"nativeTimeoutMs":300000}"#,
+    );
+
+    cmd_with_home(tmp.path())
+        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("invalid autoRefreshMs 1"));
+}
+
+#[test]
+fn unreadable_settings_path_remains_an_operational_error() {
+    let tmp = create_empty_fixture_dir();
+    let path = settings_json_path(tmp.path());
+    fs::create_dir_all(&path).unwrap();
+
+    cmd_with_home(tmp.path())
+        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("failed to read settings file"));
 }
 
 #[test]

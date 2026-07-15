@@ -40,7 +40,7 @@ fn data_loader_scanner_settings(
     let home = home_dir
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
-    crate::tui::settings::load_scanner_settings_for_home(&home)
+    Ok(crate::tui::settings::load_scanner_settings_for_home(&home)?)
 }
 
 #[cfg(test)]
