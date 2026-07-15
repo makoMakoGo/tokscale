@@ -1,5 +1,4 @@
 use crate::cli::*;
-use crate::commands::clients::*;
 use crate::commands::render::*;
 use crate::commands::shared::*;
 use clap::Parser;
@@ -934,27 +933,30 @@ fn client_id_parses_grok() {
 }
 
 #[test]
-fn clap_rejects_antigravity_cli_as_separate_client() {
+fn antigravity_is_a_local_client_without_an_integration_command_namespace() {
     assert!(Cli::try_parse_from(["tokscale", "models", "--client", "antigravity"]).is_ok());
     assert!(Cli::try_parse_from(["tokscale", "models", "--client", "antigravity-cli"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "antigravity", "status"]).is_err());
 }
 
 #[test]
-fn antigravity_cli_conversations_path_uses_home_when_env_roots_disabled() {
+fn antigravity_local_source_uses_home_when_env_roots_are_disabled() {
+    let def = ClientId::Antigravity.local_def().unwrap();
     assert_eq!(
-        antigravity_cli_conversations_path("/tmp/home", false),
+        def.resolve_path_with_env_strategy("/tmp/home", false),
         PathBuf::from("/tmp/home/.gemini/antigravity-cli/conversations")
     );
 }
 
 #[test]
 #[serial_test::serial]
-fn antigravity_cli_conversations_path_falls_back_for_blank_env() {
+fn antigravity_local_source_falls_back_for_blank_env() {
     let previous = std::env::var("GEMINI_CLI_HOME").ok();
     unsafe { std::env::set_var("GEMINI_CLI_HOME", "   ") };
 
+    let def = ClientId::Antigravity.local_def().unwrap();
     assert_eq!(
-        antigravity_cli_conversations_path("/tmp/home", true),
+        def.resolve_path_with_env_strategy("/tmp/home", true),
         PathBuf::from("/tmp/home/.gemini/antigravity-cli/conversations")
     );
 

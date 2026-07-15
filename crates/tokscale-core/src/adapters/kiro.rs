@@ -96,7 +96,6 @@ impl LocalSourceAdapter for KiroAdapter {
                     sessions::kiro::parse_kiro_file,
                 ),
                 SourceUnitMeta::None
-                | SourceUnitMeta::AntigravityCacheJsonl
                 | SourceUnitMeta::AntigravityCliSqlite
                 | SourceUnitMeta::OpenCodeSqlite
                 | SourceUnitMeta::CodeBuddyJsonl

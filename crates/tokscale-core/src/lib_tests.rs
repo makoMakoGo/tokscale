@@ -691,6 +691,69 @@ fn write_single_opencode_sqlite_fixture(home: &Path) {
     );
 }
 
+fn encode_proto_varint(mut value: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if value == 0 {
+            return bytes;
+        }
+    }
+}
+
+fn encode_proto_varint_field(field: u64, value: u64) -> Vec<u8> {
+    let mut bytes = encode_proto_varint(field << 3);
+    bytes.extend(encode_proto_varint(value));
+    bytes
+}
+
+fn encode_proto_len_field(field: u64, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = encode_proto_varint((field << 3) | 2);
+    bytes.extend(encode_proto_varint(payload.len() as u64));
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn write_single_antigravity_cli_fixture(home: &Path) {
+    let db_path = home.join(".gemini/antigravity-cli/conversations/session.db");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE gen_metadata (idx integer, data blob, size integer);
+         CREATE TABLE trajectory_metadata_blob (id text, data blob);",
+    )
+    .unwrap();
+
+    let mut usage = Vec::new();
+    usage.extend(encode_proto_varint_field(1, 12));
+    usage.extend(encode_proto_varint_field(5, 2));
+    usage.extend(encode_proto_varint_field(9, 4));
+    usage.extend(encode_proto_varint_field(10, 1));
+    usage.extend(encode_proto_len_field(11, b"response-1"));
+    let mut chat_model = encode_proto_len_field(4, &usage);
+    chat_model.extend(encode_proto_len_field(21, b"Gemini 3.5 Flash (Medium)"));
+    let generation = encode_proto_len_field(1, &chat_model);
+
+    let created_at = encode_proto_varint_field(1, 1_711_200_000);
+    let trajectory = encode_proto_len_field(2, &created_at);
+
+    conn.execute(
+        "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+        rusqlite::params![generation],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?1)",
+        rusqlite::params![trajectory],
+    )
+    .unwrap();
+}
+
 fn create_hermes_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
     let conn = rusqlite::Connection::open(db_path).unwrap();
     conn.execute_batch(
@@ -5956,18 +6019,9 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
 
 #[test]
 #[serial_test::serial]
-fn test_default_graph_includes_antigravity_cache_rows() {
+fn test_default_graph_includes_antigravity_cli_database_rows() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let sessions_dir = temp_dir
-        .path()
-        .join(".config/tokscale/antigravity-cache/sessions");
-    std::fs::create_dir_all(&sessions_dir).unwrap();
-    std::fs::write(
-        sessions_dir.join("ag-local.jsonl"),
-        r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","providerId":"antigravity","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
-"#,
-    )
-    .unwrap();
+    write_single_antigravity_cli_fixture(temp_dir.path());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let graph = rt
@@ -5987,13 +6041,13 @@ fn test_default_graph_includes_antigravity_cache_rows() {
         .unwrap();
 
     assert_eq!(graph.summary.clients, vec!["antigravity"]);
-    assert_eq!(graph.summary.models, vec!["model_placeholder_m84"]);
+    assert_eq!(graph.summary.models, vec!["gemini-3.5-flash"]);
     assert_eq!(graph.summary.total_tokens, 19);
     assert_eq!(graph.contributions.len(), 1);
     assert_eq!(graph.contributions[0].clients[0].client, "antigravity");
     assert_eq!(
         graph.contributions[0].clients[0].model_id,
-        "model_placeholder_m84"
+        "gemini-3.5-flash"
     );
 }
 

@@ -38,7 +38,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `goose` | Goose | `~/.local/share/goose/sessions/sessions.db` and platform legacy roots | `GOOSE_PATH_ROOT` can point at an alternate root. |
 | `codebuff` | Codebuff | `$CODEBUFF_DATA_DIR/projects/**/chat-messages.json`, fallback `~/.config/manicode/projects/` | Also scans dev/staging Manicode roots. |
 | `codebuddy` | CodeBuddy | `~/.codebuddy/projects/**/*.jsonl` and local CodeBuddy/VS Code extension logs | Reads assistant/function-call usage and final agent usage from local CodeBuddy records. |
-| `antigravity` | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/*.jsonl` and Antigravity CLI conversation databases | IDE data requires `tokscale antigravity sync`; CLI databases are read directly. |
+| `antigravity` | Antigravity | `$GEMINI_CLI_HOME/antigravity-cli/conversations/*.db`, fallback `~/.gemini/antigravity-cli/conversations/*.db` | Reads current AGY CLI SQLite/WAL data directly. Antigravity IDE and Antigravity 2.0 Agent Manager are intentionally unsupported; see ADR 0025. |
 | `zed` | Zed Agent | `~/.local/share/zed/threads/threads.db` | Hosted Zed model usage only; external ACP agents are not included. |
 | `zcode` | ZCode | `~/.zcode/projects/**/*.jsonl` | Reads Z.ai ADE JSONL sessions. |
 | `kiro` | Kiro | `~/.kiro/sessions/cli/`, `~/.local/share/kiro-cli/data.sqlite3`, and Kiro IDE globalStorage snapshots | Combines CLI and IDE local sources when present. |
@@ -109,15 +109,12 @@ TOKSCALE_EXTRA_DIRS='codex:/abs/path/.codex/sessions,gemini:/abs/path/gemini/tmp
   tokscale models --no-spinner
 ```
 
-## Cache-backed integrations
+## Integration data boundaries
 
-Antigravity does not refresh from the root report or TUI command. Run its sync
-command before reports when you need fresh data:
-
-```bash
-tokscale antigravity status
-tokscale antigravity sync
-```
+Antigravity is not a cache-backed integration. Reports and the TUI read current
+AGY CLI databases directly; there is no sync command. Historical
+`~/.config/tokscale/antigravity-cache/` artifacts are ignored and may be
+deleted.
 
 `warp` has two separate surfaces. Local reports read `warp.sqlite` when it is
 available. Those local rows are per-conversation/per-model aggregates, not

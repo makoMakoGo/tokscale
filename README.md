@@ -130,7 +130,8 @@ Some catalog entries have explicit boundaries:
   Tokscale applies the fixed total-only bucket allocation from ADR 0017.
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
   accounting.
-- `antigravity` uses a local cache refreshed by an explicit sync command.
+- `antigravity` reads current AGY CLI SQLite/WAL data directly; the retired
+  IDE/2.0 private-RPC bridge is intentionally unsupported (ADR 0025).
 
 ## Data and pricing semantics
 
