@@ -221,8 +221,8 @@ fn background_cache_scope(
     since: &Option<String>,
     until: &Option<String>,
     year: &Option<String>,
-) -> CacheReportScope {
-    CacheReportScope::new(home_dir.clone(), since.clone(), until.clone(), year.clone())
+) -> Result<CacheReportScope> {
+    CacheReportScope::for_request(home_dir.clone(), since.clone(), until.clone(), year.clone())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -273,7 +273,7 @@ pub fn run(
 
     // Single file read: load cache and check freshness in one pass.
     let initial_group_by = TUI_DEFAULT_GROUP_BY;
-    let initial_report_scope = background_cache_scope(&home_dir, &since, &until, &year);
+    let initial_report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
     let (cached_data, needs_background_load, initial_source_digest) = decide_initial_data(
         load_cache(&enabled_clients, &initial_group_by, &initial_report_scope),
     );
@@ -328,7 +328,7 @@ pub fn run(
         let bg_home_dir = home_dir.clone();
         let bg_enabled_clients = enabled_clients.clone();
         let bg_group_by = app.group_by.borrow().clone();
-        let bg_report_scope = background_cache_scope(&home_dir, &since, &until, &year);
+        let bg_report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
 
         thread::spawn(move || {
             let loader = background_data_loader(bg_home_dir, bg_since, bg_until, bg_year);
@@ -447,7 +447,7 @@ fn run_loop_with_background(
                 .map(|path| path.to_string_lossy().into_owned());
             let enabled_clients = app.enabled_clients.borrow().clone();
             let group_by = app.group_by.borrow().clone();
-            let report_scope = background_cache_scope(&home_dir, &since, &until, &year);
+            let report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
 
             thread::spawn(move || {
                 let loader = background_data_loader(home_dir, since, until, year);

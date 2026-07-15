@@ -23,6 +23,7 @@ pub(crate) fn run_warm_tui_cache(
         .unwrap_or_else(|| ClientId::iter().collect());
     let mut scan_clients: Vec<ClientId> = enabled_set.iter().copied().collect();
     scan_clients.sort_by_key(|client| *client as usize);
+    let report_scope = CacheReportScope::for_request(home_dir.clone(), None, None, None)?;
     let loader = DataLoader::with_filters(
         home_dir.clone().map(std::path::PathBuf::from),
         None,
@@ -34,7 +35,7 @@ pub(crate) fn run_warm_tui_cache(
         &result.data,
         &enabled_set,
         &TUI_DEFAULT_GROUP_BY,
-        &CacheReportScope::new(home_dir, None, None, None),
+        &report_scope,
         result.source_inventory_signature,
     )?;
     println!("TUI cache warmed.");

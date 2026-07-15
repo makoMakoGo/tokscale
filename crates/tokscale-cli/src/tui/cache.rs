@@ -23,30 +23,59 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 36;
+const CACHE_SCHEMA_VERSION: u32 = 37;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheReportScope {
-    pub home_dir: Option<String>,
+    pub resolved_home_dir: String,
+    pub use_env_roots: bool,
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
 }
 
 impl CacheReportScope {
-    pub fn new(
-        home_dir: Option<String>,
+    fn new(
+        resolved_home_dir: String,
+        use_env_roots: bool,
         since: Option<String>,
         until: Option<String>,
         year: Option<String>,
     ) -> Self {
         Self {
-            home_dir,
+            resolved_home_dir,
+            use_env_roots,
             since,
             until,
             year,
         }
+    }
+
+    pub fn for_request(
+        home_dir: Option<String>,
+        since: Option<String>,
+        until: Option<String>,
+        year: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let (resolved_home_dir, use_env_roots) = match home_dir {
+            Some(home_dir) => (home_dir, false),
+            None => (
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                    .to_string_lossy()
+                    .into_owned(),
+                true,
+            ),
+        };
+
+        Ok(Self::new(
+            resolved_home_dir,
+            use_env_roots,
+            since,
+            until,
+            year,
+        ))
     }
 }
 
@@ -1400,7 +1429,8 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Gemini, ClientId::Claude]);
         let scope = CacheReportScope::new(
-            None,
+            temp_dir.path().to_string_lossy().into_owned(),
+            true,
             Some("2026-07-01".to_string()),
             Some("2026-07-11".to_string()),
             Some("2026".to_string()),
@@ -1470,7 +1500,7 @@ mod tests {
         );
         assert_eq!(
             ordered.field("reportScope").keys(),
-            vec!["homeDir", "since", "until", "year"]
+            vec!["resolvedHomeDir", "useEnvRoots", "since", "until", "year",]
         );
 
         let ordered_data = ordered.field("data");
@@ -1908,7 +1938,8 @@ mod tests {
 
         let clients = make_filters(&[ClientId::Claude]);
         let filtered_scope = CacheReportScope::new(
-            None,
+            temp_dir.path().to_string_lossy().into_owned(),
+            true,
             Some("2026-05-01".to_string()),
             Some("2026-05-07".to_string()),
             None,
@@ -1933,7 +1964,8 @@ mod tests {
         ));
 
         let other_home_scope = CacheReportScope::new(
-            Some("/tmp/other-tokscale-home".to_string()),
+            "/tmp/other-tokscale-home".to_string(),
+            false,
             Some("2026-05-01".to_string()),
             Some("2026-05-07".to_string()),
             None,
@@ -1947,6 +1979,57 @@ mod tests {
             Some(home) => unsafe { env::set_var("HOME", home) },
             None => unsafe { env::remove_var("HOME") },
         }
+    }
+
+    #[test]
+    #[serial]
+    fn implicit_home_and_environment_roots_participate_in_cache_scope() {
+        let root = TempDir::new().unwrap();
+        let first_home = root.path().join("first-home");
+        let second_home = root.path().join("second-home");
+        let shared_config = root.path().join("shared-config");
+        fs::create_dir_all(&first_home).unwrap();
+        fs::create_dir_all(&second_home).unwrap();
+
+        let _home_guard = EnvVarGuard::set("HOME", first_home.as_os_str());
+        let _config_guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", shared_config.as_os_str());
+        let clients = make_filters(&[ClientId::Claude]);
+        let first_scope = CacheReportScope::for_request(None, None, None, None).unwrap();
+        save_cached_data(
+            &UsageData::default(),
+            &clients,
+            &GroupBy::Model,
+            &first_scope,
+            test_signature(),
+        )
+        .unwrap();
+
+        unsafe {
+            env::set_var("HOME", &second_home);
+        }
+        let second_scope = CacheReportScope::for_request(None, None, None, None).unwrap();
+        assert_ne!(first_scope, second_scope);
+        assert!(first_scope.use_env_roots);
+        assert!(second_scope.use_env_roots);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &second_scope),
+            CacheResult::Miss
+        ));
+
+        let explicit_second_scope = CacheReportScope::for_request(
+            Some(second_home.to_string_lossy().into_owned()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            second_scope.resolved_home_dir,
+            explicit_second_scope.resolved_home_dir
+        );
+        assert!(second_scope.use_env_roots);
+        assert!(!explicit_second_scope.use_env_roots);
+        assert_ne!(second_scope, explicit_second_scope);
     }
 
     #[test]
@@ -2403,6 +2486,7 @@ mod tests {
         .unwrap();
         cached["timestamp"] = serde_json::Value::from(fresh_timestamp_ms());
         cached["schemaVersion"] = serde_json::Value::from(CACHE_SCHEMA_VERSION);
+        cached["reportScope"] = serde_json::to_value(CacheReportScope::default()).unwrap();
         cached["sourceInventorySignature"] = serde_json::json!(vec![0x5a_u8; 32]);
         fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
 
