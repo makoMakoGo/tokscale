@@ -701,6 +701,46 @@ fn report_execution_plan_does_not_depend_on_terminal_state() {
 }
 
 #[test]
+fn json_report_plan_preserves_explicit_no_spinner() {
+    let home = tempfile::TempDir::new().unwrap();
+    let home = home.path().to_str().unwrap();
+    let resolve = |explicit_no_spinner: bool| {
+        let mut argv = vec!["tokscale", "models", "--home", home, "--json"];
+        if explicit_no_spinner {
+            argv.push("--no-spinner");
+        }
+        let cli = Cli::try_parse_from(argv).expect("models command parses");
+        let plan = ExecutionPlan::resolve(
+            cli,
+            TerminalState {
+                stdin: false,
+                stdout: false,
+            },
+        )
+        .expect("models plan resolves");
+        let ExecutionPlan::Models(plan) = plan else {
+            panic!("expected models plan");
+        };
+        plan.report
+    };
+
+    let implicit = resolve(false);
+    let explicit = resolve(true);
+    assert!(implicit.json);
+    assert!(explicit.json);
+    assert!(!implicit.no_spinner);
+    assert!(explicit.no_spinner);
+}
+
+#[test]
+fn effective_spinner_policy_keeps_json_quiet_without_erasing_explicit_intent() {
+    assert!(!super::effective_no_spinner(false, false));
+    assert!(super::effective_no_spinner(false, true));
+    assert!(super::effective_no_spinner(true, false));
+    assert!(super::effective_no_spinner(true, true));
+}
+
+#[test]
 fn tui_execution_plan_requires_both_interactive_streams() {
     for terminal in [
         TerminalState {

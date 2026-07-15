@@ -848,7 +848,7 @@ fn resolve_report(args: ReportArgs) -> Result<LocalReportPlan, CliFailure> {
         source: resolve_source(args.source)?,
         date: resolve_date(args.date)?,
         benchmark: args.benchmark,
-        no_spinner: args.no_spinner || args.json,
+        no_spinner: args.no_spinner,
     })
 }
 

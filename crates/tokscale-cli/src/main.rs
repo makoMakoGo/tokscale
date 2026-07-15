@@ -80,6 +80,7 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
         }
         ExecutionPlan::Models(plan) => {
             let report = plan.report;
+            let no_spinner = effective_no_spinner(report.json, report.no_spinner);
             run_models_report(
                 report.json,
                 report.source.home,
@@ -88,7 +89,7 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
                 report.date.until,
                 report.date.year,
                 report.benchmark,
-                report.no_spinner,
+                no_spinner,
                 report.date.today,
                 report.date.week,
                 report.date.month,
@@ -103,7 +104,7 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             plan.date.until,
             plan.date.year,
             plan.benchmark,
-            plan.no_spinner,
+            effective_no_spinner(plan.json, plan.no_spinner),
             plan.date.today,
             plan.date.week,
             plan.date.month,
@@ -116,7 +117,7 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             plan.date.until,
             plan.date.year,
             plan.benchmark,
-            plan.no_spinner,
+            effective_no_spinner(plan.json, plan.no_spinner),
             plan.date.today,
             plan.date.week,
             plan.date.month,
@@ -129,7 +130,7 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             plan.date.until,
             plan.date.year,
             plan.benchmark,
-            plan.no_spinner,
+            effective_no_spinner(plan.json, plan.no_spinner),
         ),
         ExecutionPlan::Clients(plan) => {
             run_clients_command(plan.json, plan.source.home, plan.source.clients)
@@ -154,7 +155,7 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
                 &model_id,
                 json,
                 source.map(PricingSource::as_str),
-                no_spinner || json,
+                effective_no_spinner(json, no_spinner),
             ),
             PricingSubcommand::Overrides { json } => run_pricing_list_overrides(json),
         },
@@ -175,6 +176,10 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
     }?;
 
     Ok(ExecutionOutcome::Completed)
+}
+
+const fn effective_no_spinner(json: bool, explicit_no_spinner: bool) -> bool {
+    json || explicit_no_spinner
 }
 
 fn run_wrapped_command(plan: WrappedPlan) -> Result<()> {

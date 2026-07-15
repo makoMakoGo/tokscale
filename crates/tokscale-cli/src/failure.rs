@@ -97,7 +97,6 @@ impl InvalidConfiguration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context as _;
     use std::path::PathBuf;
 
     #[test]

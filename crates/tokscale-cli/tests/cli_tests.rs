@@ -1183,6 +1183,25 @@ fn test_custom_date_range_must_be_ordered() {
 }
 
 #[test]
+fn json_report_suppresses_spinner_without_explicit_no_spinner() {
+    let tmp = create_empty_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "opencode"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("valid JSON report");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Scanning session data..."), "{stderr}");
+    assert!(!stderr.contains("\x1b[?25l"), "{stderr}");
+}
+
+#[test]
 fn test_theme_flag_is_owned_by_tui() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.args(["tui", "--theme", "blue", "--help"])
