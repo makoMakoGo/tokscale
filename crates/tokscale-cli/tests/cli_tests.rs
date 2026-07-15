@@ -3777,6 +3777,23 @@ fn test_time_metrics_table_output() {
 }
 
 #[test]
+fn test_time_metrics_benchmark_flag() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .args([
+            "time-metrics",
+            "--client",
+            "opencode",
+            "--no-spinner",
+            "--benchmark",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Processing time").not())
+        .stderr(predicate::str::contains("Processing time"));
+}
+
+#[test]
 fn test_models_table_with_client_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
