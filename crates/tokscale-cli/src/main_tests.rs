@@ -656,6 +656,18 @@ fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
         Some("use `tokscale tui --client codex`")
     );
     assert_eq!(
+        legacy_invocation_hint(&strings(&["--client=codex"])).as_deref(),
+        Some("use `tokscale tui --client=codex`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["tui", "--json"])).as_deref(),
+        Some("use `tokscale models --json`")
+    );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["--client=codex", "models"])).as_deref(),
+        Some("use `tokscale models --client=codex`")
+    );
+    assert_eq!(
         legacy_invocation_hint(&strings(&["pricing", "list-overrides"])).as_deref(),
         Some("use `tokscale pricing overrides`")
     );
@@ -672,6 +684,22 @@ fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
         None,
         "migration hints must never suggest another invalid invocation"
     );
+    assert_eq!(
+        legacy_invocation_hint(&strings(&["headless", "codex", "--", "tui", "--json"])),
+        None,
+        "child-process arguments after -- must not influence migration hints"
+    );
+}
+
+#[test]
+fn misplaced_and_equals_form_options_remain_parse_errors() {
+    for args in [
+        vec!["tokscale", "tui", "--json"],
+        vec!["tokscale", "--client=codex"],
+    ] {
+        let error = Cli::try_parse_from(args).expect_err("legacy invocation must be rejected");
+        assert_eq!(error.exit_code(), 2);
+    }
 }
 
 #[test]

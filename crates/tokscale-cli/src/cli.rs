@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::NaiveDate;
-use clap::{error::ErrorKind, Args, Parser, Subcommand, ValueEnum};
+use clap::{error::ErrorKind, Arg, Args, Command, CommandFactory, Parser, Subcommand, ValueEnum};
 use tokscale_core::{ClientId, GroupBy};
 
 use crate::commands::shared::{
@@ -65,7 +65,7 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
                 replacement.extend(arguments.iter().skip(2).cloned());
                 return valid_replacement_hint(replacement);
             }
-            Some("lookup") if arguments.iter().any(|argument| argument == "--provider") => {
+            Some("lookup") if contains_long_option(arguments, "provider") => {
                 return Some("replace `--provider` with `--source`".to_string());
             }
             Some(value) if !value.starts_with('-') && value != "lookup" && value != "overrides" => {
@@ -84,61 +84,17 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
         );
     }
 
-    if arguments
-        .iter()
-        .any(|argument| matches!(argument.as_str(), "--write-cache" | "--no-write-cache"))
+    if contains_long_option(arguments, "write-cache")
+        || contains_long_option(arguments, "no-write-cache")
     {
         return Some(
             "use `tokscale cache warm` to build the TUI aggregate cache explicitly".to_string(),
         );
     }
 
-    const COMMANDS: &[&str] = &[
-        "tui",
-        "models",
-        "monthly",
-        "hourly",
-        "time-metrics",
-        "clients",
-        "graph",
-        "pricing",
-        "usage",
-        "wrapped",
-        "headless",
-        "cache",
-        "antigravity",
-        "warp",
-    ];
-    let mut command_index = None;
-    let mut option_takes_next_value = false;
-    for (index, argument) in arguments.iter().enumerate() {
-        if option_takes_next_value {
-            option_takes_next_value = false;
-            continue;
-        }
-        if matches!(
-            argument.as_str(),
-            "--client"
-                | "-c"
-                | "--year"
-                | "--since"
-                | "--until"
-                | "--home"
-                | "--group-by"
-                | "--theme"
-                | "-t"
-                | "--refresh"
-                | "-r"
-        ) {
-            option_takes_next_value = true;
-            continue;
-        }
-        if index > 0 && COMMANDS.contains(&argument.as_str()) {
-            command_index = Some(index);
-            break;
-        }
-    }
-    if let Some(command_index) = command_index {
+    let command = Cli::command();
+    let command_index = top_level_command_index(&command, arguments);
+    if let Some(command_index @ 1..) = command_index {
         let mut replacement = vec![arguments[command_index].clone()];
         replacement.extend(
             arguments
@@ -152,63 +108,176 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
         return valid_replacement_hint(replacement);
     }
 
-    if COMMANDS.contains(&first) {
-        if arguments.iter().any(|argument| argument == "--light") {
-            let replacement = arguments
-                .iter()
-                .filter(|argument| argument.as_str() != "--light")
-                .cloned()
-                .collect::<Vec<_>>();
-            return valid_replacement_hint(replacement);
+    if command_index == Some(0) && arguments.iter().any(|argument| argument == "--light") {
+        let replacement = arguments
+            .iter()
+            .filter(|argument| argument.as_str() != "--light")
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(hint) = valid_replacement_hint(replacement) {
+            return Some(hint);
         }
-        return None;
     }
 
-    let known_root_option = arguments.iter().any(|argument| {
-        matches!(
-            argument.as_str(),
-            "--json"
-                | "--light"
-                | "--client"
-                | "-c"
-                | "--today"
-                | "--week"
-                | "--month"
-                | "--year"
-                | "--since"
-                | "--until"
-                | "--home"
-                | "--group-by"
-                | "--benchmark"
-                | "--no-spinner"
-                | "--theme"
-                | "-t"
-                | "--refresh"
-                | "-r"
-                | "--debug"
-        )
-    });
-    if !known_root_option {
+    let target = migration_target(&command, arguments)?;
+    if command_index == Some(0) && first == target {
         return None;
     }
-
-    let report_option = arguments.iter().any(|argument| {
-        matches!(
-            argument.as_str(),
-            "--json" | "--light" | "--group-by" | "--benchmark" | "--no-spinner"
-        )
-    });
-    let command = if report_option { "models" } else { "tui" };
     let migrated = arguments
         .iter()
-        .filter(|argument| argument.as_str() != "--light")
+        .enumerate()
+        .filter(|(index, argument)| Some(*index) != command_index && argument.as_str() != "--light")
+        .map(|(_, argument)| argument)
         .cloned()
         .collect::<Vec<_>>();
     valid_replacement_hint(
-        std::iter::once(command.to_string())
+        std::iter::once(target.to_string())
             .chain(migrated)
             .collect(),
     )
+}
+
+#[derive(Clone, Copy)]
+enum OptionName<'a> {
+    Long(&'a str),
+    Short(char),
+}
+
+impl OptionName<'_> {
+    fn matches(self, argument: &Arg) -> bool {
+        match self {
+            Self::Long(name) => argument.get_long() == Some(name),
+            Self::Short(name) => argument.get_short() == Some(name),
+        }
+    }
+
+    fn is_long(self, expected: &str) -> bool {
+        matches!(self, Self::Long(name) if name == expected)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OptionToken<'a> {
+    name: OptionName<'a>,
+    has_inline_value: bool,
+}
+
+fn option_token(argument: &str) -> Option<OptionToken<'_>> {
+    if argument == "--" {
+        return None;
+    }
+    if let Some(body) = argument.strip_prefix("--") {
+        let (name, has_inline_value) = match body.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (body, false),
+        };
+        return (!name.is_empty()).then_some(OptionToken {
+            name: OptionName::Long(name),
+            has_inline_value,
+        });
+    }
+    let body = argument.strip_prefix('-')?;
+    let mut characters = body.chars();
+    let name = characters.next()?;
+    Some(OptionToken {
+        name: OptionName::Short(name),
+        has_inline_value: characters.next().is_some(),
+    })
+}
+
+fn contains_long_option(arguments: &[String], expected: &str) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .filter_map(|argument| option_token(argument))
+        .any(|option| option.name.is_long(expected))
+}
+
+fn command_defines_option(command: &Command, option: OptionName<'_>) -> bool {
+    command
+        .get_arguments()
+        .any(|argument| option.matches(argument))
+}
+
+fn command_tree_option_takes_value(command: &Command, option: OptionName<'_>) -> bool {
+    command
+        .get_arguments()
+        .any(|argument| option.matches(argument) && argument.get_action().takes_values())
+        || command
+            .get_subcommands()
+            .any(|subcommand| command_tree_option_takes_value(subcommand, option))
+}
+
+fn top_level_command_index(command: &Command, arguments: &[String]) -> Option<usize> {
+    let mut option_takes_next_value = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument == "--" {
+            break;
+        }
+        if option_takes_next_value {
+            option_takes_next_value = false;
+            continue;
+        }
+        if let Some(option) = option_token(argument) {
+            option_takes_next_value =
+                !option.has_inline_value && command_tree_option_takes_value(command, option.name);
+            continue;
+        }
+        if command
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == argument)
+        {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn migration_target<'a>(command: &'a Command, arguments: &[String]) -> Option<&'a str> {
+    // TUI and Models are the canonical v5 destinations for the former root
+    // options. Reading their actual Clap arguments keeps ownership in one
+    // place; options shared by both retain the old root command's TUI default.
+    let tui = command
+        .find_subcommand("tui")
+        .expect("Clap command tree must contain tui");
+    let models = command
+        .find_subcommand("models")
+        .expect("Clap command tree must contain models");
+    let mut models_only = false;
+    let mut tui_only = false;
+    let mut shared = false;
+    let mut option_takes_next_value = false;
+
+    for argument in arguments {
+        if argument == "--" {
+            break;
+        }
+        if option_takes_next_value {
+            option_takes_next_value = false;
+            continue;
+        }
+        let Some(option) = option_token(argument) else {
+            continue;
+        };
+        option_takes_next_value =
+            !option.has_inline_value && command_tree_option_takes_value(command, option.name);
+
+        let belongs_to_tui = command_defines_option(tui, option.name);
+        let belongs_to_models =
+            command_defines_option(models, option.name) || option.name.is_long("light");
+        match (belongs_to_tui, belongs_to_models) {
+            (true, true) => shared = true,
+            (true, false) => tui_only = true,
+            (false, true) => models_only = true,
+            (false, false) => {}
+        }
+    }
+
+    match (models_only, tui_only, shared) {
+        (true, false, _) => Some(models.get_name()),
+        (false, true, _) | (false, false, true) => Some(tui.get_name()),
+        _ => None,
+    }
 }
 
 fn valid_replacement_hint(replacement: Vec<String>) -> Option<String> {
