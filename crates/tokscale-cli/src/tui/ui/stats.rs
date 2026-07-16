@@ -11,7 +11,6 @@ use crate::tui::app::{App, ClickAction};
 
 const CELL_WIDTH: u16 = 2;
 const GRAPH_PANEL_H: u16 = 12;
-const STATS_PANEL_H: u16 = 12;
 const STATS_COMPACT_H: u16 = 8;
 const BREAKDOWN_MIN_H: u16 = 6;
 const MONTH_LABELS: &[&str] = &[
@@ -21,16 +20,11 @@ const DAY_LABELS: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatsLayoutMode {
-    StatsOnly,
     StatsWithBreakdown,
     BreakdownOnly,
 }
 
-fn stats_layout_mode(area_height: u16, has_selected_cell: bool) -> StatsLayoutMode {
-    if !has_selected_cell {
-        return StatsLayoutMode::StatsOnly;
-    }
-
+fn stats_layout_mode(area_height: u16) -> StatsLayoutMode {
     if area_height >= GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H {
         StatsLayoutMode::StatsWithBreakdown
     } else {
@@ -39,8 +33,7 @@ fn stats_layout_mode(area_height: u16, has_selected_cell: bool) -> StatsLayoutMo
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    let has_selected_cell = app.selected_graph_cell.is_some();
-    match stats_layout_mode(area.height, has_selected_cell) {
+    match stats_layout_mode(area.height) {
         StatsLayoutMode::StatsWithBreakdown => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -67,18 +60,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             render_graph(frame, app, chunks[0]);
             render_breakdown_panel(frame, app, chunks[1]);
         }
-        StatsLayoutMode::StatsOnly => {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(GRAPH_PANEL_H),
-                    Constraint::Min(STATS_PANEL_H),
-                ])
-                .split(area);
-
-            render_graph(frame, app, chunks[0]);
-            render_stats_panel(frame, app, chunks[1]);
-        }
     }
 }
 
@@ -89,7 +70,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_muted = app.theme.muted;
     let theme_colors = app.theme.colors;
     let subtle_text_style = app.theme.subtle_text_style();
-    let selected_cell = app.selected_graph_cell;
+    let selected_date = app.stats_breakdown_date;
     let is_narrow = app.is_narrow();
 
     let block = Block::default()
@@ -146,7 +127,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
         theme_colors[idx]
     };
 
-    let mut click_areas_to_add: Vec<(Rect, usize, usize)> = Vec::new();
+    let mut click_areas_to_add: Vec<(Rect, chrono::NaiveDate)> = Vec::new();
 
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
         let x = graph_start_x + (week_idx as u16 * CELL_WIDTH);
@@ -158,8 +139,9 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 continue;
             }
 
-            let actual_week_idx = week_idx + start_week;
-            let is_selected = selected_cell == Some((actual_week_idx, day_idx));
+            let is_selected = day_opt
+                .as_ref()
+                .is_some_and(|day| day.date == selected_date);
 
             let (cell_str, style) = match day_opt {
                 Some(day) => {
@@ -182,12 +164,14 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
             let cell = Paragraph::new(cell_str).style(style);
             frame.render_widget(cell, Rect::new(x, y, CELL_WIDTH, 1));
 
-            click_areas_to_add.push((Rect::new(x, y, CELL_WIDTH, 1), actual_week_idx, day_idx));
+            if let Some(day) = day_opt {
+                click_areas_to_add.push((Rect::new(x, y, CELL_WIDTH, 1), day.date));
+            }
         }
     }
 
-    for (rect, week, day) in click_areas_to_add {
-        app.add_click_area(rect, ClickAction::GraphCell { week, day });
+    for (rect, date) in click_areas_to_add {
+        app.add_click_area(rect, ClickAction::GraphDay { date });
     }
 
     let month_y = inner.y;
@@ -230,7 +214,12 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if inner.height == 0 || inner.width == 0 {
+    let content = inner.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+
+    if content.height == 0 || content.width == 0 {
         return;
     }
 
@@ -295,11 +284,11 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_else(|| app.model_color("N/A"));
     let sessions: u32 = app.data.models.iter().map(|m| m.session_count).sum();
 
-    let col1_width = if is_narrow { 36u16 } else { 60u16 };
-    let col2_x = inner.x + col1_width;
-    let y_max = inner.y + inner.height;
+    let col1_width = (if is_narrow { 36u16 } else { 60u16 }).min(content.width);
+    let col2_x = content.x + col1_width;
+    let y_max = content.y + content.height;
 
-    let mut y = inner.y;
+    let mut y = content.y;
 
     let row1_label = if is_narrow {
         "Model:"
@@ -318,7 +307,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(model_color),
         ),
     ]);
-    frame.render_widget(Paragraph::new(row1), Rect::new(inner.x, y, col1_width, 1));
+    frame.render_widget(Paragraph::new(row1), Rect::new(content.x, y, col1_width, 1));
 
     let tokens_label = if is_narrow {
         "Tokens:"
@@ -335,7 +324,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     frame.render_widget(
         Paragraph::new(row1_col2),
-        Rect::new(col2_x, y, inner.width.saturating_sub(col1_width), 1),
+        Rect::new(col2_x, y, content.width.saturating_sub(col1_width), 1),
     );
 
     y += 1;
@@ -348,7 +337,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(sessions.to_string(), Style::default().fg(Color::Cyan)),
     ]);
-    frame.render_widget(Paragraph::new(row2), Rect::new(inner.x, y, col1_width, 1));
+    frame.render_widget(Paragraph::new(row2), Rect::new(content.x, y, col1_width, 1));
 
     let cost_label = if is_narrow { "Cost:" } else { "Total cost:" };
     let row2_col2 = Line::from(vec![
@@ -358,7 +347,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     frame.render_widget(
         Paragraph::new(row2_col2),
-        Rect::new(col2_x, y, inner.width.saturating_sub(col1_width), 1),
+        Rect::new(col2_x, y, content.width.saturating_sub(col1_width), 1),
     );
 
     y += 1;
@@ -380,7 +369,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Cyan),
         ),
     ]);
-    frame.render_widget(Paragraph::new(row3), Rect::new(inner.x, y, col1_width, 1));
+    frame.render_widget(Paragraph::new(row3), Rect::new(content.x, y, col1_width, 1));
 
     let longest_label = if is_narrow {
         "Max streak:"
@@ -397,7 +386,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     frame.render_widget(
         Paragraph::new(row3_col2),
-        Rect::new(col2_x, y, inner.width.saturating_sub(col1_width), 1),
+        Rect::new(col2_x, y, content.width.saturating_sub(col1_width), 1),
     );
 
     y += 1;
@@ -416,7 +405,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     frame.render_widget(
         Paragraph::new(active_days_line),
-        Rect::new(inner.x, y, col1_width, 1),
+        Rect::new(content.x, y, col1_width, 1),
     );
 
     y += 2;
@@ -439,7 +428,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     let legend_line = Line::from(legend_spans);
     frame.render_widget(
         Paragraph::new(legend_line),
-        Rect::new(inner.x, y, inner.width, 1),
+        Rect::new(content.x, y, content.width, 1),
     );
 
     y += 2;
@@ -459,7 +448,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         ));
         frame.render_widget(
             Paragraph::new(footer),
-            Rect::new(inner.x, y, inner.width, 1),
+            Rect::new(content.x, y, content.width, 1),
         );
     }
 }
@@ -469,7 +458,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Day Breakdown (ESC to close) ",
+            " Day Breakdown ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -479,51 +468,34 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let (week_idx, day_idx) = match app.selected_graph_cell {
-        Some(cell) => cell,
-        None => return,
-    };
-
-    let graph = match &app.data.graph {
-        Some(g) => g,
-        None => {
-            app.stats_breakdown_total_lines = 0;
-            return;
-        }
-    };
-
-    let day = match graph
-        .weeks
-        .get(week_idx)
-        .and_then(|w| w.get(day_idx))
-        .and_then(|d| d.as_ref())
-    {
-        Some(d) => d,
-        None => {
-            app.stats_breakdown_total_lines = 0;
-            let no_data = Paragraph::new("No data for this day")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center);
-            frame.render_widget(no_data, inner);
-            return;
-        }
-    };
-
-    let daily_usage = app.data.daily.iter().find(|d| d.date == day.date);
+    let date = app.stats_breakdown_date;
+    let daily_usage = app.data.daily.iter().find(|day| day.date == date);
+    let graph_day = app.data.graph.as_ref().and_then(|graph| {
+        graph
+            .weeks
+            .iter()
+            .flat_map(|week| week.iter())
+            .filter_map(|day| day.as_ref())
+            .find(|day| day.date == date)
+    });
+    let (day_tokens, day_cost) = daily_usage
+        .map(|day| (day.tokens.total(), day.cost))
+        .or_else(|| graph_day.map(|day| (day.tokens, day.cost)))
+        .unwrap_or((0, 0.0));
 
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
-                day.date.format("%a, %b %d, %Y").to_string(),
+                date.format("%a, %b %d, %Y").to_string(),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(format_tokens(day.tokens), Style::default().fg(Color::Cyan)),
+            Span::styled(format_tokens(day_tokens), Style::default().fg(Color::Cyan)),
             Span::raw("  "),
             Span::styled(
-                format_cost(day.cost),
+                format_cost(day_cost),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -688,30 +660,91 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
 
-    #[test]
-    fn stats_layout_without_selection_keeps_graph_fixed() {
-        assert_eq!(stats_layout_mode(24, false), StatsLayoutMode::StatsOnly);
-        assert_eq!(stats_layout_mode(60, false), StatsLayoutMode::StatsOnly);
+    use crate::tui::app::TuiConfig;
+
+    fn make_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(crate::tui::app::Tab::Stats),
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.handle_resize(width, 40);
+        app
+    }
+
+    fn render_symbols(app: &mut App, width: u16, height: u16) -> Vec<Vec<String>> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let frame = terminal
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| frame.buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn symbols_at(lines: &[Vec<String>], y: u16, x: u16, width: u16) -> String {
+        lines[y as usize][x as usize..(x + width) as usize].join("")
     }
 
     #[test]
-    fn stats_layout_with_selection_keeps_all_panels_when_roomy() {
+    fn stats_layout_always_includes_breakdown_when_roomy() {
         assert_eq!(
-            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H, true),
+            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H),
             StatsLayoutMode::StatsWithBreakdown
         );
-        assert_eq!(
-            stats_layout_mode(60, true),
-            StatsLayoutMode::StatsWithBreakdown
-        );
+        assert_eq!(stats_layout_mode(60), StatsLayoutMode::StatsWithBreakdown);
     }
 
     #[test]
-    fn stats_layout_with_selection_drops_stats_when_constrained() {
+    fn stats_layout_keeps_breakdown_when_constrained() {
         assert_eq!(
-            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H - 1, true),
+            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H - 1),
             StatsLayoutMode::BreakdownOnly
         );
+    }
+
+    #[test]
+    fn stats_summary_content_has_one_column_inset() {
+        let mut app = make_app(120);
+        let lines = render_symbols(&mut app, 120, 40);
+
+        // Stats starts at y=12. Its border is x=0, its raw inner area starts at
+        // x=1, and visible content follows the one-column inset used by other tabs.
+        for y in 13..=16 {
+            assert_eq!(symbols_at(&lines, y, 1, 1), " ");
+            assert_ne!(symbols_at(&lines, y, 2, 1), " ");
+        }
+        assert_eq!(symbols_at(&lines, 18, 1, 1), " ");
+        assert_ne!(symbols_at(&lines, 18, 2, 1), " ");
+    }
+
+    #[test]
+    fn breakdown_is_rendered_for_today_without_usage_data() {
+        let mut app = make_app(120);
+        app.stats_breakdown_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        let lines = render_symbols(&mut app, 120, 40);
+        let rendered = lines
+            .iter()
+            .map(|line| line.join(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Day Breakdown"));
+        assert!(rendered.contains("Thu, Jul 16, 2026"));
+        assert!(!rendered.contains("ESC to close"));
     }
 }

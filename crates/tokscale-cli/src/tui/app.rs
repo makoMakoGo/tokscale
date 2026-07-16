@@ -217,7 +217,7 @@ pub type PeriodDetailRow = DetailRow;
 pub enum ClickAction {
     Tab(Tab),
     Sort(SortField),
-    GraphCell { week: usize, day: usize },
+    GraphDay { date: NaiveDate },
 }
 
 struct DetailRowAccumulator {
@@ -376,7 +376,7 @@ pub struct App {
     pub selected_period_detail: Option<PeriodDetailSelection>,
     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
 
-    pub selected_graph_cell: Option<(usize, usize)>,
+    pub stats_breakdown_date: NaiveDate,
     pub stats_breakdown_total_lines: usize,
 
     pub auto_refresh: bool,
@@ -531,7 +531,7 @@ impl App {
             selected_daily_detail_date: None,
             selected_period_detail: None,
             detail_sort_contexts: HashMap::new(),
-            selected_graph_cell: None,
+            stats_breakdown_date: chrono::Local::now().date_naive(),
             stats_breakdown_total_lines: 0,
             auto_refresh,
             auto_refresh_interval,
@@ -918,9 +918,6 @@ impl App {
             KeyCode::Enter if self.current_tab == Tab::Weekly => {
                 self.open_selected_period_detail(PeriodKind::Weekly);
             }
-            KeyCode::Enter if self.current_tab == Tab::Stats => {
-                self.handle_graph_selection();
-            }
             KeyCode::Esc | KeyCode::Backspace
                 if self.current_tab == Tab::Daily && self.is_daily_detail_active() =>
             {
@@ -930,11 +927,6 @@ impl App {
                 if self.current_period_kind().is_some() && self.is_period_detail_active() =>
             {
                 self.close_period_detail();
-            }
-            KeyCode::Esc if self.selected_graph_cell.is_some() => {
-                self.selected_graph_cell = None;
-                self.stats_breakdown_total_lines = 0;
-                self.reset_current_list_interaction();
             }
             _ => {}
         }
@@ -1020,8 +1012,8 @@ impl App {
                             ClickAction::Sort(field) => {
                                 self.set_sort(*field);
                             }
-                            ClickAction::GraphCell { week, day } => {
-                                self.selected_graph_cell = Some((*week, *day));
+                            ClickAction::GraphDay { date } => {
+                                self.stats_breakdown_date = *date;
                                 self.stats_breakdown_total_lines = 0;
                                 self.selected_index = 0;
                                 self.scroll_offset = 0;
@@ -1188,7 +1180,7 @@ impl App {
     /// Stats breakdown is skipped here because `render_breakdown_panel` clamps
     /// with the actual panel height (not the full-terminal `max_visible_items`).
     fn clamp_selection(&mut self) {
-        if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
+        if self.current_tab == Tab::Stats {
             return;
         }
 
@@ -1231,8 +1223,8 @@ impl App {
             self.selected_period_detail = None;
             self.clear_detail_sort_context(DetailSortContextKind::Period);
         }
-        if target != Tab::Stats {
-            self.selected_graph_cell = None;
+        if target == Tab::Stats {
+            self.stats_breakdown_date = chrono::Local::now().date_naive();
             self.stats_breakdown_total_lines = 0;
         }
 
@@ -1244,6 +1236,9 @@ impl App {
         self.sort_field = field;
         self.sort_direction = dir;
         self.restore_current_list_interaction();
+        if target == Tab::Stats {
+            self.reset_current_list_interaction();
+        }
         self.refresh_current_tab_if_overdue();
         self.maybe_fetch_subscription_usage_on_usage_entry();
     }
@@ -1435,7 +1430,7 @@ impl App {
 
     fn apply_list_move(&mut self, command: MoveCommand) -> InteractionOutcome {
         let len = self.get_current_list_len();
-        let wrap = if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
+        let wrap = if self.current_tab == Tab::Stats {
             WrapMode::Clamp
         } else {
             WrapMode::Wrap
@@ -1465,13 +1460,7 @@ impl App {
             Tab::Weekly => build_period_usage(&self.data.daily, PeriodKind::Weekly).len(),
             Tab::Daily => self.data.daily.len(),
             Tab::Hourly => self.data.hourly.len(),
-            Tab::Stats => {
-                if self.selected_graph_cell.is_some() {
-                    self.stats_breakdown_total_lines
-                } else {
-                    0
-                }
-            }
+            Tab::Stats => self.stats_breakdown_total_lines,
             Tab::Usage => self
                 .subscription_usage
                 .iter()
@@ -1498,7 +1487,6 @@ impl App {
             self.selected_index = 0;
             self.scroll_offset = 0;
         } else {
-            self.selected_graph_cell = None;
             self.stats_breakdown_total_lines = 0;
             self.reset_current_list_interaction();
         }
@@ -1538,7 +1526,6 @@ impl App {
                 self.scroll_offset = 0;
             }
 
-            self.selected_graph_cell = None;
             self.persist_current_list_interaction();
             self.set_local_report_status("Jumped to today's usage");
         } else {
@@ -1866,12 +1853,6 @@ impl App {
                 Err(e) => self.set_status(&format!("Export failed: {}", e)),
             },
             Err(e) => self.set_status(&format!("Export failed: {}", e)),
-        }
-    }
-
-    fn handle_graph_selection(&mut self) {
-        if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
-            self.set_status("Press ESC to deselect");
         }
     }
 
@@ -2903,13 +2884,11 @@ mod tests {
         app.selected_index = 3;
         app.scroll_offset = 1;
         app.switch_tab(Tab::Overview);
-        app.selected_graph_cell = Some((2, 4));
 
         app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Models);
         assert_eq!(app.selected_index, 3);
         assert_eq!(app.scroll_offset, 1);
-        assert_eq!(app.selected_graph_cell, None);
     }
 
     #[test]
@@ -3901,22 +3880,13 @@ mod tests {
     // ── handle_key_event: misc keys ─────────────────────────────────
 
     #[test]
-    fn test_handle_key_esc_clears_graph_selection() {
+    fn test_stats_breakdown_date_defaults_to_today() {
         let mut app = make_app();
-        app.selected_graph_cell = Some((1, 2));
+        app.stats_breakdown_date = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
 
-        app.handle_key_event(key(KeyCode::Esc));
-        assert_eq!(app.selected_graph_cell, None);
-    }
-
-    #[test]
-    fn test_handle_key_enter_on_stats() {
-        let mut app = make_app();
-        app.current_tab = Tab::Stats;
-        app.selected_graph_cell = Some((1, 2));
-
-        app.handle_key_event(key(KeyCode::Enter));
-        assert!(app.status_message.is_some());
+        app.switch_tab(Tab::Stats);
+        assert_eq!(app.stats_breakdown_date, chrono::Local::now().date_naive());
+        assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]
@@ -4169,12 +4139,10 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_mouse_click_graph_cell() {
+    fn test_handle_mouse_click_graph_day() {
         let mut app = make_app();
-        app.add_click_area(
-            Rect::new(10, 5, 3, 3),
-            ClickAction::GraphCell { week: 2, day: 3 },
-        );
+        let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        app.add_click_area(Rect::new(10, 5, 3, 3), ClickAction::GraphDay { date });
 
         let event = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -4183,7 +4151,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         app.handle_mouse_event(event);
-        assert_eq!(app.selected_graph_cell, Some((2, 3)));
+        assert_eq!(app.stats_breakdown_date, date);
     }
 
     #[test]
