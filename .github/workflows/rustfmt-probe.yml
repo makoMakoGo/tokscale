@@ -1,9 +1,9 @@
 name: Prepare Final TUI Sources
 
 on:
-  push:
+  pull_request:
     branches:
-      - codex/issue-153-rustfmt-probe
+      - personal/local-clients
 
 permissions:
   contents: write
