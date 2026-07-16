@@ -11,6 +11,7 @@ mod model_usage_layout;
 mod models;
 mod overview;
 mod period;
+mod radar;
 pub mod spinner;
 mod stats;
 mod table_layout;

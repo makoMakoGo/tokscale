@@ -376,8 +376,7 @@ pub struct App {
     pub selected_period_detail: Option<PeriodDetailSelection>,
     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
 
-    pub stats_breakdown_date: NaiveDate,
-    pub stats_breakdown_total_lines: usize,
+    pub stats_insights_date: NaiveDate,
 
     pub auto_refresh: bool,
     pub auto_refresh_interval: Duration,
@@ -531,8 +530,7 @@ impl App {
             selected_daily_detail_date: None,
             selected_period_detail: None,
             detail_sort_contexts: HashMap::new(),
-            stats_breakdown_date: chrono::Local::now().date_naive(),
-            stats_breakdown_total_lines: 0,
+            stats_insights_date: chrono::Local::now().date_naive(),
             auto_refresh,
             auto_refresh_interval,
             last_refresh: Instant::now(),
@@ -1013,8 +1011,7 @@ impl App {
                                 self.set_sort(*field);
                             }
                             ClickAction::GraphDay { date } => {
-                                self.stats_breakdown_date = *date;
-                                self.stats_breakdown_total_lines = 0;
+                                self.stats_insights_date = *date;
                                 self.selected_index = 0;
                                 self.scroll_offset = 0;
                             }
@@ -1177,8 +1174,8 @@ impl App {
     }
 
     /// Clamp selection and scroll offset to valid bounds after data/resize changes.
-    /// Stats breakdown is skipped here because `render_breakdown_panel` clamps
-    /// with the actual panel height (not the full-terminal `max_visible_items`).
+    /// The Stats tab is skipped: its Day Insights panel is fixed-size content
+    /// with no scrollable list.
     fn clamp_selection(&mut self) {
         if self.current_tab == Tab::Stats {
             return;
@@ -1224,8 +1221,7 @@ impl App {
             self.clear_detail_sort_context(DetailSortContextKind::Period);
         }
         if target == Tab::Stats {
-            self.stats_breakdown_date = chrono::Local::now().date_naive();
-            self.stats_breakdown_total_lines = 0;
+            self.stats_insights_date = chrono::Local::now().date_naive();
         }
 
         let (field, dir) = self
@@ -1460,7 +1456,7 @@ impl App {
             Tab::Weekly => build_period_usage(&self.data.daily, PeriodKind::Weekly).len(),
             Tab::Daily => self.data.daily.len(),
             Tab::Hourly => self.data.hourly.len(),
-            Tab::Stats => self.stats_breakdown_total_lines,
+            Tab::Stats => 0,
             Tab::Usage => self
                 .subscription_usage
                 .iter()
@@ -1487,7 +1483,6 @@ impl App {
             self.selected_index = 0;
             self.scroll_offset = 0;
         } else {
-            self.stats_breakdown_total_lines = 0;
             self.reset_current_list_interaction();
         }
         self.set_status(&format!(
@@ -3880,12 +3875,12 @@ mod tests {
     // ── handle_key_event: misc keys ─────────────────────────────────
 
     #[test]
-    fn test_stats_breakdown_date_defaults_to_today() {
+    fn test_stats_insights_date_defaults_to_today() {
         let mut app = make_app();
-        app.stats_breakdown_date = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        app.stats_insights_date = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
 
         app.switch_tab(Tab::Stats);
-        assert_eq!(app.stats_breakdown_date, chrono::Local::now().date_naive());
+        assert_eq!(app.stats_insights_date, chrono::Local::now().date_naive());
         assert_eq!(app.scroll_offset, 0);
     }
 
@@ -4151,7 +4146,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         app.handle_mouse_event(event);
-        assert_eq!(app.stats_breakdown_date, date);
+        assert_eq!(app.stats_insights_date, date);
     }
 
     #[test]

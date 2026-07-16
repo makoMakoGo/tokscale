@@ -1,19 +1,25 @@
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use std::collections::BTreeMap;
+use tokscale_core::usage_views::DailyUsage;
 
 use crate::tui::colors::get_client_color;
 
+use super::radar::{render_radar, RadarAxis};
 use super::widgets::{
     format_cost, format_tokens, get_client_display_name, truncate_model_display_name,
-    truncate_model_display_name_to, viewport_scrollbar_state,
+    truncate_model_display_name_to,
 };
 use crate::tui::app::{App, ClickAction};
 
 const CELL_WIDTH: u16 = 2;
 const GRAPH_PANEL_H: u16 = 12;
 const STATS_COMPACT_H: u16 = 8;
-const BREAKDOWN_MIN_H: u16 = 6;
+/// Smallest Day Insights panel height (including borders) that still hosts
+/// the radar: RADAR_MIN_H inner rows plus the two border rows. Used only as
+/// the threshold for adding the Stats summary panel.
+const INSIGHTS_MIN_H: u16 = RADAR_MIN_H + 2;
 const MONTH_LABELS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -21,45 +27,49 @@ const DAY_LABELS: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatsLayoutMode {
-    StatsWithBreakdown,
-    BreakdownOnly,
+    /// Graph + Stats summary + Day Insights.
+    WithSummary,
+    /// Graph + Day Insights (no room for the summary panel).
+    InsightsOnly,
 }
 
 fn stats_layout_mode(area_height: u16) -> StatsLayoutMode {
-    if area_height >= GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H {
-        StatsLayoutMode::StatsWithBreakdown
+    // Add the Stats summary panel only when Day Insights can still keep its
+    // radar; otherwise the summary appearing would make the radar vanish as
+    // the terminal grows.
+    if area_height >= GRAPH_PANEL_H + STATS_COMPACT_H + INSIGHTS_MIN_H {
+        StatsLayoutMode::WithSummary
     } else {
-        StatsLayoutMode::BreakdownOnly
+        StatsLayoutMode::InsightsOnly
     }
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Panels tile the full area: no gaps between borders. Any slack lives
+    // inside the Day Insights border.
     match stats_layout_mode(area.height) {
-        StatsLayoutMode::StatsWithBreakdown => {
+        StatsLayoutMode::WithSummary => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(GRAPH_PANEL_H),
                     Constraint::Length(STATS_COMPACT_H),
-                    Constraint::Min(BREAKDOWN_MIN_H),
+                    Constraint::Min(INSIGHTS_MIN_H),
                 ])
                 .split(area);
 
             render_graph(frame, app, chunks[0]);
             render_stats_panel(frame, app, chunks[1]);
-            render_breakdown_panel(frame, app, chunks[2]);
+            render_day_insights_panel(frame, app, chunks[2]);
         }
-        StatsLayoutMode::BreakdownOnly => {
+        StatsLayoutMode::InsightsOnly => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(GRAPH_PANEL_H),
-                    Constraint::Min(BREAKDOWN_MIN_H),
-                ])
+                .constraints([Constraint::Length(GRAPH_PANEL_H), Constraint::Min(0)])
                 .split(area);
 
             render_graph(frame, app, chunks[0]);
-            render_breakdown_panel(frame, app, chunks[1]);
+            render_day_insights_panel(frame, app, chunks[1]);
         }
     }
 }
@@ -71,7 +81,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme_muted = app.theme.muted;
     let theme_colors = app.theme.colors;
     let subtle_text_style = app.theme.subtle_text_style();
-    let selected_date = app.stats_breakdown_date;
+    let selected_date = app.stats_insights_date;
     let is_narrow = app.is_narrow();
 
     let block = Block::default()
@@ -482,12 +492,20 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
+const HOUR_STRIP_LEN: usize = 24;
+const RADAR_MIN_H: u16 = 9;
+const RADAR_MIN_W: u16 = 24;
+const SIDE_BY_SIDE_MIN_W: u16 = 72;
+const LEFT_COL_W: u16 = 44;
+
+type RankedModels = [(String, (u64, String, String))];
+
+fn render_day_insights_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Day Breakdown ",
+            " Day Insights ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -497,7 +515,7 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let date = app.stats_breakdown_date;
+    let date = app.stats_insights_date;
     let daily_usage = app.data.daily.iter().find(|day| day.date == date);
     let graph_day = app.data.graph.as_ref().and_then(|graph| {
         graph
@@ -512,178 +530,303 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         .or_else(|| graph_day.map(|day| (day.tokens, day.cost)))
         .unwrap_or((0, 0.0));
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                date.format("%a, %b %d, %Y").to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(format_tokens(day_tokens), Style::default().fg(Color::Cyan)),
-            Span::raw("  "),
-            Span::styled(
-                format_cost(day_cost),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-    ];
+    let content = inner.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    if content.height == 0 || content.width == 0 {
+        return;
+    }
+
+    // Aggregate model tokens across clients by display name.
+    let mut day_total = 0u64;
+    let mut ranked_models: Vec<(String, (u64, String, String))> = Vec::new();
+    if let Some(daily) = daily_usage {
+        day_total = daily.tokens.total();
+        let mut model_totals: BTreeMap<String, (u64, String, String)> = BTreeMap::new();
+        for source_info in daily.source_breakdown.values() {
+            for model in source_info.models.values() {
+                let entry = model_totals
+                    .entry(model.display_name.clone())
+                    .or_insert_with(|| (0, model.provider.clone(), model.color_key.clone()));
+                entry.0 = entry.0.saturating_add(model.tokens.total());
+            }
+        }
+        ranked_models = model_totals.into_iter().collect();
+        ranked_models.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
+    }
+
+    // One cell per hour, lit when the hour has usage on the selected day.
+    let mut active_hours = [false; HOUR_STRIP_LEN];
+    for entry in &app.data.hourly {
+        if entry.datetime.date() == date {
+            active_hours[entry.datetime.hour() as usize] = true;
+        }
+    }
+    let active_count = active_hours.iter().filter(|active| **active).count();
+
+    // Left column: date / tops / hours, fixed top-down. Right: the radar in
+    // its fixed-width zone, anchored next to the column.
+    let left_w = LEFT_COL_W.min(content.width);
+    let stats_area = Rect::new(content.x, content.y, left_w, content.height);
+    render_day_stats_lines(
+        frame,
+        app,
+        stats_area,
+        date,
+        daily_usage,
+        day_tokens,
+        day_cost,
+        &ranked_models,
+        day_total,
+        &active_hours,
+        active_count,
+    );
+
+    if day_total == 0 || ranked_models.is_empty() || content.width < SIDE_BY_SIDE_MIN_W {
+        return;
+    }
+    // The radar zone hugs the left column and takes what the square chart
+    // (2 cells per inner row) plus caption flanks need; any further width
+    // stays blank inside the panel border.
+    let radar_x = content.x + left_w + 2;
+    let region_w = (content.x + content.width).saturating_sub(radar_x);
+    let radar_area = Rect::new(
+        radar_x,
+        content.y,
+        region_w.min(2 * content.height + 28),
+        content.height,
+    );
+    render_day_radar(frame, app, radar_area, &ranked_models, day_total);
+}
+
+/// One row of the Day Insights stats column: a plain line, a section rule,
+/// or a label line with a right-aligned value.
+enum StatRow {
+    Line(Line<'static>),
+    Rule,
+    KeyVal(Line<'static>, String),
+}
+
+/// Renders the Day Insights stats column as a fixed top-down block: date
+/// header, dim section rules, top model/agent lines with right-aligned
+/// values, and the hour strip with ticks. Rendering stops at the bottom of
+/// the area.
+#[allow(clippy::too_many_arguments)]
+fn render_day_stats_lines(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    date: chrono::NaiveDate,
+    daily_usage: Option<&DailyUsage>,
+    day_tokens: u64,
+    day_cost: f64,
+    ranked_models: &RankedModels,
+    day_total: u64,
+    active_hours: &[bool; HOUR_STRIP_LEN],
+    active_count: usize,
+) {
+    let y_max = area.y + area.height;
+    let is_narrow = app.is_narrow();
+
+    let mut rows: Vec<StatRow> = vec![StatRow::Line(Line::from(vec![
+        Span::styled(
+            date.format("%a, %b %d, %Y").to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(format_tokens(day_tokens), Style::default().fg(Color::Cyan)),
+        Span::raw("  "),
+        Span::styled(
+            format_cost(day_cost),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))];
+    rows.push(StatRow::Rule);
 
     if let Some(daily) = daily_usage {
-        if daily.source_breakdown.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "No detailed breakdown available",
-                Style::default().fg(app.theme.muted),
-            )));
-        } else {
-            for (client, source_info) in &daily.source_breakdown {
-                let mut models: Vec<_> = source_info.models.values().collect();
-                models.sort_by(|a, b| {
-                    b.tokens
-                        .total()
-                        .cmp(&a.tokens.total())
-                        .then_with(|| a.display_name.cmp(&b.display_name))
-                });
+        let denom = day_total.max(1);
 
-                let client_color = app.theme.color(get_client_color(client));
-                let client_name = get_client_display_name(client);
-                let model_count = models.len();
-                let plural = if model_count > 1 { "s" } else { "" };
+        if let Some((name, (tokens, provider, color_key))) = ranked_models.first() {
+            let model_color = app.model_color_for(provider, color_key);
+            let pct = tokens.saturating_mul(100) / denom;
+            let value = format!("{} ({}%)", format_tokens(*tokens), pct);
+            let name_budget = (area.width as usize)
+                .saturating_sub(value.chars().count() + 12)
+                .max(4);
+            rows.push(StatRow::KeyVal(
+                Line::from(vec![
+                    Span::styled("Top model: ", Style::default().fg(app.theme.muted)),
+                    Span::styled(
+                        truncate_model_display_name_to(name, name_budget),
+                        Style::default().fg(model_color),
+                    ),
+                ]),
+                value,
+            ));
+        }
 
-                lines.push(Line::from(vec![
+        // First entry wins ties so the top agent is deterministic (BTreeMap
+        // iteration is alphabetical).
+        if let Some((client, source_info)) = daily.source_breakdown.iter().reduce(|a, b| {
+            if b.1.tokens.total() > a.1.tokens.total() {
+                b
+            } else {
+                a
+            }
+        }) {
+            let client_color = app.theme.color(get_client_color(client));
+            let agent_tokens = source_info.tokens.total();
+            let pct = agent_tokens.saturating_mul(100) / denom;
+            let value = format!("{} ({}%)", format_tokens(agent_tokens), pct);
+            let name_budget = (area.width as usize)
+                .saturating_sub(value.chars().count() + 12)
+                .max(4);
+            rows.push(StatRow::KeyVal(
+                Line::from(vec![
+                    Span::styled("Top agent: ", Style::default().fg(app.theme.muted)),
                     Span::styled(
-                        format!("● {}", client_name),
-                        Style::default()
-                            .fg(client_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(" ({} model{})", model_count, plural),
-                        Style::default().fg(app.theme.muted),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(
-                        format_cost(source_info.cost),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-
-                for model_info in models {
-                    let model_color =
-                        app.model_color_for(&model_info.provider, &model_info.color_key);
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("●", Style::default().fg(model_color)),
-                        Span::styled(
-                            format!(" {}", truncate_model_display_name(&model_info.display_name)),
-                            Style::default().fg(Color::White),
+                        truncate_model_display_name_to(
+                            &get_client_display_name(client),
+                            name_budget,
                         ),
-                    ]));
+                        Style::default().fg(client_color),
+                    ),
+                ]),
+                value,
+            ));
+        }
+    } else {
+        rows.push(StatRow::Line(Line::from(Span::styled(
+            "No activity",
+            Style::default().fg(app.theme.muted),
+        ))));
+    }
 
-                    let is_narrow = app.is_narrow();
-                    if is_narrow {
-                        let secondary_text_style = app.theme.secondary_text_style();
-                        let subtle_text_style = app.theme.subtle_text_style();
-                        lines.push(Line::from(vec![
-                            Span::styled("    ", Style::default()),
-                            Span::styled(
-                                format_tokens(model_info.tokens.input),
-                                secondary_text_style,
-                            ),
-                            Span::styled("/", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.displayed_output()),
-                                secondary_text_style,
-                            ),
-                            Span::styled("/", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.cache_read),
-                                secondary_text_style,
-                            ),
-                            Span::styled("/", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.cache_write),
-                                secondary_text_style,
-                            ),
-                        ]));
-                    } else {
-                        let secondary_text_style = app.theme.secondary_text_style();
-                        let subtle_text_style = app.theme.subtle_text_style();
-                        lines.push(Line::from(vec![
-                            Span::styled("    In: ", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.input),
-                                secondary_text_style,
-                            ),
-                            Span::styled(" · Out: ", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.displayed_output()),
-                                secondary_text_style,
-                            ),
-                            Span::styled(" · CR: ", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.cache_read),
-                                secondary_text_style,
-                            ),
-                            Span::styled(" · CW: ", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.cache_write),
-                                secondary_text_style,
-                            ),
-                        ]));
-                    }
+    rows.push(StatRow::Rule);
+
+    let hours_label = if is_narrow {
+        format!("{}h active", active_count)
+    } else {
+        format!("Hours: {} active", active_count)
+    };
+    rows.push(StatRow::Line(Line::from(Span::styled(
+        hours_label,
+        Style::default().fg(app.theme.muted),
+    ))));
+
+    // Activity strip on its own line, grouped into four 6-hour blocks.
+    let mut hour_spans = Vec::with_capacity(HOUR_STRIP_LEN + 3);
+    for (hour, active) in active_hours.iter().enumerate() {
+        if hour > 0 && hour % 6 == 0 {
+            hour_spans.push(Span::raw(" "));
+        }
+        hour_spans.push(if *active {
+            Span::styled("█", Style::default().fg(app.theme.accent))
+        } else {
+            Span::styled("·", app.theme.subtle_text_style())
+        });
+    }
+    rows.push(StatRow::Line(Line::from(hour_spans)));
+
+    // Hour ticks under the strip groups (hour h sits at cell h + h/6).
+    let mut ticks = [' '; HOUR_STRIP_LEN + 3];
+    ticks[0] = '0';
+    ticks[7] = '6';
+    ticks[14] = '1';
+    ticks[15] = '2';
+    ticks[21] = '1';
+    ticks[22] = '8';
+    rows.push(StatRow::Line(Line::from(Span::styled(
+        ticks.iter().collect::<String>(),
+        app.theme.subtle_text_style(),
+    ))));
+
+    let mut y = area.y;
+
+    for row in rows {
+        if y >= y_max {
+            break;
+        }
+        match row {
+            StatRow::Line(line) => {
+                frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+            }
+            StatRow::Rule => {
+                let rule = "─".repeat(area.width as usize);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        rule,
+                        Style::default().fg(app.theme.border),
+                    ))),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+            }
+            StatRow::KeyVal(left, value) => {
+                frame.render_widget(Paragraph::new(left), Rect::new(area.x, y, area.width, 1));
+                let value_w = value.chars().count() as u16;
+                if area.width > value_w {
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            value,
+                            Style::default().fg(Color::Cyan),
+                        ))),
+                        Rect::new(area.x + area.width - value_w, y, value_w, 1),
+                    );
                 }
             }
         }
-    } else {
-        lines.push(Line::from(Span::styled(
-            "No detailed breakdown available",
-            Style::default().fg(app.theme.muted),
-        )));
+        y += 1;
+    }
+}
+
+/// Draws the top-3-models + Others radar centered inside `area`.
+fn render_day_radar(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    ranked_models: &RankedModels,
+    day_total: u64,
+) {
+    if area.width < RADAR_MIN_W || area.height < RADAR_MIN_H {
+        return;
     }
 
-    let visible_height = inner.height.max(1) as usize;
-    app.max_visible_items = visible_height;
-    app.stats_breakdown_total_lines = lines.len();
-
-    if lines.is_empty() {
-        app.selected_index = 0;
-        app.scroll_offset = 0;
-    } else {
-        app.selected_index = app.selected_index.min(lines.len() - 1);
-        let max_scroll = lines.len().saturating_sub(visible_height);
-        app.scroll_offset = app.scroll_offset.min(max_scroll);
+    let total_f = day_total as f64;
+    let mut axes: Vec<RadarAxis> = ranked_models
+        .iter()
+        .take(3)
+        .map(|(name, (tokens, _, _))| RadarAxis {
+            label: name.clone(),
+            share: *tokens as f64 / total_f,
+        })
+        .collect();
+    while axes.len() < 3 {
+        axes.push(RadarAxis {
+            label: String::new(),
+            share: 0.0,
+        });
     }
+    let others: u64 = ranked_models.iter().skip(3).map(|(_, (t, _, _))| *t).sum();
+    axes.push(RadarAxis {
+        label: "Others".to_string(),
+        share: others as f64 / total_f,
+    });
+    let axes: [RadarAxis; 4] = axes.try_into().expect("radar requires exactly 4 axes");
 
-    let paragraph = Paragraph::new(lines).scroll((app.scroll_offset as u16, 0));
-    frame.render_widget(paragraph, inner);
-
-    if app.stats_breakdown_total_lines > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
-
-        let mut scrollbar_state = viewport_scrollbar_state(
-            app.stats_breakdown_total_lines,
-            app.scroll_offset,
-            visible_height,
-        );
-
-        frame.render_stateful_widget(
-            scrollbar,
-            area.inner(Margin {
-                horizontal: 0,
-                vertical: 1,
-            }),
-            &mut scrollbar_state,
-        );
-    }
+    render_radar(
+        frame,
+        area,
+        &axes,
+        app.theme.accent,
+        app.theme.muted,
+        app.theme.colors[2],
+        app.theme.background,
+    );
 }
 
 #[cfg(test)]
@@ -729,20 +872,82 @@ mod tests {
         lines[y as usize][x as usize..(x + width) as usize].join("")
     }
 
-    #[test]
-    fn stats_layout_always_includes_breakdown_when_roomy() {
-        assert_eq!(
-            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H),
-            StatsLayoutMode::StatsWithBreakdown
-        );
-        assert_eq!(stats_layout_mode(60), StatsLayoutMode::StatsWithBreakdown);
+    use std::collections::BTreeSet;
+    use tokscale_core::usage_views::{
+        DailyModelInfo, DailySourceInfo, DailyUsage, HourlyUsage, UsageTokenBreakdown,
+    };
+
+    fn token_breakdown(total: u64) -> UsageTokenBreakdown {
+        UsageTokenBreakdown {
+            input: total,
+            ..Default::default()
+        }
+    }
+
+    fn model_info(display_name: &str, total: u64) -> DailyModelInfo {
+        DailyModelInfo {
+            provider: "test-provider".to_string(),
+            display_name: display_name.to_string(),
+            color_key: display_name.to_string(),
+            tokens: token_breakdown(total),
+            cost: 0.0,
+            messages: 0,
+        }
+    }
+
+    fn source_info(total: u64, models: Vec<(&str, u64)>) -> DailySourceInfo {
+        DailySourceInfo {
+            tokens: token_breakdown(total),
+            cost: 0.0,
+            models: models
+                .into_iter()
+                .map(|(name, tokens)| (name.to_string(), model_info(name, tokens)))
+                .collect(),
+        }
+    }
+
+    fn day_usage(
+        date: chrono::NaiveDate,
+        total: u64,
+        sources: Vec<(&str, DailySourceInfo)>,
+    ) -> DailyUsage {
+        DailyUsage {
+            date,
+            tokens: token_breakdown(total),
+            cost: 0.0,
+            source_breakdown: sources
+                .into_iter()
+                .map(|(client, info)| (client.to_string(), info))
+                .collect(),
+            message_count: 0,
+            turn_count: 0,
+        }
+    }
+
+    fn hourly_entry(date: chrono::NaiveDate, hour: u32) -> HourlyUsage {
+        HourlyUsage {
+            datetime: date.and_hms_opt(hour, 0, 0).unwrap(),
+            tokens: UsageTokenBreakdown::default(),
+            cost: 0.0,
+            clients: BTreeSet::new(),
+            models: BTreeMap::new(),
+            message_count: 0,
+            turn_count: 0,
+        }
     }
 
     #[test]
-    fn stats_layout_keeps_breakdown_when_constrained() {
+    fn stats_layout_thresholds() {
+        // The Stats summary panel joins at 31 rows, when Day Insights can
+        // keep its radar; below that the graph and insights share the area.
         assert_eq!(
-            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H - 1),
-            StatsLayoutMode::BreakdownOnly
+            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + INSIGHTS_MIN_H),
+            StatsLayoutMode::WithSummary
+        );
+        assert_eq!(stats_layout_mode(60), StatsLayoutMode::WithSummary);
+        assert_eq!(
+            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + INSIGHTS_MIN_H - 1),
+            StatsLayoutMode::InsightsOnly
         );
     }
 
@@ -762,9 +967,9 @@ mod tests {
     }
 
     #[test]
-    fn breakdown_is_rendered_for_today_without_usage_data() {
+    fn day_insights_rendered_for_day_without_data() {
         let mut app = make_app(120);
-        app.stats_breakdown_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        app.stats_insights_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
         let lines = render_symbols(&mut app, 120, 40);
         let rendered = lines
             .iter()
@@ -772,9 +977,312 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("Day Breakdown"));
+        assert!(rendered.contains("Day Insights"));
         assert!(rendered.contains("Thu, Jul 16, 2026"));
+        assert!(rendered.contains("No activity"));
+        assert!(rendered.contains("Hours: 0 active"));
         assert!(!rendered.contains("ESC to close"));
+    }
+
+    #[test]
+    fn day_insights_shows_top_model_agent_and_hours() {
+        let mut app = make_app(120);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        app.data.daily = vec![day_usage(
+            date,
+            12_000,
+            vec![
+                (
+                    "agentfoo",
+                    source_info(8_000, vec![("ModelAlpha", 6_000), ("ModelBeta", 2_000)]),
+                ),
+                ("agentbar", source_info(4_000, vec![("ModelGamma", 4_000)])),
+            ],
+        )];
+        app.data.hourly = vec![
+            hourly_entry(date, 9),
+            hourly_entry(date, 14),
+            hourly_entry(date, 23),
+        ];
+        app.stats_insights_date = date;
+
+        let lines = render_symbols(&mut app, 120, 40);
+        let rendered = lines
+            .iter()
+            .map(|line| line.join(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Day Insights"));
+        assert!(rendered.contains("Top model:"));
+        assert!(rendered.contains("ModelAlpha"));
+        assert!(rendered.contains("Top agent:"));
+        // Unknown client keys fall back to the raw key as display name.
+        assert!(rendered.contains("agentfoo"));
+        assert!(rendered.contains("Hours: 3 active"));
+        assert!(rendered.contains("······ ···█·· ··█··· ·····█"));
+
+        // Top-line values are right-aligned on the same row.
+        let top_row = rendered
+            .lines()
+            .find(|line| line.contains("Top model:"))
+            .unwrap();
+        assert!(top_row.contains("(50%)"));
+
+        // Hour ticks sit under the strip groups.
+        let strip_y = lines
+            .iter()
+            .position(|line| line.join("").contains("······ ···█··"))
+            .unwrap() as u16;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let frame = terminal
+            .draw(|f| render(f, &mut app, Rect::new(0, 0, 120, 40)))
+            .unwrap();
+        let buf = frame.buffer;
+        let strip_row: String = (0..120u16)
+            .map(|x| buf.cell((x, strip_y)).unwrap().symbol())
+            .collect();
+        let byte_pos = strip_row.find("······ ···█··").unwrap();
+        let strip_x = strip_row[..byte_pos].chars().count() as u16;
+        let tick_chars: Vec<char> = (0..120u16)
+            .map(|x| buf.cell((x, strip_y + 1)).unwrap().symbol())
+            .collect::<String>()
+            .chars()
+            .collect();
+        assert_eq!(tick_chars[strip_x as usize], '0');
+        assert_eq!(tick_chars[strip_x as usize + 7], '6');
+        assert_eq!(tick_chars[strip_x as usize + 14], '1');
+        assert_eq!(tick_chars[strip_x as usize + 15], '2');
+        assert_eq!(tick_chars[strip_x as usize + 21], '1');
+        assert_eq!(tick_chars[strip_x as usize + 22], '8');
+
+        // The lit strip cells carry the accent color (offset = hour + hour/6).
+        for (offset, lit) in [(10u16, true), (16, true), (26, true), (0, false)] {
+            let cell = buf.cell((strip_x + offset, strip_y)).unwrap();
+            if lit {
+                assert_eq!(cell.symbol(), "█");
+                assert_eq!(cell.fg, app.theme.accent);
+            } else {
+                assert_eq!(cell.symbol(), "·");
+            }
+        }
+    }
+
+    #[test]
+    fn day_insights_radar_labels_match_top3_models() {
+        let mut app = make_app(120);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        app.data.daily = vec![day_usage(
+            date,
+            11_000,
+            vec![(
+                "agentfoo",
+                source_info(
+                    11_000,
+                    vec![
+                        ("ModelAlpha", 5_000),
+                        ("ModelBeta", 3_000),
+                        ("ModelGamma", 2_000),
+                        ("ModelDelta", 1_000),
+                    ],
+                ),
+            )],
+        )];
+        app.stats_insights_date = date;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let frame = terminal
+            .draw(|f| render(f, &mut app, Rect::new(0, 0, 120, 40)))
+            .unwrap();
+        let buf = frame.buffer;
+        let rendered = (0..40u16)
+            .map(|y| {
+                (0..120u16)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Top-3 models get an axis; the fourth folds into Others.
+        assert!(rendered.contains("ModelAlpha"));
+        assert!(rendered.contains("ModelBeta"));
+        assert!(rendered.contains("ModelGamma"));
+        assert!(rendered.contains("Others"));
+        assert!(!rendered.contains("ModelDelta"));
+
+        // The chart body renders braille cells.
+        let has_braille = (0..40u16).any(|y| {
+            (0..120u16).any(|x| {
+                buf.cell((x, y))
+                    .unwrap()
+                    .symbol()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+            })
+        });
+        assert!(has_braille);
+    }
+
+    #[test]
+    fn day_insights_radar_side_labels_do_not_collide() {
+        let mut app = make_app(120);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        app.data.daily = vec![day_usage(
+            date,
+            11_000,
+            vec![(
+                "agentfoo",
+                source_info(
+                    11_000,
+                    vec![
+                        ("ModelAlpha", 5_000),
+                        ("ModelBeta", 3_000),
+                        ("ModelGamma", 2_000),
+                        ("ModelDelta", 1_000),
+                    ],
+                ),
+            )],
+        )];
+        app.stats_insights_date = date;
+
+        // 32 rows: the radar renders with a small height-bound chart, the case
+        // where canvas-internal labels used to overwrite each other.
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        let frame = terminal
+            .draw(|f| render(f, &mut app, Rect::new(0, 0, 120, 32)))
+            .unwrap();
+        let buf = frame.buffer;
+        let rendered = (0..32u16)
+            .map(|y| {
+                (0..120u16)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Two-line GitHub-style captions: the side names share the row below
+        // the axis, the pcts the row above — all fully intact (no overwrite).
+        let name_row = rendered
+            .lines()
+            .find(|line| line.contains("Others"))
+            .expect("left side label rendered");
+        assert!(name_row.contains("ModelBeta"));
+        let pct_row = rendered
+            .lines()
+            .find(|line| line.contains("9%"))
+            .expect("side pct rendered");
+        assert!(pct_row.contains("27%"));
+    }
+
+    #[test]
+    fn day_insights_radar_skipped_when_short() {
+        let mut app = make_app(120);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        app.data.daily = vec![day_usage(
+            date,
+            11_000,
+            vec![(
+                "agentfoo",
+                source_info(11_000, vec![("ModelAlpha", 11_000)]),
+            )],
+        )];
+        app.stats_insights_date = date;
+
+        // At 20 rows the panel still renders (panels tile the full area), but
+        // the radar does not fit; the stats lines stay.
+        let lines = render_symbols(&mut app, 120, 20);
+        let rendered = lines
+            .iter()
+            .map(|line| line.join(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Day Insights"));
+        assert!(rendered.contains("Hours:"));
+        assert!(!rendered.contains("Others"));
+    }
+
+    #[test]
+    fn radar_captions_visible_at_every_panel_height() {
+        let mut app = make_app(120);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        app.data.daily = vec![day_usage(
+            date,
+            11_000,
+            vec![(
+                "agentfoo",
+                source_info(
+                    11_000,
+                    vec![
+                        ("ModelAlpha", 5_000),
+                        ("ModelBeta", 3_000),
+                        ("ModelGamma", 2_000),
+                        ("ModelDelta", 1_000),
+                    ],
+                ),
+            )],
+        )];
+        app.stats_insights_date = date;
+
+        // All four captions (including the bottom axis) must render at every
+        // height where the panel is visible.
+        for height in 23..=40u16 {
+            let lines = render_symbols(&mut app, 120, height);
+            let rendered = lines
+                .iter()
+                .map(|line| line.join(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for caption in ["ModelAlpha", "ModelBeta", "ModelGamma", "Others"] {
+                assert!(
+                    rendered.contains(caption),
+                    "{caption} missing at height {height}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn radar_visibility_is_monotonic_in_height() {
+        let mut app = make_app(120);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        app.data.daily = vec![day_usage(
+            date,
+            11_000,
+            vec![(
+                "agentfoo",
+                source_info(
+                    11_000,
+                    vec![
+                        ("ModelAlpha", 5_000),
+                        ("ModelBeta", 3_000),
+                        ("ModelGamma", 2_000),
+                        ("ModelDelta", 1_000),
+                    ],
+                ),
+            )],
+        )];
+        app.stats_insights_date = date;
+
+        // Growing the terminal must never hide the radar once it has appeared
+        // (in particular not when the Stats summary panel joins).
+        let mut seen_visible = false;
+        for height in 16..=60u16 {
+            let lines = render_symbols(&mut app, 120, height);
+            let visible = lines
+                .iter()
+                .map(|line| line.join(""))
+                .any(|row| row.contains("Others"));
+            assert!(
+                !seen_visible || visible,
+                "radar disappeared at height {height}"
+            );
+            seen_visible |= visible;
+        }
+        assert!(seen_visible, "radar never appeared in 16..=60 rows");
     }
 
     #[test]
@@ -794,7 +1302,7 @@ mod tests {
         app.data.graph = Some(tokscale_core::build_contribution_graph_for_today(
             &daily, date,
         ));
-        app.stats_breakdown_date = date;
+        app.stats_insights_date = date;
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         let frame = terminal
