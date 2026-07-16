@@ -1,15 +1,15 @@
-name: Rustfmt Probe
+name: Prepare Final TUI Sources
 
 on:
-  pull_request:
+  push:
     branches:
-      - personal/local-clients
+      - codex/issue-153-rustfmt-probe
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  rustfmt:
+  prepare:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -18,33 +18,349 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Format sources
-        run: cargo fmt --all
-      - name: Collect formatted and base TUI sources
+      - name: Restore targeted files and apply information architecture edits
         env:
           BASE_SHA: 48cf8bb1c6973c49a148eee8d16144fb08afda65
         run: |
-          mkdir -p rustfmt-output/formatted/crates/tokscale-cli/src/tui
-          mkdir -p rustfmt-output/base/crates/tokscale-cli/src/tui/ui/dialog
-          cp -R crates/tokscale-cli/src/tui/ui rustfmt-output/formatted/crates/tokscale-cli/src/tui/
-          cp crates/tokscale-cli/src/tui/app.rs rustfmt-output/formatted/crates/tokscale-cli/src/tui/app.rs
           for path in \
-            crates/tokscale-cli/src/tui/ui/overview.rs \
-            crates/tokscale-cli/src/tui/ui/stats.rs \
-            crates/tokscale-cli/src/tui/ui/hourly_profile.rs \
-            crates/tokscale-cli/src/tui/ui/issues.rs \
             crates/tokscale-cli/src/tui/ui/header.rs \
             crates/tokscale-cli/src/tui/ui/footer.rs \
             crates/tokscale-cli/src/tui/ui/dialog/group_by_picker.rs \
-            crates/tokscale-cli/src/tui/ui/mod.rs \
-            crates/tokscale-cli/src/tui/app.rs
+            crates/tokscale-cli/src/tui/ui/mod.rs
           do
-            mkdir -p "rustfmt-output/base/$(dirname "$path")"
-            git show "$BASE_SHA:$path" > "rustfmt-output/base/$path"
+            git show "$BASE_SHA:$path" > "$path"
           done
-          git diff -- crates/tokscale-cli/src/tui > rustfmt-output/rustfmt.patch
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rustfmt-output
-          path: rustfmt-output
-          if-no-files-found: error
+
+          python <<'PY'
+          from pathlib import Path
+
+          def replace(text, old, new, expected=1):
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"expected {expected} matches, found {count}: {old[:80]!r}")
+              return text.replace(old, new)
+
+          path = Path("crates/tokscale-cli/src/tui/ui/header.rs")
+          text = path.read_text()
+          text = replace(text, """fn tab_label(_app: &App, tab: Tab, mode: TabLabelMode) -> Cow<'static, str> {
+              match mode {
+                  TabLabelMode::Full => Cow::Borrowed(tab.as_str()),
+                  TabLabelMode::Short => Cow::Borrowed(tab.short_name()),
+              }
+          }""", """fn tab_label(_app: &App, tab: Tab, mode: TabLabelMode) -> Cow<'static, str> {
+              match (tab, mode) {
+                  (Tab::Issues, TabLabelMode::Full) => Cow::Borrowed("Sessions"),
+                  (Tab::Issues, TabLabelMode::Short) => Cow::Borrowed("Ses"),
+                  (_, TabLabelMode::Full) => Cow::Borrowed(tab.as_str()),
+                  (_, TabLabelMode::Short) => Cow::Borrowed(tab.short_name()),
+              }
+          }""")
+          text = replace(text, "(Rect::new(110, 5, 8, 1), Tab::Issues)", "(Rect::new(110, 5, 10, 1), Tab::Issues)", 2)
+          text = replace(text, "(Rect::new(120, 5, 8, 1), Tab::Issues)", "(Rect::new(120, 5, 10, 1), Tab::Issues)")
+          text = replace(text, 'assert_eq!(symbols_at(&lines, 5, 110, 8), " Issues ");', 'assert_eq!(symbols_at(&lines, 5, 110, 10), " Sessions ");', 2)
+          text = replace(text, 'assert_eq!(symbols_at(&lines, 3, 70, 5), " Iss ");', 'assert_eq!(symbols_at(&lines, 3, 70, 5), " Ses ");')
+          text = replace(text, "fn issues_label_stays_quiet_when_issues_exist()", "fn sessions_label_stays_quiet_when_issues_exist()")
+          text = replace(text, 'assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Full), "Issues");', 'assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Full), "Sessions");')
+          text = replace(text, 'assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Short), "Iss");', 'assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Short), "Ses");')
+          text = replace(text, "fn issues_tab_remains_rendered_and_clickable_in_a_real_fifty_column_header()", "fn sessions_tab_remains_rendered_and_clickable_in_a_real_fifty_column_header()")
+          text = replace(text, '.expect("narrow fitting must reserve space for Issues");', '.expect("narrow fitting must reserve space for Sessions");')
+          text = replace(text, 'assert_eq!(symbols_at(&lines, rect.y, rect.x, rect.width), " Iss ");', 'assert_eq!(symbols_at(&lines, rect.y, rect.x, rect.width), " Ses ");')
+          path.write_text(text)
+
+          path = Path("crates/tokscale-cli/src/tui/ui/footer.rs")
+          text = path.read_text()
+          text = replace(text, "use ratatui::prelude::*;\n", "use std::collections::BTreeSet;\n\nuse ratatui::prelude::*;\n")
+          text = replace(text, """    // Left side: sort buttons
+              if !is_very_narrow {
+                  let mut spans: Vec<Span> = Vec::new();
+                  let mut x_offset = chunks[0].x;
+
+                  spans.push(Span::styled("Sort: ", Style::default().fg(app.theme.muted)));
+                  x_offset += 6;
+
+                  let sort_buttons = [
+                      (SortField::Date, "Date"),
+                      (SortField::Cost, "Cost"),
+                      (SortField::Tokens, "Tokens"),
+                  ];
+
+                  for (field, label) in sort_buttons {
+                      let is_active = app.sort_field == field;""", """    // Left side: sort buttons
+              if !is_very_narrow && sort_controls_visible(app) {
+                  let mut spans: Vec<Span> = Vec::new();
+                  let mut x_offset = chunks[0].x;
+
+                  spans.push(Span::styled("Sort: ", Style::default().fg(app.theme.muted)));
+                  x_offset += 6;
+
+                  let sort_buttons = [SortField::Date, SortField::Cost, SortField::Tokens];
+
+                  for field in sort_buttons {
+                      let label = sort_label(app, field);
+                      let is_active = app.sort_field == field;""")
+          text = replace(text, """    // Scroll position indicator for Overview tab
+              if app.current_tab == Tab::Overview {
+                  let total_models = app.data.models.len();
+                  if total_models > app.max_visible_items && app.max_visible_items > 0 {
+                      let start = app.scroll_offset + 1;
+                      let end = (app.scroll_offset + app.max_visible_items).min(total_models);
+                      if !is_very_narrow {
+                          right_spans.push(Span::styled(
+                              format!("↓ {}-{} of {} ", start, end, total_models),
+                              Style::default().fg(app.theme.muted),
+                          ));
+                          right_spans.push(Span::styled("| ", Style::default().fg(app.theme.muted)));
+                      }
+                  }
+              }
+
+          """, "")
+          text = replace(text, """fn current_count_label(app: &App) -> String {
+              match app.current_tab {
+                  Tab::Overview | Tab::Models => format!(" ({} models)", app.data.models.len()),""", """fn sort_controls_visible(app: &App) -> bool {
+              !matches!(app.current_tab, Tab::Overview | Tab::Stats | Tab::Usage)
+          }
+
+          fn sort_label(app: &App, field: SortField) -> &'static str {
+              match (app.current_tab, field) {
+                  (Tab::Issues, SortField::Date) => "Sessions",
+                  (_, SortField::Date) => "Date",
+                  (_, SortField::Cost) => "Cost",
+                  (_, SortField::Tokens) => "Tokens",
+              }
+          }
+
+          fn current_count_label(app: &App) -> String {
+              match app.current_tab {
+                  Tab::Overview => {
+                      let mut models = BTreeSet::new();
+                      let mut harnesses = BTreeSet::new();
+                      for day in &app.data.daily {
+                          for (harness, source) in &day.source_breakdown {
+                              harnesses.insert(harness.as_str());
+                              for (key, model) in &source.models {
+                                  models.insert(if model.color_key.is_empty() {
+                                      key.as_str()
+                                  } else {
+                                      model.color_key.as_str()
+                                  });
+                              }
+                          }
+                      }
+                      format!(
+                          " ({} models · {} harnesses · {} days)",
+                          models.len(),
+                          harnesses.len(),
+                          app.data.daily.len()
+                      )
+                  }
+                  Tab::Models => format!(" ({} models)", app.data.models.len()),""")
+          text = replace(text, """        Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
+                  Tab::Issues => String::new(),
+                  Tab::Stats | Tab::Usage => String::new(),""", """        Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
+                  Tab::Issues => {
+                      let links = app
+                          .data
+                          .models
+                          .iter()
+                          .map(|model| u64::from(model.session_count))
+                          .sum::<u64>();
+                      format!(" ({links} model-session links)")
+                  }
+                  Tab::Stats | Tab::Usage => String::new(),""")
+          text = replace(text, """    if app.current_tab == Tab::Issues {
+                  let text = if is_very_narrow {
+                      "↑↓·←→·r·e·q"
+                  } else {
+                      "↑↓ scroll • ←→/tab view • [r:refresh local] • e • q"
+                  };
+                  return Line::from(Span::styled(text, Style::default().fg(app.theme.muted)));
+              }""", """    if app.current_tab == Tab::Issues {
+                  let text = if is_very_narrow {
+                      "↑↓·d/t/c·s·g·r·←→·q".to_string()
+                  } else {
+                      format!(
+                          "↑↓ scroll • [d/t/c:sort coverage] • [s:sources] • [g:{}] • [r:refresh local] • ←→/tab view • e • q",
+                          app.group_by.borrow()
+                      )
+                  };
+                  return Line::from(Span::styled(text, Style::default().fg(app.theme.muted)));
+              }""")
+          text = replace(text, """    fn test_current_count_label_matches_active_tab() {
+                  assert_eq!(
+                      current_count_label(&make_app_on(Tab::Models)),
+                      " (0 models)"
+                  );""", """    fn test_current_count_label_matches_active_tab() {
+                  assert_eq!(
+                      current_count_label(&make_app_on(Tab::Overview)),
+                      " (0 models · 0 harnesses · 0 days)"
+                  );
+                  assert_eq!(
+                      current_count_label(&make_app_on(Tab::Models)),
+                      " (0 models)"
+                  );""")
+          text = replace(text, """        assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
+                  assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
+              }
+
+              #[test]
+              fn usage_help_row_shows_subscription_and_local_refresh_keys() {""", """        assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
+                  assert_eq!(
+                      current_count_label(&make_app_on(Tab::Issues)),
+                      " (0 model-session links)"
+                  );
+                  assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
+              }
+
+              #[test]
+              fn sessions_tab_renames_the_date_sort_dimension() {
+                  let app = make_app_on(Tab::Issues);
+
+                  assert_eq!(sort_label(&app, SortField::Date), "Sessions");
+                  assert_eq!(sort_label(&app, SortField::Cost), "Cost");
+              }
+
+              #[test]
+              fn usage_help_row_shows_subscription_and_local_refresh_keys() {""")
+          path.write_text(text)
+
+          path = Path("crates/tokscale-cli/src/tui/ui/dialog/group_by_picker.rs")
+          text = path.read_text()
+          text = replace(text, """        let options = vec![
+                      GroupByOption {
+                          value: GroupBy::Model,
+                          label: "Model",
+                          description: "One row per model (merge clients & providers)",
+                      },
+                      GroupByOption {
+                          value: GroupBy::ClientModel,
+                          label: "Client + Model",
+                          description: "One row per client-model pair (default)",
+                      },
+                      GroupByOption {
+                          value: GroupBy::ClientProviderModel,
+                          label: "Client + Provider + Model",
+                          description: "Most granular — no merging",
+                      },
+                      GroupByOption {
+                          value: GroupBy::WorkspaceModel,
+                          label: "Workspace + Model",
+                          description: "Group local usage by workspace key, then model",
+                      },
+                      GroupByOption {
+                          value: GroupBy::Session,
+                          label: "Session + Model",
+                          description: "One row per session_id and model (attribute cost per session)",
+                      },
+                      GroupByOption {
+                          value: GroupBy::ClientSession,
+                          label: "Client + Session + Model",
+                          description: "One row per client, session_id, and model",
+                      },
+                  ];""", """        let options = vec![
+                      GroupByOption {
+                          value: GroupBy::Model,
+                          label: "Model",
+                          description: "One row per model; merge harnesses and providers",
+                      },
+                      GroupByOption {
+                          value: GroupBy::ClientModel,
+                          label: "Harness + Model",
+                          description: "One row per harness-model pair (default)",
+                      },
+                      GroupByOption {
+                          value: GroupBy::ClientProviderModel,
+                          label: "Harness + Provider + Model",
+                          description: "Keep provider identity; no model merging",
+                      },
+                      GroupByOption {
+                          value: GroupBy::WorkspaceModel,
+                          label: "Workspace + Model",
+                          description: "Group local usage by workspace, then model",
+                      },
+                  ];""")
+          text = replace(text, """        // 6 options render as 2 lines each (label + description) = 12 rows,
+                  // plus header (1) + divider (1) + hint (1) + borders (2). Cap at 18
+                  // so every option stays visible without scrolling on a typical
+                  // terminal; matches source_picker's sizing.
+                  let width = 52u16.min(viewport.width.saturating_sub(4));
+                  let height = 18u16.min(viewport.height.saturating_sub(4));""", """        // Four options use two rows each, plus header, divider, hint, and borders.
+                  let width = 54u16.min(viewport.width.saturating_sub(4));
+                  let height = 14u16.min(viewport.height.saturating_sub(4));""")
+          text = replace(text, "Rect::new(0, 0, 52, 18)", "Rect::new(0, 0, 54, 14)", 4)
+          text = replace(text, 'assert!(rendered.contains("(●) Client + Model  current"));', 'assert!(rendered.contains("(●) Harness + Model  current"));')
+          text = replace(text, "let result = dialog.handle_mouse(click(list.x, list.y + 12), area);", "let result = dialog.handle_mouse(click(list.x, list.y + 8), area);")
+          text = replace(text, """        assert_eq!(*dialog.selected.borrow(), GroupBy::ClientModel);
+                  assert!(!*dialog.needs_reload.borrow());
+              }
+          }""", """        assert_eq!(*dialog.selected.borrow(), GroupBy::ClientModel);
+                  assert!(!*dialog.needs_reload.borrow());
+              }
+
+              #[test]
+              fn group_by_picker_exposes_only_report_dimensions() {
+                  let dialog = make_dialog(GroupBy::ClientModel);
+
+                  assert_eq!(dialog.options.len(), 4);
+                  assert!(dialog
+                      .options
+                      .iter()
+                      .all(|option| !matches!(option.value, GroupBy::Session | GroupBy::ClientSession)));
+              }
+
+              #[test]
+              fn legacy_session_selection_falls_back_to_default_cursor() {
+                  let dialog = make_dialog(GroupBy::Session);
+
+                  assert_eq!(dialog.cursor, 1);
+              }
+          }""")
+          path.write_text(text)
+
+          path = Path("crates/tokscale-cli/src/tui/ui/mod.rs")
+          text = path.read_text()
+          text = replace(text, "mod daily;\n", "mod daily;\nmod daily_profile;\n")
+          text = replace(text, "            Tab::Daily => daily::render(frame, app, chunks[1]),", "            Tab::Daily => render_daily(frame, app, chunks[1]),")
+          text = replace(text, """    if app.dialog_stack.is_active() {
+                  app.dialog_stack.render(frame, area);
+              }
+          }
+
+          fn render_loading""", """    if app.dialog_stack.is_active() {
+                  app.dialog_stack.render(frame, area);
+              }
+          }
+
+          fn render_daily(frame: &mut Frame, app: &mut App, area: Rect) {
+              if app.is_daily_detail_active() || area.height < daily_profile::MIN_COMBINED_HEIGHT {
+                  daily::render(frame, app, area);
+                  return;
+              }
+
+              let chunks = Layout::default()
+                  .direction(Direction::Vertical)
+                  .constraints([
+                      Constraint::Length(daily_profile::PANEL_HEIGHT),
+                      Constraint::Min(0),
+                  ])
+                  .split(area);
+              daily_profile::render(frame, app, chunks[0]);
+              daily::render(frame, app, chunks[1]);
+          }
+
+          fn render_loading""")
+          path.write_text(text)
+          PY
+
+          rm -f crates/tokscale-cli/tests/rustfmt_probe.rs
+          cargo fmt --all
+      - name: Commit prepared sources
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor(tui): prepare formatted information architecture"
+          git push origin HEAD:codex/issue-153-rustfmt-probe
