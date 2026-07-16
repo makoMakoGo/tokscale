@@ -1,78 +1,125 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
-use super::widgets::{format_tokens, viewport_scrollbar_state};
+use super::widgets::{format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::{App, ChartGranularity};
-use tokscale_core::GroupBy;
+use crate::tui::data::TokenBreakdown;
 
-struct ModelRowData {
-    model: String,
+#[derive(Debug, Clone, Default)]
+struct ModelAggregate {
     provider: String,
-    workspace_label: Option<String>,
-    tokens_input: u64,
-    displayed_output: u64,
-    tokens_cache_read: u64,
-    tokens_cache_write: u64,
+    tokens: u64,
     cost: f64,
 }
 
-fn overview_model_label(group_by: &GroupBy, model: &str, workspace_label: Option<&str>) -> String {
-    if *group_by == GroupBy::WorkspaceModel {
-        format!(
-            "{} / {}",
-            workspace_label.unwrap_or("Unknown workspace"),
-            model
-        )
-    } else {
-        model.to_string()
-    }
+#[derive(Debug, Clone, Default)]
+struct HarnessAggregate {
+    tokens: u64,
+    cost: f64,
+    models: BTreeSet<String>,
 }
 
-fn overview_color_key<'a>(group_by: &GroupBy, model: &'a str) -> &'a str {
-    if *group_by == GroupBy::WorkspaceModel {
-        model
-            .rsplit_once(" / ")
-            .map(|(_, base_model)| base_model)
-            .unwrap_or(model)
-    } else {
-        model
-    }
+#[derive(Debug, Clone, Default)]
+struct OverviewData {
+    models: BTreeMap<String, ModelAggregate>,
+    harnesses: BTreeMap<String, HarnessAggregate>,
+    tokens: TokenBreakdown,
+    active_days: usize,
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Pre-fill entire overview area with theme background so that chart and
-    // legend cells (which only set fg via direct buffer writes) don't fall
-    // through to the terminal's default background color.
     frame.render_widget(
         Block::default().style(Style::default().bg(app.theme.background)),
         area,
     );
 
-    let safe_height = area.height.max(12) as usize;
-    let chart_height = (safe_height as f64 * 0.35).floor().max(5.0) as u16;
-    let legend_height = 1u16;
+    if area.is_empty() {
+        return;
+    }
 
+    app.set_max_visible_items(1);
+    let chart_height = if area.height >= 24 {
+        (area.height * 2 / 5).max(8)
+    } else {
+        (area.height / 2).max(6)
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(chart_height),
-            Constraint::Length(legend_height),
+            Constraint::Length(chart_height.min(area.height)),
+            Constraint::Length(1),
             Constraint::Min(0),
         ])
         .split(area);
 
-    let list_area_height = chunks[2].height.saturating_sub(2);
-    let items_per_page = ((list_area_height / 2) as usize).max(1);
-    app.set_max_visible_items(items_per_page);
-
     render_chart(frame, app, chunks[0]);
     render_legend(frame, app, chunks[1]);
-    render_top_models(frame, app, chunks[2], items_per_page);
+
+    let overview = collect_overview_data(app);
+    render_dashboard(frame, app, chunks[2], &overview);
+}
+
+fn collect_overview_data(app: &App) -> OverviewData {
+    let mut overview = OverviewData::default();
+
+    for day in &app.data.daily {
+        overview.tokens = overview
+            .tokens
+            .checked_add(&day.tokens)
+            .expect("overview token buckets exceed u64::MAX");
+        if day.tokens.total() > 0 || day.message_count > 0 || day.turn_count > 0 {
+            overview.active_days += 1;
+        }
+
+        for (harness, source) in &day.source_breakdown {
+            let harness_entry = overview.harnesses.entry(harness.clone()).or_default();
+            harness_entry.tokens = harness_entry
+                .tokens
+                .checked_add(source.tokens.total())
+                .expect("overview harness token total exceeds u64::MAX");
+            harness_entry.cost += source.cost;
+
+            for (model_key, model) in &source.models {
+                let canonical = canonical_model_key(
+                    model_key,
+                    &model.display_name,
+                    &model.color_key,
+                );
+                harness_entry.models.insert(canonical.clone());
+
+                let entry = overview.models.entry(canonical).or_default();
+                if entry.provider.is_empty() && !model.provider.is_empty() {
+                    entry.provider = model.provider.clone();
+                }
+                entry.tokens = entry
+                    .tokens
+                    .checked_add(model.tokens.total())
+                    .expect("overview model token total exceeds u64::MAX");
+                entry.cost += model.cost;
+            }
+        }
+    }
+
+    overview
+}
+
+fn canonical_model_key(model_key: &str, display_name: &str, color_key: &str) -> String {
+    if !color_key.is_empty() {
+        color_key.to_string()
+    } else if !display_name.is_empty() {
+        display_name.to_string()
+    } else {
+        model_key.to_string()
+    }
 }
 
 fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
-    let group_by = app.group_by.borrow().clone();
+    if area.is_empty() {
+        return;
+    }
 
     let data: Vec<StackedBarData> = match app.chart_granularity {
         ChartGranularity::Daily => app
@@ -83,33 +130,37 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
-            .map(|d| {
-                let mut models_by_key = std::collections::BTreeMap::<String, ModelSegment>::new();
-                for source_info in d.source_breakdown.values() {
-                    for (key, info) in &source_info.models {
-                        let entry =
-                            models_by_key
-                                .entry(key.clone())
-                                .or_insert_with(|| ModelSegment {
-                                    model_id: info.display_name.clone(),
-                                    tokens: 0,
-                                    color: app.model_color_for(
-                                        &info.provider,
-                                        overview_color_key(&group_by, &info.color_key),
-                                    ),
-                                });
+            .map(|day| {
+                let mut models = BTreeMap::<String, ModelAggregate>::new();
+                for source in day.source_breakdown.values() {
+                    for (model_key, model) in &source.models {
+                        let canonical = canonical_model_key(
+                            model_key,
+                            &model.display_name,
+                            &model.color_key,
+                        );
+                        let entry = models.entry(canonical).or_default();
+                        if entry.provider.is_empty() && !model.provider.is_empty() {
+                            entry.provider = model.provider.clone();
+                        }
                         entry.tokens = entry
                             .tokens
-                            .checked_add(info.tokens.total())
-                            .expect("overview model token total exceeds u64::MAX");
+                            .checked_add(model.tokens.total())
+                            .expect("overview chart token total exceeds u64::MAX");
                     }
                 }
-                let models: Vec<ModelSegment> = models_by_key.into_values().collect();
 
                 StackedBarData {
-                    date: d.date.format("%m/%d").to_string(),
-                    models,
-                    total: d.tokens.total(),
+                    date: day.date.format("%m/%d").to_string(),
+                    models: models
+                        .into_iter()
+                        .map(|(model, aggregate)| ModelSegment {
+                            color: app.model_color_for(&aggregate.provider, &model),
+                            model_id: model,
+                            tokens: aggregate.tokens,
+                        })
+                        .collect(),
+                    total: day.tokens.total(),
                 }
             })
             .collect(),
@@ -121,21 +172,35 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
-            .map(|h| {
-                let models: Vec<ModelSegment> = h
-                    .models
-                    .values()
-                    .map(|info| ModelSegment {
-                        model_id: info.display_name.clone(),
-                        tokens: info.tokens.total(),
-                        color: app.model_color_for(&info.provider, &info.color_key),
-                    })
-                    .collect();
+            .map(|hour| {
+                let mut models = BTreeMap::<String, ModelAggregate>::new();
+                for (model_key, model) in &hour.models {
+                    let canonical = canonical_model_key(
+                        model_key,
+                        &model.display_name,
+                        &model.color_key,
+                    );
+                    let entry = models.entry(canonical).or_default();
+                    if entry.provider.is_empty() && !model.provider.is_empty() {
+                        entry.provider = model.provider.clone();
+                    }
+                    entry.tokens = entry
+                        .tokens
+                        .checked_add(model.tokens.total())
+                        .expect("overview hourly chart token total exceeds u64::MAX");
+                }
 
                 StackedBarData {
-                    date: h.datetime.format("%d %H:%M").to_string(),
-                    models,
-                    total: h.tokens.total(),
+                    date: hour.datetime.format("%d %H:%M").to_string(),
+                    models: models
+                        .into_iter()
+                        .map(|(model, aggregate)| ModelSegment {
+                            color: app.model_color_for(&aggregate.provider, &model),
+                            model_id: model,
+                            tokens: aggregate.tokens,
+                        })
+                        .collect(),
+                    total: hour.tokens.total(),
                 }
             })
             .collect(),
@@ -145,262 +210,308 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
-    let legend_limit = if app.is_narrow() { 3 } else { 5 };
-    let max_name_width = if app.is_narrow() { 12 } else { 18 };
-    let muted_color = app.theme.muted;
-    let group_by = app.group_by.borrow().clone();
-
-    let top_models: Vec<(String, Color)> = app
-        .get_sorted_models()
-        .iter()
-        .take(legend_limit)
-        .map(|m| {
-            (
-                overview_model_label(&group_by, &m.model, m.workspace_label.as_deref()),
-                app.model_color_for(&m.provider, &m.model),
-            )
-        })
-        .collect();
-
-    if top_models.is_empty() {
+    if area.is_empty() {
         return;
     }
 
-    let mut spans: Vec<Span> = Vec::new();
-    for (i, (model_name, color)) in top_models.iter().enumerate() {
-        let name = truncate_string(model_name, max_name_width);
+    let overview = collect_overview_data(app);
+    let mut models: Vec<_> = overview.models.iter().collect();
+    models.sort_by(|(left_name, left), (right_name, right)| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| right.cost.total_cmp(&left.cost))
+            .then_with(|| left_name.cmp(right_name))
+    });
 
-        spans.push(Span::styled("●", Style::default().fg(*color)));
-        spans.push(Span::raw(format!(" {}", name)));
-
-        if i < top_models.len() - 1 {
-            spans.push(Span::styled("  ·", Style::default().fg(muted_color)));
+    let limit = if app.is_narrow() { 3 } else { 5 };
+    let name_width = if app.is_narrow() { 12 } else { 18 };
+    let mut spans = Vec::new();
+    for (index, (model, aggregate)) in models.into_iter().take(limit).enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(app.theme.muted)));
         }
+        spans.push(Span::styled(
+            "●",
+            Style::default().fg(app.model_color_for(&aggregate.provider, model)),
+        ));
+        spans.push(Span::raw(format!(
+            " {}",
+            truncate_string(model, name_width)
+        )));
     }
 
-    let legend_line = Line::from(spans);
-    let paragraph = Paragraph::new(legend_line);
-    frame.render_widget(paragraph, area);
+    if !spans.is_empty() {
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
 }
 
-fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_page: usize) {
-    use super::widgets::format_cost;
-    use crate::tui::app::SortField;
+fn render_dashboard(frame: &mut Frame, app: &App, area: Rect, overview: &OverviewData) {
+    if area.is_empty() {
+        return;
+    }
 
-    let theme_border = app.theme.border;
-    let theme_accent = app.theme.accent;
-    let theme_background = app.theme.background;
-    let theme_muted = app.theme.muted;
-    let theme_foreground = app.theme.foreground;
-    let theme_selection = app.theme.selection;
-    let secondary_text_style = app.theme.secondary_text_style();
-    let subtle_text_style = app.theme.subtle_text_style();
-    let scroll_offset = app.scroll_offset;
-    let selected_index = app.selected_index;
-    let is_narrow = app.is_narrow();
-    let is_very_narrow = app.is_very_narrow();
-    let sort_field = app.sort_field;
-    let total_cost = app.data.total_cost;
-    let group_by = app.group_by.borrow().clone();
-
-    let models_data: Vec<ModelRowData> = app
-        .get_sorted_models()
-        .iter()
-        .map(|m| ModelRowData {
-            model: m.model.clone(),
-            provider: m.provider.clone(),
-            workspace_label: m.workspace_label.clone(),
-            tokens_input: m.tokens.input,
-            displayed_output: m.tokens.displayed_output(),
-            tokens_cache_read: m.tokens.cache_read,
-            tokens_cache_write: m.tokens.cache_write,
-            cost: m.cost,
-        })
-        .collect();
-
-    let title = if is_very_narrow {
-        "Top Models".to_string()
+    if area.width >= 88 {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+            .split(area);
+        render_summary_panel(frame, app, columns[0], overview);
+        render_profile_panel(frame, app, columns[1], overview);
+    } else if area.height >= 13 {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(8), Constraint::Min(5)])
+            .split(area);
+        render_summary_panel(frame, app, rows[0], overview);
+        render_profile_panel(frame, app, rows[1], overview);
     } else {
-        match sort_field {
-            SortField::Tokens => "Models by Tokens".to_string(),
-            _ => "Models by Cost".to_string(),
-        }
-    };
+        render_summary_panel(frame, app, area, overview);
+    }
+}
 
-    let title_right = if is_very_narrow {
-        format_cost(total_cost)
-    } else {
-        format!("Total: {}", format_cost(total_cost))
-    };
-
-    let block = Block::default()
+fn dashboard_block<'a>(app: &App, title: &'a str) -> Block<'a> {
+    Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme_border))
+        .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            format!(" {} ", title),
+            format!(" {title} "),
             Style::default()
-                .fg(theme_accent)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         ))
-        .title_top(
-            Line::from(Span::styled(
-                format!(" {} ", title_right),
-                Style::default().fg(Color::Green),
-            ))
-            .right_aligned(),
-        )
-        .style(Style::default().bg(theme_background));
+        .style(Style::default().bg(app.theme.background))
+}
 
+fn render_summary_panel(frame: &mut Frame, app: &App, area: Rect, overview: &OverviewData) {
+    if area.is_empty() {
+        return;
+    }
+
+    let block = dashboard_block(app, "Overview");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    if models_data.is_empty() {
-        let empty = Paragraph::new("No data available")
-            .style(Style::default().fg(theme_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty, inner);
+    if inner.is_empty() {
         return;
     }
 
-    let total = models_data
+    let favorite_model = overview
+        .models
         .iter()
-        .map(|m| if m.cost.is_finite() { m.cost } else { 0.0 })
-        .sum::<f64>()
-        .max(0.01);
-    let models_len = models_data.len();
-    let start = scroll_offset.min(models_len);
-    let end = (start + items_per_page).min(models_len);
-    let max_name_width = if is_narrow { 20 } else { 35 };
+        .max_by(|(left_name, left), (right_name, right)| {
+            left.tokens
+                .cmp(&right.tokens)
+                .then_with(|| left.cost.total_cmp(&right.cost))
+                .then_with(|| right_name.cmp(left_name))
+        })
+        .map(|(name, _)| name.as_str())
+        .unwrap_or("—");
+    let favorite_harness = overview
+        .harnesses
+        .iter()
+        .max_by(|(left_name, left), (right_name, right)| {
+            left.tokens
+                .cmp(&right.tokens)
+                .then_with(|| left.cost.total_cmp(&right.cost))
+                .then_with(|| right_name.cmp(left_name))
+        })
+        .map(|(name, _)| get_client_display_name(name))
+        .unwrap_or_else(|| "—".to_string());
+    let issue_count = app.data.health.issue_count();
 
-    if start >= models_len {
+    let lines = vec![
+        metric_pair_line(
+            app,
+            "Tokens",
+            format_tokens(app.data.total_tokens),
+            Color::Cyan,
+            "Cost",
+            format_cost(app.data.total_cost),
+            Color::Green,
+        ),
+        metric_pair_line(
+            app,
+            "Favorite model",
+            truncate_string(favorite_model, 24),
+            app.model_color(favorite_model),
+            "Favorite harness",
+            truncate_string(&favorite_harness, 20),
+            app.theme.foreground,
+        ),
+        metric_pair_line(
+            app,
+            "Models",
+            overview.models.len().to_string(),
+            Color::Cyan,
+            "Harnesses",
+            overview.harnesses.len().to_string(),
+            Color::Cyan,
+        ),
+        metric_pair_line(
+            app,
+            "Active days",
+            overview.active_days.to_string(),
+            Color::Cyan,
+            "Agent profiles",
+            app.data.agents.len().to_string(),
+            Color::Cyan,
+        ),
+        metric_pair_line(
+            app,
+            "Source data",
+            format_bytes(app.data.health.source_data_bytes),
+            app.theme.foreground,
+            "Data issues",
+            issue_count.to_string(),
+            if issue_count == 0 {
+                app.theme.muted
+            } else {
+                Color::Yellow
+            },
+        ),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().take(inner.height as usize).collect::<Vec<_>>()),
+        inner,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn metric_pair_line(
+    app: &App,
+    left_label: &str,
+    left_value: String,
+    left_color: Color,
+    right_label: &str,
+    right_value: String,
+    right_color: Color,
+) -> Line<'static> {
+    let separator = if app.is_narrow() { "  ·  " } else { "    │    " };
+    Line::from(vec![
+        Span::styled(format!("{left_label}: "), Style::default().fg(app.theme.muted)),
+        Span::styled(left_value, Style::default().fg(left_color)),
+        Span::styled(separator, Style::default().fg(app.theme.border)),
+        Span::styled(format!("{right_label}: "), Style::default().fg(app.theme.muted)),
+        Span::styled(right_value, Style::default().fg(right_color)),
+    ])
+}
+
+fn render_profile_panel(frame: &mut Frame, app: &App, area: Rect, overview: &OverviewData) {
+    if area.is_empty() {
         return;
     }
 
-    let mut y = inner.y;
-    for (i, model) in models_data[start..end].iter().enumerate() {
-        if y + 1 >= inner.y + inner.height {
-            break;
-        }
-
-        let idx = i + start;
-        let is_selected = idx == selected_index;
-        let row_style = if is_selected {
-            Style::default().bg(theme_selection).fg(theme_foreground)
-        } else {
-            Style::default()
-        };
-
-        let model_color = app.model_color_for(&model.provider, &model.model);
-        let display_name =
-            overview_model_label(&group_by, &model.model, model.workspace_label.as_deref());
-        let name = truncate_string(&display_name, max_name_width);
-        let percentage = if model.cost.is_finite() && total.is_finite() && total > 0.0 {
-            (model.cost / total) * 100.0
-        } else {
-            0.0
-        };
-
-        let line1_area = Rect::new(inner.x, y, inner.width, 1);
-        frame.render_widget(Paragraph::new("").style(row_style), line1_area);
-
-        let line1_spans = vec![
-            Span::styled("●", Style::default().fg(model_color)),
-            Span::styled(
-                format!(" {}", name),
-                Style::default()
-                    .fg(if is_selected {
-                        theme_foreground
-                    } else {
-                        model_color
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" ({:.1}%)", percentage),
-                Style::default().fg(theme_muted),
-            ),
-        ];
-        let line1 = Line::from(line1_spans);
-        let line1_para = Paragraph::new(line1).style(row_style);
-        frame.render_widget(line1_para, line1_area);
-
-        y += 1;
-        if y >= inner.y + inner.height {
-            break;
-        }
-
-        let line2_area = Rect::new(inner.x, y, inner.width, 1);
-        frame.render_widget(Paragraph::new("").style(row_style), line2_area);
-
-        let line2_spans = if is_narrow {
-            vec![
-                Span::raw("  "),
-                Span::styled(format_tokens(model.tokens_input), secondary_text_style),
-                Span::styled("/", subtle_text_style),
-                Span::styled(format_tokens(model.displayed_output), secondary_text_style),
-                Span::styled("/", subtle_text_style),
-                Span::styled(format_tokens(model.tokens_cache_read), secondary_text_style),
-                Span::styled("/", subtle_text_style),
-                Span::styled(
-                    format_tokens(model.tokens_cache_write),
-                    secondary_text_style,
-                ),
-            ]
-        } else {
-            vec![
-                Span::styled("  In: ", subtle_text_style),
-                Span::styled(format_tokens(model.tokens_input), secondary_text_style),
-                Span::styled(" · Out: ", subtle_text_style),
-                Span::styled(format_tokens(model.displayed_output), secondary_text_style),
-                Span::styled(" · CR: ", subtle_text_style),
-                Span::styled(format_tokens(model.tokens_cache_read), secondary_text_style),
-                Span::styled(" · CW: ", subtle_text_style),
-                Span::styled(
-                    format_tokens(model.tokens_cache_write),
-                    secondary_text_style,
-                ),
-            ]
-        };
-
-        let line2 = Line::from(line2_spans);
-        let line2_para = Paragraph::new(line2).style(row_style);
-        frame.render_widget(line2_para, line2_area);
-
-        y += 1;
+    let block = dashboard_block(app, "Token Profile");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
     }
 
-    if models_len > items_per_page {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
+    let total = overview.tokens.total();
+    let buckets = [
+        ("Input", overview.tokens.input, app.theme.metric_input_style()),
+        (
+            "Output",
+            overview.tokens.displayed_output(),
+            app.theme.metric_output_style(),
+        ),
+        (
+            "Cache read",
+            overview.tokens.cache_read,
+            app.theme.metric_cache_read_style(),
+        ),
+        (
+            "Cache write",
+            overview.tokens.cache_write,
+            app.theme.metric_cache_write_style(),
+        ),
+    ];
+    let bar_width = (inner.width as usize).saturating_sub(31).clamp(1, 40);
+    let lines = buckets
+        .into_iter()
+        .map(|(label, value, style)| {
+            let percentage = if total > 0 {
+                value as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            let filled = if total > 0 {
+                ((value as f64 / total as f64) * bar_width as f64).round() as usize
+            } else {
+                0
+            }
+            .min(bar_width);
+            Line::from(vec![
+                Span::styled(
+                    format!("{label:<12}"),
+                    Style::default().fg(app.theme.muted),
+                ),
+                Span::styled("█".repeat(filled), style),
+                Span::styled(
+                    "░".repeat(bar_width.saturating_sub(filled)),
+                    app.theme.subtle_text_style(),
+                ),
+                Span::styled(
+                    format!("  {:>5.1}%  ", percentage),
+                    Style::default().fg(app.theme.muted),
+                ),
+                Span::styled(format_tokens(value), Style::default().fg(app.theme.foreground)),
+            ])
+        })
+        .take(inner.height as usize)
+        .collect::<Vec<_>>();
 
-        let mut scrollbar_state =
-            viewport_scrollbar_state(models_len, scroll_offset, items_per_page);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
 
-        frame.render_stateful_widget(
-            scrollbar,
-            inner.inner(Margin {
-                horizontal: 0,
-                vertical: 0,
-            }),
-            &mut scrollbar_state,
-        );
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
-fn truncate_string(s: &str, max_chars: usize) -> String {
+fn truncate_string(value: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars == 1 {
-        "…".to_string()
-    } else {
-        let head: String = s.chars().take(max_chars - 1).collect();
-        format!("{}…", head)
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+    format!("{}…", value.chars().take(max_chars - 1).collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_model_prefers_color_key_over_grouped_label() {
+        assert_eq!(
+            canonical_model_key(
+                "workspace-a / claude-sonnet-4",
+                "workspace-a / claude-sonnet-4",
+                "claude-sonnet-4",
+            ),
+            "claude-sonnet-4"
+        );
+    }
+
+    #[test]
+    fn source_size_uses_binary_units() {
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
     }
 }

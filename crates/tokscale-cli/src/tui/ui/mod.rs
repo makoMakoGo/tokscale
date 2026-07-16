@@ -1,6 +1,7 @@
 mod agents;
 mod bar_chart;
 mod daily;
+mod daily_profile;
 pub mod dialog;
 mod footer;
 mod header;
@@ -30,7 +31,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     app.clear_click_areas();
     app.handle_resize(area.width, area.height);
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -41,7 +41,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .split(area);
 
     header::render(frame, app, chunks[0]);
-
     if app.is_blocking_loading() || (app.data.loading && !app.background_loading) {
         render_loading(frame, app, chunks[1]);
     } else if let Some(ref error) = app.data.error {
@@ -51,7 +50,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Tab::Overview => overview::render(frame, app, chunks[1]),
             Tab::Models => models::render(frame, app, chunks[1]),
             Tab::Agents => agents::render(frame, app, chunks[1]),
-            Tab::Daily => daily::render(frame, app, chunks[1]),
+            Tab::Daily => render_daily(frame, app, chunks[1]),
             Tab::Hourly => hourly::render(frame, app, chunks[1]),
             Tab::Monthly => period::render_monthly(frame, app, chunks[1]),
             Tab::Weekly => period::render_weekly(frame, app, chunks[1]),
@@ -62,10 +61,26 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     footer::render(frame, app, chunks[2]);
-
     if app.dialog_stack.is_active() {
         app.dialog_stack.render(frame, area);
     }
+}
+
+fn render_daily(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.is_daily_detail_active() || area.height < daily_profile::MIN_COMBINED_HEIGHT {
+        daily::render(frame, app, area);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(daily_profile::PANEL_HEIGHT),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    daily_profile::render(frame, app, chunks[0]);
+    daily::render(frame, app, chunks[1]);
 }
 
 fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
@@ -73,10 +88,8 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .style(Style::default().bg(app.theme.background));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
     let center = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -85,18 +98,16 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
             Constraint::Percentage(40),
         ])
         .split(inner)[1];
-
     let mut spans = spinner::get_scanner_spans(app.spinner_frame, &app.theme);
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
         spinner::get_phase_message("parsing-sources"),
         Style::default().fg(app.theme.muted),
     ));
-
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line).alignment(Alignment::Center);
-
-    frame.render_widget(paragraph, center);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        center,
+    );
 }
 
 fn render_error(frame: &mut Frame, app: &App, area: Rect, error: &str) {
@@ -104,10 +115,8 @@ fn render_error(frame: &mut Frame, app: &App, area: Rect, error: &str) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .style(Style::default().bg(app.theme.background));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
     let center = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -116,11 +125,10 @@ fn render_error(frame: &mut Frame, app: &App, area: Rect, error: &str) {
             Constraint::Percentage(40),
         ])
         .split(inner)[1];
-
-    let text = format!("Error: {}", error);
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(Color::Red))
-        .alignment(Alignment::Center);
-
-    frame.render_widget(paragraph, center);
+    frame.render_widget(
+        Paragraph::new(format!("Error: {error}"))
+            .style(Style::default().fg(Color::Red))
+            .alignment(Alignment::Center),
+        center,
+    );
 }
