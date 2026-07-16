@@ -1,0 +1,27 @@
+name: Clippy Probe
+
+on:
+  pull_request:
+    branches:
+      - personal/local-clients
+
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Capture strict Clippy output
+        run: |
+          cargo clippy --workspace --all-targets --all-features --message-format=short -- -D warnings > clippy.log 2>&1 || true
+          cat clippy.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clippy-log
+          path: clippy.log
+          if-no-files-found: error
