@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
@@ -96,12 +97,30 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let graph_start_x = inner.x + label_width;
     let graph_start_y = inner.y + 2;
 
+    let selected_weekday = selected_date.weekday().num_days_from_sunday() as usize;
+
     for (day_idx, label) in DAY_LABELS.iter().enumerate() {
-        if day_idx % 2 == 1 {
+        let is_selected_row = day_idx == selected_weekday;
+        if day_idx % 2 == 1 || is_selected_row {
             let y = graph_start_y + day_idx as u16;
             if y < inner.y + inner.height {
-                let display_label = if is_narrow { "" } else { *label };
-                let text = Paragraph::new(display_label).style(Style::default().fg(theme_muted));
+                let display_label = if is_narrow {
+                    if is_selected_row {
+                        &label[..2]
+                    } else {
+                        ""
+                    }
+                } else {
+                    *label
+                };
+                let style = if is_selected_row {
+                    Style::default()
+                        .fg(theme_accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme_muted)
+                };
+                let text = Paragraph::new(display_label).style(style);
                 frame.render_widget(text, Rect::new(inner.x, y, label_width, 1));
             }
         }
@@ -176,6 +195,8 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let month_y = inner.y;
     let mut current_month: Option<usize> = None;
+    let selected_year = selected_date.year();
+    let selected_month0 = selected_date.month0() as usize;
 
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
         if let Some(Some(day)) = week.first() {
@@ -190,8 +211,16 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 current_month = Some(month);
                 let x = graph_start_x + (week_idx as u16 * CELL_WIDTH);
                 if x + 3 < inner.x + inner.width && month < MONTH_LABELS.len() {
-                    let label =
-                        Paragraph::new(MONTH_LABELS[month]).style(Style::default().fg(theme_muted));
+                    let is_selected_month =
+                        day.date.year() == selected_year && month == selected_month0;
+                    let style = if is_selected_month {
+                        Style::default()
+                            .fg(theme_accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme_muted)
+                    };
+                    let label = Paragraph::new(MONTH_LABELS[month]).style(style);
                     frame.render_widget(label, Rect::new(x, month_y, 3, 1));
                 }
             }
@@ -746,5 +775,61 @@ mod tests {
         assert!(rendered.contains("Day Breakdown"));
         assert!(rendered.contains("Thu, Jul 16, 2026"));
         assert!(!rendered.contains("ESC to close"));
+    }
+
+    #[test]
+    fn selected_day_dithered_cell_with_highlighted_axes() {
+        use chrono::Datelike;
+
+        let mut app = make_app(120);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap(); // Thursday
+        let daily = vec![tokscale_core::usage_views::DailyUsage {
+            date,
+            tokens: Default::default(),
+            cost: 3.0,
+            source_breakdown: Default::default(),
+            message_count: 0,
+            turn_count: 0,
+        }];
+        app.data.graph = Some(tokscale_core::build_contribution_graph_for_today(
+            &daily, date,
+        ));
+        app.stats_breakdown_date = date;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let frame = terminal
+            .draw(|f| render(f, &mut app, Rect::new(0, 0, 120, 40)))
+            .unwrap();
+        let buf = frame.buffer;
+
+        // The selected day keeps the original marker: a dithered cell, white on
+        // its own intensity color. As the only day with usage it has max intensity.
+        let heat = app.theme.colors[4];
+        let mut selected_cells = Vec::new();
+        for y in 0..40u16 {
+            for x in 0..120u16 {
+                let cell = buf.cell((x, y)).unwrap();
+                if cell.symbol() == "▓" && cell.fg == Color::White && cell.bg == heat {
+                    selected_cells.push((x, y));
+                }
+            }
+        }
+        assert_eq!(selected_cells.len(), 2);
+        assert_eq!(selected_cells[0].0 + 1, selected_cells[1].0);
+
+        // The cell sits on the Thursday row, whose label is now rendered accented.
+        let row_y = 3 + date.weekday().num_days_from_sunday() as u16;
+        assert_eq!(selected_cells[0].1, row_y);
+        assert_eq!(buf.cell((1, row_y)).unwrap().fg, app.theme.accent);
+
+        // The selected month's label (its rightmost occurrence) is accented too.
+        let month_row: String = (0..120u16)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol())
+            .collect();
+        let month_label = MONTH_LABELS[date.month0() as usize];
+        let month_x = month_row
+            .rfind(month_label)
+            .expect("selected month label rendered") as u16;
+        assert_eq!(buf.cell((month_x, 1)).unwrap().fg, app.theme.accent);
     }
 }
