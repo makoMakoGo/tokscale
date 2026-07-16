@@ -3477,6 +3477,22 @@ mod tests {
     }
 
     #[test]
+    fn test_workspace_metadata_matches_lowercase_drive_to_uppercase_project_slug() {
+        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"x:\\WorkSapce\\fish-claude","message":{"model":"claude-haiku-4.5","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let (_dir, path) =
+            create_project_file(content, "X--WorkSapce-fish-claude", "session.jsonl");
+
+        let messages = parse_claude_file(&path).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("X:/WorkSapce/fish-claude")
+        );
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("fish-claude"));
+    }
+
+    #[test]
     fn test_workspace_metadata_resolves_project_from_cwd_ancestor() {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/home/travis/01-workspace/tokscale/crates/tokscale-core","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let (_dir, path) = create_project_file(

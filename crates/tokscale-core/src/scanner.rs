@@ -283,6 +283,15 @@ pub fn scan_directory(
 
     let entries = WalkDir::new(root)
         .into_iter()
+        // Gemini's retired SHA-256 project directories can contain large chat
+        // histories. Prune unsupported project directories before WalkDir
+        // enumerates their contents instead of discovering and filtering files.
+        .filter_entry(|entry| {
+            pattern != "gemini-session"
+                || entry.depth() != 1
+                || !entry.file_type().is_dir()
+                || crate::sessions::gemini::is_current_project_dir(entry.path())
+        })
         .par_bridge()
         .map(|entry| {
             entry.map_err(|source| ScanDirectoryError::WalkRoot {
@@ -314,6 +323,7 @@ pub fn scan_directory(
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
+                "gemini-session" => crate::sessions::gemini::is_current_project_session(path),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
                 "*.log" => file_name.ends_with(".log"),
                 // OpenClaw: also match archived transcripts
@@ -1645,8 +1655,14 @@ mod tests {
     }
 
     fn setup_mock_gemini_dir(base: &std::path::Path) {
-        let gemini_path = base.join(".gemini/tmp/123/chats");
+        let project_path = base.join(".gemini/tmp/example-project");
+        let gemini_path = project_path.join("chats");
         fs::create_dir_all(&gemini_path).unwrap();
+        fs::write(
+            project_path.join(".project_root"),
+            "/workspace/example-project\n",
+        )
+        .unwrap();
         let mut file = File::create(gemini_path.join("session-abc.json")).unwrap();
         file.write_all(b"{}").unwrap();
     }
@@ -2620,13 +2636,49 @@ mod tests {
     fn test_scan_all_clients_gemini_jsonl_session() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
-        let gemini_path = home.join(".gemini/tmp/123/chats");
+        let project_path = home.join(".gemini/tmp/example-project");
+        let gemini_path = project_path.join("chats");
         fs::create_dir_all(&gemini_path).unwrap();
+        fs::write(
+            project_path.join(".project_root"),
+            "/workspace/example-project\n",
+        )
+        .unwrap();
         File::create(gemini_path.join("session-abc.jsonl")).unwrap();
 
         let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
         assert_eq!(result.get(ClientId::Gemini).len(), 1);
         assert!(result.get(ClientId::Gemini)[0].ends_with("session-abc.jsonl"));
+    }
+
+    #[test]
+    fn test_scan_all_clients_gemini_skips_legacy_hash_project() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let project_hash = "a".repeat(64);
+        let project_path = home.join(".gemini/tmp").join(project_hash);
+        let chats_path = project_path.join("chats");
+        fs::create_dir_all(&chats_path).unwrap();
+        // A sidecar must not revive the retired hash-based project layout.
+        fs::write(project_path.join(".project_root"), "/workspace/legacy\n").unwrap();
+        File::create(chats_path.join("session-legacy.json")).unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
+
+        assert!(result.get(ClientId::Gemini).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_gemini_requires_project_root() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let chats_path = home.join(".gemini/tmp/example-project/chats");
+        fs::create_dir_all(&chats_path).unwrap();
+        File::create(chats_path.join("session-without-root.jsonl")).unwrap();
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["gemini".to_string()]);
+
+        assert!(result.get(ClientId::Gemini).is_empty());
     }
 
     #[test]

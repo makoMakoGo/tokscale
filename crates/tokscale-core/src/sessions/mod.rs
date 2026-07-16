@@ -425,6 +425,15 @@ pub fn normalize_workspace_key(raw: &str) -> Option<String> {
         }
     }
 
+    // Windows-origin transcripts are also parsed on WSL/Linux, so detect the
+    // drive syntax instead of the host OS. Drive letters are case-insensitive;
+    // canonicalizing only that byte prevents one workspace from splitting.
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_lowercase() && bytes[1] == b':' && bytes[2] == b'/' {
+        let uppercase_drive = (bytes[0] as char).to_ascii_uppercase().to_string();
+        normalized.replace_range(0..1, &uppercase_drive);
+    }
+
     let minimum_len = if preserve_unc_prefix { 2 } else { 1 };
     if normalized.len() > minimum_len {
         normalized = normalized.trim_end_matches('/').to_string();
@@ -572,6 +581,22 @@ mod tests {
         assert_eq!(
             normalize_workspace_key("/Users/alice//repo/"),
             Some("/Users/alice/repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_workspace_key_canonicalizes_only_windows_drive_prefix() {
+        assert_eq!(
+            normalize_workspace_key(r"x:\WorkSapce\fish-claude"),
+            Some("X:/WorkSapce/fish-claude".to_string())
+        );
+        assert_eq!(
+            normalize_workspace_key("x:relative/path"),
+            Some("x:relative/path".to_string())
+        );
+        assert_eq!(
+            normalize_workspace_key("/home/travis/x:/repo"),
+            Some("/home/travis/x:/repo".to_string())
         );
     }
 

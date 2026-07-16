@@ -8,12 +8,16 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{
+    normalize_workspace_key, workspace_label_from_key, workspace_metadata_from_key, UnifiedMessage,
+    WorkspaceMetadata,
+};
 use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const CLIENT_ID: &str = "commandcode";
 
@@ -47,10 +51,11 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
     let (raw_model, configured_provider) = model_from_config(path)?;
     let provider_id = provider_hint_for_model(&raw_model).unwrap_or(&configured_provider);
     let model_id = canonicalize_model(&raw_model);
-    let workspace_key = workspace_key_from_path(path);
-    let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+    let project_slug = workspace_key_from_path(path);
+    let fallback_workspace_label = project_slug.as_deref().and_then(workspace_label_from_key);
 
     let mut scanned = ScannedSource::default();
+    let mut workspace_candidates = BTreeSet::new();
     let mut session_id: Option<String> = None;
     let mut turn_input_chars = 0usize;
     let mut pending_turn_start = false;
@@ -82,6 +87,14 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
                 continue;
             }
         };
+
+        if let (Some(content), Some(project_slug)) = (entry.content.as_ref(), &project_slug) {
+            collect_transcript_workspace_candidates(
+                content,
+                project_slug,
+                &mut workspace_candidates,
+            );
+        }
 
         let chars = match entry.content.as_ref() {
             Some(content) => match content_chars(content) {
@@ -165,7 +178,6 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
                     Some(dedup_key),
                 );
                 message.is_turn_start = is_turn_start;
-                message.set_workspace(workspace_key.clone(), workspace_label.clone());
                 scanned.messages.push(message);
 
                 assistant_index += 1;
@@ -178,6 +190,17 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
                 turn_input_chars += chars;
             }
         }
+    }
+
+    let resolved_workspace = project_slug.as_deref().and_then(|project_slug| {
+        resolve_commandcode_workspace(path, project_slug, workspace_candidates)
+    });
+    let (workspace_key, workspace_label) = resolved_workspace.map_or_else(
+        || (project_slug, fallback_workspace_label),
+        |workspace| (Some(workspace.key), Some(workspace.label)),
+    );
+    for message in &mut scanned.messages {
+        message.set_workspace(workspace_key.clone(), workspace_label.clone());
     }
 
     Ok(scanned)
@@ -217,12 +240,15 @@ fn provider_hint_for_model(model: &str) -> Option<&'static str> {
     crate::provider_identity::inferred_provider_from_model(model)
 }
 
-fn model_from_config(session_path: &Path) -> SessionParseResult<(String, String)> {
-    let Some(commandcode_root) = session_path
+fn commandcode_root(session_path: &Path) -> Option<&Path> {
+    session_path
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
-    else {
+}
+
+fn model_from_config(session_path: &Path) -> SessionParseResult<(String, String)> {
+    let Some(commandcode_root) = commandcode_root(session_path) else {
         return Err(SessionParseError::invalid(
             "locate model config",
             "Command Code session path is outside the current projects layout",
@@ -255,6 +281,113 @@ fn workspace_key_from_path(path: &Path) -> Option<String> {
         .and_then(|dir| dir.file_name())
         .and_then(|name| name.to_str())
         .and_then(normalize_workspace_key)
+}
+
+fn resolve_commandcode_workspace(
+    session_path: &Path,
+    project_slug: &str,
+    mut candidates: BTreeSet<String>,
+) -> Option<WorkspaceMetadata> {
+    if candidates.is_empty() {
+        let home = commandcode_root(session_path)?.parent()?;
+        collect_existing_workspace_candidates(home, project_slug, &mut candidates);
+    }
+    if candidates.len() != 1 {
+        return None;
+    }
+    workspace_metadata_from_key(candidates.first()?)
+}
+
+/// Command Code stores full paths in the observed `absolutePath` and
+/// `filePath` tool inputs. Their ancestors are accepted only when applying
+/// Command Code's own project slug transform reproduces the directory slug.
+fn collect_transcript_workspace_candidates(
+    content: &serde_json::Value,
+    project_slug: &str,
+    candidates: &mut BTreeSet<String>,
+) {
+    let Some(items) = content.as_array() else {
+        return;
+    };
+    for item in items {
+        let Some(input) = item.get("input").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for field in ["absolutePath", "filePath"] {
+            let Some(raw_path) = input.get(field).and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let path = Path::new(raw_path);
+            if !path.is_absolute() {
+                continue;
+            }
+            for ancestor in path.ancestors() {
+                if commandcode_project_slug(ancestor).as_deref() == Some(project_slug) {
+                    if let Some(candidate) = ancestor.to_str().and_then(normalize_workspace_key) {
+                        candidates.insert(candidate);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The installed Command Code uses `@sindresorhus/slugify(process.cwd())`.
+/// Current WSL records contain ASCII paths, for which that transform lowercases
+/// text and collapses path punctuation into one `-` separator.
+fn commandcode_project_slug(path: &Path) -> Option<String> {
+    let raw = path.to_str()?;
+    let mut slug = String::with_capacity(raw.len());
+    let mut pending_separator = false;
+    for character in raw.chars() {
+        if character.is_ascii_alphanumeric() {
+            if pending_separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character.to_ascii_lowercase());
+            pending_separator = false;
+        } else {
+            pending_separator = true;
+        }
+    }
+    (!slug.is_empty()).then_some(slug)
+}
+
+fn collect_existing_workspace_candidates(
+    home: &Path,
+    project_slug: &str,
+    candidates: &mut BTreeSet<String>,
+) {
+    let mut pending = vec![home.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Some(directory_slug) = commandcode_project_slug(&directory) else {
+            continue;
+        };
+        if directory_slug == project_slug {
+            if let Some(candidate) = directory.to_str().and_then(normalize_workspace_key) {
+                candidates.insert(candidate);
+            }
+            continue;
+        }
+        if !is_slug_prefix(project_slug, &directory_slug) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        pending.extend(entries.filter_map(existing_child_directory));
+    }
+}
+
+fn is_slug_prefix(project_slug: &str, candidate: &str) -> bool {
+    project_slug
+        .strip_prefix(candidate)
+        .is_some_and(|suffix| suffix.starts_with('-'))
+}
+
+fn existing_child_directory(entry: std::io::Result<std::fs::DirEntry>) -> Option<PathBuf> {
+    let entry = entry.ok()?;
+    entry.file_type().ok()?.is_dir().then(|| entry.path())
 }
 
 #[cfg(test)]
@@ -321,6 +454,72 @@ mod tests {
         assert!(message.is_turn_start);
         assert_eq!(message.timestamp, 1781589500332);
         assert_eq!(message.workspace_key.as_deref(), Some("users-alice-repo"));
+    }
+
+    #[test]
+    fn resolves_existing_workspace_by_forward_slug_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let commandcode_root = home.join(".commandcode");
+        let workspace = home.join("01-workspace/cc-switch");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&commandcode_root).unwrap();
+        write_config(&commandcode_root, "model-x");
+        let project_slug = commandcode_project_slug(&workspace).unwrap();
+        let path = write_session(
+            &commandcode_root,
+            &project_slug,
+            "session",
+            concat!(
+                r#"{"role":"user","sessionId":"session","content":"hello"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"session","timestamp":"2026-06-16T05:58:20Z","content":"world"}"#
+            ),
+        );
+
+        let messages = parse_commandcode_file(&path);
+
+        assert_eq!(messages[0].workspace_key.as_deref(), workspace.to_str());
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("cc-switch"));
+    }
+
+    #[test]
+    fn resolves_historical_workspace_from_structured_tool_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let commandcode_root = home.join(".commandcode");
+        let workspace = home.join("dining-table-workspace/Gaode-Map-test");
+        std::fs::create_dir_all(&commandcode_root).unwrap();
+        write_config(&commandcode_root, "model-x");
+        let project_slug = commandcode_project_slug(&workspace).unwrap();
+        let absolute_path = workspace.join("amap-jsapi/runmap.html");
+        let jsonl = format!(
+            "{}\n{}",
+            json!({
+                "role": "user",
+                "sessionId": "session",
+                "content": [{
+                    "type": "tool_use",
+                    "input": {"absolutePath": absolute_path}
+                }]
+            }),
+            json!({
+                "role": "assistant",
+                "sessionId": "session",
+                "timestamp": "2026-06-16T05:58:20Z",
+                "content": "done"
+            }),
+        );
+        let path = write_session(&commandcode_root, &project_slug, "session", &jsonl);
+
+        let messages = parse_commandcode_file(&path);
+
+        assert!(!workspace.exists());
+        assert_eq!(messages[0].workspace_key.as_deref(), workspace.to_str());
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("Gaode-Map-test")
+        );
     }
 
     #[test]

@@ -12,8 +12,9 @@ use crate::adapters::{
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions::error::SessionParseResult;
+use crate::sessions::WorkspaceMetadata;
 use crate::source_health::ScannedSource;
-use crate::{scanner, sessions};
+use crate::{scanner, sessions, UnifiedMessage};
 
 const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
@@ -21,10 +22,12 @@ const QWEN_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION +
 const ZCODE_OVERLAP_NORMALIZATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const KIMI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const COMMANDCODE_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const COMMANDCODE_WORKSPACE_REVISION: u32 = COMMANDCODE_RECORD_REJECTION_REVISION + 1;
 const ZCODE_RECORD_REJECTION_REVISION: u32 = ZCODE_OVERLAP_NORMALIZATION_REVISION + 1;
 const MUX_RECORD_REJECTION_REVISION: u32 = MUX_STABLE_DEDUP_REVISION + 1;
 const AMP_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const COPILOT_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const COPILOT_WORKSPACE_REVISION: u32 = COPILOT_RECORD_REJECTION_REVISION + 1;
 const GROK_RECORD_REJECTION_REVISION: u32 = GROK_TOTAL_ONLY_IMPUTATION_REVISION + 1;
 const GROK_RELATED_METADATA_REVISION: u32 = GROK_RECORD_REJECTION_REVISION + 1;
 const GEMINI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
@@ -38,6 +41,7 @@ pub(crate) struct CachedFileAdapter {
     fingerprint_policy: FingerprintPolicy,
     optional_related_inputs: bool,
     dependency_path: Option<fn(&Path) -> Option<PathBuf>>,
+    workspace_enrichment: Option<fn(&Path, &mut [UnifiedMessage])>,
     parse: fn(&Path) -> SessionParseResult<ScannedSource>,
 }
 
@@ -54,6 +58,7 @@ impl CachedFileAdapter {
             fingerprint_policy: FingerprintPolicy::PlainFile,
             optional_related_inputs: false,
             dependency_path: None,
+            workspace_enrichment: None,
             parse,
         }
     }
@@ -71,6 +76,7 @@ impl CachedFileAdapter {
             fingerprint_policy: FingerprintPolicy::PlainFile,
             optional_related_inputs: false,
             dependency_path: Some(dependency_path),
+            workspace_enrichment: None,
             parse,
         }
     }
@@ -88,8 +94,14 @@ impl CachedFileAdapter {
             fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings { sibling_names },
             optional_related_inputs: true,
             dependency_path: None,
+            workspace_enrichment: None,
             parse,
         }
+    }
+
+    const fn with_workspace_enrichment(mut self, enrich: fn(&Path, &mut [UnifiedMessage])) -> Self {
+        self.workspace_enrichment = Some(enrich);
+        self
     }
 }
 
@@ -150,8 +162,37 @@ impl LocalSourceAdapter for CachedFileAdapter {
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
     ) -> Result<(), SourcePipelineError> {
-        adapter_cache::fold_units(parsed, ctx, sink)
+        let workspace_enrichment = self.workspace_enrichment;
+        // Companion workspace metadata is projected after cache resolution so
+        // both old and fresh usage shards observe the current authoritative path.
+        adapter_cache::fold_units_with_filter(parsed, ctx, sink, move |unit, mut messages| {
+            if let Some(enrich) = workspace_enrichment {
+                enrich(&unit.path, &mut messages);
+            }
+            messages
+        })
     }
+}
+
+fn apply_workspace(messages: &mut [UnifiedMessage], workspace: Option<WorkspaceMetadata>) {
+    let Some(workspace) = workspace else {
+        return;
+    };
+    for message in messages {
+        message.set_workspace(Some(workspace.key.clone()), Some(workspace.label.clone()));
+    }
+}
+
+fn enrich_droid_workspace(path: &Path, messages: &mut [UnifiedMessage]) {
+    apply_workspace(messages, sessions::droid::droid_workspace_metadata(path));
+}
+
+fn enrich_kimi_workspace(path: &Path, messages: &mut [UnifiedMessage]) {
+    apply_workspace(messages, sessions::kimi::kimi_workspace_metadata(path));
+}
+
+fn enrich_gemini_workspace(path: &Path, messages: &mut [UnifiedMessage]) {
+    apply_workspace(messages, sessions::gemini::gemini_workspace_metadata(path));
 }
 
 pub(crate) struct CopilotAdapter;
@@ -193,18 +234,24 @@ impl LocalSourceAdapter for CopilotAdapter {
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
                 ParserId::Copilot,
-                COPILOT_RECORD_REJECTION_REVISION,
+                COPILOT_WORKSPACE_REVISION,
             ))
         })
         .collect())
     }
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+        let workspace_index = sessions::copilot::CopilotWorkspaceIndex::discover(
+            units.iter().map(|unit| unit.path.as_path()),
+        );
         units
             .into_par_iter()
             .map(|unit| {
                 adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
-                    sessions::copilot::parse_copilot_file(path)
+                    sessions::copilot::parse_copilot_file_with_workspace_index(
+                        path,
+                        &workspace_index,
+                    )
                 })
             })
             .collect()
@@ -234,7 +281,8 @@ pub(crate) static GEMINI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ParserId::Gemini,
     GEMINI_RECORD_REJECTION_REVISION,
     sessions::gemini::parse_gemini_file,
-);
+)
+.with_workspace_enrichment(enrich_gemini_workspace);
 pub(crate) static GROK_ADAPTER: CachedFileAdapter = CachedFileAdapter::new_with_optional_siblings(
     ClientId::Grok,
     ParserId::Grok,
@@ -254,13 +302,15 @@ pub(crate) static DROID_ADAPTER: CachedFileAdapter = CachedFileAdapter::new_with
     DROID_AGENT_ATTRIBUTION_REVISION,
     sessions::droid::droid_agent_dependency_path,
     sessions::droid::parse_droid_file,
-);
+)
+.with_workspace_enrichment(enrich_droid_workspace);
 pub(crate) static KIMI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Kimi,
     ParserId::Kimi,
     KIMI_RECORD_REJECTION_REVISION,
     sessions::kimi::parse_kimi_file,
-);
+)
+.with_workspace_enrichment(enrich_kimi_workspace);
 pub(crate) static QWEN_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Qwen,
     ParserId::Qwen,
@@ -276,7 +326,7 @@ pub(crate) static MUX_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
 pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::CommandCode,
     ParserId::CommandCode,
-    COMMANDCODE_RECORD_REJECTION_REVISION,
+    COMMANDCODE_WORKSPACE_REVISION,
     sessions::commandcode::parse_commandcode_file,
 );
 pub(crate) static ZCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
@@ -595,6 +645,72 @@ not-json
     }
 
     #[test]
+    fn droid_workspace_enrichment_refreshes_on_warm_usage_cache() {
+        let home = tempfile::TempDir::new().unwrap();
+        let session_dir = home.path().join(".factory/sessions/project");
+        let settings_path = session_dir.join("session.settings.json");
+        let transcript_path = session_dir.join("session.jsonl");
+        write_file(
+            &settings_path,
+            r#"{
+                "model": "custom:gpt-5.5-xhigh",
+                "providerLock": "openai",
+                "providerLockTimestamp": "2026-07-15T08:55:13.871Z",
+                "tokenUsage": {"inputTokens": 10, "outputTokens": 5}
+            }"#,
+        );
+        write_file(
+            &transcript_path,
+            r#"{"type":"session_start","cwd":"/home/travis/01-workspace/tokscale"}
+"#,
+        );
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let cold_unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let cold_messages = fold_with_adapter(&DROID_ADAPTER, vec![cold_unit], &mut cache);
+        assert_eq!(
+            cold_messages[0].workspace_key.as_deref(),
+            Some("/home/travis/01-workspace/tokscale")
+        );
+        assert_eq!(
+            cold_messages[0].workspace_label.as_deref(),
+            Some("tokscale")
+        );
+
+        // Workspace metadata is deliberately read after usage-cache resolution.
+        write_file(
+            &transcript_path,
+            r#"{"type":"session_start","cwd":"/home/travis/02-workspace/oh-my-openagent"}
+"#,
+        );
+        let warm_unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let crate::adapters::CacheHitPlan::Hit(warm_hit) =
+            DROID_ADAPTER.plan_cache_hit(warm_unit, &cache).unwrap()
+        else {
+            panic!("unchanged Droid settings must retain the usage-cache hit");
+        };
+        let mut warm_messages = Vec::new();
+        DROID_ADAPTER
+            .fold(
+                vec![warm_hit],
+                &mut FoldContext::new(&mut cache, None),
+                &mut warm_messages,
+            )
+            .unwrap();
+
+        assert_eq!(
+            warm_messages[0].workspace_key.as_deref(),
+            Some("/home/travis/02-workspace/oh-my-openagent")
+        );
+        assert_eq!(
+            warm_messages[0].workspace_label.as_deref(),
+            Some("oh-my-openagent")
+        );
+    }
+
+    #[test]
     fn droid_adapter_invalidates_cached_mission_worker_role_from_features() {
         let home = tempfile::TempDir::new().unwrap();
         let session_dir = home.path().join(".factory/sessions/project");
@@ -698,7 +814,7 @@ not-json
             (
                 COMMANDCODE_ADAPTER.parser_version,
                 ParserId::CommandCode,
-                COMMANDCODE_RECORD_REJECTION_REVISION,
+                COMMANDCODE_WORKSPACE_REVISION,
             ),
             (
                 ZCODE_ADAPTER.parser_version,
@@ -723,7 +839,7 @@ not-json
 
         assert_eq!(
             unit.parser_version,
-            ParserVersion::new(ParserId::Copilot, COPILOT_RECORD_REJECTION_REVISION)
+            ParserVersion::new(ParserId::Copilot, COPILOT_WORKSPACE_REVISION)
         );
     }
 

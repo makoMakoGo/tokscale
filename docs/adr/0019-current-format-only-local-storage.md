@@ -17,6 +17,11 @@ OpenCode now stores usage in release-channel SQLite databases under its data
 root. The earlier `storage/message/**/*.json` layout and databases without the
 current `session.directory` schema are obsolete formats.
 
+Gemini CLI has also used two project layouts under its `tmp` data root. The
+retired layout identifies project directories by a SHA-256 storage key. The
+current layout uses a readable project directory and records the exact
+workspace path in a `.project_root` sidecar.
+
 ## Decision
 
 Local client adapters read only the currently supported storage format unless
@@ -46,6 +51,15 @@ For OpenCode:
 - reject the former SQL query without the current `session` join rather than
   falling back to it.
 
+For Gemini CLI:
+
+- discover only non-SHA-256 project directories that contain `.project_root`;
+- accept `chats/session-*.json` and `chats/session-*.jsonl` within that current
+  layout and derive workspace identity from `.project_root`;
+- prune SHA-256 project directories before walking their chat histories; and
+- do not reconstruct retired project identities from path hashes, auxiliary
+  indexes, or transcript heuristics.
+
 The TUI aggregate cache schema advances from 25 to 26. The first run after the
 change rebuilds cached aggregates so values previously sourced from retired
 OpenCode JSON cannot remain visible. The OpenCode SQLite parser revision also
@@ -72,3 +86,8 @@ Removing the JSON parser, migration record, source metadata, precedence
 partition, and legacy scanner tasks leaves one discovery and parse contract for
 OpenCode. Existing `opencode-migration.json` files are ignored and may be
 deleted.
+
+Gemini history stored only in retired SHA-256 project directories is likewise
+absent from reports. Tokscale ignores those directories without migrating or
+deleting them. Supporting both JSON and JSONL session files in the current
+named layout does not reintroduce the retired storage contract.

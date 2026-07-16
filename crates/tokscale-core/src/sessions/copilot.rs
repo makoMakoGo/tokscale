@@ -5,16 +5,186 @@
 //! aggregate agent records are only used as a fallback to avoid double counting.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::UnifiedMessage;
+use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
 use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
 use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[derive(Default)]
+pub(crate) struct CopilotWorkspaceIndex {
+    by_response_id: HashMap<String, WorkspaceMetadata>,
+    ambiguous_response_ids: HashSet<String>,
+}
+
+impl CopilotWorkspaceIndex {
+    /// VS Code keeps remote-workspace chat sessions on the Windows host. For
+    /// the observed WSL layout, derive the matching host roots from the home
+    /// that owns `.copilot/otel`, then index only exact Copilot response IDs.
+    pub(crate) fn discover<'a>(otel_paths: impl IntoIterator<Item = &'a Path>) -> Self {
+        let mut roots = BTreeSet::new();
+        for otel_path in otel_paths {
+            let Some(home) = copilot_home_from_otel_path(otel_path) else {
+                continue;
+            };
+            roots.extend(vscode_workspace_storage_roots(home));
+        }
+        Self::from_workspace_storage_roots(roots)
+    }
+
+    fn from_workspace_storage_roots(
+        roots: impl IntoIterator<Item = PathBuf>,
+    ) -> CopilotWorkspaceIndex {
+        let mut index = Self::default();
+        for root in roots {
+            index.index_workspace_storage_root(&root);
+        }
+        index
+    }
+
+    fn index_workspace_storage_root(&mut self, root: &Path) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let storage_dir = entry.path();
+            if !storage_dir.is_dir() {
+                continue;
+            }
+            let Some(workspace) = workspace_from_vscode_storage_dir(&storage_dir) else {
+                continue;
+            };
+            let Ok(chat_sessions) = std::fs::read_dir(storage_dir.join("chatSessions")) else {
+                continue;
+            };
+            for chat_session in chat_sessions.flatten() {
+                let chat_path = chat_session.path();
+                if chat_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                self.index_chat_session_file(&chat_path, &workspace);
+            }
+        }
+    }
+
+    fn index_chat_session_file(&mut self, path: &Path, workspace: &WorkspaceMetadata) {
+        let Ok(file) = std::fs::File::open(path) else {
+            return;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let mut response_ids = Vec::new();
+            collect_response_ids(&value, &mut response_ids);
+            for response_id in response_ids {
+                self.insert_response_workspace(response_id, workspace);
+            }
+        }
+    }
+
+    fn insert_response_workspace(&mut self, response_id: &str, workspace: &WorkspaceMetadata) {
+        if response_id.trim().is_empty() || self.ambiguous_response_ids.contains(response_id) {
+            return;
+        }
+        if let Some(existing) = self.by_response_id.get(response_id) {
+            if existing != workspace {
+                self.by_response_id.remove(response_id);
+                self.ambiguous_response_ids.insert(response_id.to_string());
+            }
+            return;
+        }
+        self.by_response_id
+            .insert(response_id.to_string(), workspace.clone());
+    }
+
+    fn workspace_for_response_id(&self, response_id: &str) -> Option<&WorkspaceMetadata> {
+        self.by_response_id.get(response_id)
+    }
+}
+
+fn copilot_home_from_otel_path(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".copilot"))?
+        .parent()
+}
+
+fn vscode_workspace_storage_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for product in ["Code", "Code - Insiders"] {
+        roots.push(
+            home.join(".config")
+                .join(product)
+                .join("User/workspaceStorage"),
+        );
+        roots.push(
+            home.join("AppData/Roaming")
+                .join(product)
+                .join("User/workspaceStorage"),
+        );
+    }
+
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        if let Some(user_name) = home.file_name() {
+            let windows_home = Path::new("/mnt/c/Users").join(user_name);
+            for product in ["Code", "Code - Insiders"] {
+                roots.push(
+                    windows_home
+                        .join("AppData/Roaming")
+                        .join(product)
+                        .join("User/workspaceStorage"),
+                );
+            }
+        }
+    }
+    roots
+}
+
+fn workspace_from_vscode_storage_dir(storage_dir: &Path) -> Option<WorkspaceMetadata> {
+    let mut bytes = std::fs::read(storage_dir.join("workspace.json")).ok()?;
+    let value = simd_json::from_slice::<Value>(&mut bytes).ok()?;
+    let folder = value.get("folder")?.as_str()?;
+    let workspace_path = if let Some(remote) = folder.strip_prefix("vscode-remote://") {
+        let path_start = remote.find('/')?;
+        &remote[path_start..]
+    } else {
+        folder
+    };
+    workspace_metadata_from_key(workspace_path)
+}
+
+fn collect_response_ids<'a>(value: &'a Value, response_ids: &mut Vec<&'a str>) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if key == "responseId" {
+                    if let Some(response_id) = child.as_str() {
+                        response_ids.push(response_id);
+                    }
+                }
+                collect_response_ids(child, response_ids);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                collect_response_ids(child, response_ids);
+            }
+        }
+        _ => {}
+    }
+}
 
 pub fn parse_copilot_file(path: &Path) -> SessionParseResult<ScannedSource> {
+    parse_copilot_file_with_workspace_index(path, &CopilotWorkspaceIndex::default())
+}
+
+pub(crate) fn parse_copilot_file_with_workspace_index(
+    path: &Path,
+    workspace_index: &CopilotWorkspaceIndex,
+) -> SessionParseResult<ScannedSource> {
     let mut scanned = ScannedSource::default();
     let (trace_contexts, first_pass_interruption, confirmed_records) =
         collect_trace_contexts(path, &mut scanned.rejections)?;
@@ -38,6 +208,8 @@ pub fn parse_copilot_file(path: &Path) -> SessionParseResult<ScannedSource> {
     )?;
     scanned.interrupted = first_pass_interruption.or(second_pass_interruption);
     scanned.rejections.merge(&candidate_rejections);
+
+    apply_copilot_workspace_matches(&mut candidates, workspace_index);
 
     let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::ChatSpan);
     let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::InferenceLog);
@@ -156,6 +328,7 @@ struct CopilotUsageCandidate {
     source: CopilotUsageSource,
     trace_id: Option<String>,
     response_id: Option<String>,
+    resource_session_id: Option<String>,
     model: String,
     provider_id: String,
     session_id: String,
@@ -164,6 +337,7 @@ struct CopilotUsageCandidate {
     tokens: TokenBreakdown,
     dedup_key: String,
     agent: Option<String>,
+    workspace: Option<WorkspaceMetadata>,
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -188,7 +362,60 @@ impl CopilotUsageCandidate {
         );
         message.dedup_key = Some(crate::sessions::dedup_hash_str(&self.dedup_key));
         message.duration_ms = self.duration_ms;
+        if let Some(workspace) = self.workspace {
+            message.set_workspace(Some(workspace.key), Some(workspace.label));
+        }
         message
+    }
+}
+
+fn apply_copilot_workspace_matches(
+    candidates: &mut [CopilotUsageCandidate],
+    workspace_index: &CopilotWorkspaceIndex,
+) {
+    let mut session_workspaces: HashMap<String, WorkspaceMetadata> = HashMap::new();
+    let mut ambiguous_sessions = HashSet::new();
+
+    for candidate in candidates.iter_mut() {
+        let Some(workspace) = candidate
+            .response_id
+            .as_deref()
+            .and_then(|response_id| workspace_index.workspace_for_response_id(response_id))
+            .cloned()
+        else {
+            continue;
+        };
+        candidate.workspace = Some(workspace.clone());
+
+        let Some(resource_session_id) = candidate.resource_session_id.as_ref() else {
+            continue;
+        };
+        if ambiguous_sessions.contains(resource_session_id) {
+            continue;
+        }
+        if let Some(existing) = session_workspaces.get(resource_session_id) {
+            if existing != &workspace {
+                session_workspaces.remove(resource_session_id);
+                ambiguous_sessions.insert(resource_session_id.clone());
+            }
+        } else {
+            session_workspaces.insert(resource_session_id.clone(), workspace);
+        }
+    }
+
+    // Internal title/summary requests do not appear in chatSessions, but the
+    // observed OTEL resource session covers one VS Code extension host. Only a
+    // unique response-ID match is propagated within that exact resource id.
+    for candidate in candidates {
+        if candidate.workspace.is_some() {
+            continue;
+        }
+        candidate.workspace = candidate
+            .resource_session_id
+            .as_ref()
+            .filter(|session_id| !ambiguous_sessions.contains(*session_id))
+            .and_then(|session_id| session_workspaces.get(session_id))
+            .cloned();
     }
 }
 
@@ -319,6 +546,7 @@ fn candidate_from_attributes(
     trace_context: Option<&TraceContext>,
     index: usize,
 ) -> SessionParseResult<Option<CopilotUsageCandidate>> {
+    let resource_session_id = resource_session_id_from_record(record).map(str::to_string);
     let input =
         attr_token_i64_first(attributes, &["gen_ai.usage.input_tokens"])?.unwrap_or_default();
     let output =
@@ -398,6 +626,7 @@ fn candidate_from_attributes(
     let session_id = best_session_attr(attributes)
         .map(|(session_id, _)| session_id)
         .or_else(|| trace_context.and_then(|context| context.session_id.as_deref()))
+        .or(resource_session_id.as_deref())
         .or(trace_id.as_deref())
         .ok_or_else(|| {
             invalid_at_path(
@@ -431,6 +660,7 @@ fn candidate_from_attributes(
         source,
         trace_id,
         response_id,
+        resource_session_id,
         model,
         provider_id,
         session_id,
@@ -442,6 +672,7 @@ fn candidate_from_attributes(
             .map(super::normalize_copilot_agent_name)
             .or_else(|| trace_context.and_then(|tc| tc.agent_name.clone()))
             .or_else(|| Some("Default".to_string())),
+        workspace: None,
     }))
 }
 
@@ -622,6 +853,20 @@ fn trace_id_from_record(value: &Value) -> Option<&str> {
         })
         .map(str::trim)
         .filter(|trace_id| !trace_id.is_empty())
+}
+
+fn resource_session_id_from_record(value: &Value) -> Option<&str> {
+    let raw_attributes = value.get("resource")?.get("_rawAttributes")?.as_array()?;
+    raw_attributes.iter().find_map(|entry| {
+        let pair = entry.as_array()?;
+        if pair.first()?.as_str()? != "session.id" {
+            return None;
+        }
+        pair.get(1)?
+            .as_str()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+    })
 }
 
 fn span_id_from_record(value: &Value) -> Option<&str> {
@@ -878,6 +1123,40 @@ mod tests {
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn vscode_response_match_propagates_workspace_within_resource_session() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let workspace_storage = directory.path().join("workspaceStorage");
+        let storage_dir = workspace_storage.join("workspace-id");
+        let chat_dir = storage_dir.join("chatSessions");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(
+            storage_dir.join("workspace.json"),
+            r#"{"folder":"vscode-remote://wsl%2Bubuntu/home/travis/01-workspace/tokscale"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            chat_dir.join("session.jsonl"),
+            r#"{"kind":2,"v":[{"responseId":"matched-response"}]}"#,
+        )
+        .unwrap();
+        let workspace_index =
+            CopilotWorkspaceIndex::from_workspace_storage_roots([workspace_storage]);
+        let content = r#"{"hrTime":[1782215752,916000000],"resource":{"_rawAttributes":[["service.name","copilot-chat"],["session.id","resource-session"]]},"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-4o-mini-2024-07-18","gen_ai.response.id":"internal-response","gen_ai.usage.input_tokens":262,"gen_ai.usage.output_tokens":74}}
+{"hrTime":[1782215759,337000000],"spanContext":{"traceId":"trace-main","spanId":"span-main"},"resource":{"_rawAttributes":[["service.name","copilot-chat"],["session.id","resource-session"]]},"attributes":{"event.name":"gen_ai.client.inference.operation.details","gen_ai.operation.name":"chat","gen_ai.response.model":"gemini-3-flash-preview","gen_ai.response.id":"matched-response","gen_ai.usage.input_tokens":23545,"gen_ai.usage.output_tokens":234}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file_with_workspace_index(file.path(), &workspace_index)
+            .unwrap()
+            .messages;
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|message| {
+            message.workspace_key.as_deref() == Some("/home/travis/01-workspace/tokscale")
+                && message.workspace_label.as_deref() == Some("tokscale")
+        }));
     }
 
     fn write_large_fixture_with_usage(usage_line: &str) -> NamedTempFile {

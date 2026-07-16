@@ -5,7 +5,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_i64, extract_string, parse_timestamp_value};
-use super::UnifiedMessage;
+use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
 use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
 use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
@@ -46,6 +46,54 @@ struct GeminiSessionEnvelope {
     #[serde(rename = "sessionId")]
     session_id: String,
     messages: Vec<Value>,
+}
+
+fn gemini_project_dir(path: &Path) -> Option<&Path> {
+    let file_name = path.file_name()?.to_str()?;
+    if !file_name.starts_with("session-")
+        || !(file_name.ends_with(".json") || file_name.ends_with(".jsonl"))
+    {
+        return None;
+    }
+    let chats_dir = path.parent()?;
+    if chats_dir.file_name()?.to_str()? != "chats" {
+        return None;
+    }
+    chats_dir.parent()
+}
+
+fn is_sha256_storage_key(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub(crate) fn is_current_project_dir(project_dir: &Path) -> bool {
+    let Some(storage_key) = project_dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    !is_sha256_storage_key(storage_key) && project_dir.join(".project_root").is_file()
+}
+
+/// Accept only Gemini's current named project layout. Gemini used both JSON
+/// and JSONL transcripts after introducing `.project_root`, so the sidecar and
+/// non-hash storage key define the supported format rather than the extension.
+pub(crate) fn is_current_project_session(path: &Path) -> bool {
+    let Some(project_dir) = gemini_project_dir(path) else {
+        return false;
+    };
+    is_current_project_dir(project_dir)
+}
+
+/// Current Gemini projects carry the exact workspace path in `.project_root`.
+/// Legacy hash-named projects are excluded during discovery and are not
+/// reconstructed from `projects.json` or transcript contents.
+pub(crate) fn gemini_workspace_metadata(path: &Path) -> Option<WorkspaceMetadata> {
+    if !is_current_project_session(path) {
+        return None;
+    }
+    let project_dir = gemini_project_dir(path)?;
+    let project_root = std::fs::read_to_string(project_dir.join(".project_root")).ok()?;
+    workspace_metadata_from_key(&project_root)
 }
 
 fn first_i64(value: &Value, keys: &[&str]) -> SessionParseResult<Option<i64>> {
@@ -914,6 +962,63 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, content).unwrap();
         (directory, path)
+    }
+
+    #[test]
+    fn workspace_uses_current_project_root_sidecar() {
+        let directory = TempDir::new().unwrap();
+        let project_dir = directory.path().join("tmp/tokscale");
+        let session = project_dir.join("chats/session-current.json");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(
+            project_dir.join(".project_root"),
+            "/home/travis/01-workspace/tokscale\n",
+        )
+        .unwrap();
+
+        let workspace = gemini_workspace_metadata(&session).unwrap();
+
+        assert_eq!(workspace.key, "/home/travis/01-workspace/tokscale");
+        assert_eq!(workspace.label, "tokscale");
+    }
+
+    #[test]
+    fn workspace_rejects_legacy_hash_project_even_with_sidecar() {
+        let directory = TempDir::new().unwrap();
+        let project_hash = "a".repeat(64);
+        let session = directory
+            .path()
+            .join("tmp")
+            .join(&project_hash)
+            .join("chats/session-legacy.json");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(
+            session
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(".project_root"),
+            "/home/travis/legacy-project\n",
+        )
+        .unwrap();
+
+        assert!(!is_current_project_session(&session));
+        assert_eq!(gemini_workspace_metadata(&session), None);
+    }
+
+    #[test]
+    fn workspace_requires_project_root_sidecar() {
+        let directory = TempDir::new().unwrap();
+        let session = directory
+            .path()
+            .join("tmp")
+            .join("named-project")
+            .join("chats/session-current.json");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+
+        assert!(!is_current_project_session(&session));
+        assert_eq!(gemini_workspace_metadata(&session), None);
     }
 
     #[test]

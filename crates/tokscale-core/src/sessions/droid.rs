@@ -3,7 +3,7 @@
 //! Parses JSON files from ~/.factory/sessions/
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::UnifiedMessage;
+use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
 use crate::source_health::{RecordRejectionReason, ScannedSource};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -53,6 +53,7 @@ struct DroidTagMetadata {
 struct DroidSessionStart {
     #[serde(rename = "type")]
     record_type: String,
+    cwd: Option<String>,
     title: Option<String>,
     #[serde(rename = "callingSessionId")]
     calling_session_id: Option<String>,
@@ -209,6 +210,15 @@ fn read_session_start(path: &Path) -> Option<DroidSessionStart> {
         .ok()?;
     let start: DroidSessionStart = serde_json::from_str(&first_line).ok()?;
     (start.record_type == "session_start").then_some(start)
+}
+
+/// Factory records the authoritative session working directory on the first
+/// transcript row, next to the settings file that owns the usage totals.
+pub(crate) fn droid_workspace_metadata(path: &Path) -> Option<WorkspaceMetadata> {
+    read_session_start(path)?
+        .cwd
+        .as_deref()
+        .and_then(workspace_metadata_from_key)
 }
 
 fn factory_root(path: &Path) -> Option<&Path> {
@@ -1050,5 +1060,22 @@ mod tests {
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
         assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn resolves_workspace_from_session_start_cwd() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let settings = temp_dir.path().join("session.settings.json");
+        std::fs::write(
+            temp_dir.path().join("session.jsonl"),
+            r#"{"type":"session_start","cwd":"/home/travis/01-workspace/tokscale"}
+"#,
+        )
+        .unwrap();
+
+        let workspace = droid_workspace_metadata(&settings).unwrap();
+
+        assert_eq!(workspace.key, "/home/travis/01-workspace/tokscale");
+        assert_eq!(workspace.label, "tokscale");
     }
 }

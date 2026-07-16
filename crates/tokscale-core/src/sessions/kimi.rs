@@ -4,7 +4,7 @@
 //! `~/.kimi-code/sessions/<WORKDIR_KEY>/<SESSION_ID>/agents/<AGENT_ID>/wire.jsonl`.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::UnifiedMessage;
+use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
 use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -44,8 +44,16 @@ struct WireLine {
     time: Option<i64>,
     model: Option<String>,
     usage: Option<TokenUsage>,
+    cwd: Option<String>,
     #[serde(rename = "profileName")]
     profile_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KimiSessionIndexLine {
+    session_id: String,
+    work_dir: String,
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +361,53 @@ fn parse_wire_path(path: &Path) -> SessionParseResult<KimiWirePath> {
         session_id: session_id.to_string(),
         agent_id: agent_id.to_string(),
     })
+}
+
+/// Current Kimi records place `cwd` in the initial config snapshot. Older
+/// sessions omit it from wire.jsonl but retain the exact path in the session
+/// index, so the index is used only when the wire itself has no workspace.
+pub(crate) fn kimi_workspace_metadata(path: &Path) -> Option<WorkspaceMetadata> {
+    workspace_from_initial_wire_config(path).or_else(|| {
+        let wire_path = parse_wire_path(path).ok()?;
+        workspace_from_session_index(&wire_path.home, &wire_path.session_id)
+    })
+}
+
+fn workspace_from_initial_wire_config(path: &Path) -> Option<WorkspaceMetadata> {
+    let reader = BufReader::new(std::fs::File::open(path).ok()?);
+    for line in reader.lines().map_while(Result::ok) {
+        let mut bytes = line.as_bytes().to_vec();
+        let Ok(wire_line) = simd_json::from_slice::<WireLine>(&mut bytes) else {
+            continue;
+        };
+        if let Some(workspace) = wire_line
+            .cwd
+            .as_deref()
+            .and_then(workspace_metadata_from_key)
+        {
+            return Some(workspace);
+        }
+        if wire_line.line_type.as_deref() == Some("usage.record") {
+            break;
+        }
+    }
+    None
+}
+
+fn workspace_from_session_index(home: &Path, session_id: &str) -> Option<WorkspaceMetadata> {
+    let index = std::fs::File::open(home.join("session_index.jsonl")).ok()?;
+    for line in BufReader::new(index).lines().map_while(Result::ok) {
+        if !line.contains(session_id) {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<KimiSessionIndexLine>(&line) else {
+            continue;
+        };
+        if entry.session_id == session_id {
+            return workspace_metadata_from_key(&entry.work_dir);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -701,5 +756,42 @@ model = "gpt-5.5"
 
         assert_eq!(error.operation(), "validate Kimi wire path");
         assert_eq!(error.path(), Some(wire.as_path()));
+    }
+
+    #[test]
+    fn resolves_workspace_from_initial_config_cwd() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"config.update","cwd":"/home/travis/01-workspace/kimi-code"}
+{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
+        );
+
+        let workspace = kimi_workspace_metadata(&wire).unwrap();
+
+        assert_eq!(workspace.key, "/home/travis/01-workspace/kimi-code");
+        assert_eq!(workspace.label, "kimi-code");
+    }
+
+    #[test]
+    fn resolves_legacy_workspace_from_session_index() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
+        );
+        std::fs::write(
+            dir.path().join("session_index.jsonl"),
+            r#"{"sessionId":"session_123","sessionDir":"/tmp/session_123","workDir":"/home/travis/personal-workspace/fish-claude"}
+"#,
+        )
+        .unwrap();
+
+        let workspace = kimi_workspace_metadata(&wire).unwrap();
+
+        assert_eq!(workspace.key, "/home/travis/personal-workspace/fish-claude");
+        assert_eq!(workspace.label, "fish-claude");
     }
 }

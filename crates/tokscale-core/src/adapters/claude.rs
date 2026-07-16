@@ -16,7 +16,7 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
 
-const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 7;
+const CLAUDE_PARSER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 8;
 
 static CLAUDE_PROJECT_RESOLVERS: LazyLock<
     Mutex<HashMap<PathBuf, Arc<sessions::claudecode::ClaudeProjectResolver>>>,
@@ -107,10 +107,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
         .into_iter()
         .map(configure_claude_parent_dependency)
         .map(|unit| {
-            unit.with_parser_version(ParserVersion::new(
-                ParserId::Claude,
-                CLAUDE_RECORD_HEALTH_REVISION,
-            ))
+            unit.with_parser_version(ParserVersion::new(ParserId::Claude, CLAUDE_PARSER_REVISION))
         })
         .collect();
         Ok(units)
@@ -596,10 +593,7 @@ mod tests {
             home.path().to_path_buf(),
         )
         .unwrap()
-        .with_parser_version(ParserVersion::new(
-            ParserId::Claude,
-            CLAUDE_RECORD_HEALTH_REVISION,
-        ))
+        .with_parser_version(ParserVersion::new(ParserId::Claude, CLAUDE_PARSER_REVISION))
         .prepare_snapshot()
         .unwrap();
         let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());

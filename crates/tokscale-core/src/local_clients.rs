@@ -126,7 +126,7 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
                 fallback_relative: ".gemini",
             },
             relative_path: "tmp",
-            pattern: "*.json|*.jsonl",
+            pattern: "gemini-session",
         },
     },
     LocalClientEntry {
