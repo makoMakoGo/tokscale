@@ -63,6 +63,17 @@ where
     })
 }
 
+pub(crate) fn load_or_scan_unit_with_cacheability<F>(
+    unit: SourceUnit,
+    ctx: &ParseContext<'_>,
+    scan: F,
+) -> ParsedUnit
+where
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<(ScannedSource, bool)>,
+{
+    load_or_scan_unit_cacheable(unit, ctx, ScanCacheOptions::default(), scan)
+}
+
 /// Scan a primary source whose related fingerprint inputs only provide
 /// optional metadata. If hashing one of those inputs fails, the primary scan
 /// still runs, the failure is exposed as partial health when the parser did

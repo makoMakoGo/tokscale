@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use rayon::prelude::*;
 
@@ -15,7 +16,42 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
 
-const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 5;
+const CLAUDE_RECORD_HEALTH_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 7;
+
+static CLAUDE_PROJECT_RESOLVERS: LazyLock<
+    Mutex<HashMap<PathBuf, Arc<sessions::claudecode::ClaudeProjectResolver>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn reset_claude_project_resolver(home_dir: &Path) {
+    CLAUDE_PROJECT_RESOLVERS
+        .lock()
+        .expect("Claude project resolver registry poisoned")
+        .insert(
+            home_dir.to_path_buf(),
+            Arc::new(sessions::claudecode::ClaudeProjectResolver::new(Some(
+                home_dir,
+            ))),
+        );
+}
+
+fn claude_project_resolver(
+    home_dir: Option<&Path>,
+) -> Arc<sessions::claudecode::ClaudeProjectResolver> {
+    let Some(home_dir) = home_dir else {
+        return Arc::new(sessions::claudecode::ClaudeProjectResolver::new(None));
+    };
+    let mut resolvers = CLAUDE_PROJECT_RESOLVERS
+        .lock()
+        .expect("Claude project resolver registry poisoned");
+    resolvers
+        .entry(home_dir.to_path_buf())
+        .or_insert_with(|| {
+            Arc::new(sessions::claudecode::ClaudeProjectResolver::new(Some(
+                home_dir,
+            )))
+        })
+        .clone()
+}
 
 pub(crate) struct ClaudeAdapter;
 
@@ -28,6 +64,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
         &self,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+        reset_claude_project_resolver(Path::new(ctx.home_dir));
         let def = ClientId::Claude
             .local_def()
             .expect("Claude adapter must have local scan policy");
@@ -83,15 +120,34 @@ impl LocalSourceAdapter for ClaudeAdapter {
         units
             .into_par_iter()
             .map(|unit| {
-                let home_dir = match &unit.fingerprint_policy {
-                    FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
-                        Some(home_dir.clone())
-                    }
-                    FingerprintPolicy::NoMessageCache => None,
+                let (home_dir, parent_session_fingerprinted) = match &unit.fingerprint_policy {
+                    FingerprintPolicy::ClaudeCodeWithHome {
+                        home_dir,
+                        parent_session_path,
+                        ..
+                    } => (Some(home_dir.clone()), parent_session_path.is_some()),
+                    FingerprintPolicy::NoMessageCache => (None, false),
                     _ => unreachable!("unexpected Claude source fingerprint policy"),
                 };
-                adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
-                    sessions::claudecode::parse_claude_file_with_home(path, home_dir.as_deref())
+                let project_resolver = claude_project_resolver(home_dir.as_deref());
+                adapter_cache::load_or_scan_unit_with_cacheability(unit, ctx, |path| {
+                    sessions::claudecode::parse_claude_file_with_project_resolver(
+                        path,
+                        home_dir.as_deref(),
+                        &project_resolver,
+                    )
+                    .map(|(scanned, dependency)| {
+                        let cacheable = match dependency {
+                            sessions::claudecode::ClaudeProjectDependency::None => true,
+                            sessions::claudecode::ClaudeProjectDependency::ParentSession => {
+                                parent_session_fingerprinted
+                            }
+                            sessions::claudecode::ClaudeProjectDependency::ExternalMetadata => {
+                                false
+                            }
+                        };
+                        (scanned, cacheable)
+                    })
                 })
             })
             .collect()
@@ -328,7 +384,7 @@ mod tests {
 
     fn sidechain(parent_session_id: &str, agent_id: &str) -> String {
         format!(
-            r#"{{"type":"assistant","isSidechain":true,"sessionId":"{parent_session_id}","agentId":"{agent_id}","timestamp":"2026-07-14T00:00:00Z","message":{{"id":"msg-{agent_id}","model":"claude-sonnet-4.6","usage":{{"input_tokens":2,"output_tokens":3}}}}}}"#
+            r#"{{"type":"assistant","isSidechain":true,"sessionId":"{parent_session_id}","agentId":"{agent_id}","cwd":"project-a","timestamp":"2026-07-14T00:00:00Z","message":{{"id":"msg-{agent_id}","model":"claude-sonnet-4.6","usage":{{"input_tokens":2,"output_tokens":3}}}}}}"#
         )
     }
 
@@ -530,7 +586,7 @@ mod tests {
         let session_path = home.path().join(".claude/projects/project-a/health.jsonl");
         write_file(
             &session_path,
-            r#"{"type":"assistant","timestamp":"2026-07-14T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":1}}}
+            r#"{"type":"assistant","cwd":"project-a","timestamp":"2026-07-14T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":1}}}
 {"type":"assistant","timestamp":"2026-07-14T00:00:01Z","message":{"usage":{"input_tokens":99,"output_tokens":9}}}
 {"type":"assistant","timestamp":"2026-07-14T00:00:02Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":20,"output_tokens":2}}}"#,
         );
@@ -573,6 +629,51 @@ mod tests {
             health.rejections.entries().next().unwrap().key,
             "missing-model"
         );
+    }
+
+    #[test]
+    fn external_project_resolution_is_not_cached() {
+        let home = tempfile::TempDir::new().unwrap();
+        let session_path = home
+            .path()
+            .join(".claude/projects/-home-travis-external-project/session.jsonl");
+        write_file(
+            &session_path,
+            r#"{"type":"assistant","timestamp":"2026-07-14T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+        );
+
+        let unit = discover_unit(home.path(), &session_path);
+        let parser_version = unit.parser_version;
+        let mut cache = message_cache::SourceMessageCache::default();
+        let (unresolved, _) = scan_and_fold(unit, &mut cache);
+        assert_eq!(
+            unresolved[0].workspace_key.as_deref(),
+            Some("-home-travis-external-project")
+        );
+        assert!(cache
+            .get_meta(&session_path, parser_version)
+            .unwrap()
+            .is_none());
+
+        write_file(
+            &home.path().join(".claude/history.jsonl"),
+            r#"{"project":"/home/travis/external-project"}"#,
+        );
+        let unit = discover_unit(home.path(), &session_path);
+        let crate::adapters::CacheHitPlan::Miss(miss) =
+            CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap()
+        else {
+            panic!("external project metadata must be re-evaluated");
+        };
+        let (resolved, _) = scan_and_fold(miss, &mut cache);
+        assert_eq!(
+            resolved[0].workspace_key.as_deref(),
+            Some("/home/travis/external-project")
+        );
+        assert!(cache
+            .get_meta(&session_path, parser_version)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -699,6 +800,57 @@ mod tests {
             CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
             crate::adapters::CacheHitPlan::Hit(_)
         ));
+    }
+
+    #[test]
+    fn tier1_parent_project_resolution_is_not_cached() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home
+            .path()
+            .join(".claude/projects/-home-travis-parent-project");
+        let parent_path = project.join("parent-meta.jsonl");
+        let child_path = project.join("parent-meta/subagents/agent-meta1.jsonl");
+        let meta_path = child_path.with_file_name("agent-meta1.meta.json");
+        write_file(&parent_path, r#"{"type":"user"}"#);
+        write_file(
+            &child_path,
+            r#"{"type":"assistant","isSidechain":true,"sessionId":"parent-meta","agentId":"meta1","timestamp":"2026-07-14T00:00:00Z","message":{"id":"msg-meta1","model":"claude-sonnet-4.6","usage":{"input_tokens":2,"output_tokens":3}}}"#,
+        );
+        write_file(&meta_path, r#"{"agentType":"plan"}"#);
+
+        let unit = discover_unit(home.path(), &child_path);
+        assert!(!unit.digest_paths().contains(&parent_path));
+        let parser_version = unit.parser_version;
+        let mut cache = message_cache::SourceMessageCache::default();
+        let (unresolved, _) = scan_and_fold(unit, &mut cache);
+        assert_eq!(
+            unresolved[0].workspace_key.as_deref(),
+            Some("-home-travis-parent-project")
+        );
+        assert!(cache
+            .get_meta(&child_path, parser_version)
+            .unwrap()
+            .is_none());
+
+        write_file(
+            &parent_path,
+            r#"{"type":"user","cwd":"/home/travis/parent-project"}"#,
+        );
+        let unit = discover_unit(home.path(), &child_path);
+        let crate::adapters::CacheHitPlan::Miss(miss) =
+            CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap()
+        else {
+            panic!("an unfingerprinted parent project path must be re-evaluated");
+        };
+        let (resolved, _) = scan_and_fold(miss, &mut cache);
+        assert_eq!(
+            resolved[0].workspace_key.as_deref(),
+            Some("/home/travis/parent-project")
+        );
+        assert!(cache
+            .get_meta(&child_path, parser_version)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

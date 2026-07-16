@@ -287,7 +287,7 @@ fn create_mixed_workspace_fixture_dir() -> TempDir {
             serde_json::json!({
                 "type": "assistant",
                 "timestamp": "2026-01-01T00:00:01.000Z",
-                "cwd": workspace,
+                "projectPath": workspace,
                 "message": {
                     "model": "gpt-5.4",
                     "usage": {
@@ -2706,7 +2706,7 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
 }
 
 #[test]
-fn test_models_group_by_workspace_model_merges_claude_codex_pi_by_cwd() {
+fn test_models_group_by_workspace_model_merges_claude_project_path_with_codex_pi_cwd() {
     let tmp = create_mixed_workspace_fixture_dir();
     let output = cmd_with_home(tmp.path())
         .args([
