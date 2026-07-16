@@ -83,11 +83,8 @@ fn collect_overview_data(app: &App) -> OverviewData {
             harness_entry.cost += source.cost;
 
             for (model_key, model) in &source.models {
-                let canonical = canonical_model_key(
-                    model_key,
-                    &model.display_name,
-                    &model.color_key,
-                );
+                let canonical =
+                    canonical_model_key(model_key, &model.display_name, &model.color_key);
                 harness_entry.models.insert(canonical.clone());
 
                 let entry = overview.models.entry(canonical).or_default();
@@ -134,11 +131,8 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                 let mut models = BTreeMap::<String, ModelAggregate>::new();
                 for source in day.source_breakdown.values() {
                     for (model_key, model) in &source.models {
-                        let canonical = canonical_model_key(
-                            model_key,
-                            &model.display_name,
-                            &model.color_key,
-                        );
+                        let canonical =
+                            canonical_model_key(model_key, &model.display_name, &model.color_key);
                         let entry = models.entry(canonical).or_default();
                         if entry.provider.is_empty() && !model.provider.is_empty() {
                             entry.provider = model.provider.clone();
@@ -175,11 +169,8 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             .map(|hour| {
                 let mut models = BTreeMap::<String, ModelAggregate>::new();
                 for (model_key, model) in &hour.models {
-                    let canonical = canonical_model_key(
-                        model_key,
-                        &model.display_name,
-                        &model.color_key,
-                    );
+                    let canonical =
+                        canonical_model_key(model_key, &model.display_name, &model.color_key);
                     let entry = models.entry(canonical).or_default();
                     if entry.provider.is_empty() && !model.provider.is_empty() {
                         entry.provider = model.provider.clone();
@@ -372,7 +363,12 @@ fn render_summary_panel(frame: &mut Frame, app: &App, area: Rect, overview: &Ove
     ];
 
     frame.render_widget(
-        Paragraph::new(lines.into_iter().take(inner.height as usize).collect::<Vec<_>>()),
+        Paragraph::new(
+            lines
+                .into_iter()
+                .take(inner.height as usize)
+                .collect::<Vec<_>>(),
+        ),
         inner,
     );
 }
@@ -387,12 +383,22 @@ fn metric_pair_line(
     right_value: String,
     right_color: Color,
 ) -> Line<'static> {
-    let separator = if app.is_narrow() { "  ·  " } else { "    │    " };
+    let separator = if app.is_narrow() {
+        "  ·  "
+    } else {
+        "    │    "
+    };
     Line::from(vec![
-        Span::styled(format!("{left_label}: "), Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!("{left_label}: "),
+            Style::default().fg(app.theme.muted),
+        ),
         Span::styled(left_value, Style::default().fg(left_color)),
         Span::styled(separator, Style::default().fg(app.theme.border)),
-        Span::styled(format!("{right_label}: "), Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!("{right_label}: "),
+            Style::default().fg(app.theme.muted),
+        ),
         Span::styled(right_value, Style::default().fg(right_color)),
     ])
 }
@@ -411,7 +417,11 @@ fn render_profile_panel(frame: &mut Frame, app: &App, area: Rect, overview: &Ove
 
     let total = overview.tokens.total();
     let buckets = [
-        ("Input", overview.tokens.input, app.theme.metric_input_style()),
+        (
+            "Input",
+            overview.tokens.input,
+            app.theme.metric_input_style(),
+        ),
         (
             "Output",
             overview.tokens.displayed_output(),
@@ -444,10 +454,7 @@ fn render_profile_panel(frame: &mut Frame, app: &App, area: Rect, overview: &Ove
             }
             .min(bar_width);
             Line::from(vec![
-                Span::styled(
-                    format!("{label:<12}"),
-                    Style::default().fg(app.theme.muted),
-                ),
+                Span::styled(format!("{label:<12}"), Style::default().fg(app.theme.muted)),
                 Span::styled("█".repeat(filled), style),
                 Span::styled(
                     "░".repeat(bar_width.saturating_sub(filled)),
@@ -457,7 +464,10 @@ fn render_profile_panel(frame: &mut Frame, app: &App, area: Rect, overview: &Ove
                     format!("  {:>5.1}%  ", percentage),
                     Style::default().fg(app.theme.muted),
                 ),
-                Span::styled(format_tokens(value), Style::default().fg(app.theme.foreground)),
+                Span::styled(
+                    format_tokens(value),
+                    Style::default().fg(app.theme.foreground),
+                ),
             ])
         })
         .take(inner.height as usize)

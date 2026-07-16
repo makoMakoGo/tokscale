@@ -154,13 +154,19 @@ fn render_session_coverage(frame: &mut Frame, app: &mut App, area: Rect) {
             ])
         })
         .collect::<Vec<_>>();
-    let header = Row::new(vec!["Harness", "Model / Workspace", "Sessions", "Tokens", "Cost"])
-        .style(
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .height(1);
+    let header = Row::new(vec![
+        "Harness",
+        "Model / Workspace",
+        "Sessions",
+        "Tokens",
+        "Cost",
+    ])
+    .style(
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )
+    .height(1);
     let widths = if app.is_narrow() {
         [
             Constraint::Percentage(24),
@@ -306,7 +312,10 @@ fn render_harness_health(frame: &mut Frame, app: &App, area: Rect) {
             .collect::<Vec<_>>()
             .join(", ");
         lines.push(Line::from(vec![
-            Span::styled("Affected source groups: ", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                "Affected source groups: ",
+                Style::default().fg(app.theme.muted),
+            ),
             Span::styled(labels, Style::default().fg(Color::Yellow)),
         ]));
     }
@@ -337,14 +346,25 @@ fn render_harness_health(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(app.theme.muted),
             ),
             Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
-            Span::styled(format_tokens(coverage.tokens), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format_tokens(coverage.tokens),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
-            Span::styled(format_cost(coverage.cost), Style::default().fg(Color::Green)),
+            Span::styled(
+                format_cost(coverage.cost),
+                Style::default().fg(Color::Green),
+            ),
         ]));
     }
 
     frame.render_widget(
-        Paragraph::new(lines.into_iter().take(inner.height as usize).collect::<Vec<_>>()),
+        Paragraph::new(
+            lines
+                .into_iter()
+                .take(inner.height as usize)
+                .collect::<Vec<_>>(),
+        ),
         inner,
     );
 }

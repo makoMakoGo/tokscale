@@ -68,11 +68,9 @@ pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line
     let max_date = hourly.iter().map(|entry| entry.datetime.date()).max();
     let date_range = match (min_date, max_date) {
         (Some(start), Some(end)) if start == end => start.format("%Y-%m-%d").to_string(),
-        (Some(start), Some(end)) => format!(
-            "{} to {}",
-            start.format("%Y-%m-%d"),
-            end.format("%Y-%m-%d")
-        ),
+        (Some(start), Some(end)) => {
+            format!("{} to {}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
+        }
         _ => "No data".to_string(),
     };
 
