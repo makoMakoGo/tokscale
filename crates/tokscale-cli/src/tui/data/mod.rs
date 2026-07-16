@@ -20,12 +20,8 @@ pub use tokscale_core::usage_views::{
     HourlyModelInfo, HourlyUsage, PeriodKind, PeriodUsage, UsageData, UsageGraphData as GraphData,
     UsageModelEntry as ModelUsage, UsageTokenBreakdown as TokenBreakdown,
 };
-#[allow(unused_imports)]
 pub use tokscale_core::{
-    aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
-    build_contribution_graph_for_today, build_period_usage, calculate_streaks,
-    calculate_streaks_for_today, find_peak_hour, PeriodBucket, WeekdayBucket,
-    UNKNOWN_WORKSPACE_LABEL,
+    aggregate_by_period, aggregate_by_weekday, build_period_usage, find_peak_hour,
 };
 
 /// Returns the scanner settings that `DataLoader` should use when building
@@ -99,12 +95,6 @@ impl DataLoader {
             until,
             year,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn load(&self, enabled_clients: &[ClientId], group_by: &GroupBy) -> Result<UsageData> {
-        self.load_with_diagnostics(enabled_clients, group_by)
-            .map(|result| result.data)
     }
 
     pub fn load_with_diagnostics(
@@ -185,48 +175,8 @@ impl DataLoader {
             source_digest: result.source_inventory_signature.process_digest(),
         })
     }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn load_with_pricing(
-        &self,
-        enabled_clients: &[ClientId],
-        group_by: &GroupBy,
-        pricing: &tokscale_core::pricing::PricingService,
-    ) -> Result<UsageData> {
-        let (home, use_env_roots) = match &self.home_dir {
-            Some(home) => (home.to_string_lossy().into_owned(), false),
-            None => (
-                dirs::home_dir()
-                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-                    .to_string_lossy()
-                    .into_owned(),
-                true,
-            ),
-        };
-
-        let sources: Vec<String> = enabled_clients
-            .iter()
-            .map(|client| client.as_str().to_string())
-            .collect();
-
-        let opts = LocalParseOptions {
-            home_dir: Some(home),
-            clients: Some(sources),
-            since: self.since.clone(),
-            until: self.until.clone(),
-            year: self.year.clone(),
-            use_env_roots,
-            scanner_settings: data_loader_scanner_settings(&self.home_dir)?,
-        };
-
-        let usage_data =
-            tokscale_core::load_usage_data_with_pricing(opts, group_by.clone(), Some(pricing))
-                .map_err(anyhow::Error::new)?;
-
-        Ok(usage_data)
-    }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,7 +186,10 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
     use tokscale_core::pricing::{ModelPricing, PricingService};
-    use tokscale_core::TokenBreakdown as CoreTokenBreakdown;
+    use tokscale_core::{
+        build_contribution_graph_for_today, calculate_streaks_for_today,
+        TokenBreakdown as CoreTokenBreakdown,
+    };
 
     fn test_pricing_service() -> PricingService {
         let mut litellm = HashMap::new();
@@ -481,17 +434,6 @@ mod tests {
 
     #[test]
     fn test_data_loader_scanner_settings_is_hermetic_under_cfg_test() {
-        // Regression guard: the `#[cfg(test)]` branch of
-        // `data_loader_scanner_settings` must not read
-        // `~/.config/tokscale/settings.json`. Otherwise every DataLoader
-        // unit test becomes machine-dependent as soon as a developer
-        // pins extra OpenCode dbs in their real settings.json.
-        //
-        // This test cannot sandbox HOME (many of the sibling tests in
-        // this module would race against each other if it did), so
-        // instead it asserts the cfg(test) helper returns a default
-        // ScannerSettings regardless of what the real settings file
-        // contains on the developer's machine.
         let settings = super::data_loader_scanner_settings(&None).unwrap();
         assert!(
             settings.opencode_db_paths.is_empty(),
