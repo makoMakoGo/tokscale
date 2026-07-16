@@ -23,9 +23,6 @@ pub enum DialogResult {
     Close,
     /// Dialog data changed and the app should reload after close
     NeedsReload,
-    /// Replace the current dialog with a new one
-    #[allow(dead_code)]
-    Replace(Box<dyn DialogContent>),
 }
 
 impl From<InteractionOutcome> for DialogResult {
