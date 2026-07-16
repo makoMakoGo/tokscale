@@ -60,10 +60,6 @@ clap = { version = "4.5", features = ["derive", "cargo"] }
 ratatui = { version = "0.29", features = ["all-widgets"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 
-# Async utilities
-tokio-stream = "0.1"
-futures = "0.3"
-
 # Table output for non-TUI mode
 comfy-table = "7"
 
