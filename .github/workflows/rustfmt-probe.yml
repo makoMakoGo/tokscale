@@ -1,9 +1,9 @@
 name: Rustfmt Probe
 
 on:
-  push:
+  pull_request:
     branches:
-      - codex/issue-153-rustfmt-probe
+      - personal/local-clients
 
 permissions:
   contents: read
@@ -13,16 +13,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Format sources
         run: cargo fmt --all
-      - name: Collect formatted TUI sources
+      - name: Collect formatted and base TUI sources
+        env:
+          BASE_SHA: 48cf8bb1c6973c49a148eee8d16144fb08afda65
         run: |
-          mkdir -p rustfmt-output/crates/tokscale-cli/src/tui
-          cp -R crates/tokscale-cli/src/tui/ui rustfmt-output/crates/tokscale-cli/src/tui/
-          git diff -- crates/tokscale-cli/src/tui/ui > rustfmt-output/rustfmt.patch
+          mkdir -p rustfmt-output/formatted/crates/tokscale-cli/src/tui
+          mkdir -p rustfmt-output/base/crates/tokscale-cli/src/tui/ui/dialog
+          cp -R crates/tokscale-cli/src/tui/ui rustfmt-output/formatted/crates/tokscale-cli/src/tui/
+          cp crates/tokscale-cli/src/tui/app.rs rustfmt-output/formatted/crates/tokscale-cli/src/tui/app.rs
+          for path in \
+            crates/tokscale-cli/src/tui/ui/overview.rs \
+            crates/tokscale-cli/src/tui/ui/stats.rs \
+            crates/tokscale-cli/src/tui/ui/hourly_profile.rs \
+            crates/tokscale-cli/src/tui/ui/issues.rs \
+            crates/tokscale-cli/src/tui/ui/header.rs \
+            crates/tokscale-cli/src/tui/ui/footer.rs \
+            crates/tokscale-cli/src/tui/ui/dialog/group_by_picker.rs \
+            crates/tokscale-cli/src/tui/ui/mod.rs \
+            crates/tokscale-cli/src/tui/app.rs
+          do
+            mkdir -p "rustfmt-output/base/$(dirname "$path")"
+            git show "$BASE_SHA:$path" > "rustfmt-output/base/$path"
+          done
+          git diff -- crates/tokscale-cli/src/tui > rustfmt-output/rustfmt.patch
       - uses: actions/upload-artifact@v4
         with:
           name: rustfmt-output
