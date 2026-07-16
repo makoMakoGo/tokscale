@@ -1,6 +1,7 @@
 mod agents;
 mod bar_chart;
 mod daily;
+mod daily_profile;
 pub mod dialog;
 mod footer;
 mod header;
@@ -51,7 +52,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Tab::Overview => overview::render(frame, app, chunks[1]),
             Tab::Models => models::render(frame, app, chunks[1]),
             Tab::Agents => agents::render(frame, app, chunks[1]),
-            Tab::Daily => daily::render(frame, app, chunks[1]),
+            Tab::Daily => render_daily(frame, app, chunks[1]),
             Tab::Hourly => hourly::render(frame, app, chunks[1]),
             Tab::Monthly => period::render_monthly(frame, app, chunks[1]),
             Tab::Weekly => period::render_weekly(frame, app, chunks[1]),
@@ -66,6 +67,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.dialog_stack.is_active() {
         app.dialog_stack.render(frame, area);
     }
+}
+
+fn render_daily(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.is_daily_detail_active() || area.height < daily_profile::MIN_COMBINED_HEIGHT {
+        daily::render(frame, app, area);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(daily_profile::PANEL_HEIGHT),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    daily_profile::render(frame, app, chunks[0]);
+    daily::render(frame, app, chunks[1]);
 }
 
 fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
