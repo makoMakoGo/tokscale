@@ -22,6 +22,7 @@ jobs:
           components: rustfmt, clippy
       - name: Apply prepared source changes
         run: |
+          # The implementation patch is stored in the oversized temporary workflow.
           awk '
             /cat > \/tmp\/session-navigation\.patch\.b64 <<'\''PATCH'\''/ { copy = 1; next }
             copy && /^PATCH$/ { exit }
