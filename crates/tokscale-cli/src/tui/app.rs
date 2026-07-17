@@ -417,6 +417,7 @@ pub struct App {
     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
 
     pub selected_graph_cell: Option<(usize, usize)>,
+    stats_auto_select_today_pending: bool,
 
     pub auto_refresh: bool,
     pub auto_refresh_interval: Duration,
@@ -570,6 +571,7 @@ impl App {
             selected_period_detail: None,
             detail_sort_contexts: HashMap::new(),
             selected_graph_cell: None,
+            stats_auto_select_today_pending: current_tab == Tab::Stats,
             auto_refresh,
             auto_refresh_interval,
             last_refresh: Instant::now(),
@@ -621,6 +623,7 @@ impl App {
             usage_rx: None,
         };
         app.build_model_shade_map();
+        app.try_auto_select_stats_today();
         app.maybe_fetch_subscription_usage_on_usage_entry();
         Ok(app)
     }
@@ -671,11 +674,62 @@ impl App {
         }
     }
 
+    fn graph_cell_for_date(&self, date: NaiveDate) -> Option<(usize, usize)> {
+        self.data
+            .graph
+            .as_ref()?
+            .weeks
+            .iter()
+            .enumerate()
+            .find_map(|(week_idx, week)| {
+                week.iter()
+                    .position(|day| day.as_ref().is_some_and(|day| day.date == date))
+                    .map(|day_idx| (week_idx, day_idx))
+            })
+    }
+
+    fn graph_date_for_cell(&self, (week_idx, day_idx): (usize, usize)) -> Option<NaiveDate> {
+        self.data
+            .graph
+            .as_ref()?
+            .weeks
+            .get(week_idx)?
+            .get(day_idx)?
+            .as_ref()
+            .map(|day| day.date)
+    }
+
+    fn request_stats_today_selection(&mut self) {
+        self.selected_graph_cell = None;
+        self.stats_auto_select_today_pending = true;
+        self.try_auto_select_stats_today();
+    }
+
+    fn try_auto_select_stats_today(&mut self) {
+        if !self.stats_auto_select_today_pending || self.current_tab != Tab::Stats {
+            return;
+        }
+
+        if let Some(cell) = self.graph_cell_for_date(chrono::Local::now().date_naive()) {
+            self.selected_graph_cell = Some(cell);
+            self.stats_auto_select_today_pending = false;
+        }
+    }
+
     pub fn update_data(&mut self, data: UsageData) {
+        let had_graph_selection = self.selected_graph_cell.is_some();
+        let selected_graph_date = self
+            .selected_graph_cell
+            .and_then(|cell| self.graph_date_for_cell(cell));
         drop(std::mem::replace(&mut self.data, data));
         let now = Instant::now();
         self.last_refresh = now;
         self.build_model_shade_map();
+        if had_graph_selection {
+            self.selected_graph_cell =
+                selected_graph_date.and_then(|date| self.graph_cell_for_date(date));
+        }
+        self.try_auto_select_stats_today();
 
         // Exit Daily-detail mode if the refresh dropped the day we were
         // viewing; otherwise `get_sorted_daily_detail_rows()` would return
@@ -979,6 +1033,7 @@ impl App {
             }
             KeyCode::Esc if self.selected_graph_cell.is_some() => {
                 self.selected_graph_cell = None;
+                self.stats_auto_select_today_pending = false;
                 self.reset_current_list_interaction();
             }
             _ => {}
@@ -1067,6 +1122,7 @@ impl App {
                             }
                             ClickAction::GraphCell { week, day } => {
                                 self.selected_graph_cell = Some((*week, *day));
+                                self.stats_auto_select_today_pending = false;
                                 self.selected_index = 0;
                                 self.scroll_offset = 0;
                             }
@@ -1257,8 +1313,11 @@ impl App {
             self.selected_period_detail = None;
             self.clear_detail_sort_context(DetailSortContextKind::Period);
         }
-        if target != Tab::Stats {
+        if target == Tab::Stats {
+            self.request_stats_today_selection();
+        } else {
             self.selected_graph_cell = None;
+            self.stats_auto_select_today_pending = false;
         }
 
         let (field, dir) = self
@@ -2633,6 +2692,23 @@ mod tests {
         }
     }
 
+    fn usage_data_with_graph_for_today(
+        graph_today: NaiveDate,
+        activity_date: NaiveDate,
+    ) -> UsageData {
+        let daily = vec![daily_usage(
+            &activity_date.format("%Y-%m-%d").to_string(),
+            1.0,
+            vec![("gpt-5.4", "openai", 1.0)],
+        )];
+        let graph = tokscale_core::build_contribution_graph_for_today(&daily, graph_today);
+        UsageData {
+            daily,
+            graph: Some(graph),
+            ..Default::default()
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -3901,6 +3977,109 @@ mod tests {
     }
 
     // ── handle_key_event: misc keys ─────────────────────────────────
+
+    #[test]
+    fn test_entering_stats_selects_today_instead_of_latest_usage_day() {
+        let today = chrono::Local::now().date_naive();
+        let activity_date = today - chrono::Duration::days(1);
+        let mut app = make_app();
+        app.update_data(usage_data_with_graph_for_today(today, activity_date));
+        let today_cell = app.graph_cell_for_date(today).unwrap();
+        let activity_cell = app.graph_cell_for_date(activity_date).unwrap();
+        assert_ne!(today_cell, activity_cell);
+
+        app.selected_graph_cell = Some(activity_cell);
+        app.switch_tab(Tab::Stats);
+
+        assert_eq!(app.selected_graph_cell, Some(today_cell));
+        assert_eq!(app.graph_date_for_cell(today_cell), Some(today));
+    }
+
+    #[test]
+    fn test_initial_stats_tab_selects_today_from_cached_graph() {
+        let today = chrono::Local::now().date_naive();
+        let activity_date = today - chrono::Duration::days(2);
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: Some(Tab::Stats),
+        };
+
+        let app = App::new_with_cached_data_and_settings(
+            config,
+            Some(usage_data_with_graph_for_today(today, activity_date)),
+            test_settings(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.selected_graph_cell
+                .and_then(|cell| app.graph_date_for_cell(cell)),
+            Some(today)
+        );
+    }
+
+    #[test]
+    fn test_stats_selects_today_when_graph_arrives_after_entry() {
+        let today = chrono::Local::now().date_naive();
+        let mut app = make_app();
+
+        app.switch_tab(Tab::Stats);
+        assert_eq!(app.selected_graph_cell, None);
+
+        app.update_data(usage_data_with_graph_for_today(
+            today,
+            today - chrono::Duration::days(1),
+        ));
+
+        assert_eq!(
+            app.selected_graph_cell
+                .and_then(|cell| app.graph_date_for_cell(cell)),
+            Some(today)
+        );
+    }
+
+    #[test]
+    fn test_stats_escape_prevents_refresh_from_reselecting_today() {
+        let today = chrono::Local::now().date_naive();
+        let activity_date = today - chrono::Duration::days(1);
+        let mut app = make_app();
+        app.update_data(usage_data_with_graph_for_today(today, activity_date));
+        app.switch_tab(Tab::Stats);
+        assert!(app.selected_graph_cell.is_some());
+
+        app.handle_key_event(key(KeyCode::Esc));
+        assert_eq!(app.selected_graph_cell, None);
+
+        app.update_data(usage_data_with_graph_for_today(today, activity_date));
+        assert_eq!(app.selected_graph_cell, None);
+    }
+
+    #[test]
+    fn test_stats_selection_is_remapped_by_date_after_graph_rebuild() {
+        let today = chrono::Local::now().date_naive();
+        let selected_date = today - chrono::Duration::days(10);
+        let mut app = make_app();
+        app.update_data(usage_data_with_graph_for_today(today, selected_date));
+        app.switch_tab(Tab::Stats);
+        let old_cell = app.graph_cell_for_date(selected_date).unwrap();
+        app.selected_graph_cell = Some(old_cell);
+
+        app.update_data(usage_data_with_graph_for_today(
+            today + chrono::Duration::days(7),
+            selected_date,
+        ));
+
+        let new_cell = app.selected_graph_cell.unwrap();
+        assert_ne!(new_cell, old_cell);
+        assert_eq!(app.graph_date_for_cell(new_cell), Some(selected_date));
+    }
 
     #[test]
     fn test_handle_key_esc_clears_graph_selection() {
