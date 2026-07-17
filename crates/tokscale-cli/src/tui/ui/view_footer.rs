@@ -176,6 +176,28 @@ mod tests {
             .collect()
     }
 
+    fn assert_sort_clicks(
+        terminal: &Terminal<TestBackend>,
+        app: &App,
+        expected: &[(SortField, &str)],
+    ) {
+        let buffer = terminal.backend().buffer();
+        let clicks = sort_clicks(app);
+        assert_eq!(clicks.len(), expected.len());
+        for ((field, rect), (expected_field, label)) in clicks.iter().zip(expected) {
+            assert_eq!(field, expected_field);
+            assert_eq!(rect.width, label.width() as u16);
+            let rendered_label = (rect.x..rect.right())
+                .map(|x| buffer[(x, rect.y)].symbol())
+                .collect::<Vec<_>>()
+                .join("");
+            assert_eq!(&rendered_label, label);
+        }
+        for adjacent in clicks.windows(2) {
+            assert_eq!(adjacent[1].1.x, adjacent[0].1.right().saturating_add(1));
+        }
+    }
+
     #[test]
     fn sessions_footer_renders_only_the_current_copy() {
         let width = 140;
@@ -190,24 +212,46 @@ mod tests {
 
         let screen = screen_text(&terminal);
 
+        assert!(screen.contains("Sort: Active Sessions Space"));
         assert!(screen.contains("enter:sessions"));
         assert!(!screen.contains("sort coverage"));
         assert!(!screen.contains("model-session links"));
+        assert_sort_clicks(
+            &terminal,
+            &app,
+            &[
+                (SortField::Date, "Active"),
+                (SortField::Tokens, "Sessions"),
+                (SortField::Cost, "Space"),
+            ],
+        );
+    }
 
-        let clicks = sort_clicks(&app);
-        assert_eq!(
-            clicks.iter().map(|(field, _)| *field).collect::<Vec<_>>(),
-            [SortField::Date, SortField::Tokens, SortField::Cost]
+    #[test]
+    fn sessions_detail_footer_uses_detail_labels_and_click_areas() {
+        let width = 140;
+        let height = 5;
+        let mut app = make_app(width);
+        let mut state = ViewState::default();
+        state.select_session_source_for_test("codex");
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, &mut state, frame.area()))
+            .unwrap();
+
+        let screen = screen_text(&terminal);
+        assert!(screen.contains("Sort: Active Tokens Cost"));
+        assert!(screen.contains("esc:back"));
+        assert_sort_clicks(
+            &terminal,
+            &app,
+            &[
+                (SortField::Date, "Active"),
+                (SortField::Tokens, "Tokens"),
+                (SortField::Cost, "Cost"),
+            ],
         );
-        assert_eq!(
-            clicks
-                .iter()
-                .map(|(_, rect)| rect.width)
-                .collect::<Vec<_>>(),
-            ["Active".width(), "Sessions".width(), "Space".width()].map(|width| width as u16)
-        );
-        assert_eq!(clicks[1].1.x, clicks[0].1.right().saturating_add(1));
-        assert_eq!(clicks[2].1.x, clicks[1].1.right().saturating_add(1));
     }
 
     #[test]

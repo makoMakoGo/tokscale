@@ -93,6 +93,11 @@ impl ViewState {
         self.selected_session_source.as_deref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn select_session_source_for_test(&mut self, source: &str) {
+        self.selected_session_source = Some(source.to_string());
+    }
+
     pub(crate) fn source_count(&self) -> usize {
         session_data::snapshot().source_count()
     }
