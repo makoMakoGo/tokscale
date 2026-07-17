@@ -1,11 +1,12 @@
 use chrono::Datelike;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
 use super::usage_profile;
-use super::widgets::format_tokens;
+use super::widgets::{format_tokens, viewport_scrollbar_state};
 use crate::tui::app::App;
 use crate::tui::data::DailyUsage;
+use crate::tui::view_state::ViewState;
 
 const WEEKDAYS: [&str; 7] = [
     "Monday",
@@ -60,7 +61,7 @@ fn peak_weekday(weekdays: &[WeekdayUsage; 7]) -> Option<WeekdayUsage> {
         .map(|(_, weekday)| *weekday)
 }
 
-pub fn render(frame: &mut Frame, app: &App, area: Rect) {
+pub fn render(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -74,10 +75,12 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.is_empty() {
+        state.set_daily_profile_text_viewport(0, 0);
         return;
     }
 
     if app.data.daily.is_empty() {
+        state.set_daily_profile_text_viewport(inner.height as usize, 0);
         frame.render_widget(
             Paragraph::new("No daily usage data available")
                 .style(Style::default().fg(app.theme.muted))
@@ -87,10 +90,27 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    frame.render_widget(
-        Paragraph::new(build_daily_profile_lines(app, inner.width)),
-        inner,
-    );
+    let lines = build_daily_profile_lines(app, inner.width);
+    let total_lines = lines.len();
+    let visible_height = inner.height as usize;
+    state.set_daily_profile_text_viewport(visible_height, total_lines);
+    let visible = lines[state.daily_profile_text_visible_range()].to_vec();
+    frame.render_widget(Paragraph::new(visible), inner);
+
+    if total_lines > visible_height {
+        let mut scrollbar_state =
+            viewport_scrollbar_state(total_lines, state.daily_profile_scroll(), visible_height);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼")),
+            area.inner(Margin {
+                horizontal: 0,
+                vertical: 1,
+            }),
+            &mut scrollbar_state,
+        );
+    }
 }
 
 pub(crate) fn build_daily_profile_lines(app: &App, area_width: u16) -> Vec<Line<'static>> {
@@ -169,9 +189,10 @@ pub(crate) fn build_daily_profile_lines(app: &App, area_width: u16) -> Vec<Line<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::TuiConfig;
+    use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::TokenBreakdown;
     use chrono::NaiveDate;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::BTreeMap;
 
@@ -211,10 +232,10 @@ mod tests {
             .collect()
     }
 
-    fn render_screen(app: &App, width: u16, height: u16) -> String {
+    fn render_screen(app: &App, state: &mut ViewState, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .draw(|frame| render(frame, app, state, Rect::new(0, 0, width, height)))
             .unwrap();
         terminal
             .backend()
@@ -290,13 +311,38 @@ mod tests {
         app.data.daily = vec![day("2026-07-17", 600, 6.0)];
         app.data.total_tokens = 600;
         app.data.total_cost = 6.0;
+        let mut state = ViewState::default();
 
-        let screen = render_screen(&app, 120, 16);
+        let screen = render_screen(&app, &mut state, 120, 16);
 
         assert!(screen.contains("Daily Profile"));
         assert!(screen.contains("When You Work Most"));
         assert!(screen.contains("Peak day Friday"));
         assert!(screen.contains("Press [v] to switch to table view"));
         assert!(!screen.contains("Most productive"));
+    }
+
+    #[test]
+    fn short_profile_scrolls_to_the_peak_and_switch_hint() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.data.daily = vec![day("2026-07-17", 600, 6.0)];
+        app.data.total_tokens = 600;
+        app.data.total_cost = 6.0;
+        app.selected_index = 5;
+        let mut state = ViewState::default();
+        assert!(state.handle_key(&app, &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+
+        let top = render_screen(&app, &mut state, 120, 12);
+        assert!(top.contains("When You Work Most"));
+        assert!(!top.contains("Peak day Friday"));
+        assert!(!top.contains("Press [v] to switch to table view"));
+
+        assert!(state.handle_key(&app, &KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        let bottom = render_screen(&app, &mut state, 120, 12);
+
+        assert!(bottom.contains("Peak day Friday"));
+        assert!(bottom.contains("Press [v] to switch to table view"));
+        assert_eq!(app.selected_index, 5);
     }
 }

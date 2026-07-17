@@ -4,12 +4,14 @@ use std::ops::Range;
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 
 use super::app::{App, SortDirection, SortField, Tab};
-use super::interaction::{ListInteraction, MoveCommand, WrapMode};
+use super::interaction::{ListInteraction, MoveCommand, TextViewport, WrapMode};
 use super::session_data::{self, SessionEntry, SourceSummary};
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewState {
     daily_profile: bool,
+    daily_profile_viewport: TextViewport,
+    daily_profile_total_lines: usize,
     selected_session_source: Option<String>,
     session_sources: ListInteraction,
     session_details: ListInteraction,
@@ -27,20 +29,14 @@ impl ViewState {
                 return true;
             }
 
-            if self.daily_profile
-                && matches!(
-                    key.code,
-                    KeyCode::Up
-                        | KeyCode::Down
-                        | KeyCode::PageUp
-                        | KeyCode::PageDown
-                        | KeyCode::Home
-                        | KeyCode::End
-                        | KeyCode::Enter
-                        | KeyCode::Char('j')
-                )
-            {
-                return true;
+            if self.daily_profile {
+                if let Some(command) = move_command(key.code) {
+                    self.move_daily_profile(command);
+                    return true;
+                }
+                if matches!(key.code, KeyCode::Enter | KeyCode::Char('j')) {
+                    return true;
+                }
             }
         }
 
@@ -83,8 +79,7 @@ impl ViewState {
         };
 
         if app.current_tab == Tab::Daily && !app.is_daily_detail_active() && self.daily_profile {
-            // Daily Profile has no scrollable viewport. Consume wheel input here so it
-            // cannot mutate the hidden Daily Table selection through App's list state.
+            self.move_daily_profile(command);
             return true;
         }
 
@@ -111,8 +106,28 @@ impl ViewState {
         interaction.apply_move(command, len, WrapMode::Wrap);
     }
 
+    fn move_daily_profile(&mut self, command: MoveCommand) {
+        self.daily_profile_viewport
+            .apply_move(command, self.daily_profile_total_lines);
+    }
+
     pub(crate) fn daily_profile_active(&self) -> bool {
         self.daily_profile
+    }
+
+    pub(crate) fn set_daily_profile_text_viewport(&mut self, visible: usize, total_lines: usize) {
+        self.daily_profile_total_lines = total_lines;
+        self.daily_profile_viewport
+            .set_visible(visible, total_lines);
+    }
+
+    pub(crate) fn daily_profile_text_visible_range(&self) -> Range<usize> {
+        self.daily_profile_viewport
+            .visible_range(self.daily_profile_total_lines)
+    }
+
+    pub(crate) fn daily_profile_scroll(&self) -> usize {
+        self.daily_profile_viewport.scroll
     }
 
     pub(crate) fn session_detail_active(&self) -> bool {

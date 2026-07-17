@@ -73,11 +73,11 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
     }
 }
 
-fn render_daily(frame: &mut Frame, app: &mut App, state: &ViewState, area: Rect) {
+fn render_daily(frame: &mut Frame, app: &mut App, state: &mut ViewState, area: Rect) {
     if app.is_daily_detail_active() || !state.daily_profile_active() {
         daily::render(frame, app, area);
     } else {
-        daily_profile::render(frame, app, area);
+        daily_profile::render(frame, app, state, area);
     }
 }
 

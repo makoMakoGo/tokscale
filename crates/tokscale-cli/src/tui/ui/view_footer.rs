@@ -88,10 +88,10 @@ fn daily_help_line(app: &App, state: &ViewState) -> Line<'static> {
     };
     let text = if state.daily_profile_active() {
         if app.is_very_narrow() {
-            format!("←→·v:{view}·s·g·p·r·q")
+            format!("↑↓·←→·v:{view}·s·g·p·r·q")
         } else {
             format!(
-                "←→/tab view • [v:{view}] • [s:sources] [g:{}] • [p:{}] • [r:refresh local] • e • q",
+                "↑↓ scroll • ←→/tab view • [v:{view}] • [s:sources] [g:{}] • [p:{}] • [r:refresh local] • e • q",
                 app.group_by.borrow(),
                 app.theme.name.as_str()
             )
@@ -269,6 +269,7 @@ mod tests {
             .unwrap();
 
         let screen = screen_text(&terminal);
+        assert!(screen.contains("↑↓ scroll"));
         assert!(screen.contains("[v:table]"));
         assert!(!screen.contains("Sort:"));
         assert!(sort_clicks(&app).is_empty());

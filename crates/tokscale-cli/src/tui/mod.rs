@@ -592,11 +592,12 @@ mod tests {
     }
 
     #[test]
-    fn daily_profile_mouse_wheel_does_not_move_the_hidden_table() {
+    fn daily_profile_mouse_wheel_scrolls_without_moving_the_hidden_table() {
         let mut app = app_on(Tab::Daily);
         let mut view_state = view_state::ViewState::default();
         assert!(view_state.handle_key(&app, &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
         assert!(view_state.daily_profile_active());
+        view_state.set_daily_profile_text_viewport(10, 14);
         app.selected_index = 7;
 
         dispatch_mouse_event(
@@ -605,6 +606,7 @@ mod tests {
             mouse_event(MouseEventKind::ScrollDown),
         );
 
+        assert_eq!(view_state.daily_profile_scroll(), 1);
         assert_eq!(
             app.selected_index, 7,
             "Daily Profile wheel input must not mutate the hidden Daily Table selection"
