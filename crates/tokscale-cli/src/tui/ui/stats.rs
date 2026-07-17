@@ -189,30 +189,34 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected_month = selected_date.map(|date| (date.year(), date.month0() as usize));
     let mut current_month = None;
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
-        if let Some(Some(day)) = week.first() {
-            let month = day
-                .date
-                .format("%m")
-                .to_string()
-                .parse::<usize>()
-                .unwrap_or(1)
-                .saturating_sub(1);
-            if current_month != Some(month) {
-                current_month = Some(month);
-                let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
-                if x.saturating_add(3) < inner.right() && month < MONTH_LABELS.len() {
-                    let style = if selected_month == Some((day.date.year(), month)) {
-                        Style::default()
-                            .fg(app.theme.accent)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(app.theme.muted)
-                    };
-                    frame.render_widget(
-                        Paragraph::new(MONTH_LABELS[month]).style(style),
-                        Rect::new(x, inner.y, 3, 1),
-                    );
-                }
+        let mut label_month = None;
+        for day in week.iter().filter_map(Option::as_ref) {
+            let month = (day.date.year(), day.date.month0() as usize);
+            if current_month == Some(month) || label_month == Some(month) {
+                continue;
+            }
+
+            if !label_month.is_some_and(|candidate| selected_month == Some(candidate)) {
+                label_month = Some(month);
+            }
+        }
+
+        if let Some(month @ (_, month_idx)) = label_month {
+            current_month = Some(month);
+            let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
+            let label_x = x.min(inner.right().saturating_sub(3));
+            if label_x >= graph_start_x && month_idx < MONTH_LABELS.len() {
+                let style = if selected_month == Some(month) {
+                    Style::default()
+                        .fg(app.theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.theme.muted)
+                };
+                frame.render_widget(
+                    Paragraph::new(MONTH_LABELS[month_idx]).style(style),
+                    Rect::new(label_x, inner.y, 3, 1),
+                );
             }
         }
     }
@@ -910,6 +914,47 @@ mod tests {
         assert_eq!(month.symbol(), "J");
         assert_eq!(month.fg, app.theme.accent);
         assert!(month.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn selected_month_starting_midweek_remains_visible_at_the_right_edge() {
+        let today = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        let daily = vec![day_usage(today, 42, 0.5, vec![])];
+        let graph = tokscale_core::build_contribution_graph_for_today(&daily, today);
+        let selected_cell = graph
+            .weeks
+            .iter()
+            .enumerate()
+            .find_map(|(week_idx, week)| {
+                week.iter()
+                    .position(|day| {
+                        day.as_ref()
+                            .is_some_and(|contribution| contribution.date == today)
+                    })
+                    .map(|day_idx| (week_idx, day_idx))
+            })
+            .unwrap();
+        assert_eq!(selected_cell.0, graph.weeks.len() - 1);
+
+        let mut app = make_app(80);
+        app.data.graph = Some(graph);
+        app.selected_graph_cell = Some(selected_cell);
+        let mut terminal = Terminal::new(TestBackend::new(80, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+        let month_label = (76..79)
+            .map(|x| buffer.cell((x, 1)).unwrap().symbol())
+            .collect::<String>();
+
+        assert_eq!(month_label, "May");
+        for x in 76..79 {
+            let cell = buffer.cell((x, 1)).unwrap();
+            assert_eq!(cell.fg, app.theme.accent);
+            assert!(cell.modifier.contains(Modifier::BOLD));
+        }
     }
 
     #[test]
