@@ -145,7 +145,7 @@ impl PricingService {
         };
 
         Ok(Self::new_with_custom_and_models_dev(
-            CustomPricing::load_from_default_path(),
+            CustomPricing::load_from_default_path_with_diagnostics(diagnostics),
             litellm_data,
             openrouter_data,
             models_dev_data,
@@ -153,16 +153,21 @@ impl PricingService {
     }
 
     fn from_cached_datasets(
+        custom: CustomPricing,
         litellm_data: Option<HashMap<String, ModelPricing>>,
         openrouter_data: Option<HashMap<String, ModelPricing>>,
         models_dev_data: Option<HashMap<String, ModelPricing>>,
     ) -> Option<Self> {
-        if litellm_data.is_none() && openrouter_data.is_none() && models_dev_data.is_none() {
+        if custom.is_empty()
+            && litellm_data.is_none()
+            && openrouter_data.is_none()
+            && models_dev_data.is_none()
+        {
             return None;
         }
 
         Some(Self::new_with_custom_and_models_dev(
-            CustomPricing::load_from_default_path(),
+            custom,
             Self::filter_litellm_data(litellm_data.unwrap_or_default()),
             openrouter_data.unwrap_or_default(),
             models_dev_data.unwrap_or_default(),
@@ -171,6 +176,18 @@ impl PricingService {
 
     pub fn load_cached_any_age() -> Option<Self> {
         Self::from_cached_datasets(
+            CustomPricing::load_from_default_path(),
+            litellm::load_cached_any_age(),
+            openrouter::load_cached_any_age(),
+            models_dev::load_cached_any_age(),
+        )
+    }
+
+    pub(crate) fn load_cached_any_age_with_diagnostics(
+        diagnostics: &mut PricingDiagnostics,
+    ) -> Option<Self> {
+        Self::from_cached_datasets(
+            CustomPricing::load_from_default_path_with_diagnostics(diagnostics),
             litellm::load_cached_any_age(),
             openrouter::load_cached_any_age(),
             models_dev::load_cached_any_age(),
@@ -629,8 +646,34 @@ mod tests {
     }
 
     #[test]
-    fn test_from_cached_datasets_returns_none_when_both_sources_missing() {
-        assert!(PricingService::from_cached_datasets(None, None, None).is_none());
+    fn test_from_cached_datasets_returns_none_when_all_sources_missing() {
+        assert!(
+            PricingService::from_cached_datasets(CustomPricing::default(), None, None, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_from_cached_datasets_uses_custom_when_remote_sources_missing() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "custom-only-model".into(),
+            model_pricing(0.000002, 0.000008),
+        );
+
+        let service = PricingService::from_cached_datasets(
+            CustomPricing::from_models(custom),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let result = service
+            .lookup_with_source("custom-only-model", None)
+            .unwrap();
+
+        assert_eq!(result.source, "Custom");
+        assert_eq!(result.matched_key, "custom-only-model");
     }
 
     #[test]
@@ -651,7 +694,13 @@ mod tests {
             },
         );
 
-        let service = PricingService::from_cached_datasets(Some(litellm), None, None).unwrap();
+        let service = PricingService::from_cached_datasets(
+            CustomPricing::default(),
+            Some(litellm),
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(service
             .lookup_with_source("github_copilot/gpt-5.3-codex", Some("litellm"))
@@ -663,8 +712,13 @@ mod tests {
 
     #[test]
     fn test_from_cached_datasets_uses_models_dev_when_other_sources_missing() {
-        let service =
-            PricingService::from_cached_datasets(None, None, Some(fixture_models_dev())).unwrap();
+        let service = PricingService::from_cached_datasets(
+            CustomPricing::default(),
+            None,
+            None,
+            Some(fixture_models_dev()),
+        )
+        .unwrap();
 
         let result = service
             .lookup_with_source_and_provider("gpt-fixture-model", None, Some("openai"))

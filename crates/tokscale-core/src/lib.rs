@@ -284,6 +284,12 @@ pub struct LocalReport<T> {
     pub metadata: LocalLoadMetadata,
 }
 
+#[derive(Debug)]
+pub struct LocalReportWithPricingDiagnostics<T> {
+    pub report: LocalReport<T>,
+    pub pricing_diagnostics: pricing::PricingDiagnostics,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LocalParseOptions {
     pub home_dir: Option<String>,
@@ -1420,16 +1426,15 @@ async fn load_pricing_for_local_parse_with_diagnostics(
     diagnostics: &mut pricing::PricingDiagnostics,
 ) -> Option<Arc<pricing::PricingService>> {
     if pricing_cache_only_enabled() {
-        return load_cache_only_pricing_with_diagnostics(
-            diagnostics,
-            pricing::PricingService::load_cached_any_age,
-        );
+        let cached = pricing::PricingService::load_cached_any_age_with_diagnostics(diagnostics);
+        return load_cache_only_pricing_with_diagnostics(diagnostics, || cached);
     }
 
     match pricing::PricingService::get_or_init_with_diagnostics(diagnostics).await {
         Ok(pricing) => Some(pricing),
         Err(error) => {
-            let stale = pricing::PricingService::load_cached_any_age().map(Arc::new);
+            let stale = pricing::PricingService::load_cached_any_age_with_diagnostics(diagnostics)
+                .map(Arc::new);
             if stale.is_some() {
                 diagnostics.push(format!(
                     "{}: {}",
@@ -1515,6 +1520,19 @@ pub async fn parse_local_unified_messages(
     let prepared = prepare_local_sources(options)?;
     let pricing = load_pricing_for_local_parse().await;
     parse_prepared_local_unified_messages(prepared, pricing.as_deref())
+}
+
+pub async fn parse_local_unified_messages_with_diagnostics(
+    options: LocalParseOptions,
+) -> Result<LocalReportWithPricingDiagnostics<Vec<UnifiedMessage>>, LocalReportError> {
+    let prepared = prepare_local_sources(options)?;
+    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
+    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
+    let report = parse_prepared_local_unified_messages(prepared, pricing.as_deref())?;
+    Ok(LocalReportWithPricingDiagnostics {
+        report,
+        pricing_diagnostics,
+    })
 }
 
 #[doc(hidden)]

@@ -45,32 +45,22 @@ impl GroupByPickerDialog {
             GroupByOption {
                 value: GroupBy::Model,
                 label: "Model",
-                description: "One row per model (merge clients & providers)",
+                description: "One row per model; merge harnesses and providers",
             },
             GroupByOption {
                 value: GroupBy::ClientModel,
-                label: "Client + Model",
-                description: "One row per client-model pair (default)",
+                label: "Harness + Model",
+                description: "One row per harness-model pair (default)",
             },
             GroupByOption {
                 value: GroupBy::ClientProviderModel,
-                label: "Client + Provider + Model",
-                description: "Most granular — no merging",
+                label: "Harness + Provider + Model",
+                description: "Keep provider identity; no model merging",
             },
             GroupByOption {
                 value: GroupBy::WorkspaceModel,
                 label: "Workspace + Model",
-                description: "Group local usage by workspace key, then model",
-            },
-            GroupByOption {
-                value: GroupBy::Session,
-                label: "Session + Model",
-                description: "One row per session_id and model (attribute cost per session)",
-            },
-            GroupByOption {
-                value: GroupBy::ClientSession,
-                label: "Client + Session + Model",
-                description: "One row per client, session_id, and model",
+                description: "Group local usage by workspace, then model",
             },
         ];
 
@@ -162,12 +152,9 @@ fn option_index_for_row(
 
 impl DialogContent for GroupByPickerDialog {
     fn desired_size(&self, viewport: Rect) -> (u16, u16) {
-        // 6 options render as 2 lines each (label + description) = 12 rows,
-        // plus header (1) + divider (1) + hint (1) + borders (2). Cap at 18
-        // so every option stays visible without scrolling on a typical
-        // terminal; matches source_picker's sizing.
-        let width = 52u16.min(viewport.width.saturating_sub(4));
-        let height = 18u16.min(viewport.height.saturating_sub(4));
+        // Four options use two rows each, plus header, divider, hint, and borders.
+        let width = 54u16.min(viewport.width.saturating_sub(4));
+        let height = 14u16.min(viewport.height.saturating_sub(4));
         (width, height)
     }
 
@@ -323,15 +310,15 @@ mod tests {
         let mut dialog = make_dialog(GroupBy::ClientModel);
         dialog.cursor = 0;
 
-        let rendered = render_symbols(&dialog, Rect::new(0, 0, 52, 18));
+        let rendered = render_symbols(&dialog, Rect::new(0, 0, 54, 14));
 
-        assert!(rendered.contains("(●) Client + Model  current"));
+        assert!(rendered.contains("(●) Harness + Model  current"));
     }
 
     #[test]
     fn group_by_picker_mouse_hitbox_selects_label_row() {
         let mut dialog = make_dialog(GroupBy::ClientModel);
-        let area = Rect::new(0, 0, 52, 18);
+        let area = Rect::new(0, 0, 54, 14);
         let list = group_by_picker_areas(area).list;
 
         let result = dialog.handle_mouse(click(list.x, list.y + 6), area);
@@ -344,7 +331,7 @@ mod tests {
     #[test]
     fn group_by_picker_mouse_hitbox_selects_description_row() {
         let mut dialog = make_dialog(GroupBy::ClientModel);
-        let area = Rect::new(0, 0, 52, 18);
+        let area = Rect::new(0, 0, 54, 14);
         let list = group_by_picker_areas(area).list;
 
         let result = dialog.handle_mouse(click(list.x, list.y + 7), area);
@@ -357,10 +344,10 @@ mod tests {
     #[test]
     fn group_by_picker_mouse_outside_rows_does_not_select() {
         let mut dialog = make_dialog(GroupBy::ClientModel);
-        let area = Rect::new(0, 0, 52, 18);
+        let area = Rect::new(0, 0, 54, 14);
         let list = group_by_picker_areas(area).list;
 
-        let result = dialog.handle_mouse(click(list.x, list.y + 12), area);
+        let result = dialog.handle_mouse(click(list.x, list.y + 8), area);
 
         assert!(matches!(
             result,
@@ -368,5 +355,23 @@ mod tests {
         ));
         assert_eq!(*dialog.selected.borrow(), GroupBy::ClientModel);
         assert!(!*dialog.needs_reload.borrow());
+    }
+
+    #[test]
+    fn group_by_picker_exposes_only_report_dimensions() {
+        let dialog = make_dialog(GroupBy::ClientModel);
+
+        assert_eq!(dialog.options.len(), 4);
+        assert!(dialog
+            .options
+            .iter()
+            .all(|option| !matches!(option.value, GroupBy::Session | GroupBy::ClientSession)));
+    }
+
+    #[test]
+    fn legacy_session_selection_falls_back_to_default_cursor() {
+        let dialog = make_dialog(GroupBy::Session);
+
+        assert_eq!(dialog.cursor, 1);
     }
 }

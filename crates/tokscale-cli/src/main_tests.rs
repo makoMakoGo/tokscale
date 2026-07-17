@@ -1,6 +1,7 @@
 use crate::cli::*;
 use crate::commands::render::*;
 use crate::commands::shared::*;
+use crate::tui::Tab;
 use clap::Parser;
 use std::path::PathBuf;
 use tokscale_core::ClientId;
@@ -817,6 +818,21 @@ fn tui_execution_plan_requires_both_interactive_streams() {
         assert_eq!(error.exit_code(), 2);
         assert!(error.to_string().contains("interactive terminal"));
     }
+}
+
+#[test]
+fn tui_tab_uses_sessions_as_its_only_cli_name() {
+    let cli = Cli::try_parse_from(["tokscale", "tui", "--tab", "sessions"])
+        .expect("Sessions tab name must parse");
+    let Some(Commands::Tui(args)) = cli.command else {
+        panic!("expected TUI command");
+    };
+    assert_eq!(args.tab, Some(TuiTab::Sessions));
+    assert_eq!(Tab::from(TuiTab::Sessions), Tab::Sessions);
+
+    let error = Cli::try_parse_from(["tokscale", "tui", "--tab", "issues"])
+        .expect_err("the removed Issues tab name must not remain as an alias");
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
 }
 
 #[test]

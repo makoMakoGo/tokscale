@@ -1,127 +1,88 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
+use crate::tui::app::{App, ClickAction};
 use crate::tui::colors::get_client_color;
 
 use super::widgets::{
     format_cost, format_tokens, get_client_display_name, truncate_model_display_name,
-    truncate_model_display_name_to, viewport_scrollbar_state,
+    viewport_scrollbar_state,
 };
-use crate::tui::app::{App, ClickAction};
 
 const CELL_WIDTH: u16 = 2;
-const GRAPH_PANEL_H: u16 = 12;
-const STATS_PANEL_H: u16 = 12;
-const STATS_COMPACT_H: u16 = 8;
-const BREAKDOWN_MIN_H: u16 = 6;
+const GRAPH_PANEL_H: u16 = 14;
+const DAY_INSIGHTS_MIN_H: u16 = 5;
 const MONTH_LABELS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 const DAY_LABELS: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatsLayoutMode {
-    StatsOnly,
-    StatsWithBreakdown,
-    BreakdownOnly,
-}
-
-fn stats_layout_mode(area_height: u16, has_selected_cell: bool) -> StatsLayoutMode {
-    if !has_selected_cell {
-        return StatsLayoutMode::StatsOnly;
-    }
-
-    if area_height >= GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H {
-        StatsLayoutMode::StatsWithBreakdown
-    } else {
-        StatsLayoutMode::BreakdownOnly
-    }
-}
-
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    let has_selected_cell = app.selected_graph_cell.is_some();
-    match stats_layout_mode(area.height, has_selected_cell) {
-        StatsLayoutMode::StatsWithBreakdown => {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(GRAPH_PANEL_H),
-                    Constraint::Length(STATS_COMPACT_H),
-                    Constraint::Min(BREAKDOWN_MIN_H),
-                ])
-                .split(area);
-
-            render_graph(frame, app, chunks[0]);
-            render_stats_panel(frame, app, chunks[1]);
-            render_breakdown_panel(frame, app, chunks[2]);
-        }
-        StatsLayoutMode::BreakdownOnly => {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(GRAPH_PANEL_H),
-                    Constraint::Min(BREAKDOWN_MIN_H),
-                ])
-                .split(area);
-
-            render_graph(frame, app, chunks[0]);
-            render_breakdown_panel(frame, app, chunks[1]);
-        }
-        StatsLayoutMode::StatsOnly => {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(GRAPH_PANEL_H),
-                    Constraint::Min(STATS_PANEL_H),
-                ])
-                .split(area);
-
-            render_graph(frame, app, chunks[0]);
-            render_stats_panel(frame, app, chunks[1]);
-        }
+    if area.is_empty() {
+        return;
     }
+
+    let graph_height = GRAPH_PANEL_H.min(area.height.saturating_sub(DAY_INSIGHTS_MIN_H));
+    if graph_height < 6 {
+        render_graph(frame, app, area);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(graph_height),
+            Constraint::Min(DAY_INSIGHTS_MIN_H),
+        ])
+        .split(area);
+
+    render_graph(frame, app, chunks[0]);
+    render_day_insights(frame, app, chunks[1]);
 }
 
 fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
-    let theme_border = app.theme.border;
-    let theme_accent = app.theme.accent;
-    let theme_background = app.theme.background;
-    let theme_muted = app.theme.muted;
-    let theme_colors = app.theme.colors;
-    let subtle_text_style = app.theme.subtle_text_style();
-    let selected_cell = app.selected_graph_cell;
-    let is_narrow = app.is_narrow();
-
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme_border))
+        .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             " Contribution Graph (52 weeks) ",
             Style::default()
-                .fg(theme_accent)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(theme_background));
-
+        .style(Style::default().bg(app.theme.background));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
 
-    let graph = match &app.data.graph {
-        Some(g) => g.clone(),
-        None => return,
+    let Some(graph) = app.data.graph.clone() else {
+        frame.render_widget(
+            Paragraph::new("No contribution data available")
+                .style(Style::default().fg(app.theme.muted))
+                .alignment(Alignment::Center),
+            inner,
+        );
+        return;
     };
 
+    let selected_cell = app.selected_graph_cell;
+    let is_narrow = app.is_narrow();
     let label_width = if is_narrow { 2u16 } else { 4u16 };
-    let graph_start_x = inner.x + label_width;
-    let graph_start_y = inner.y + 2;
+    let graph_start_x = inner.x.saturating_add(label_width);
+    let graph_start_y = inner.y.saturating_add(2);
+    let graph_bottom = inner.bottom();
 
     for (day_idx, label) in DAY_LABELS.iter().enumerate() {
         if day_idx % 2 == 1 {
-            let y = graph_start_y + day_idx as u16;
-            if y < inner.y + inner.height {
-                let display_label = if is_narrow { "" } else { *label };
-                let text = Paragraph::new(display_label).style(Style::default().fg(theme_muted));
-                frame.render_widget(text, Rect::new(inner.x, y, label_width, 1));
+            let y = graph_start_y.saturating_add(day_idx as u16);
+            if y < graph_bottom {
+                frame.render_widget(
+                    Paragraph::new(if is_narrow { "" } else { *label })
+                        .style(Style::default().fg(app.theme.muted)),
+                    Rect::new(inner.x, y, label_width, 1),
+                );
             }
         }
     }
@@ -129,70 +90,61 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let max_weeks = (inner.width.saturating_sub(label_width) / CELL_WIDTH) as usize;
     let weeks_to_show = graph.weeks.len().min(max_weeks);
     let start_week = graph.weeks.len().saturating_sub(weeks_to_show);
-
+    let colors = app.theme.colors;
     let intensity_color = |intensity: f64| -> Color {
-        let safe_intensity = if intensity.is_finite() {
+        let value = if intensity.is_finite() {
             intensity.clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let idx = match safe_intensity {
+        let index = match value {
             x if x <= 0.0 => 0,
             x if x < 0.25 => 1,
             x if x < 0.50 => 2,
             x if x < 0.75 => 3,
             _ => 4,
         };
-        theme_colors[idx]
+        colors[index]
     };
 
-    let mut click_areas_to_add: Vec<(Rect, usize, usize)> = Vec::new();
-
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
-        let x = graph_start_x + (week_idx as u16 * CELL_WIDTH);
-
-        for (day_idx, day_opt) in week.iter().enumerate() {
-            let y = graph_start_y + day_idx as u16;
-
-            if x >= inner.x + inner.width || y >= inner.y + inner.height {
+        let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
+        for (day_idx, day) in week.iter().enumerate() {
+            let y = graph_start_y.saturating_add(day_idx as u16);
+            if x >= inner.right() || y >= graph_bottom {
                 continue;
             }
 
-            let actual_week_idx = week_idx + start_week;
-            let is_selected = selected_cell == Some((actual_week_idx, day_idx));
-
-            let (cell_str, style) = match day_opt {
+            let actual_week = week_idx + start_week;
+            let selected = selected_cell == Some((actual_week, day_idx));
+            let cell_area = Rect::new(x, y, CELL_WIDTH, 1);
+            let (symbol, style) = match day {
                 Some(day) => {
+                    app.add_click_area(
+                        cell_area,
+                        ClickAction::GraphCell {
+                            week: actual_week,
+                            day: day_idx,
+                        },
+                    );
                     let color = intensity_color(day.intensity);
-                    if is_selected {
+                    if selected {
                         ("▓▓", Style::default().fg(Color::White).bg(color))
                     } else {
                         ("██", Style::default().fg(color))
                     }
                 }
-                None => {
-                    if is_selected {
-                        ("▓▓", Style::default().fg(Color::White).bg(theme_colors[0]))
-                    } else {
-                        ("· ", subtle_text_style)
-                    }
-                }
+                None if selected => (
+                    "▓▓",
+                    Style::default().fg(Color::White).bg(app.theme.colors[0]),
+                ),
+                None => ("· ", app.theme.subtle_text_style()),
             };
-
-            let cell = Paragraph::new(cell_str).style(style);
-            frame.render_widget(cell, Rect::new(x, y, CELL_WIDTH, 1));
-
-            click_areas_to_add.push((Rect::new(x, y, CELL_WIDTH, 1), actual_week_idx, day_idx));
+            frame.render_widget(Paragraph::new(symbol).style(style), cell_area);
         }
     }
 
-    for (rect, week, day) in click_areas_to_add {
-        app.add_click_area(rect, ClickAction::GraphCell { week, day });
-    }
-
-    let month_y = inner.y;
-    let mut current_month: Option<usize> = None;
-
+    let mut current_month = None;
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
         if let Some(Some(day)) = week.first() {
             let month = day
@@ -201,448 +153,237 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 .to_string()
                 .parse::<usize>()
                 .unwrap_or(1)
-                - 1;
+                .saturating_sub(1);
             if current_month != Some(month) {
                 current_month = Some(month);
-                let x = graph_start_x + (week_idx as u16 * CELL_WIDTH);
-                if x + 3 < inner.x + inner.width && month < MONTH_LABELS.len() {
-                    let label =
-                        Paragraph::new(MONTH_LABELS[month]).style(Style::default().fg(theme_muted));
-                    frame.render_widget(label, Rect::new(x, month_y, 3, 1));
+                let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
+                if x.saturating_add(3) < inner.right() && month < MONTH_LABELS.len() {
+                    frame.render_widget(
+                        Paragraph::new(MONTH_LABELS[month])
+                            .style(Style::default().fg(app.theme.muted)),
+                        Rect::new(x, inner.y, 3, 1),
+                    );
                 }
             }
         }
     }
+
+    render_graph_metrics(frame, app, inner, &graph);
 }
 
-fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
-        .title(Span::styled(
-            " Stats ",
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().bg(app.theme.background));
+fn render_graph_metrics(
+    frame: &mut Frame,
+    app: &App,
+    inner: Rect,
+    graph: &crate::tui::data::GraphData,
+) {
+    let active_days = graph
+        .weeks
+        .iter()
+        .flat_map(|week| week.iter())
+        .filter_map(|day| day.as_ref())
+        .filter(|day| day.tokens > 0)
+        .count();
+    let total_days = graph
+        .weeks
+        .iter()
+        .flat_map(|week| week.iter())
+        .filter(|day| day.is_some())
+        .count();
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let is_narrow = app.is_narrow();
-    let graph = &app.data.graph;
-
-    let total_tokens: u64 = graph
-        .as_ref()
-        .map(|g| {
-            g.weeks
-                .iter()
-                .flat_map(|w| w.iter())
-                .filter_map(|d| d.as_ref())
-                .map(|d| d.tokens)
-                .sum()
-        })
-        .unwrap_or(0);
-
-    let total_cost: f64 = graph
-        .as_ref()
-        .map(|g| {
-            g.weeks
-                .iter()
-                .flat_map(|w| w.iter())
-                .filter_map(|d| d.as_ref())
-                .map(|d| d.cost)
-                .sum()
-        })
-        .unwrap_or(0.0);
-
-    let active_days: u32 = graph
-        .as_ref()
-        .map(|g| {
-            g.weeks
-                .iter()
-                .flat_map(|w| w.iter())
-                .filter_map(|d| d.as_ref())
-                .filter(|d| d.tokens > 0)
-                .count() as u32
-        })
-        .unwrap_or(0);
-
-    let total_days: u32 = graph
-        .as_ref()
-        .map(|g| {
-            g.weeks
-                .iter()
-                .flat_map(|w| w.iter())
-                .filter(|d| d.is_some())
-                .count() as u32
-        })
-        .unwrap_or(365);
-
-    let favorite_model = app.data.models.iter().max_by(|a, b| {
-        a.cost
-            .partial_cmp(&b.cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let favorite_model_name = favorite_model.map(|m| m.model.as_str()).unwrap_or("N/A");
-    let model_color = favorite_model
-        .map(|m| app.model_color_for(&m.provider, &m.model))
-        .unwrap_or_else(|| app.model_color("N/A"));
-    let sessions: u32 = app.data.models.iter().map(|m| m.session_count).sum();
-
-    let col1_width = if is_narrow { 36u16 } else { 60u16 };
-    let col2_x = inner.x + col1_width;
-    let y_max = inner.y + inner.height;
-
-    let mut y = inner.y;
-
-    let row1_label = if is_narrow {
-        "Model:"
-    } else {
-        "Favorite model:"
-    };
-    let row1 = Line::from(vec![
-        Span::styled(row1_label, Style::default().fg(app.theme.muted)),
-        Span::raw(" "),
-        Span::styled(
-            if is_narrow {
-                truncate_model_display_name_to(favorite_model_name, 15)
-            } else {
-                truncate_model_display_name(favorite_model_name)
-            },
-            Style::default().fg(model_color),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(row1), Rect::new(inner.x, y, col1_width, 1));
-
-    let tokens_label = if is_narrow {
-        "Tokens:"
-    } else {
-        "Total tokens:"
-    };
-    let row1_col2 = Line::from(vec![
-        Span::styled(tokens_label, Style::default().fg(app.theme.muted)),
-        Span::raw(" "),
-        Span::styled(
-            format_tokens(total_tokens),
-            Style::default().fg(Color::Cyan),
-        ),
-    ]);
-    frame.render_widget(
-        Paragraph::new(row1_col2),
-        Rect::new(col2_x, y, inner.width.saturating_sub(col1_width), 1),
-    );
-
-    y += 1;
-    if y >= y_max {
-        return;
-    }
-
-    let row2 = Line::from(vec![
-        Span::styled("Sessions:", Style::default().fg(app.theme.muted)),
-        Span::raw(" "),
-        Span::styled(sessions.to_string(), Style::default().fg(Color::Cyan)),
-    ]);
-    frame.render_widget(Paragraph::new(row2), Rect::new(inner.x, y, col1_width, 1));
-
-    let cost_label = if is_narrow { "Cost:" } else { "Total cost:" };
-    let row2_col2 = Line::from(vec![
-        Span::styled(cost_label, Style::default().fg(app.theme.muted)),
-        Span::raw(" "),
-        Span::styled(format_cost(total_cost), Style::default().fg(Color::Green)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(row2_col2),
-        Rect::new(col2_x, y, inner.width.saturating_sub(col1_width), 1),
-    );
-
-    y += 1;
-    if y >= y_max {
-        return;
-    }
-
-    // Row 3: Current streak / Longest streak
-    let streak_label = if is_narrow {
-        "Streak:"
-    } else {
-        "Current streak:"
-    };
-    let row3 = Line::from(vec![
-        Span::styled(streak_label, Style::default().fg(app.theme.muted)),
-        Span::raw(" "),
-        Span::styled(
-            format!("{} days", app.data.current_streak),
-            Style::default().fg(Color::Cyan),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(row3), Rect::new(inner.x, y, col1_width, 1));
-
-    let longest_label = if is_narrow {
-        "Max streak:"
-    } else {
-        "Longest streak:"
-    };
-    let row3_col2 = Line::from(vec![
-        Span::styled(longest_label, Style::default().fg(app.theme.muted)),
-        Span::raw(" "),
-        Span::styled(
-            format!("{} days", app.data.longest_streak),
-            Style::default().fg(Color::Cyan),
-        ),
-    ]);
-    frame.render_widget(
-        Paragraph::new(row3_col2),
-        Rect::new(col2_x, y, inner.width.saturating_sub(col1_width), 1),
-    );
-
-    y += 1;
-    if y >= y_max {
-        return;
-    }
-
-    let active_label = if is_narrow { "Active:" } else { "Active days:" };
-    let active_days_line = Line::from(vec![
-        Span::styled(active_label, Style::default().fg(app.theme.muted)),
-        Span::raw(" "),
-        Span::styled(
-            format!("{}/{}", active_days, total_days),
-            Style::default().fg(Color::Cyan),
-        ),
-    ]);
-    frame.render_widget(
-        Paragraph::new(active_days_line),
-        Rect::new(inner.x, y, col1_width, 1),
-    );
-
-    y += 2;
-    if y >= y_max {
-        return;
-    }
-
-    let legend_spans = vec![
-        Span::styled("Less ", Style::default().fg(app.theme.muted)),
-        Span::styled("· ", app.theme.subtle_text_style()),
-        Span::styled("██", Style::default().fg(app.theme.colors[1])),
-        Span::raw(" "),
-        Span::styled("██", Style::default().fg(app.theme.colors[2])),
-        Span::raw(" "),
-        Span::styled("██", Style::default().fg(app.theme.colors[3])),
-        Span::raw(" "),
-        Span::styled("██", Style::default().fg(app.theme.colors[4])),
-        Span::styled(" More", Style::default().fg(app.theme.muted)),
-    ];
-    let legend_line = Line::from(legend_spans);
-    frame.render_widget(
-        Paragraph::new(legend_line),
-        Rect::new(inner.x, y, inner.width, 1),
-    );
-
-    y += 2;
-    if y >= y_max {
-        return;
-    }
-
-    if !is_narrow {
-        let footer = Line::from(Span::styled(
-            format!(
-                "Your total spending is ${:.2} on AI coding assistants!",
-                total_cost
+    let metrics_y = inner.y.saturating_add(9);
+    if metrics_y < inner.bottom() {
+        let metrics = Line::from(vec![
+            Span::styled("Current ", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                format!("{}d", app.data.current_streak),
+                Style::default().fg(Color::Cyan),
             ),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::ITALIC),
-        ));
+            Span::styled("  ·  Longest ", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                format!("{}d", app.data.longest_streak),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled("  ·  Active ", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                format!("{active_days}/{total_days}"),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]);
         frame.render_widget(
-            Paragraph::new(footer),
-            Rect::new(inner.x, y, inner.width, 1),
+            Paragraph::new(metrics),
+            Rect::new(inner.x, metrics_y, inner.width, 1),
+        );
+    }
+
+    let legend_y = inner.y.saturating_add(10);
+    if legend_y < inner.bottom() {
+        let legend = Line::from(vec![
+            Span::styled("Less ", Style::default().fg(app.theme.muted)),
+            Span::styled("· ", app.theme.subtle_text_style()),
+            Span::styled("██", Style::default().fg(app.theme.colors[1])),
+            Span::raw(" "),
+            Span::styled("██", Style::default().fg(app.theme.colors[2])),
+            Span::raw(" "),
+            Span::styled("██", Style::default().fg(app.theme.colors[3])),
+            Span::raw(" "),
+            Span::styled("██", Style::default().fg(app.theme.colors[4])),
+            Span::styled(" More", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                "    select a day with mouse or keyboard",
+                Style::default().fg(app.theme.muted),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(legend),
+            Rect::new(inner.x, legend_y, inner.width, 1),
         );
     }
 }
 
-fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_day_insights(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Day Breakdown (ESC to close) ",
+            " Day Insights ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(app.theme.background));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
 
-    let (week_idx, day_idx) = match app.selected_graph_cell {
-        Some(cell) => cell,
-        None => return,
+    let selected_day = app.selected_graph_cell.and_then(|(week_idx, day_idx)| {
+        app.data
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.weeks.get(week_idx))
+            .and_then(|week| week.get(day_idx))
+            .and_then(|day| day.clone())
+    });
+
+    let Some(day) = selected_day else {
+        app.stats_breakdown_total_lines = 0;
+        app.scroll_offset = 0;
+        frame.render_widget(
+            Paragraph::new(
+                "Select a day in the contribution graph to inspect its harness and model usage.",
+            )
+            .style(Style::default().fg(app.theme.muted))
+            .alignment(Alignment::Center),
+            inner,
+        );
+        return;
     };
 
-    let graph = match &app.data.graph {
-        Some(g) => g,
-        None => {
-            app.stats_breakdown_total_lines = 0;
-            return;
-        }
-    };
+    let daily = app
+        .data
+        .daily
+        .iter()
+        .find(|usage| usage.date == day.date)
+        .cloned();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            day.date.format("%a, %b %d, %Y").to_string(),
+            Style::default()
+                .fg(app.theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(format_tokens(day.tokens), Style::default().fg(Color::Cyan)),
+        Span::raw("  "),
+        Span::styled(
+            format_cost(day.cost),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
 
-    let day = match graph
-        .weeks
-        .get(week_idx)
-        .and_then(|w| w.get(day_idx))
-        .and_then(|d| d.as_ref())
-    {
-        Some(d) => d,
-        None => {
-            app.stats_breakdown_total_lines = 0;
-            let no_data = Paragraph::new("No data for this day")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center);
-            frame.render_widget(no_data, inner);
-            return;
-        }
-    };
-
-    let daily_usage = app.data.daily.iter().find(|d| d.date == day.date);
-
-    let mut lines = vec![
-        Line::from(vec![
+    if let Some(daily) = daily {
+        lines.push(Line::from(vec![
+            Span::styled("Messages ", Style::default().fg(app.theme.muted)),
             Span::styled(
-                day.date.format("%a, %b %d, %Y").to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                daily.message_count.to_string(),
+                Style::default().fg(Color::Cyan),
             ),
-            Span::raw("  "),
-            Span::styled(format_tokens(day.tokens), Style::default().fg(Color::Cyan)),
-            Span::raw("  "),
+            Span::styled("  ·  Turns ", Style::default().fg(app.theme.muted)),
             Span::styled(
-                format_cost(day.cost),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
+                daily.turn_count.to_string(),
+                Style::default().fg(Color::Cyan),
             ),
-        ]),
-        Line::from(""),
-    ];
+            Span::styled("  ·  Harnesses ", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                daily.source_breakdown.len().to_string(),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+        lines.push(Line::default());
 
-    if let Some(daily) = daily_usage {
-        if daily.source_breakdown.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "No detailed breakdown available",
-                Style::default().fg(app.theme.muted),
-            )));
-        } else {
-            for (client, source_info) in &daily.source_breakdown {
-                let mut models: Vec<_> = source_info.models.values().collect();
-                models.sort_by(|a, b| {
-                    b.tokens
-                        .total()
-                        .cmp(&a.tokens.total())
-                        .then_with(|| a.display_name.cmp(&b.display_name))
-                });
+        let mut sources: Vec<_> = daily.source_breakdown.iter().collect();
+        sources.sort_by(|(left_name, left), (right_name, right)| {
+            right
+                .tokens
+                .total()
+                .cmp(&left.tokens.total())
+                .then_with(|| right.cost.total_cmp(&left.cost))
+                .then_with(|| left_name.cmp(right_name))
+        });
 
-                let client_color = app.theme.color(get_client_color(client));
-                let client_name = get_client_display_name(client);
-                let model_count = models.len();
-                let plural = if model_count > 1 { "s" } else { "" };
+        for (client, source) in sources {
+            let client_color = app.theme.color(get_client_color(client));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("● {}", get_client_display_name(client)),
+                    Style::default()
+                        .fg(client_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format_tokens(source.tokens.total()),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(format_cost(source.cost), Style::default().fg(Color::Green)),
+            ]));
 
+            let mut models: Vec<_> = source.models.values().collect();
+            models.sort_by(|left, right| {
+                right
+                    .tokens
+                    .total()
+                    .cmp(&left.tokens.total())
+                    .then_with(|| right.cost.total_cmp(&left.cost))
+                    .then_with(|| left.display_name.cmp(&right.display_name))
+            });
+            for model in models {
+                let model_color = app.model_color_for(&model.provider, &model.color_key);
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("● {}", client_name),
-                        Style::default()
-                            .fg(client_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(" ({} model{})", model_count, plural),
-                        Style::default().fg(app.theme.muted),
-                    ),
                     Span::raw("  "),
+                    Span::styled("●", Style::default().fg(model_color)),
                     Span::styled(
-                        format_cost(source_info.cost),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
+                        format!(" {}", truncate_model_display_name(&model.display_name)),
+                        Style::default().fg(app.theme.foreground),
                     ),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        format_tokens(model.tokens.total()),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(format_cost(model.cost), Style::default().fg(Color::Green)),
                 ]));
-
-                for model_info in models {
-                    let model_color =
-                        app.model_color_for(&model_info.provider, &model_info.color_key);
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("●", Style::default().fg(model_color)),
-                        Span::styled(
-                            format!(" {}", truncate_model_display_name(&model_info.display_name)),
-                            Style::default().fg(Color::White),
-                        ),
-                    ]));
-
-                    let is_narrow = app.is_narrow();
-                    if is_narrow {
-                        let secondary_text_style = app.theme.secondary_text_style();
-                        let subtle_text_style = app.theme.subtle_text_style();
-                        lines.push(Line::from(vec![
-                            Span::styled("    ", Style::default()),
-                            Span::styled(
-                                format_tokens(model_info.tokens.input),
-                                secondary_text_style,
-                            ),
-                            Span::styled("/", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.displayed_output()),
-                                secondary_text_style,
-                            ),
-                            Span::styled("/", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.cache_read),
-                                secondary_text_style,
-                            ),
-                            Span::styled("/", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.cache_write),
-                                secondary_text_style,
-                            ),
-                        ]));
-                    } else {
-                        let secondary_text_style = app.theme.secondary_text_style();
-                        let subtle_text_style = app.theme.subtle_text_style();
-                        lines.push(Line::from(vec![
-                            Span::styled("    In: ", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.input),
-                                secondary_text_style,
-                            ),
-                            Span::styled(" · Out: ", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.displayed_output()),
-                                secondary_text_style,
-                            ),
-                            Span::styled(" · CR: ", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.cache_read),
-                                secondary_text_style,
-                            ),
-                            Span::styled(" · CW: ", subtle_text_style),
-                            Span::styled(
-                                format_tokens(model_info.tokens.cache_write),
-                                secondary_text_style,
-                            ),
-                        ]));
-                    }
-                }
             }
         }
     } else {
         lines.push(Line::from(Span::styled(
-            "No detailed breakdown available",
+            "No detailed usage was recorded for this day.",
             Style::default().fg(app.theme.muted),
         )));
     }
@@ -650,32 +391,25 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = inner.height.max(1) as usize;
     app.max_visible_items = visible_height;
     app.stats_breakdown_total_lines = lines.len();
-
-    if lines.is_empty() {
-        app.selected_index = 0;
-        app.scroll_offset = 0;
-    } else {
-        app.selected_index = app.selected_index.min(lines.len() - 1);
-        let max_scroll = lines.len().saturating_sub(visible_height);
-        app.scroll_offset = app.scroll_offset.min(max_scroll);
-    }
-
-    let paragraph = Paragraph::new(lines).scroll((app.scroll_offset as u16, 0));
-    frame.render_widget(paragraph, inner);
+    let max_scroll = lines.len().saturating_sub(visible_height);
+    app.scroll_offset = app.scroll_offset.min(max_scroll);
+    let visible = lines
+        .into_iter()
+        .skip(app.scroll_offset)
+        .take(visible_height)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(visible), inner);
 
     if app.stats_breakdown_total_lines > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
-
         let mut scrollbar_state = viewport_scrollbar_state(
             app.stats_breakdown_total_lines,
             app.scroll_offset,
             visible_height,
         );
-
         frame.render_stateful_widget(
-            scrollbar,
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼")),
             area.inner(Margin {
                 horizontal: 0,
                 vertical: 1,
@@ -688,30 +422,68 @@ fn render_breakdown_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{ContributionDay, GraphData};
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
 
-    #[test]
-    fn stats_layout_without_selection_keeps_graph_fixed() {
-        assert_eq!(stats_layout_mode(24, false), StatsLayoutMode::StatsOnly);
-        assert_eq!(stats_layout_mode(60, false), StatsLayoutMode::StatsOnly);
+    fn make_app() -> App {
+        App::new_with_cached_data(
+            TuiConfig {
+                theme: Some("blue".to_string()),
+                refresh: 0,
+                no_refresh: false,
+                home_dir: None,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                initial_tab: None,
+            },
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn stats_layout_with_selection_keeps_all_panels_when_roomy() {
-        assert_eq!(
-            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H, true),
-            StatsLayoutMode::StatsWithBreakdown
-        );
-        assert_eq!(
-            stats_layout_mode(60, true),
-            StatsLayoutMode::StatsWithBreakdown
-        );
+    fn stats_reserves_space_for_day_insights() {
+        let area = Rect::new(0, 0, 100, 30);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(GRAPH_PANEL_H),
+                Constraint::Min(DAY_INSIGHTS_MIN_H),
+            ])
+            .split(area);
+        assert_eq!(chunks[0].height, GRAPH_PANEL_H);
+        assert!(chunks[1].height >= DAY_INSIGHTS_MIN_H);
     }
 
     #[test]
-    fn stats_layout_with_selection_drops_stats_when_constrained() {
-        assert_eq!(
-            stats_layout_mode(GRAPH_PANEL_H + STATS_COMPACT_H + BREAKDOWN_MIN_H - 1, true),
-            StatsLayoutMode::BreakdownOnly
-        );
+    fn graph_registers_click_areas_only_for_real_days() {
+        let mut app = make_app();
+        app.data.graph = Some(GraphData {
+            weeks: vec![vec![
+                None,
+                Some(ContributionDay {
+                    date: NaiveDate::from_ymd_opt(2026, 7, 17).unwrap(),
+                    tokens: 42,
+                    cost: 0.5,
+                    intensity: 0.75,
+                }),
+                None,
+            ]],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(30, GRAPH_PANEL_H)).unwrap();
+
+        terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+
+        assert_eq!(app.click_areas.len(), 1);
+        match &app.click_areas[0].action {
+            ClickAction::GraphCell { week, day } => assert_eq!((*week, *day), (0, 1)),
+            action => panic!("unexpected click action: {action:?}"),
+        }
     }
 }

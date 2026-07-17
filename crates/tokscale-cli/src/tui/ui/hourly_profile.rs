@@ -1,9 +1,10 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
-use super::widgets::{format_cost, format_tokens, viewport_scrollbar_state};
+use super::usage_profile;
+use super::widgets::viewport_scrollbar_state;
 use crate::tui::app::App;
-use crate::tui::data::{aggregate_by_period, aggregate_by_weekday, find_peak_hour};
+use crate::tui::data::{aggregate_by_period, find_peak_hour};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -16,47 +17,42 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(app.theme.background));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if app.data.hourly.is_empty() {
         app.set_hourly_profile_text_viewport(inner.height as usize, 0);
-        let empty_msg = Paragraph::new("No hourly usage data found. Press 'r' to refresh.")
-            .style(Style::default().fg(app.theme.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty_msg, inner);
+        frame.render_widget(
+            Paragraph::new("No hourly usage data found. Press 'r' to refresh.")
+                .style(Style::default().fg(app.theme.muted))
+                .alignment(Alignment::Center),
+            inner,
+        );
         return;
     }
 
-    let mut lines = build_hourly_profile_lines(app, inner.width);
+    let lines = build_hourly_profile_lines(app, inner.width);
     let total_lines = lines.len();
     let visible_height = inner.height as usize;
     app.set_hourly_profile_text_viewport(visible_height, total_lines);
-
-    let range = app.hourly_profile_text_visible_range();
-    let paragraph =
-        Paragraph::new(lines.drain(range).collect::<Vec<_>>()).alignment(Alignment::Left);
-    frame.render_widget(paragraph, inner);
+    let visible = lines[app.hourly_profile_text_visible_range()].to_vec();
+    frame.render_widget(Paragraph::new(visible), inner);
 
     if total_lines > visible_height {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"));
-
-        let mut scrollbar_state = viewport_scrollbar_state(
+        let mut state = viewport_scrollbar_state(
             total_lines,
             app.hourly_profile_viewport.scroll,
             visible_height,
         );
-
         frame.render_stateful_widget(
-            scrollbar,
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼")),
             area.inner(Margin {
                 horizontal: 0,
                 vertical: 1,
             }),
-            &mut scrollbar_state,
+            &mut state,
         );
     }
 }
@@ -64,93 +60,37 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line<'static>> {
     let hourly = &app.data.hourly;
     let total_tokens = app.data.total_tokens;
-    let total_cost = app.data.total_cost;
-
-    // Calculate dynamic bar width to use most of the available width
-    // Period line: label (10) + hour_range (12) + spaces (4) + percentage (8) = 34 chars overhead
-    // Weekday line: day name (10) + spaces (3) + percentage (8) = 21 chars overhead
-    // Use period overhead since it's larger, then subtract a margin for safety
-    let overhead = 36; // 34 + small margin
-    let bar_width = (area_width as usize).saturating_sub(overhead).clamp(20, 80);
-
-    // Get date range
-    let min_date = hourly.iter().map(|h| h.datetime.date()).min();
-    let max_date = hourly.iter().map(|h| h.datetime.date()).max();
-    let date_range = match (min_date, max_date) {
-        (Some(mn), Some(mx)) if mn == mx => mn.format("%Y-%m-%d").to_string(),
-        (Some(mn), Some(mx)) => format!("{} to {}", mn.format("%Y-%m-%d"), mx.format("%Y-%m-%d")),
-        _ => "No data".to_string(),
-    };
-
-    // Aggregate data
     let periods = aggregate_by_period(hourly);
-    let weekdays = aggregate_by_weekday(hourly);
     let peak_hour = find_peak_hour(hourly);
+    let bar_width = usage_profile::bar_width(area_width);
+    let mut lines = usage_profile::summary_lines(
+        app,
+        hourly.iter().map(|entry| entry.datetime.date()),
+        hourly.len(),
+        "active hours",
+    )
+    .into_iter()
+    .collect::<Vec<_>>();
+    lines.push(Line::default());
 
-    // Build content
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Title line
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Hourly Profile",
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled(date_range, Style::default().fg(app.theme.muted)),
-    ]));
-    lines.push(Line::from(""));
-
-    // Summary line
-    let summary_spans = vec![
-        Span::styled(
-            format!("{} hours", hourly.len()),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled("  |  ", Style::default().fg(app.theme.muted)),
-        Span::styled(
-            format!("{} total tokens", format_tokens(total_tokens)),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled("  |  ", Style::default().fg(app.theme.muted)),
-        Span::styled(
-            format!("{} total cost", format_cost(total_cost)),
-            Style::default().fg(Color::Green),
-        ),
-    ];
-    lines.push(Line::from(summary_spans));
-    lines.push(Line::from(""));
-
-    // Time-of-day breakdown
-    lines.push(Line::from(vec![Span::styled(
-        "When You Work Most",
-        Style::default()
-            .fg(app.theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )]));
-    lines.push(Line::from(""));
-
-    let max_period_tokens = periods.iter().map(|p| p.total_tokens).max().unwrap_or(1);
-
-    for period in &periods {
+    let max_period_tokens = periods
+        .iter()
+        .map(|period| period.total_tokens)
+        .max()
+        .unwrap_or(0);
+    for period in periods {
         let percentage = if total_tokens > 0 {
             period.total_tokens as f64 / total_tokens as f64 * 100.0
         } else {
             0.0
         };
-        let bar_filled = if max_period_tokens > 0 {
+        let filled = if max_period_tokens > 0 {
             (period.total_tokens as f64 / max_period_tokens as f64 * bar_width as f64).round()
                 as usize
         } else {
             0
-        };
-        let bar_filled = bar_filled.min(bar_width);
-        let bar_empty = bar_width - bar_filled;
-
-        let bar = format!("{}{}", "█".repeat(bar_filled), "░".repeat(bar_empty));
-
+        }
+        .min(bar_width);
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  {:<10}", period.label),
@@ -160,114 +100,106 @@ pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line
                 format!("{:>12}", period.hour_range),
                 Style::default().fg(app.theme.muted),
             ),
-            Span::styled("  ", Style::default()),
-            Span::styled(bar, Style::default().fg(Color::Green)),
-            Span::styled("  ", Style::default()),
+            Span::raw("  "),
+            Span::styled("█".repeat(filled), Style::default().fg(Color::Green)),
             Span::styled(
-                format!("{:>5.1}%", percentage),
+                "░".repeat(bar_width.saturating_sub(filled)),
+                app.theme.subtle_text_style(),
+            ),
+            Span::styled(
+                format!("  {:>5.1}%", percentage),
                 Style::default().fg(Color::Yellow),
             ),
         ]));
     }
-    lines.push(Line::from(""));
 
-    // Weekday breakdown
-    lines.push(Line::from(vec![Span::styled(
-        "Most Productive Day",
-        Style::default()
-            .fg(app.theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )]));
-    lines.push(Line::from(""));
-
-    let max_weekday_tokens = weekdays.iter().map(|w| w.total_tokens).max().unwrap_or(1);
-
-    // Find best weekday
-    let best_weekday = weekdays
-        .iter()
-        .max_by_key(|w| w.total_tokens)
-        .map(|w| w.day)
-        .unwrap_or("Monday");
-
-    for weekday in &weekdays {
-        let percentage = if total_tokens > 0 {
-            weekday.total_tokens as f64 / total_tokens as f64 * 100.0
-        } else {
-            0.0
-        };
-        let bar_filled = if max_weekday_tokens > 0 {
-            (weekday.total_tokens as f64 / max_weekday_tokens as f64 * bar_width as f64).round()
-                as usize
-        } else {
-            0
-        };
-        let bar_filled = bar_filled.min(bar_width);
-        let bar_empty = bar_width - bar_filled;
-
-        let bar = format!("{}{}", "█".repeat(bar_filled), "░".repeat(bar_empty));
-
-        let is_best = weekday.day == best_weekday;
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {:<10}", weekday.day),
-                Style::default().fg(if is_best {
-                    Color::Yellow
-                } else {
-                    app.theme.foreground
-                }),
-            ),
-            Span::styled(bar, Style::default().fg(Color::Green)),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                format!("{:>5.1}%", percentage),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]));
-    }
-    lines.push(Line::from(""));
-
-    // Peak hour insight
+    lines.push(Line::default());
     if let Some((hour, tokens, cost)) = peak_hour {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Peak Hour: ",
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:02}:00-{:02}:59", hour, hour),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled("  (", Style::default().fg(app.theme.muted)),
-            Span::styled(format_tokens(tokens), Style::default().fg(Color::Cyan)),
-            Span::styled(" tokens, ", Style::default().fg(app.theme.muted)),
-            Span::styled(format_cost(cost), Style::default().fg(Color::Green)),
-            Span::styled(")", Style::default().fg(app.theme.muted)),
-        ]));
+        lines.push(usage_profile::peak_line(
+            app,
+            "Peak hour ",
+            format!("{hour:02}:00-{hour:02}:59"),
+            tokens,
+            cost,
+        ));
     }
-
-    // Legend
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Legend: ", Style::default().fg(app.theme.muted)),
-        Span::styled("░", Style::default().fg(app.theme.muted)),
-        Span::styled(" low  ", Style::default().fg(app.theme.muted)),
-        Span::styled("█", Style::default().fg(Color::Green)),
-        Span::styled(" high", Style::default().fg(app.theme.muted)),
-    ]));
-
-    // Hint
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Press ", Style::default().fg(app.theme.muted)),
-        Span::styled("[v]", Style::default().fg(Color::Yellow)),
-        Span::styled(
-            " to switch to table view",
-            Style::default().fg(app.theme.muted),
-        ),
-    ]));
+    lines.extend([Line::default(), usage_profile::switch_to_table_line(app)]);
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{HourlyUsage, TokenBreakdown};
+    use chrono::NaiveDate;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn make_app() -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        App::new_with_cached_data(config, None).unwrap()
+    }
+
+    fn hour(date: &str, hour: u32, tokens: u64, cost: f64) -> HourlyUsage {
+        HourlyUsage {
+            datetime: NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .unwrap()
+                .and_hms_opt(hour, 0, 0)
+                .unwrap(),
+            tokens: TokenBreakdown {
+                input: tokens,
+                ..TokenBreakdown::default()
+            },
+            cost,
+            clients: BTreeSet::new(),
+            models: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn hourly_profile_uses_the_shared_summary_and_peak_rows() {
+        let mut app = make_app();
+        app.data.hourly = vec![
+            hour("2026-07-17", 8, 400, 4.0),
+            hour("2026-07-18", 20, 600, 6.0),
+        ];
+        app.data.total_tokens = 1_000;
+        app.data.total_cost = 10.0;
+
+        let text = build_hourly_profile_lines(&app, 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(text[0].contains("2026-07-17 to 2026-07-18"));
+        assert!(text[1].contains("2 active hours"));
+        assert!(text[1].contains("1K tokens"));
+        assert!(text[1].contains("$10.00"));
+        assert!(text
+            .iter()
+            .any(|line| line.contains("Peak hour 20:00-20:59")));
+        assert!(text
+            .last()
+            .is_some_and(|line| line.contains("Press [v] to switch to table view")));
+    }
 }

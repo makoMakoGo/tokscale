@@ -20,9 +20,7 @@ pub use tokscale_core::usage_views::{
     HourlyModelInfo, HourlyUsage, PeriodKind, PeriodUsage, UsageData, UsageGraphData as GraphData,
     UsageModelEntry as ModelUsage, UsageTokenBreakdown as TokenBreakdown,
 };
-pub use tokscale_core::{
-    aggregate_by_period, aggregate_by_weekday, build_period_usage, find_peak_hour,
-};
+pub use tokscale_core::{aggregate_by_period, build_period_usage, find_peak_hour};
 
 /// Returns the scanner settings that `DataLoader` should use when building
 /// `LocalParseOptions`. Under `#[cfg(test)]` this intentionally ignores
