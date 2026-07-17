@@ -1,0 +1,195 @@
+name: Finalize Issue 153 V3
+
+on:
+  push:
+    branches:
+      - codex/issue-153-session-navigation
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-issue-153-v3
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  FORMAL_BRANCH: codex/issue-153-tui-information-architecture
+  BASE_BRANCH: personal/local-clients
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: codex/issue-153-session-navigation
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Materialize source-first Sessions implementation
+        run: |
+          if ! grep -q 'pub struct SessionUsage' crates/tokscale-core/src/usage_views.rs; then
+            for patch in .github/session-patches/*.patch; do
+              git apply --check "$patch"
+              git apply "$patch"
+            done
+          fi
+
+      - name: Apply focused cleanup
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_if_present(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              if old in text:
+                  file.write_text(text.replace(old, new, 1))
+
+          replace_if_present(
+              "crates/tokscale-cli/src/tui/ui/issues.rs",
+              "Constraint::Length(health_height.min(area.height))",
+              "Constraint::Length(health_height)",
+          )
+          replace_if_present(
+              "crates/tokscale-cli/src/tui/data/mod.rs",
+              "aggregate_by_period, aggregate_by_weekday, build_period_usage, find_peak_hour,",
+              "aggregate_by_period, build_period_usage, find_peak_hour,",
+          )
+          replace_if_present(
+              "crates/tokscale-cli/src/tui/ui/hourly_profile.rs",
+              "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]",
+              "#[cfg(test)]\nmod tests {\n    #[test]",
+          )
+
+          app = Path("crates/tokscale-cli/src/tui/app.rs")
+          text = app.read_text()
+          tuple_pattern = re.compile(
+              r"let mut sources:\s*BTreeMap<\s*String,\s*"
+              r"\(BTreeSet<String>, usize, u32, u32, u64, f64, i64\),\s*>\s*"
+              r"=\s*BTreeMap::new\(\);"
+          )
+          replacement = (
+              "type SessionSourceAggregate = "
+              "(BTreeSet<String>, usize, u32, u32, u64, f64, i64);\n"
+              "        let mut sources: BTreeMap<String, SessionSourceAggregate> = "
+              "BTreeMap::new();"
+          )
+          text = tuple_pattern.sub(replacement, text, count=1)
+          obsolete_test = re.compile(
+              r"\n    #\[test\]\n"
+              r"    fn issues_tab_key_scrolls_text_viewport_without_table_selection\(\) \{.*?"
+              r"\n    \}\n",
+              flags=re.DOTALL,
+          )
+          text = obsolete_test.sub("\n", text, count=1)
+          app.write_text(text)
+
+          cache = Path("crates/tokscale-cli/src/tui/cache.rs")
+          text = cache.read_text()
+
+          def matching_brace(source: str, opening: int) -> int:
+              depth = 0
+              in_string = False
+              escaped = False
+              for index in range(opening, len(source)):
+                  char = source[index]
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif char == "\\":
+                          escaped = True
+                      elif char == '"':
+                          in_string = False
+                      continue
+                  if char == '"':
+                      in_string = True
+                  elif char == "{":
+                      depth += 1
+                  elif char == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return index
+              raise SystemExit("unterminated UsageData initializer")
+
+          insertions = []
+          for match in re.finditer(r"\bUsageData\s*\{", text):
+              before = text[max(0, match.start() - 100):match.start()]
+              if re.search(r"(?:impl|struct|enum|trait|fn)[^\n{]{0,100}$", before):
+                  continue
+              opening = text.find("{", match.start())
+              closing = matching_brace(text, opening)
+              block = text[match.start():closing + 1]
+              if "sessions:" in block or "..Default" in block:
+                  continue
+              agent_line = re.search(r"(?m)^(\s*)agents:\s*Vec::new\(\),\s*$", block)
+              if agent_line is None:
+                  continue
+              absolute_end = match.start() + agent_line.end()
+              insertions.append((absolute_end, agent_line.group(1)))
+
+          if len(insertions) > 1:
+              raise SystemExit(f"ambiguous missing sessions fields: {len(insertions)}")
+          for position, indent in reversed(insertions):
+              text = text[:position] + f"\n{indent}sessions: Vec::new()," + text[position:]
+          cache.write_text(text)
+
+          themes = Path("crates/tokscale-cli/src/tui/themes.rs")
+          if themes.exists():
+              text = themes.read_text()
+              if text.count("metric_total_style(") == 1:
+                  text = re.sub(
+                      r"\n    pub\(crate\) fn metric_total_style\(&self\) -> Style \{.*?\n    \}\n",
+                      "\n",
+                      text,
+                      count=1,
+                      flags=re.DOTALL,
+                  )
+                  themes.write_text(text)
+          PY
+
+      - name: Remove temporary validation scaffolding
+        run: |
+          rm -rf .github/session-patches
+          rm -f \
+            .github/session-navigation-v2.patch \
+            .github/session-navigation-patch-source.yml \
+            .github/session-navigation-trigger \
+            .github/workflows/prepare-session-navigation.yml \
+            .github/workflows/session-navigation-diagnostics.yml \
+            .github/workflows/session-navigation-validation.yml \
+            .github/workflows/session-navigation-validation-v2.yml \
+            .github/workflows/session-navigation-materialize.yml \
+            .github/workflows/finalize-issue-153.yml \
+            .github/workflows/finalize-issue-153-v3.yml
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Apply safe Clippy suggestions
+        run: |
+          cargo clippy --fix --workspace --all-targets --all-features \
+            --allow-dirty --allow-staged -- -W warnings || true
+          cargo fmt --all
+
+      - name: Strict Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Full test suite
+        run: cargo test --workspace --all-targets --all-features
+
+      - name: Publish one semantic commit to the formal PR branch
+        run: |
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git fetch origin "$BASE_BRANCH" "$FORMAL_BRANCH"
+          git reset --soft "origin/$BASE_BRANCH"
+          git add -A
+          git commit -m "refactor(tui): reorganize overview stats and sessions"
+          git push --force-with-lease origin "HEAD:$FORMAL_BRANCH"
