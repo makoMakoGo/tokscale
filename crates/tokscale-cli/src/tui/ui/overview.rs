@@ -2,9 +2,14 @@ use std::collections::BTreeMap;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
 use crate::tui::app::{App, ChartGranularity};
+
+const LEGEND_HORIZONTAL_PADDING: u16 = 2;
+const LEGEND_ITEM_GAP: &str = "    ";
+const LEGEND_MARKER: &str = "●";
 
 #[derive(Debug, Clone, Default)]
 struct ModelAggregate {
@@ -171,6 +176,11 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
+    // Match the Snapshot text inset: one cell for its border and one for padding.
+    let area = area.inner(Margin {
+        horizontal: LEGEND_HORIZONTAL_PADDING,
+        vertical: 0,
+    });
     if area.is_empty() {
         return;
     }
@@ -187,13 +197,19 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
 
     let limit = if app.is_narrow() { 3 } else { 5 };
     let name_width = if app.is_narrow() { 12 } else { 18 };
+    let visible_count = visible_legend_count(
+        models.iter().map(|(model, _)| model.as_str()),
+        limit,
+        name_width,
+        area.width as usize,
+    );
     let mut spans = Vec::new();
-    for (index, (model, aggregate)) in models.into_iter().take(limit).enumerate() {
+    for (index, (model, aggregate)) in models.into_iter().take(visible_count).enumerate() {
         if index > 0 {
-            spans.push(Span::styled("  ·  ", Style::default().fg(app.theme.muted)));
+            spans.push(Span::raw(LEGEND_ITEM_GAP));
         }
         spans.push(Span::styled(
-            "●",
+            LEGEND_MARKER,
             Style::default().fg(app.model_color_for(&aggregate.provider, model)),
         ));
         spans.push(Span::raw(format!(
@@ -205,6 +221,35 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
     if !spans.is_empty() {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
+}
+
+fn visible_legend_count<'a>(
+    models: impl IntoIterator<Item = &'a str>,
+    limit: usize,
+    name_width: usize,
+    available_width: usize,
+) -> usize {
+    let mut used_width = 0usize;
+    let mut visible_count = 0;
+
+    for model in models.into_iter().take(limit) {
+        let display_name = truncate_string(model, name_width);
+        let item_width = LEGEND_MARKER.width() + 1 + display_name.width();
+        let gap_width = if visible_count == 0 {
+            0
+        } else {
+            LEGEND_ITEM_GAP.width()
+        };
+        let required_width = gap_width + item_width;
+        if used_width.saturating_add(required_width) > available_width {
+            break;
+        }
+
+        used_width += required_width;
+        visible_count += 1;
+    }
+
+    visible_count
 }
 
 fn truncate_string(value: &str, max_chars: usize) -> String {
@@ -234,5 +279,28 @@ mod tests {
             ),
             "claude-sonnet-4"
         );
+    }
+
+    #[test]
+    fn legend_only_includes_complete_items_that_fit() {
+        let models = ["123456789012345678"; 5];
+        let three_items_width = 3 * 20 + 2 * LEGEND_ITEM_GAP.width();
+        let fourth_item_width = LEGEND_ITEM_GAP.width() + 20;
+
+        assert_eq!(visible_legend_count(models, 5, 18, three_items_width), 3);
+        assert_eq!(
+            visible_legend_count(models, 5, 18, three_items_width + fourth_item_width - 1),
+            3
+        );
+        assert_eq!(
+            visible_legend_count(models, 5, 18, three_items_width + fourth_item_width),
+            4
+        );
+    }
+
+    #[test]
+    fn legend_width_uses_rendered_character_width() {
+        assert_eq!(visible_legend_count(["模型"], 1, 18, 5), 0);
+        assert_eq!(visible_legend_count(["模型"], 1, 18, 6), 1);
     }
 }
