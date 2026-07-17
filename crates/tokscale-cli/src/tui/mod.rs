@@ -40,7 +40,7 @@ use std::panic;
 
 use anyhow::Result;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableMouseCapture, EnableMouseCapture, MouseEvent},
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -488,7 +488,7 @@ fn run_loop_with_background(
                 }
             }
             Event::Mouse(mouse) => {
-                app.handle_mouse_event(mouse);
+                dispatch_mouse_event(app, view_state, mouse);
             }
             Event::Resize(w, h) => {
                 app.handle_resize(w, h);
@@ -497,9 +497,16 @@ fn run_loop_with_background(
     }
 }
 
+fn dispatch_mouse_event(app: &mut App, view_state: &mut view_state::ViewState, event: MouseEvent) {
+    if !view_state.handle_mouse(app, &event) {
+        app.handle_mouse_event(event);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use serial_test::serial;
     use std::ffi::OsString;
     use tempfile::TempDir;
@@ -536,6 +543,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn app_on(tab: Tab) -> App {
+        App::new_with_cached_data_and_settings(
+            TuiConfig {
+                theme: Some("blue".to_string()),
+                refresh: 0,
+                no_refresh: false,
+                home_dir: None,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                initial_tab: Some(tab),
+            },
+            Some(UsageData::default()),
+            settings::Settings::default(),
+        )
+        .unwrap()
+    }
+
+    fn mouse_event(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn sessions_mouse_wheel_is_dispatched_before_legacy_app_list_state() {
+        let mut app = app_on(Tab::Issues);
+        let mut view_state = view_state::ViewState::default();
+        app.selected_index = 7;
+
+        dispatch_mouse_event(
+            &mut app,
+            &mut view_state,
+            mouse_event(MouseEventKind::ScrollDown),
+        );
+
+        assert_eq!(
+            app.selected_index, 7,
+            "Sessions wheel input must not reach App's empty legacy Issues list"
+        );
+    }
+
+    #[test]
+    fn daily_profile_mouse_wheel_does_not_move_the_hidden_table() {
+        let mut app = app_on(Tab::Daily);
+        let mut view_state = view_state::ViewState::default();
+        assert!(view_state.handle_key(&app, &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+        assert!(view_state.daily_profile_active());
+        app.selected_index = 7;
+
+        dispatch_mouse_event(
+            &mut app,
+            &mut view_state,
+            mouse_event(MouseEventKind::ScrollDown),
+        );
+
+        assert_eq!(
+            app.selected_index, 7,
+            "Daily Profile wheel input must not mutate the hidden Daily Table selection"
+        );
     }
 
     fn write_amp_source(home: &std::path::Path, input_tokens: u64) {

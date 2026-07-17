@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 
 use super::app::{App, SortDirection, SortField, Tab};
 use super::interaction::{ListInteraction, MoveCommand, WrapMode};
@@ -49,15 +49,7 @@ impl ViewState {
         }
 
         if let Some(command) = move_command(key.code) {
-            if self.session_detail_active() {
-                let len = self.session_count();
-                self.session_details
-                    .apply_move(command, len, WrapMode::Wrap);
-            } else {
-                let len = self.source_count();
-                self.session_sources
-                    .apply_move(command, len, WrapMode::Wrap);
-            }
+            self.move_session_selection(command);
             return true;
         }
 
@@ -79,6 +71,44 @@ impl ViewState {
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn handle_mouse(&mut self, app: &App, event: &MouseEvent) -> bool {
+        if app.dialog_stack.is_active() {
+            return false;
+        }
+
+        let Some(command) = wheel_move_command(event.kind) else {
+            return false;
+        };
+
+        if app.current_tab == Tab::Daily && !app.is_daily_detail_active() && self.daily_profile {
+            // Daily Profile has no scrollable viewport. Consume wheel input here so it
+            // cannot mutate the hidden Daily Table selection through App's list state.
+            return true;
+        }
+
+        if app.current_tab != Tab::Issues {
+            return false;
+        }
+
+        self.move_session_selection(command);
+        true
+    }
+
+    fn move_session_selection(&mut self, command: MoveCommand) {
+        let detail_active = self.session_detail_active();
+        let len = if detail_active {
+            self.session_count()
+        } else {
+            self.source_count()
+        };
+        let interaction = if detail_active {
+            &mut self.session_details
+        } else {
+            &mut self.session_sources
+        };
+        interaction.apply_move(command, len, WrapMode::Wrap);
     }
 
     pub(crate) fn daily_profile_active(&self) -> bool {
@@ -191,6 +221,14 @@ fn move_command(code: KeyCode) -> Option<MoveCommand> {
         KeyCode::PageDown => Some(MoveCommand::PageDown),
         KeyCode::Home => Some(MoveCommand::Home),
         KeyCode::End => Some(MoveCommand::End),
+        _ => None,
+    }
+}
+
+fn wheel_move_command(kind: MouseEventKind) -> Option<MoveCommand> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(MoveCommand::Up),
+        MouseEventKind::ScrollDown => Some(MoveCommand::Down),
         _ => None,
     }
 }
