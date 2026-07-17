@@ -746,9 +746,7 @@ fn render_day_stats_lines(
         app.theme.subtle_text_style(),
     ))));
 
-    let mut y = area.y;
-
-    for row in rows {
+    for (y, row) in (area.y..).zip(rows) {
         if y >= y_max {
             break;
         }
@@ -780,7 +778,6 @@ fn render_day_stats_lines(
                 }
             }
         }
-        y += 1;
     }
 }
 
