@@ -158,7 +158,11 @@ impl PricingService {
         openrouter_data: Option<HashMap<String, ModelPricing>>,
         models_dev_data: Option<HashMap<String, ModelPricing>>,
     ) -> Option<Self> {
-        if litellm_data.is_none() && openrouter_data.is_none() && models_dev_data.is_none() {
+        if custom.is_empty()
+            && litellm_data.is_none()
+            && openrouter_data.is_none()
+            && models_dev_data.is_none()
+        {
             return None;
         }
 
@@ -642,11 +646,34 @@ mod tests {
     }
 
     #[test]
-    fn test_from_cached_datasets_returns_none_when_both_sources_missing() {
+    fn test_from_cached_datasets_returns_none_when_all_sources_missing() {
         assert!(
             PricingService::from_cached_datasets(CustomPricing::default(), None, None, None)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn test_from_cached_datasets_uses_custom_when_remote_sources_missing() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "custom-only-model".into(),
+            model_pricing(0.000002, 0.000008),
+        );
+
+        let service = PricingService::from_cached_datasets(
+            CustomPricing::from_models(custom),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let result = service
+            .lookup_with_source("custom-only-model", None)
+            .unwrap();
+
+        assert_eq!(result.source, "Custom");
+        assert_eq!(result.matched_key, "custom-only-model");
     }
 
     #[test]

@@ -196,19 +196,20 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::BTreeMap;
 
-    fn make_app() -> App {
+    fn make_app() -> (App, tempfile::TempDir) {
+        let home_dir = tempfile::tempdir().unwrap();
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
             no_refresh: false,
-            home_dir: None,
+            home_dir: Some(home_dir.path().to_string_lossy().into_owned()),
             clients: None,
             since: None,
             until: None,
             year: None,
             initial_tab: None,
         };
-        App::new_with_cached_data(config, None).unwrap()
+        (App::new_with_cached_data(config, None).unwrap(), home_dir)
     }
 
     fn day(date: &str, tokens: u64, cost: f64) -> DailyUsage {
@@ -272,7 +273,7 @@ mod tests {
 
     #[test]
     fn daily_profile_matches_hourly_summary_and_peak_structure() {
-        let mut app = make_app();
+        let (mut app, _home_dir) = make_app();
         app.data.daily = vec![day("2026-07-13", 400, 4.0), day("2026-07-17", 600, 6.0)];
         app.data.total_tokens = 1_000;
         app.data.total_cost = 10.0;
@@ -296,7 +297,7 @@ mod tests {
 
     #[test]
     fn percentages_use_the_authoritative_global_token_total() {
-        let mut app = make_app();
+        let (mut app, _home_dir) = make_app();
         app.data.daily = vec![day("2026-07-13", 500, 5.0)];
         app.data.total_tokens = 1_000;
 
@@ -307,7 +308,7 @@ mod tests {
 
     #[test]
     fn standard_height_renders_the_complete_profile_without_clipping() {
-        let mut app = make_app();
+        let (mut app, _home_dir) = make_app();
         app.data.daily = vec![day("2026-07-17", 600, 6.0)];
         app.data.total_tokens = 600;
         app.data.total_cost = 6.0;
@@ -324,7 +325,7 @@ mod tests {
 
     #[test]
     fn short_profile_scrolls_to_the_peak_and_switch_hint() {
-        let mut app = make_app();
+        let (mut app, _home_dir) = make_app();
         app.current_tab = Tab::Daily;
         app.data.daily = vec![day("2026-07-17", 600, 6.0)];
         app.data.total_tokens = 600;
