@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -54,20 +56,17 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     // Left side: sort buttons
-    if !is_very_narrow {
+    if !is_very_narrow && sort_controls_visible(app) {
         let mut spans: Vec<Span> = Vec::new();
         let mut x_offset = chunks[0].x;
 
         spans.push(Span::styled("Sort: ", Style::default().fg(app.theme.muted)));
         x_offset += 6;
 
-        let sort_buttons = [
-            (SortField::Date, "Date"),
-            (SortField::Cost, "Cost"),
-            (SortField::Tokens, "Tokens"),
-        ];
+        let sort_buttons = [SortField::Date, SortField::Cost, SortField::Tokens];
 
-        for (field, label) in sort_buttons {
+        for field in sort_buttons {
+            let label = sort_label(app, field);
             let is_active = app.sort_field == field;
             let style = if is_active {
                 Style::default()
@@ -95,22 +94,6 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Right side: scroll info | tokens | cost
     let mut right_spans: Vec<Span> = Vec::new();
-
-    // Scroll position indicator for Overview tab
-    if app.current_tab == Tab::Overview {
-        let total_models = app.data.models.len();
-        if total_models > app.max_visible_items && app.max_visible_items > 0 {
-            let start = app.scroll_offset + 1;
-            let end = (app.scroll_offset + app.max_visible_items).min(total_models);
-            if !is_very_narrow {
-                right_spans.push(Span::styled(
-                    format!("↓ {}-{} of {} ", start, end, total_models),
-                    Style::default().fg(app.theme.muted),
-                ));
-                right_spans.push(Span::styled("| ", Style::default().fg(app.theme.muted)));
-            }
-        }
-    }
 
     // Total tokens
     let total_tokens = app.data.total_tokens;
@@ -149,9 +132,44 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(right_para, chunks[1]);
 }
 
+fn sort_controls_visible(app: &App) -> bool {
+    !matches!(app.current_tab, Tab::Overview | Tab::Stats | Tab::Usage)
+}
+
+fn sort_label(app: &App, field: SortField) -> &'static str {
+    match (app.current_tab, field) {
+        (Tab::Issues, SortField::Date) => "Sessions",
+        (_, SortField::Date) => "Date",
+        (_, SortField::Cost) => "Cost",
+        (_, SortField::Tokens) => "Tokens",
+    }
+}
+
 fn current_count_label(app: &App) -> String {
     match app.current_tab {
-        Tab::Overview | Tab::Models => format!(" ({} models)", app.data.models.len()),
+        Tab::Overview => {
+            let mut models = BTreeSet::new();
+            let mut harnesses = BTreeSet::new();
+            for day in &app.data.daily {
+                for (harness, source) in &day.source_breakdown {
+                    harnesses.insert(harness.as_str());
+                    for (key, model) in &source.models {
+                        models.insert(if model.color_key.is_empty() {
+                            key.as_str()
+                        } else {
+                            model.color_key.as_str()
+                        });
+                    }
+                }
+            }
+            format!(
+                " ({} models · {} harnesses · {} days)",
+                models.len(),
+                harnesses.len(),
+                app.data.daily.len()
+            )
+        }
+        Tab::Models => format!(" ({} models)", app.data.models.len()),
         Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
         Tab::Daily if app.is_daily_detail_active() => {
             format!(" ({} models)", app.get_sorted_daily_detail_rows().len())
@@ -172,7 +190,15 @@ fn current_count_label(app: &App) -> String {
         ),
         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
-        Tab::Issues => String::new(),
+        Tab::Issues => {
+            let links = app
+                .data
+                .models
+                .iter()
+                .map(|model| u64::from(model.session_count))
+                .sum::<u64>();
+            format!(" ({links} model-session links)")
+        }
         Tab::Stats | Tab::Usage => String::new(),
     }
 }
@@ -187,9 +213,12 @@ fn help_row_line(app: &App) -> Line<'static> {
 
     if app.current_tab == Tab::Issues {
         let text = if is_very_narrow {
-            "↑↓·←→·r·e·q"
+            "↑↓·d/t/c·s·g·r·←→·q".to_string()
         } else {
-            "↑↓ scroll • ←→/tab view • [r:refresh local] • e • q"
+            format!(
+                "↑↓ scroll • [d/t/c:sort coverage] • [s:sources] • [g:{}] • [r:refresh local] • ←→/tab view • e • q",
+                app.group_by.borrow()
+            )
         };
         return Line::from(Span::styled(text, Style::default().fg(app.theme.muted)));
     }
@@ -547,6 +576,10 @@ mod tests {
     #[test]
     fn test_current_count_label_matches_active_tab() {
         assert_eq!(
+            current_count_label(&make_app_on(Tab::Overview)),
+            " (0 models · 0 harnesses · 0 days)"
+        );
+        assert_eq!(
             current_count_label(&make_app_on(Tab::Models)),
             " (0 models)"
         );
@@ -561,7 +594,19 @@ mod tests {
         assert_eq!(current_count_label(&make_app_on(Tab::Weekly)), " (0 weeks)");
         assert_eq!(current_count_label(&make_app_on(Tab::Daily)), " (0 days)");
         assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
+        assert_eq!(
+            current_count_label(&make_app_on(Tab::Issues)),
+            " (0 model-session links)"
+        );
         assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
+    }
+
+    #[test]
+    fn sessions_tab_renames_the_date_sort_dimension() {
+        let app = make_app_on(Tab::Issues);
+
+        assert_eq!(sort_label(&app, SortField::Date), "Sessions");
+        assert_eq!(sort_label(&app, SortField::Cost), "Cost");
     }
 
     #[test]

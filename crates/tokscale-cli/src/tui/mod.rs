@@ -6,9 +6,11 @@ pub mod data;
 mod event;
 mod export;
 mod interaction;
+mod session_data;
 pub mod settings;
 mod themes;
 mod ui;
+mod view_state;
 
 use app::KeyEventOutcome;
 pub use app::{App, Tab, TuiConfig, TuiExit};
@@ -52,8 +54,11 @@ use tokscale_core::{
 
 fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool, Option<u64>) {
     match load_result {
+        // The cached TUI bundle does not persist the independent Sessions projection.
+        // Keep rendering it immediately, then run the inventory probe in the background
+        // so Sessions can be refreshed without forcing the main usage aggregation.
         CacheResult::Fresh(data, signature) => {
-            (Some(data), false, Some(signature.process_digest()))
+            (Some(data), true, Some(signature.process_digest()))
         }
         CacheResult::Stale(data) => (Some(data), true, None),
         CacheResult::Miss => (None, true, None),
@@ -88,6 +93,12 @@ enum BackgroundLoad {
     },
 }
 
+fn refresh_session_data(loader: &DataLoader, clients: &[ClientId]) {
+    if let Err(error) = session_data::refresh(loader, clients) {
+        tracing::warn!(error = %error, "failed to refresh TUI Sessions projection");
+    }
+}
+
 fn load_background_data(
     loader: &DataLoader,
     clients: &[ClientId],
@@ -100,17 +111,19 @@ fn load_background_data(
         .refresh_source_inventory_signature()?
         .process_digest();
     if !force && last_digest == Some(digest) {
+        refresh_session_data(loader, clients);
         return Ok(BackgroundLoad::Unchanged);
     }
-    loader
-        .execute_with_diagnostics(prepared, group_by)
-        .map(|result| BackgroundLoad::Loaded {
-            data: Box::new(result.data),
-            digest: result.source_digest,
-            source_inventory_signature: result.source_inventory_signature,
-            pricing_diagnostics: result.pricing_diagnostics,
-            cache_persistence_warning: None,
-        })
+
+    let result = loader.execute_with_diagnostics(prepared, group_by);
+    refresh_session_data(loader, clients);
+    result.map(|result| BackgroundLoad::Loaded {
+        data: Box::new(result.data),
+        digest: result.source_digest,
+        source_inventory_signature: result.source_inventory_signature,
+        pricing_diagnostics: result.pricing_diagnostics,
+        cache_persistence_warning: None,
+    })
 }
 
 fn persist_background_load(
@@ -313,6 +326,7 @@ pub fn run(
         }
     };
     app.last_source_digest = initial_source_digest;
+    let mut view_state = view_state::ViewState::default();
 
     let (bg_tx, bg_rx) = mpsc::channel::<Result<BackgroundLoad>>();
 
@@ -329,11 +343,19 @@ pub fn run(
         let bg_enabled_clients = enabled_clients.clone();
         let bg_group_by = app.group_by.borrow().clone();
         let bg_report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
+        let bg_last_digest = initial_source_digest;
+        let bg_force = bg_last_digest.is_none();
 
         thread::spawn(move || {
             let loader = background_data_loader(bg_home_dir, bg_since, bg_until, bg_year);
             let result = persist_background_load(
-                load_background_data(&loader, &bg_clients, &bg_group_by, true, None),
+                load_background_data(
+                    &loader,
+                    &bg_clients,
+                    &bg_group_by,
+                    bg_force,
+                    bg_last_digest,
+                ),
                 &bg_enabled_clients,
                 &bg_group_by,
                 &bg_report_scope,
@@ -359,6 +381,7 @@ pub fn run(
     let result = run_loop_with_background(
         &mut terminal,
         &mut app,
+        &mut view_state,
         &mut events,
         bg_tx,
         bg_rx,
@@ -395,6 +418,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
 fn run_loop_with_background(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    view_state: &mut view_state::ViewState,
     events: &mut EventHandler,
     bg_tx: mpsc::Sender<Result<BackgroundLoad>>,
     bg_rx: mpsc::Receiver<Result<BackgroundLoad>>,
@@ -412,7 +436,7 @@ fn run_loop_with_background(
             let _ = terminal.clear();
         }
 
-        terminal.draw(|f| ui::render(f, app))?;
+        terminal.draw(|frame| ui::render_with_state(frame, app, view_state))?;
 
         match bg_rx.try_recv() {
             Ok(result) => {
@@ -466,6 +490,9 @@ fn run_loop_with_background(
                 app.on_tick();
             }
             Event::Key(key) => {
+                if view_state.handle_key(app, &key) {
+                    continue;
+                }
                 if let KeyEventOutcome::Exit(exit) = app.handle_key_event(key) {
                     return Ok(exit);
                 }
@@ -547,14 +574,14 @@ mod tests {
     }
 
     #[test]
-    fn launches_with_fresh_cache_skips_immediate_background_load() {
+    fn launches_with_fresh_cache_refreshes_session_projection_in_background() {
         let (cached_data, needs_background_load, digest) = decide_initial_data(CacheResult::Fresh(
             UsageData::default(),
             tokscale_core::SourceInventorySignature::from_bytes([1; 32]),
         ));
 
         assert!(cached_data.is_some());
-        assert!(!needs_background_load);
+        assert!(needs_background_load);
         assert!(digest.is_some());
     }
 
@@ -624,7 +651,7 @@ mod tests {
             .source_inventory_signature;
         let (_, needs_load, baseline) =
             decide_initial_data(CacheResult::Fresh(UsageData::default(), signature_a));
-        assert!(!needs_load);
+        assert!(needs_load);
 
         assert!(matches!(
             load_background_data(
