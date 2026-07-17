@@ -82,12 +82,11 @@ fn render_sources(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rec
         })
         .collect::<Vec<_>>();
 
-    let header = Row::new(vec!["Source", "Sessions", "Workspaces", "Active", "Space"])
-        .style(
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
+    let header = Row::new(vec!["Source", "Sessions", "Workspaces", "Active", "Space"]).style(
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    );
     let table = Table::new(
         table_rows,
         [
@@ -101,13 +100,7 @@ fn render_sources(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rec
     .header(header)
     .column_spacing(2);
     frame.render_widget(table, inner);
-    render_scrollbar(
-        frame,
-        area,
-        rows.len(),
-        visible,
-        state.source_scroll(),
-    );
+    render_scrollbar(frame, area, rows.len(), visible, state.source_scroll());
 }
 
 fn render_session_details(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
@@ -208,13 +201,7 @@ fn render_session_details(frame: &mut Frame, app: &App, state: &mut ViewState, a
     .header(header)
     .column_spacing(1);
     frame.render_widget(table, inner);
-    render_scrollbar(
-        frame,
-        area,
-        rows.len(),
-        visible,
-        state.detail_scroll(),
-    );
+    render_scrollbar(frame, area, rows.len(), visible, state.detail_scroll());
 }
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, scroll: usize) {

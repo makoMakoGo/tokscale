@@ -20,10 +20,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, state: &mut ViewState, ar
         if inner.height >= 2 {
             render_sessions_help_row(frame, app, state, row(inner, 1));
         }
-    } else if app.current_tab == Tab::Daily
-        && !app.is_daily_detail_active()
-        && inner.height >= 2
-    {
+    } else if app.current_tab == Tab::Daily && !app.is_daily_detail_active() && inner.height >= 2 {
         render_daily_help_row(frame, app, state, row(inner, 1));
     }
 }
@@ -47,10 +44,7 @@ fn render_sessions_main_row(frame: &mut Frame, app: &App, state: &ViewState, are
         .split(area);
 
     if !app.is_very_narrow() {
-        let mut spans = vec![Span::styled(
-            "Sort: ",
-            Style::default().fg(app.theme.muted),
-        )];
+        let mut spans = vec![Span::styled("Sort: ", Style::default().fg(app.theme.muted))];
         for field in [SortField::Date, SortField::Tokens, SortField::Cost] {
             let active = app.sort_field == field;
             spans.push(Span::styled(

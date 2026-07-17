@@ -338,10 +338,6 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
-    pub(crate) fn secondary_text_style(&self) -> Style {
-        Style::default().fg(self.color(Color::Rgb(170, 170, 170)))
-    }
-
     pub(crate) fn subtle_text_style(&self) -> Style {
         Style::default().fg(self.color(Color::Rgb(102, 102, 102)))
     }
@@ -526,7 +522,6 @@ mod tests {
             theme.metric_cache_read_style(),
             theme.metric_cache_write_style(),
             theme.metric_total_style(),
-            theme.secondary_text_style(),
             theme.subtle_text_style(),
             theme.striped_row_style(),
             theme.current_row_style(),

@@ -26,11 +26,6 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::tui::app::{App, Tab};
 use crate::tui::view_state::ViewState;
 
-pub fn render(frame: &mut Frame, app: &mut App) {
-    let mut state = ViewState::default();
-    render_with_state(frame, app, &mut state);
-}
-
 pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut ViewState) {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -259,11 +259,7 @@ fn right_lines(app: &App, data: &SnapshotData, width: usize) -> Vec<Line<'static
             data.tokens.cache_write,
             app.theme.metric_cache_write_style(),
         ),
-        (
-            "Input",
-            data.tokens.input,
-            app.theme.metric_input_style(),
-        ),
+        ("Input", data.tokens.input, app.theme.metric_input_style()),
         (
             "Output",
             data.tokens.displayed_output(),
@@ -342,10 +338,7 @@ fn right_lines(app: &App, data: &SnapshotData, width: usize) -> Vec<Line<'static
 
 fn metric_line(app: &App, label: &str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{label:<20}"),
-            Style::default().fg(app.theme.muted),
-        ),
+        Span::styled(format!("{label:<20}"), Style::default().fg(app.theme.muted)),
         Span::styled(value, Style::default().fg(color)),
     ])
 }

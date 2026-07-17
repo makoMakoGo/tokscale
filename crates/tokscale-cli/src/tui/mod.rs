@@ -57,9 +57,7 @@ fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool, Op
         // The cached TUI bundle does not persist the independent Sessions projection.
         // Keep rendering it immediately, then run the inventory probe in the background
         // so Sessions can be refreshed without forcing the main usage aggregation.
-        CacheResult::Fresh(data, signature) => {
-            (Some(data), true, Some(signature.process_digest()))
-        }
+        CacheResult::Fresh(data, signature) => (Some(data), true, Some(signature.process_digest())),
         CacheResult::Stale(data) => (Some(data), true, None),
         CacheResult::Miss => (None, true, None),
     }
@@ -349,13 +347,7 @@ pub fn run(
         thread::spawn(move || {
             let loader = background_data_loader(bg_home_dir, bg_since, bg_until, bg_year);
             let result = persist_background_load(
-                load_background_data(
-                    &loader,
-                    &bg_clients,
-                    &bg_group_by,
-                    bg_force,
-                    bg_last_digest,
-                ),
+                load_background_data(&loader, &bg_clients, &bg_group_by, bg_force, bg_last_digest),
                 &bg_enabled_clients,
                 &bg_group_by,
                 &bg_report_scope,

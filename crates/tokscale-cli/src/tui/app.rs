@@ -370,8 +370,6 @@ pub struct App {
     usage_text_total_lines: usize,
     pub(crate) hourly_profile_viewport: TextViewport,
     hourly_profile_text_total_lines: usize,
-    pub(crate) issues_viewport: TextViewport,
-    issues_text_total_lines: usize,
     pub selected_daily_detail_date: Option<NaiveDate>,
     pub selected_period_detail: Option<PeriodDetailSelection>,
     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
@@ -526,8 +524,6 @@ impl App {
             usage_text_total_lines: 0,
             hourly_profile_viewport: TextViewport::default(),
             hourly_profile_text_total_lines: 0,
-            issues_viewport: TextViewport::default(),
-            issues_text_total_lines: 0,
             selected_daily_detail_date: None,
             selected_period_detail: None,
             detail_sort_contexts: HashMap::new(),
@@ -1078,23 +1074,12 @@ impl App {
             .visible_range(self.hourly_profile_text_total_lines)
     }
 
-    pub(crate) fn set_issues_text_viewport(&mut self, visible: usize, total_lines: usize) {
-        self.issues_text_total_lines = total_lines;
-        self.issues_viewport.set_visible(visible, total_lines);
-    }
-
-    pub(crate) fn issues_text_visible_range(&self) -> std::ops::Range<usize> {
-        self.issues_viewport
-            .visible_range(self.issues_text_total_lines)
-    }
-
     fn active_text_viewport_mut(&mut self) -> Option<&mut TextViewport> {
         match self.current_tab {
             Tab::Usage => Some(&mut self.usage_viewport),
             Tab::Hourly if self.hourly_view_mode == HourlyViewMode::Profile => {
                 Some(&mut self.hourly_profile_viewport)
             }
-            Tab::Issues => Some(&mut self.issues_viewport),
             _ => None,
         }
     }
@@ -1105,7 +1090,6 @@ impl App {
             Tab::Hourly if self.hourly_view_mode == HourlyViewMode::Profile => {
                 Some(self.hourly_profile_text_total_lines)
             }
-            Tab::Issues => Some(self.issues_text_total_lines),
             _ => None,
         }
     }
@@ -3664,21 +3648,6 @@ mod tests {
         app.handle_key_event(key(KeyCode::PageDown));
 
         assert_eq!(app.hourly_profile_viewport.scroll, 2);
-        assert_eq!(app.selected_index, 2);
-        assert_eq!(app.scroll_offset, 1);
-    }
-
-    #[test]
-    fn issues_tab_key_scrolls_text_viewport_without_table_selection() {
-        let mut app = make_app();
-        app.current_tab = Tab::Issues;
-        app.selected_index = 2;
-        app.scroll_offset = 1;
-        app.set_issues_text_viewport(4, 10);
-
-        app.handle_key_event(key(KeyCode::PageDown));
-
-        assert_eq!(app.issues_viewport.scroll, 2);
         assert_eq!(app.selected_index, 2);
         assert_eq!(app.scroll_offset, 1);
     }

@@ -89,13 +89,15 @@ impl SessionSnapshot {
 
         summaries
             .into_iter()
-            .map(|(source, (session_count, workspaces, last_seen))| SourceSummary {
-                space_bytes: self.source_space.get(&source).copied().unwrap_or(0),
-                source,
-                session_count,
-                workspace_count: workspaces.len(),
-                last_seen,
-            })
+            .map(
+                |(source, (session_count, workspaces, last_seen))| SourceSummary {
+                    space_bytes: self.source_space.get(&source).copied().unwrap_or(0),
+                    source,
+                    session_count,
+                    workspace_count: workspaces.len(),
+                    last_seen,
+                },
+            )
             .collect()
     }
 
