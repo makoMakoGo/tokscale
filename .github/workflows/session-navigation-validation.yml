@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - codex/issue-153-session-navigation
+  pull_request:
+    branches:
+      - personal/local-clients
 
 permissions:
   contents: write
@@ -17,7 +20,10 @@ env:
 
 jobs:
   validate:
-    if: github.actor != 'github-actions[bot]'
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name != 'pull_request' ||
+       github.head_ref == 'codex/issue-153-session-navigation')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
