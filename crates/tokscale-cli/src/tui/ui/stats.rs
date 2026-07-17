@@ -107,7 +107,6 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
         colors[index]
     };
 
-    let mut click_areas = Vec::new();
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
         let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
         for (day_idx, day) in week.iter().enumerate() {
@@ -118,8 +117,16 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let actual_week = week_idx + start_week;
             let selected = selected_cell == Some((actual_week, day_idx));
+            let cell_area = Rect::new(x, y, CELL_WIDTH, 1);
             let (symbol, style) = match day {
                 Some(day) => {
+                    app.add_click_area(
+                        cell_area,
+                        ClickAction::GraphCell {
+                            week: actual_week,
+                            day: day_idx,
+                        },
+                    );
                     let color = intensity_color(day.intensity);
                     if selected {
                         ("▓▓", Style::default().fg(Color::White).bg(color))
@@ -133,15 +140,8 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
                 None => ("· ", app.theme.subtle_text_style()),
             };
-            frame.render_widget(
-                Paragraph::new(symbol).style(style),
-                Rect::new(x, y, CELL_WIDTH, 1),
-            );
-            click_areas.push((Rect::new(x, y, CELL_WIDTH, 1), actual_week, day_idx));
+            frame.render_widget(Paragraph::new(symbol).style(style), cell_area);
         }
-    }
-    for (rect, week, day) in click_areas {
-        app.add_click_area(rect, ClickAction::GraphCell { week, day });
     }
 
     let mut current_month = None;
@@ -422,6 +422,28 @@ fn render_day_insights(frame: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{ContributionDay, GraphData};
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn make_app() -> App {
+        App::new_with_cached_data(
+            TuiConfig {
+                theme: Some("blue".to_string()),
+                refresh: 0,
+                no_refresh: false,
+                home_dir: None,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                initial_tab: None,
+            },
+            None,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn stats_reserves_space_for_day_insights() {
@@ -435,5 +457,33 @@ mod tests {
             .split(area);
         assert_eq!(chunks[0].height, GRAPH_PANEL_H);
         assert!(chunks[1].height >= DAY_INSIGHTS_MIN_H);
+    }
+
+    #[test]
+    fn graph_registers_click_areas_only_for_real_days() {
+        let mut app = make_app();
+        app.data.graph = Some(GraphData {
+            weeks: vec![vec![
+                None,
+                Some(ContributionDay {
+                    date: NaiveDate::from_ymd_opt(2026, 7, 17).unwrap(),
+                    tokens: 42,
+                    cost: 0.5,
+                    intensity: 0.75,
+                }),
+                None,
+            ]],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(30, GRAPH_PANEL_H)).unwrap();
+
+        terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+
+        assert_eq!(app.click_areas.len(), 1);
+        match &app.click_areas[0].action {
+            ClickAction::GraphCell { week, day } => assert_eq!((*week, *day), (0, 1)),
+            action => panic!("unexpected click action: {action:?}"),
+        }
     }
 }
