@@ -514,6 +514,13 @@ fn status_row_line(app: &App) -> Line<'static> {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ));
+    } else if let Some(warning) = app.pricing_warning() {
+        spans.push(Span::styled(
+            warning,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
     } else {
         let elapsed = app.last_refresh.elapsed();
         let ago = if elapsed.as_secs() < 60 {
@@ -540,35 +547,56 @@ fn status_row_line(app: &App) -> Line<'static> {
 }
 
 fn usage_status_row_line(app: &App) -> Line<'static> {
-    let text = if app.is_fetching_usage() {
-        "Fetching subscription usage...".to_string()
+    let (text, style) = if app.is_fetching_usage() {
+        (
+            "Fetching subscription usage...".to_string(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
     } else if let Some(msg) = subscription_status_message(app) {
-        msg.to_string()
+        (
+            msg.to_string(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
     } else if let Some(msg) = app.general_status_message() {
-        msg.to_string()
+        (msg.to_string(), Style::default().fg(app.theme.muted))
+    } else if let Some(warning) = app.pricing_warning() {
+        (
+            warning.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
     } else if let Some(updated_at) = app.last_subscription_usage_check {
-        format!(
-            "Subscription checked: {}",
-            elapsed_label(updated_at.elapsed())
+        (
+            format!(
+                "Subscription checked: {}",
+                elapsed_label(updated_at.elapsed())
+            ),
+            Style::default().fg(app.theme.muted),
         )
     } else if !app.subscription_usage.is_empty() {
-        if app.has_enabled_subscription_providers() {
-            "Subscription usage loaded from cache".to_string()
-        } else {
-            "Showing cached subscription usage; no remote providers enabled".to_string()
-        }
+        (
+            if app.has_enabled_subscription_providers() {
+                "Subscription usage loaded from cache".to_string()
+            } else {
+                "Showing cached subscription usage; no remote providers enabled".to_string()
+            },
+            Style::default().fg(app.theme.muted),
+        )
     } else if !app.has_enabled_subscription_providers() {
-        "No remote subscription providers enabled; configure usageProviders".to_string()
+        (
+            "No remote subscription providers enabled; configure usageProviders".to_string(),
+            Style::default().fg(app.theme.muted),
+        )
     } else {
-        "Press u to refresh subscription usage".to_string()
-    };
-
-    let style = if app.is_fetching_usage() || subscription_status_message(app).is_some() {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(app.theme.muted)
+        (
+            "Press u to refresh subscription usage".to_string(),
+            Style::default().fg(app.theme.muted),
+        )
     };
 
     Line::from(vec![Span::styled(text, style)])
@@ -740,6 +768,28 @@ mod tests {
         let text = line_text(status_row_line(&app));
 
         assert_eq!(text, "Export failed: permission denied");
+    }
+
+    #[test]
+    fn pricing_warning_persists_in_the_global_footer_status_row() {
+        let mut app = make_app_on(Tab::Models);
+        app.status_message = None;
+        app.status_message_time = None;
+        app.set_pricing_diagnostics(&[format!(
+            "{}: network error",
+            tokscale_core::pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
+        )]);
+
+        assert_eq!(
+            line_text(status_row_line(&app)),
+            "Pricing unavailable; costs may be missing"
+        );
+
+        app.current_tab = Tab::Usage;
+        assert_eq!(
+            line_text(status_row_line(&app)),
+            "Pricing unavailable; costs may be missing"
+        );
     }
 
     #[test]

@@ -47,10 +47,7 @@ use crossterm::{
     },
 };
 use ratatui::prelude::*;
-use tokscale_core::{
-    pricing::{DIAGNOSTIC_PRICING_UNAVAILABLE, DIAGNOSTIC_USING_CACHED_PRICING},
-    ClientId,
-};
+use tokscale_core::ClientId;
 
 fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool, Option<u64>) {
     match load_result {
@@ -81,7 +78,9 @@ fn should_force_source_reload(
 
 /// Background loader result: a full reload, or proof that no source changed.
 enum BackgroundLoad {
-    Unchanged,
+    Unchanged {
+        pricing_diagnostics: Option<Vec<String>>,
+    },
     Loaded {
         data: Box<UsageData>,
         digest: u64,
@@ -96,9 +95,16 @@ fn refresh_session_data(
     clients: &[ClientId],
     source_digest: u64,
     force: bool,
-) {
-    if let Err(error) = session_data::refresh_if_needed(loader, clients, source_digest, force) {
-        tracing::warn!(error = %error, "failed to refresh TUI Sessions projection");
+) -> Option<Vec<String>> {
+    match session_data::refresh_if_needed(loader, clients, source_digest, force) {
+        Ok(session_data::SessionRefreshOutcome::Reused) => None,
+        Ok(session_data::SessionRefreshOutcome::Refreshed {
+            pricing_diagnostics,
+        }) => Some(pricing_diagnostics),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to refresh TUI Sessions projection");
+            None
+        }
     }
 }
 
@@ -114,15 +120,17 @@ fn load_background_data(
         .refresh_source_inventory_signature()?
         .process_digest();
     if !force && last_digest == Some(digest) {
-        refresh_session_data(loader, clients, digest, force);
-        return Ok(BackgroundLoad::Unchanged);
+        let pricing_diagnostics = refresh_session_data(loader, clients, digest, force);
+        return Ok(BackgroundLoad::Unchanged {
+            pricing_diagnostics,
+        });
     }
 
     let result = loader.execute_with_diagnostics(prepared, group_by);
     let session_digest = result
         .as_ref()
         .map_or(digest, |result| result.source_digest);
-    refresh_session_data(loader, clients, session_digest, force);
+    let _ = refresh_session_data(loader, clients, session_digest, force);
     result.map(|result| BackgroundLoad::Loaded {
         data: Box::new(result.data),
         digest: result.source_digest,
@@ -151,7 +159,7 @@ fn persist_background_load(
             report_scope,
             *source_inventory_signature,
         ),
-        BackgroundLoad::Unchanged => Ok(()),
+        BackgroundLoad::Unchanged { .. } => Ok(()),
     };
     Ok(record_cache_persistence_result(result, persistence_result))
 }
@@ -190,11 +198,15 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
             app.update_data(*data);
             app.last_source_digest = Some(digest);
             app.set_cache_persistence_warning(cache_persistence_warning);
-            app.set_status(
-                pricing_diagnostics_status(&pricing_diagnostics).unwrap_or("Data loaded"),
-            );
+            app.set_pricing_diagnostics(&pricing_diagnostics);
+            app.set_status("Data loaded");
         }
-        Ok(BackgroundLoad::Unchanged) => {
+        Ok(BackgroundLoad::Unchanged {
+            pricing_diagnostics,
+        }) => {
+            if let Some(pricing_diagnostics) = pricing_diagnostics {
+                app.set_pricing_diagnostics(&pricing_diagnostics);
+            }
             app.mark_refresh_checked();
         }
         Err(error) => {
@@ -202,28 +214,6 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
             app.set_status(&format!("Error: {error}"));
         }
     }
-}
-
-fn pricing_diagnostics_status(diagnostics: &[String]) -> Option<&'static str> {
-    if diagnostics.is_empty() {
-        return None;
-    }
-
-    if diagnostics
-        .iter()
-        .any(|line| line.starts_with(DIAGNOSTIC_USING_CACHED_PRICING))
-    {
-        return Some("Pricing refresh failed; using cached pricing");
-    }
-
-    if diagnostics
-        .iter()
-        .any(|line| line.starts_with(DIAGNOSTIC_PRICING_UNAVAILABLE))
-    {
-        return Some("Pricing unavailable; costs may be missing");
-    }
-
-    Some("Pricing refreshed with warnings")
 }
 
 fn send_background_result(
@@ -662,7 +652,7 @@ mod tests {
                 baseline
             )
             .unwrap(),
-            BackgroundLoad::Unchanged
+            BackgroundLoad::Unchanged { .. }
         ));
 
         write_amp_source(home.path(), 1000);
@@ -679,7 +669,9 @@ mod tests {
                 assert_ne!(Some(digest), baseline);
                 assert_eq!(data.total_tokens, 1002);
             }
-            BackgroundLoad::Unchanged => panic!("changed source B must consume its inventory"),
+            BackgroundLoad::Unchanged { .. } => {
+                panic!("changed source B must consume its inventory")
+            }
         }
     }
 
@@ -715,36 +707,37 @@ mod tests {
     }
 
     #[test]
-    fn pricing_diagnostics_status_summarizes_cached_fallback() {
-        let diagnostics = vec![
-            "[tokscale] LiteLLM JSON parse failed: error decoding response body".to_string(),
-            format!("{DIAGNOSTIC_USING_CACHED_PRICING}: error decoding response body"),
-        ];
+    fn unchanged_cached_load_promotes_session_pricing_diagnostics_globally() {
+        let mut app = App::new_with_cached_data_and_settings(
+            TuiConfig {
+                theme: Some("blue".to_string()),
+                refresh: 0,
+                no_refresh: false,
+                home_dir: None,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                initial_tab: None,
+            },
+            Some(UsageData::default()),
+            settings::Settings::default(),
+        )
+        .unwrap();
 
-        assert_eq!(
-            pricing_diagnostics_status(&diagnostics),
-            Some("Pricing refresh failed; using cached pricing")
+        apply_background_result(
+            &mut app,
+            Ok(BackgroundLoad::Unchanged {
+                pricing_diagnostics: Some(vec![format!(
+                    "{}: network error",
+                    tokscale_core::pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
+                )]),
+            }),
         );
-    }
-
-    #[test]
-    fn pricing_diagnostics_status_summarizes_unavailable_pricing() {
-        let diagnostics = vec![format!("{DIAGNOSTIC_PRICING_UNAVAILABLE}: network error")];
 
         assert_eq!(
-            pricing_diagnostics_status(&diagnostics),
+            app.pricing_warning(),
             Some("Pricing unavailable; costs may be missing")
-        );
-    }
-
-    #[test]
-    fn pricing_diagnostics_status_summarizes_nonfatal_warnings() {
-        let diagnostics =
-            vec!["[tokscale] OpenRouter author pricing skipped: endpoint failed".to_string()];
-
-        assert_eq!(
-            pricing_diagnostics_status(&diagnostics),
-            Some("Pricing refreshed with warnings")
         );
     }
 
@@ -785,7 +778,9 @@ mod tests {
                 assert!(warning.contains("failed to persist TUI cache"));
                 assert!(warning.contains("Not a directory"));
             }
-            BackgroundLoad::Unchanged => panic!("loaded data must not become unchanged"),
+            BackgroundLoad::Unchanged { .. } => {
+                panic!("loaded data must not become unchanged")
+            }
         }
     }
 

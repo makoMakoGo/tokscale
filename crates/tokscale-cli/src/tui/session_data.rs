@@ -77,10 +77,16 @@ struct SessionProjectionUpdate {
     source_digest: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
+struct SessionProjectionBuild {
+    update: SessionProjectionUpdate,
+    pricing_diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionRefreshOutcome {
     Reused,
-    Refreshed,
+    Refreshed { pricing_diagnostics: Vec<String> },
 }
 
 #[derive(Debug, Default)]
@@ -249,7 +255,7 @@ fn refresh_projection_with<F>(
     build: F,
 ) -> Result<SessionRefreshOutcome>
 where
-    F: FnOnce() -> Result<SessionProjectionUpdate>,
+    F: FnOnce() -> Result<SessionProjectionBuild>,
 {
     let should_refresh = store
         .read()
@@ -260,14 +266,20 @@ where
     }
 
     let result = build();
+    let pricing_diagnostics = result
+        .as_ref()
+        .map(|build| build.pricing_diagnostics.clone())
+        .unwrap_or_default();
     store
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .apply_refresh(result)?;
-    Ok(SessionRefreshOutcome::Refreshed)
+        .apply_refresh(result.map(|build| build.update))?;
+    Ok(SessionRefreshOutcome::Refreshed {
+        pricing_diagnostics,
+    })
 }
 
-fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionProjectionUpdate> {
+fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionProjectionBuild> {
     let home_override = loader
         .home_dir
         .as_ref()
@@ -298,9 +310,10 @@ fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionPr
         scanner_settings: scanner_settings.clone(),
     };
 
-    let report = tokio::runtime::Runtime::new()?
-        .block_on(tokscale_core::parse_local_unified_messages(options))
+    let result = tokio::runtime::Runtime::new()?
+        .block_on(tokscale_core::parse_local_unified_messages_with_diagnostics(options))
         .map_err(anyhow::Error::new)?;
+    let report = result.report;
     let source_digest = report.metadata.source_inventory_signature.process_digest();
     let sessions = aggregate_sessions(report.data);
     let source_space = collect_source_space(
@@ -311,9 +324,12 @@ fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionPr
         &scanner_settings,
     )?;
 
-    Ok(SessionProjectionUpdate {
-        snapshot: SessionSnapshot::new(sessions, source_space),
-        source_digest,
+    Ok(SessionProjectionBuild {
+        update: SessionProjectionUpdate {
+            snapshot: SessionSnapshot::new(sessions, source_space),
+            source_digest,
+        },
+        pricing_diagnostics: result.pricing_diagnostics,
     })
 }
 
@@ -495,6 +511,17 @@ mod tests {
         }
     }
 
+    fn projection_build(
+        session_id: &str,
+        source_digest: u64,
+        pricing_diagnostics: Vec<String>,
+    ) -> SessionProjectionBuild {
+        SessionProjectionBuild {
+            update: projection_update(session_id, source_digest),
+            pricing_diagnostics,
+        }
+    }
+
     fn session(
         source: &str,
         session_id: &str,
@@ -565,15 +592,31 @@ mod tests {
 
         let first = refresh_projection_with(&store, 40, false, || {
             build_count.set(build_count.get() + 1);
-            Ok(projection_update("session-1", 41))
+            Ok(projection_build(
+                "session-1",
+                41,
+                vec!["pricing unavailable".to_string()],
+            ))
         })
         .expect("a pending projection should be initialized");
-        assert_eq!(first, SessionRefreshOutcome::Refreshed);
+        assert_eq!(
+            first,
+            SessionRefreshOutcome::Refreshed {
+                pricing_diagnostics: vec!["pricing unavailable".to_string()],
+            }
+        );
         assert_eq!(build_count.get(), 1);
+        assert_eq!(
+            store
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .status,
+            SessionProjectionStatus::Ready
+        );
 
         let second = refresh_projection_with(&store, 41, false, || {
             build_count.set(build_count.get() + 1);
-            Ok(projection_update("unexpected", 41))
+            Ok(projection_build("unexpected", 41, Vec::new()))
         })
         .expect("a matching ready projection should be reusable");
         assert_eq!(second, SessionRefreshOutcome::Reused);

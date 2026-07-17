@@ -8,7 +8,11 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use tokscale_core::{ordered_clients_by_token_contribution, ClientContributionOrder, ClientId};
+use tokscale_core::{
+    ordered_clients_by_token_contribution,
+    pricing::{DIAGNOSTIC_PRICING_UNAVAILABLE, DIAGNOSTIC_USING_CACHED_PRICING},
+    ClientContributionOrder, ClientId,
+};
 
 use ratatui::style::Color;
 
@@ -166,6 +170,44 @@ enum StatusMessageKind {
     #[default]
     General,
     LocalReport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PricingStatus {
+    #[default]
+    Available,
+    AvailableWithWarnings,
+    CachedFallback,
+    Unavailable,
+}
+
+impl PricingStatus {
+    fn from_diagnostics(diagnostics: &[String]) -> Self {
+        if diagnostics
+            .iter()
+            .any(|line| line.starts_with(DIAGNOSTIC_PRICING_UNAVAILABLE))
+        {
+            Self::Unavailable
+        } else if diagnostics
+            .iter()
+            .any(|line| line.starts_with(DIAGNOSTIC_USING_CACHED_PRICING))
+        {
+            Self::CachedFallback
+        } else if diagnostics.is_empty() {
+            Self::Available
+        } else {
+            Self::AvailableWithWarnings
+        }
+    }
+
+    fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Available => None,
+            Self::AvailableWithWarnings => Some("Pricing warnings; some costs may be missing"),
+            Self::CachedFallback => Some("Pricing refresh failed; using cached rates"),
+            Self::Unavailable => Some("Pricing unavailable; costs may be missing"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,6 +428,7 @@ pub struct App {
     pub status_message_time: Option<Instant>,
     status_message_kind: StatusMessageKind,
     cache_persistence_warning: Option<String>,
+    pricing_status: PricingStatus,
     pub subscription_status_message: Option<String>,
     pub subscription_status_message_time: Option<Instant>,
 
@@ -545,6 +588,7 @@ impl App {
                 StatusMessageKind::General
             },
             cache_persistence_warning: None,
+            pricing_status: PricingStatus::Available,
             subscription_status_message: None,
             subscription_status_message_time: None,
             terminal_width: 80,
@@ -709,6 +753,14 @@ impl App {
 
     pub(crate) fn cache_persistence_warning(&self) -> Option<&str> {
         self.cache_persistence_warning.as_deref()
+    }
+
+    pub(crate) fn set_pricing_diagnostics(&mut self, diagnostics: &[String]) {
+        self.pricing_status = PricingStatus::from_diagnostics(diagnostics);
+    }
+
+    pub(crate) fn pricing_warning(&self) -> Option<&'static str> {
+        self.pricing_status.warning()
     }
 
     fn refresh_current_tab_if_overdue(&mut self) {
@@ -4295,6 +4347,34 @@ mod tests {
         app.on_tick();
         assert!(app.status_message.is_some());
         assert_eq!(app.status_message.as_ref().unwrap(), "fresh message");
+    }
+
+    #[test]
+    fn pricing_diagnostics_update_global_cost_status() {
+        let mut app = make_app();
+
+        app.set_pricing_diagnostics(&[format!("{DIAGNOSTIC_PRICING_UNAVAILABLE}: network error")]);
+        assert_eq!(
+            app.pricing_warning(),
+            Some("Pricing unavailable; costs may be missing")
+        );
+
+        app.set_pricing_diagnostics(&[format!("{DIAGNOSTIC_USING_CACHED_PRICING}: network error")]);
+        assert_eq!(
+            app.pricing_warning(),
+            Some("Pricing refresh failed; using cached rates")
+        );
+
+        app.set_pricing_diagnostics(&[
+            "[tokscale] OpenRouter author pricing skipped: endpoint failed".to_string(),
+        ]);
+        assert_eq!(
+            app.pricing_warning(),
+            Some("Pricing warnings; some costs may be missing")
+        );
+
+        app.set_pricing_diagnostics(&[]);
+        assert_eq!(app.pricing_warning(), None);
     }
 
     // ── click area management ───────────────────────────────────────

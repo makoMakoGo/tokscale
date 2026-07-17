@@ -1,4 +1,5 @@
 use super::litellm::ModelPricing;
+use super::{emit_diagnostic, PricingDiagnosticSink, PricingDiagnostics};
 use serde::de::{MapAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value;
@@ -179,18 +180,42 @@ impl CustomPricing {
         Self::load_from_path(&Self::default_path())
     }
 
+    pub(crate) fn load_from_default_path_with_diagnostics(
+        diagnostics: &mut PricingDiagnostics,
+    ) -> Self {
+        Self::load_from_path_with_diagnostics(&Self::default_path(), diagnostics)
+    }
+
     pub fn load_from_path(path: &Path) -> Self {
+        let mut diagnostics = None;
+        Self::load_from_path_with_sink(path, &mut diagnostics)
+    }
+
+    pub(crate) fn load_from_path_with_diagnostics(
+        path: &Path,
+        diagnostics: &mut PricingDiagnostics,
+    ) -> Self {
+        let mut diagnostics = Some(diagnostics);
+        Self::load_from_path_with_sink(path, &mut diagnostics)
+    }
+
+    fn load_from_path_with_sink(path: &Path, diagnostics: &mut PricingDiagnosticSink<'_>) -> Self {
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(err) => {
-                warn_custom_pricing(path, format_args!("failed to stat file: {err}"));
+                warn_custom_pricing(
+                    diagnostics,
+                    path,
+                    format_args!("failed to stat file: {err}"),
+                );
                 return Self::default();
             }
         };
 
         if metadata.len() > MAX_CUSTOM_PRICING_FILE_BYTES {
             warn_custom_pricing(
+                diagnostics,
                 path,
                 format_args!(
                     "file is too large ({} bytes; max {} bytes)",
@@ -205,12 +230,16 @@ impl CustomPricing {
             Ok(content) => content,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(err) => {
-                warn_custom_pricing(path, format_args!("failed to read file: {err}"));
+                warn_custom_pricing(
+                    diagnostics,
+                    path,
+                    format_args!("failed to read file: {err}"),
+                );
                 return Self::default();
             }
         };
 
-        Self::load_from_str(&content, path)
+        Self::load_from_str(&content, path, diagnostics)
     }
 
     pub fn from_models(models: HashMap<String, ModelPricing>) -> Self {
@@ -252,11 +281,19 @@ impl CustomPricing {
         None
     }
 
-    fn load_from_str(content: &str, path: &Path) -> Self {
+    fn load_from_str(
+        content: &str,
+        path: &Path,
+        diagnostics: &mut PricingDiagnosticSink<'_>,
+    ) -> Self {
         let raw: RawCustomPricingFile = match serde_json::from_str(content) {
             Ok(raw) => raw,
             Err(err) => {
-                warn_custom_pricing(path, format_args!("failed to parse JSON: {err}"));
+                warn_custom_pricing(
+                    diagnostics,
+                    path,
+                    format_args!("failed to parse JSON: {err}"),
+                );
                 return Self::default();
             }
         };
@@ -269,6 +306,7 @@ impl CustomPricing {
                 Ok(entry) => entry,
                 Err(err) => {
                     warn_custom_pricing(
+                        diagnostics,
                         path,
                         format_args!("skipping {model_id}: malformed pricing entry: {err}"),
                     );
@@ -278,13 +316,18 @@ impl CustomPricing {
             let pricing = match entry.into_model_pricing() {
                 Ok(pricing) => pricing,
                 Err(err) => {
-                    warn_custom_pricing(path, format_args!("skipping {model_id}: {err}"));
+                    warn_custom_pricing(
+                        diagnostics,
+                        path,
+                        format_args!("skipping {model_id}: {err}"),
+                    );
                     continue;
                 }
             };
 
             if models.insert(lower_key.clone(), pricing).is_some() {
                 warn_custom_pricing(
+                    diagnostics,
                     path,
                     format_args!(
                         "duplicate model key after lowercasing, last entry wins: {lower_key}"
@@ -335,10 +378,17 @@ fn to_per_token(per_million: Option<f64>) -> Option<f64> {
     Some(per_million / TOKENS_PER_MILLION)
 }
 
-fn warn_custom_pricing(path: &Path, message: fmt::Arguments<'_>) {
-    eprintln!(
-        "[tokscale] Warning: custom pricing {}: {message}",
-        path.display()
+fn warn_custom_pricing(
+    diagnostics: &mut PricingDiagnosticSink<'_>,
+    path: &Path,
+    message: fmt::Arguments<'_>,
+) {
+    emit_diagnostic(
+        diagnostics,
+        format!(
+            "[tokscale] Warning: custom pricing {}: {message}",
+            path.display()
+        ),
     );
 }
 
@@ -586,6 +636,21 @@ mod tests {
 
         assert!(loaded.is_empty());
         assert!(loaded.lookup("model").is_none());
+    }
+
+    #[test]
+    fn diagnostic_loader_collects_warnings_instead_of_using_terminal_output() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("custom-pricing.json");
+        fs::write(&path, r#"{"models": {"#).unwrap();
+        let mut diagnostics = Vec::new();
+
+        let loaded = CustomPricing::load_from_path_with_diagnostics(&path, &mut diagnostics);
+
+        assert!(loaded.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("failed to parse JSON"));
+        assert!(diagnostics[0].contains(&path.display().to_string()));
     }
 
     #[test]
