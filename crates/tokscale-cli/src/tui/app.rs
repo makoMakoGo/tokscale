@@ -417,7 +417,6 @@ pub struct App {
     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
 
     pub selected_graph_cell: Option<(usize, usize)>,
-    pub stats_breakdown_total_lines: usize,
 
     pub auto_refresh: bool,
     pub auto_refresh_interval: Duration,
@@ -571,7 +570,6 @@ impl App {
             selected_period_detail: None,
             detail_sort_contexts: HashMap::new(),
             selected_graph_cell: None,
-            stats_breakdown_total_lines: 0,
             auto_refresh,
             auto_refresh_interval,
             last_refresh: Instant::now(),
@@ -981,7 +979,6 @@ impl App {
             }
             KeyCode::Esc if self.selected_graph_cell.is_some() => {
                 self.selected_graph_cell = None;
-                self.stats_breakdown_total_lines = 0;
                 self.reset_current_list_interaction();
             }
             _ => {}
@@ -1070,7 +1067,6 @@ impl App {
                             }
                             ClickAction::GraphCell { week, day } => {
                                 self.selected_graph_cell = Some((*week, *day));
-                                self.stats_breakdown_total_lines = 0;
                                 self.selected_index = 0;
                                 self.scroll_offset = 0;
                             }
@@ -1221,13 +1217,7 @@ impl App {
     }
 
     /// Clamp selection and scroll offset to valid bounds after data/resize changes.
-    /// Stats breakdown is skipped here because `render_breakdown_panel` clamps
-    /// with the actual panel height (not the full-terminal `max_visible_items`).
     fn clamp_selection(&mut self) {
-        if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
-            return;
-        }
-
         let len = self.get_current_list_len();
         let mut interaction = self.current_list_interaction();
         interaction.set_visible(self.max_visible_items, len);
@@ -1269,7 +1259,6 @@ impl App {
         }
         if target != Tab::Stats {
             self.selected_graph_cell = None;
-            self.stats_breakdown_total_lines = 0;
         }
 
         let (field, dir) = self
@@ -1471,12 +1460,11 @@ impl App {
 
     fn apply_list_move(&mut self, command: MoveCommand) -> InteractionOutcome {
         let len = self.get_current_list_len();
-        let wrap = if self.current_tab == Tab::Stats && self.selected_graph_cell.is_some() {
+        let wrap = if self.current_tab == Tab::Stats {
             WrapMode::Clamp
         } else {
             WrapMode::Wrap
         };
-
         let mut interaction = self.current_list_interaction();
         let outcome = interaction.apply_move(command, len, wrap);
         self.set_current_list_interaction(interaction);
@@ -1501,13 +1489,7 @@ impl App {
             Tab::Weekly => build_period_usage(&self.data.daily, PeriodKind::Weekly).len(),
             Tab::Daily => self.data.daily.len(),
             Tab::Hourly => self.data.hourly.len(),
-            Tab::Stats => {
-                if self.selected_graph_cell.is_some() {
-                    self.stats_breakdown_total_lines
-                } else {
-                    0
-                }
-            }
+            Tab::Stats => 0,
             Tab::Usage => self
                 .subscription_usage
                 .iter()
@@ -1535,7 +1517,6 @@ impl App {
             self.scroll_offset = 0;
         } else {
             self.selected_graph_cell = None;
-            self.stats_breakdown_total_lines = 0;
             self.reset_current_list_interaction();
         }
         self.set_status(&format!(
