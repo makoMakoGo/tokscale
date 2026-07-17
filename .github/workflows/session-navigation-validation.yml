@@ -32,6 +32,18 @@ jobs:
               in_run && /^      - name: / { exit }
               in_run { sub(/^          /, ""); print }
             ' .github/workflows/prepare-session-navigation.yml > /tmp/apply-session-navigation.sh
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path('/tmp/apply-session-navigation.sh')
+          script = path.read_text()
+          for token in ('agent_map,', 'session_map,', 'daily_map,'):
+              script = script.replace(f'\n        {token}', f'\n            {token}')
+          script = script.replace(
+              "\n        daily_map: HashMap::new(),'''",
+              "\n            daily_map: HashMap::new(),'''",
+          )
+          path.write_text(script)
+          PY
             test -s /tmp/apply-session-navigation.sh
             bash /tmp/apply-session-navigation.sh 2>&1 | tee apply-session-navigation.log
           fi
