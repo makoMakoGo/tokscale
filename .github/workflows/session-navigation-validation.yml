@@ -78,6 +78,24 @@ jobs:
           PY
             test -s /tmp/apply-session-navigation.sh
             bash /tmp/apply-session-navigation.sh 2>&1 | tee apply-session-navigation.log
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('crates/tokscale-cli/src/tui/ui/footer.rs')
+          text = path.read_text()
+          pattern = re.compile(
+              r'(Tab::Issues\s*=>\s*format!\(\s*" \(\{\} sources · \{\} sessions\)",\s*'
+              r'app\.get_sorted_session_sources\(\)\.len\(\),\s*'
+              r'app\.data\.sessions\.len\(\)\s*\))'
+              r'(\s*\n\s*Tab::Stats)',
+              flags=re.DOTALL,
+          )
+          text, replacements = pattern.subn(r'\1,\2', text, count=1)
+          if replacements != 1:
+              raise SystemExit('could not repair generated footer match arm')
+          path.write_text(text)
+          PY
           fi
           rm -f .github/workflows/prepare-session-navigation.yml
       - uses: actions/upload-artifact@v4
