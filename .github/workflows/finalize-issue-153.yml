@@ -1,0 +1,186 @@
+name: Finalize Issue 153
+
+on:
+  push:
+    branches:
+      - codex/issue-153-session-navigation
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-issue-153
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  FORMAL_BRANCH: codex/issue-153-tui-information-architecture
+  BASE_BRANCH: personal/local-clients
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: codex/issue-153-session-navigation
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Materialize Sessions implementation when needed
+        run: |
+          if [ -d .github/session-patches ]; then
+            for patch in .github/session-patches/*.patch; do
+              git apply --check "$patch"
+              git apply "$patch"
+            done
+          fi
+
+      - name: Apply focused cleanup
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          issues = Path("crates/tokscale-cli/src/tui/ui/issues.rs")
+          text = issues.read_text().replace(
+              "Constraint::Length(health_height.min(area.height))",
+              "Constraint::Length(health_height)",
+          )
+          issues.write_text(text)
+
+          app = Path("crates/tokscale-cli/src/tui/app.rs")
+          text = app.read_text()
+          tuple_pattern = re.compile(
+              r"let mut sources:\s*BTreeMap<\s*String,\s*"
+              r"\(BTreeSet<String>, usize, u32, u32, u64, f64, i64\),\s*>\s*"
+              r"=\s*BTreeMap::new\(\);"
+          )
+          replacement = (
+              "type SessionSourceAggregate = "
+              "(BTreeSet<String>, usize, u32, u32, u64, f64, i64);\n"
+              "        let mut sources: BTreeMap<String, SessionSourceAggregate> = "
+              "BTreeMap::new();"
+          )
+          text, replacements = tuple_pattern.subn(replacement, text, count=1)
+          if replacements == 0 and not any(
+              marker in text
+              for marker in ("SessionSourceAggregate", "SessionSourceAccumulator")
+          ):
+              raise SystemExit("could not locate the session source accumulator")
+          app.write_text(text)
+
+          cache = Path("crates/tokscale-cli/src/tui/cache.rs")
+          text = cache.read_text()
+
+          def matching_brace(source: str, opening: int) -> int:
+              depth = 0
+              in_string = False
+              escaped = False
+              for index in range(opening, len(source)):
+                  char = source[index]
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif char == "\\":
+                          escaped = True
+                      elif char == '"':
+                          in_string = False
+                      continue
+                  if char == '"':
+                      in_string = True
+                  elif char == "{":
+                      depth += 1
+                  elif char == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return index
+              raise SystemExit("unterminated UsageData initializer")
+
+          insertions = []
+          for match in re.finditer(r"\bUsageData\s*\{", text):
+              before = text[max(0, match.start() - 100):match.start()]
+              if re.search(r"(?:impl|struct|enum|trait|fn)[^\n{]{0,100}$", before):
+                  continue
+              opening = text.find("{", match.start())
+              closing = matching_brace(text, opening)
+              block = text[match.start():closing + 1]
+              if "sessions:" in block or "..Default" in block:
+                  continue
+              agent_line = re.search(r"(?m)^(\s*)agents:\s*Vec::new\(\),\s*$", block)
+              if agent_line is None:
+                  raise SystemExit("UsageData initializer without sessions has no simple agents field")
+              absolute_end = match.start() + agent_line.end()
+              insertions.append((absolute_end, agent_line.group(1)))
+
+          if len(insertions) > 1:
+              raise SystemExit(f"expected at most one missing sessions field, found {len(insertions)}")
+          for position, indent in reversed(insertions):
+              text = text[:position] + f"\n{indent}sessions: Vec::new()," + text[position:]
+          cache.write_text(text)
+          PY
+
+      - name: Remove validation scaffolding
+        run: |
+          rm -rf .github/session-patches
+          rm -f \
+            .github/workflows/session-navigation-validation.yml \
+            .github/workflows/session-navigation-validation-v2.yml \
+            .github/workflows/session-navigation-materialize.yml \
+            .github/workflows/finalize-issue-153.yml
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Clippy
+        id: clippy
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 |
+            tee issue-153-clippy.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-153-clippy-log
+          path: issue-153-clippy.log
+          if-no-files-found: warn
+
+      - name: Stop after Clippy failure
+        if: steps.clippy.outcome == 'failure'
+        run: exit 1
+
+      - name: Test
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test --workspace --all-targets --all-features 2>&1 |
+            tee issue-153-test.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-153-test-log
+          path: issue-153-test.log
+          if-no-files-found: warn
+
+      - name: Stop after test failure
+        if: steps.test.outcome == 'failure'
+        run: exit 1
+
+      - name: Publish one clean semantic commit to PR branch
+        run: |
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git fetch origin "$BASE_BRANCH" "$FORMAL_BRANCH"
+          git merge-base --is-ancestor "origin/$BASE_BRANCH" HEAD
+          git reset --soft "origin/$BASE_BRANCH"
+          git add -A
+          git commit -m "refactor(tui): reorganize overview stats and sessions"
+          git push --force-with-lease origin "HEAD:$FORMAL_BRANCH"
