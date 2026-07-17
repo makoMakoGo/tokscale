@@ -21,7 +21,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply prepared implementation once
+        id: apply
+        continue-on-error: true
         run: |
+          set -o pipefail
           if ! grep -q 'pub struct SessionUsage' crates/tokscale-core/src/usage_views.rs; then
             awk '
               /^      - name: Apply session navigation implementation$/ { found = 1; next }
@@ -30,9 +33,18 @@ jobs:
               in_run { sub(/^          /, ""); print }
             ' .github/workflows/prepare-session-navigation.yml > /tmp/apply-session-navigation.sh
             test -s /tmp/apply-session-navigation.sh
-            bash /tmp/apply-session-navigation.sh
+            bash /tmp/apply-session-navigation.sh 2>&1 | tee apply-session-navigation.log
           fi
           rm -f .github/workflows/prepare-session-navigation.yml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: session-navigation-apply-log
+          path: apply-session-navigation.log
+          if-no-files-found: warn
+      - name: Stop after patch failure
+        if: steps.apply.outcome == 'failure'
+        run: exit 1
       - name: Format
         run: cargo fmt --all
       - name: Clippy
