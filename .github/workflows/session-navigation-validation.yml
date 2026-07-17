@@ -34,24 +34,46 @@ jobs:
             ' .github/workflows/prepare-session-navigation.yml > /tmp/apply-session-navigation.sh
             python3 - <<'PY'
           from pathlib import Path
+
           path = Path('/tmp/apply-session-navigation.sh')
           script = path.read_text()
-          for token in ('agent_map,', 'session_map,', 'daily_map,'):
-              script = script.replace(f'\n        {token}', f'\n            {token}')
-          script = script.replace('\n        .sessions', '\n            .sessions')
-          script = script.replace('\n        b.cost', '\n            b.cost')
           script = script.replace(
-              '\n        .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));',
-              '\n            .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));',
+              'from pathlib import Path\n',
+              'from pathlib import Path\nimport re\n',
+              1,
           )
-          script = script.replace(
-              '\n    if let Some(agent) = msg.agent.as_ref() {',
-              '\n        if let Some(agent) = msg.agent.as_ref() {',
-          )
-          script = script.replace(
-              "\n        daily_map: HashMap::new(),'''",
-              "\n            daily_map: HashMap::new(),'''",
-          )
+          original = '''def replace_once(path, old, new):
+              file = Path(path)
+              text = file.read_text()
+              if old not in text:
+                  raise SystemExit(f"missing replacement in {path}: {old[:120]!r}")
+              file.write_text(text.replace(old, new, 1))
+          '''
+          replacement = '''def replace_once(path, old, new):
+              file = Path(path)
+              text = file.read_text()
+              if old in text:
+                  file.write_text(text.replace(old, new, 1))
+                  return
+
+              pieces = re.split(r"(\\s+)", old)
+              pattern = "".join(
+                  r"\\s+" if piece.isspace() else re.escape(piece)
+                  for piece in pieces
+                  if piece
+              )
+              matches = list(re.finditer(pattern, text, flags=re.MULTILINE))
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"missing or ambiguous replacement in {path}: "
+                      f"{old[:120]!r}; matches={len(matches)}"
+                  )
+              match = matches[0]
+              file.write_text(text[:match.start()] + new + text[match.end():])
+          '''
+          if original not in script:
+              raise SystemExit('cannot replace generated replace_once helper')
+          script = script.replace(original, replacement, 1)
           path.write_text(script)
           PY
             test -s /tmp/apply-session-navigation.sh
