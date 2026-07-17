@@ -68,11 +68,13 @@ fn render_sessions_main_row(frame: &mut Frame, app: &App, state: &ViewState, are
     }
 
     let count = if state.session_detail_active() {
-        format!(" ({} sessions)", state.session_rows(app).len())
+        format!(" ({} sessions)", state.session_count())
     } else {
-        let rows = state.source_rows(app);
-        let sessions = rows.iter().map(|row| row.session_count).sum::<usize>();
-        format!(" ({} sources · {sessions} sessions)", rows.len())
+        format!(
+            " ({} sources · {} sessions)",
+            state.source_count(),
+            state.session_count()
+        )
     };
     let right = Line::from(vec![
         Span::styled(

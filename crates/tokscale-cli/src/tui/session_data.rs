@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Context, Result};
 use tokscale_core::{ClientId, LocalParseOptions};
@@ -51,10 +51,11 @@ pub(crate) struct SourceSummary {
     pub space_bytes: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct SessionSnapshot {
-    pub sessions: Vec<SessionEntry>,
-    pub source_space: BTreeMap<String, u64>,
+    sessions: Vec<SessionEntry>,
+    source_summaries: Vec<SourceSummary>,
+    session_indices_by_source: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -84,7 +85,7 @@ pub(crate) enum SessionRefreshOutcome {
 
 #[derive(Debug, Default)]
 struct SessionProjection {
-    snapshot: SessionSnapshot,
+    snapshot: Arc<SessionSnapshot>,
     status: SessionProjectionStatus,
     source_digest: Option<u64>,
 }
@@ -99,7 +100,7 @@ impl SessionProjection {
     fn apply_refresh(&mut self, result: Result<SessionProjectionUpdate>) -> Result<()> {
         match result {
             Ok(update) => {
-                self.snapshot = update.snapshot;
+                self.snapshot = Arc::new(update.snapshot);
                 self.source_digest = Some(update.source_digest);
                 self.status = SessionProjectionStatus::Ready;
                 Ok(())
@@ -121,9 +122,15 @@ impl SessionProjection {
 }
 
 impl SessionSnapshot {
-    pub(crate) fn source_summaries(&self) -> Vec<SourceSummary> {
+    fn new(sessions: Vec<SessionEntry>, source_space: BTreeMap<String, u64>) -> Self {
         let mut summaries = BTreeMap::<String, (usize, BTreeSet<String>, i64)>::new();
-        for session in &self.sessions {
+        let mut session_indices_by_source = BTreeMap::<String, Vec<usize>>::new();
+
+        for (index, session) in sessions.iter().enumerate() {
+            session_indices_by_source
+                .entry(session.source.clone())
+                .or_default()
+                .push(index);
             let entry = summaries
                 .entry(session.source.clone())
                 .or_insert_with(|| (0, BTreeSet::new(), 0));
@@ -144,32 +151,57 @@ impl SessionSnapshot {
             entry.2 = entry.2.max(session.last_seen);
         }
 
-        for source in self.source_space.keys() {
+        for source in source_space.keys() {
             summaries
                 .entry(source.clone())
                 .or_insert_with(|| (0, BTreeSet::new(), 0));
         }
 
-        summaries
+        let source_summaries = summaries
             .into_iter()
             .map(
                 |(source, (session_count, workspaces, last_seen))| SourceSummary {
-                    space_bytes: self.source_space.get(&source).copied().unwrap_or(0),
+                    space_bytes: source_space.get(&source).copied().unwrap_or(0),
                     source,
                     session_count,
                     workspace_count: workspaces.len(),
                     last_seen,
                 },
             )
-            .collect()
+            .collect();
+
+        Self {
+            sessions,
+            source_summaries,
+            session_indices_by_source,
+        }
+    }
+
+    pub(crate) fn source_summaries(&self) -> &[SourceSummary] {
+        &self.source_summaries
     }
 
     pub(crate) fn sessions_for_source(&self, source: &str) -> Vec<SessionEntry> {
-        self.sessions
-            .iter()
-            .filter(|session| session.source == source)
-            .cloned()
+        self.session_indices_by_source
+            .get(source)
+            .into_iter()
+            .flatten()
+            .map(|index| self.sessions[*index].clone())
             .collect()
+    }
+
+    pub(crate) fn source_count(&self) -> usize {
+        self.source_summaries.len()
+    }
+
+    pub(crate) fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub(crate) fn session_count_for_source(&self, source: &str) -> usize {
+        self.session_indices_by_source
+            .get(source)
+            .map_or(0, Vec::len)
     }
 }
 
@@ -178,12 +210,17 @@ fn projection_store() -> &'static RwLock<SessionProjection> {
     PROJECTION.get_or_init(|| RwLock::new(SessionProjection::default()))
 }
 
-pub(crate) fn snapshot() -> SessionSnapshot {
-    projection_store()
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .snapshot
-        .clone()
+fn shared_snapshot(store: &RwLock<SessionProjection>) -> Arc<SessionSnapshot> {
+    Arc::clone(
+        &store
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot,
+    )
+}
+
+pub(crate) fn snapshot() -> Arc<SessionSnapshot> {
+    shared_snapshot(projection_store())
 }
 
 pub(crate) fn projection_status() -> SessionProjectionStatus {
@@ -275,10 +312,7 @@ fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionPr
     )?;
 
     Ok(SessionProjectionUpdate {
-        snapshot: SessionSnapshot {
-            sessions,
-            source_space,
-        },
+        snapshot: SessionSnapshot::new(sessions, source_space),
         source_digest,
     })
 }
@@ -449,14 +483,30 @@ mod tests {
 
     fn projection_update(session_id: &str, source_digest: u64) -> SessionProjectionUpdate {
         SessionProjectionUpdate {
-            snapshot: SessionSnapshot {
-                sessions: vec![SessionEntry {
+            snapshot: SessionSnapshot::new(
+                vec![SessionEntry {
+                    source: "codex".to_string(),
                     session_id: session_id.to_string(),
                     ..SessionEntry::default()
                 }],
-                source_space: BTreeMap::new(),
-            },
+                BTreeMap::new(),
+            ),
             source_digest,
+        }
+    }
+
+    fn session(
+        source: &str,
+        session_id: &str,
+        workspace: Option<&str>,
+        last_seen: i64,
+    ) -> SessionEntry {
+        SessionEntry {
+            source: source.to_string(),
+            session_id: session_id.to_string(),
+            workspace_key: workspace.map(str::to_string),
+            last_seen,
+            ..SessionEntry::default()
         }
     }
 
@@ -537,5 +587,53 @@ mod tests {
                 .session_id,
             "session-1"
         );
+    }
+
+    #[test]
+    fn snapshot_reads_share_storage_and_use_precomputed_source_views() {
+        let snapshot = SessionSnapshot::new(
+            vec![
+                session("codex", "c-1", Some("repo-a"), 10),
+                session("opencode", "o-1", Some("repo-b"), 20),
+                session("codex", "c-2", Some("repo-a"), 30),
+            ],
+            BTreeMap::from([
+                ("claude".to_string(), 7),
+                ("codex".to_string(), 42),
+                ("opencode".to_string(), 99),
+            ]),
+        );
+        let store = RwLock::new(SessionProjection {
+            snapshot: Arc::new(snapshot),
+            status: SessionProjectionStatus::Ready,
+            source_digest: Some(1),
+        });
+
+        let first = shared_snapshot(&store);
+        let second = shared_snapshot(&store);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.source_count(), 3);
+        assert_eq!(first.session_count(), 3);
+        assert_eq!(first.session_count_for_source("codex"), 2);
+        assert_eq!(first.session_count_for_source("claude"), 0);
+        assert_eq!(
+            first
+                .sessions_for_source("codex")
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["c-1", "c-2"]
+        );
+
+        let codex = first
+            .source_summaries()
+            .iter()
+            .find(|summary| summary.source == "codex")
+            .expect("codex summary should be precomputed");
+        assert_eq!(codex.session_count, 2);
+        assert_eq!(codex.workspace_count, 1);
+        assert_eq!(codex.last_seen, 30);
+        assert_eq!(codex.space_bytes, 42);
     }
 }

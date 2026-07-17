@@ -50,11 +50,11 @@ impl ViewState {
 
         if let Some(command) = move_command(key.code) {
             if self.session_detail_active() {
-                let len = self.session_rows(app).len();
+                let len = self.session_count();
                 self.session_details
                     .apply_move(command, len, WrapMode::Wrap);
             } else {
-                let len = self.source_rows(app).len();
+                let len = self.source_count();
                 self.session_sources
                     .apply_move(command, len, WrapMode::Wrap);
             }
@@ -93,8 +93,21 @@ impl ViewState {
         self.selected_session_source.as_deref()
     }
 
+    pub(crate) fn source_count(&self) -> usize {
+        session_data::snapshot().source_count()
+    }
+
+    pub(crate) fn session_count(&self) -> usize {
+        let snapshot = session_data::snapshot();
+        self.selected_session_source.as_deref().map_or_else(
+            || snapshot.session_count(),
+            |source| snapshot.session_count_for_source(source),
+        )
+    }
+
     pub(crate) fn source_rows(&self, app: &App) -> Vec<SourceSummary> {
-        let mut rows = session_data::snapshot().source_summaries();
+        let snapshot = session_data::snapshot();
+        let mut rows = snapshot.source_summaries().to_vec();
         rows.sort_by(|left, right| {
             let ordering = match app.sort_field {
                 SortField::Date => left.last_seen.cmp(&right.last_seen),
@@ -111,7 +124,8 @@ impl ViewState {
         let Some(source) = self.selected_session_source.as_deref() else {
             return Vec::new();
         };
-        let mut rows = session_data::snapshot().sessions_for_source(source);
+        let snapshot = session_data::snapshot();
+        let mut rows = snapshot.sessions_for_source(source);
         rows.sort_by(|left, right| {
             let ordering = match app.sort_field {
                 SortField::Date => left.last_seen.cmp(&right.last_seen),
