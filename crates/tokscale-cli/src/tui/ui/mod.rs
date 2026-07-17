@@ -17,6 +17,7 @@ pub mod spinner;
 mod stats;
 mod table_layout;
 mod usage;
+mod usage_profile;
 mod view_footer;
 pub(crate) mod widgets;
 

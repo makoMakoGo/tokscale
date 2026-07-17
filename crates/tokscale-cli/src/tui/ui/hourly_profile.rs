@@ -1,13 +1,10 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
-use super::widgets::{format_cost, format_tokens, viewport_scrollbar_state};
+use super::usage_profile;
+use super::widgets::viewport_scrollbar_state;
 use crate::tui::app::App;
 use crate::tui::data::{aggregate_by_period, find_peak_hour};
-
-fn profile_bar_width(area_width: u16) -> usize {
-    (area_width as usize).saturating_sub(36).min(80)
-}
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
@@ -63,47 +60,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line<'static>> {
     let hourly = &app.data.hourly;
     let total_tokens = app.data.total_tokens;
-    let total_cost = app.data.total_cost;
     let periods = aggregate_by_period(hourly);
     let peak_hour = find_peak_hour(hourly);
-    let bar_width = profile_bar_width(area_width);
-
-    let min_date = hourly.iter().map(|entry| entry.datetime.date()).min();
-    let max_date = hourly.iter().map(|entry| entry.datetime.date()).max();
-    let date_range = match (min_date, max_date) {
-        (Some(start), Some(end)) if start == end => start.format("%Y-%m-%d").to_string(),
-        (Some(start), Some(end)) => {
-            format!("{} to {}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
-        }
-        _ => "No data".to_string(),
-    };
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "When You Work Most",
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(date_range, Style::default().fg(app.theme.muted)),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format!("{} active hours", hourly.len()),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
-            Span::styled(
-                format!("{} tokens", format_tokens(total_tokens)),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
-            Span::styled(format_cost(total_cost), Style::default().fg(Color::Green)),
-        ]),
-        Line::default(),
-    ];
+    let bar_width = usage_profile::bar_width(area_width);
+    let mut lines = usage_profile::summary_lines(
+        app,
+        hourly.iter().map(|entry| entry.datetime.date()),
+        hourly.len(),
+        "active hours",
+    )
+    .into_iter()
+    .collect::<Vec<_>>();
+    lines.push(Line::default());
 
     let max_period_tokens = periods
         .iter()
@@ -147,46 +115,91 @@ pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line
 
     lines.push(Line::default());
     if let Some((hour, tokens, cost)) = peak_hour {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Peak hour ",
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{hour:02}:00-{hour:02}:59"),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
-            Span::styled(format_tokens(tokens), Style::default().fg(Color::Cyan)),
-            Span::styled(" tokens  ·  ", Style::default().fg(app.theme.muted)),
-            Span::styled(format_cost(cost), Style::default().fg(Color::Green)),
-        ]));
+        lines.push(usage_profile::peak_line(
+            app,
+            "Peak hour ",
+            format!("{hour:02}:00-{hour:02}:59"),
+            tokens,
+            cost,
+        ));
     }
-    lines.extend([
-        Line::default(),
-        Line::from(vec![
-            Span::styled("Press ", Style::default().fg(app.theme.muted)),
-            Span::styled("[v]", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                " to switch to table view",
-                Style::default().fg(app.theme.muted),
-            ),
-        ]),
-    ]);
+    lines.extend([Line::default(), usage_profile::switch_to_table_line(app)]);
 
     lines
 }
 
 #[cfg(test)]
 mod tests {
-    use super::profile_bar_width;
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{HourlyUsage, TokenBreakdown};
+    use chrono::NaiveDate;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn make_app() -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        App::new_with_cached_data(config, None).unwrap()
+    }
+
+    fn hour(date: &str, hour: u32, tokens: u64, cost: f64) -> HourlyUsage {
+        HourlyUsage {
+            datetime: NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .unwrap()
+                .and_hms_opt(hour, 0, 0)
+                .unwrap(),
+            tokens: TokenBreakdown {
+                input: tokens,
+                ..TokenBreakdown::default()
+            },
+            cost,
+            clients: BTreeSet::new(),
+            models: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
 
     #[test]
-    fn profile_bar_does_not_overflow_a_narrow_view() {
-        assert_eq!(profile_bar_width(20), 0);
-        assert_eq!(profile_bar_width(40), 4);
-        assert_eq!(profile_bar_width(200), 80);
+    fn hourly_profile_uses_the_shared_summary_and_peak_rows() {
+        let mut app = make_app();
+        app.data.hourly = vec![
+            hour("2026-07-17", 8, 400, 4.0),
+            hour("2026-07-18", 20, 600, 6.0),
+        ];
+        app.data.total_tokens = 1_000;
+        app.data.total_cost = 10.0;
+
+        let text = build_hourly_profile_lines(&app, 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(text[0].contains("2026-07-17 to 2026-07-18"));
+        assert!(text[1].contains("2 active hours"));
+        assert!(text[1].contains("1K tokens"));
+        assert!(text[1].contains("$10.00"));
+        assert!(text
+            .iter()
+            .any(|line| line.contains("Peak hour 20:00-20:59")));
+        assert!(text
+            .last()
+            .is_some_and(|line| line.contains("Press [v] to switch to table view")));
     }
 }

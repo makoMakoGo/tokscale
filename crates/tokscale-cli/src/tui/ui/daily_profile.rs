@@ -2,51 +2,66 @@ use chrono::Datelike;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use super::usage_profile;
 use super::widgets::format_tokens;
 use crate::tui::app::App;
+use crate::tui::data::DailyUsage;
 
-const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const WEEKDAYS: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProfileLayout {
-    show_values: bool,
-    bar_width: usize,
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WeekdayUsage {
+    label: &'static str,
+    tokens: u64,
+    cost: f64,
+    active_days: usize,
 }
 
-fn profile_layout(width: u16) -> ProfileLayout {
-    let show_values = width >= 30;
-    let fixed_width = if show_values { 21 } else { 12 };
-    ProfileLayout {
-        show_values,
-        bar_width: (width as usize).saturating_sub(fixed_width).min(28),
+fn aggregate_weekdays(daily: &[DailyUsage]) -> [WeekdayUsage; 7] {
+    let mut weekdays = std::array::from_fn(|index| WeekdayUsage {
+        label: WEEKDAYS[index],
+        tokens: 0,
+        cost: 0.0,
+        active_days: 0,
+    });
+
+    for day in daily {
+        let index = day.date.weekday().num_days_from_monday() as usize;
+        weekdays[index].tokens = weekdays[index]
+            .tokens
+            .checked_add(day.tokens.total())
+            .expect("daily profile weekday token total exceeds u64::MAX");
+        weekdays[index].cost += day.cost;
+        weekdays[index].active_days = weekdays[index].active_days.saturating_add(1);
     }
+
+    weekdays
+}
+
+fn peak_weekday(weekdays: &[WeekdayUsage; 7]) -> Option<WeekdayUsage> {
+    weekdays
+        .iter()
+        .enumerate()
+        .filter(|(_, weekday)| weekday.active_days > 0)
+        .max_by(|(left_index, left), (right_index, right)| {
+            left.tokens
+                .cmp(&right.tokens)
+                .then_with(|| left.cost.total_cmp(&right.cost))
+                .then_with(|| right_index.cmp(left_index))
+        })
+        .map(|(_, weekday)| *weekday)
 }
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
-    let mut totals = [0u64; 7];
-    for day in &app.data.daily {
-        let index = day.date.weekday().num_days_from_monday() as usize;
-        totals[index] = totals[index]
-            .checked_add(day.tokens.total())
-            .expect("daily profile token total exceeds u64::MAX");
-    }
-
-    let best_index = totals
-        .iter()
-        .enumerate()
-        .max_by(|(left_index, left), (right_index, right)| {
-            left.cmp(right).then_with(|| right_index.cmp(left_index))
-        })
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    let total_tokens = totals
-        .iter()
-        .copied()
-        .try_fold(0u64, u64::checked_add)
-        .expect("daily profile total exceeds u64::MAX");
-    let max_tokens = totals.iter().copied().max().unwrap_or(0);
-
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
@@ -56,22 +71,13 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(app.theme.background));
-    if total_tokens > 0 {
-        block = block.title_top(
-            Line::from(Span::styled(
-                format!(" Most productive: {} ", WEEKDAYS[best_index]),
-                Style::default().fg(Color::Yellow),
-            ))
-            .right_aligned(),
-        );
-    }
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.is_empty() {
         return;
     }
-    if total_tokens == 0 {
+
+    if app.data.daily.is_empty() {
         frame.render_widget(
             Paragraph::new("No daily usage data available")
                 .style(Style::default().fg(app.theme.muted))
@@ -81,77 +87,216 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let profile_layout = profile_layout(inner.width);
-    let lines = WEEKDAYS
-        .iter()
-        .enumerate()
-        .map(|(index, label)| {
-            let value = totals[index];
-            let percentage = value as f64 / total_tokens as f64 * 100.0;
-            let filled = if max_tokens > 0 {
-                (value as f64 / max_tokens as f64 * profile_layout.bar_width as f64).round()
-                    as usize
-            } else {
-                0
-            }
-            .min(profile_layout.bar_width);
-            let label_style = if index == best_index {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(app.theme.foreground)
-            };
-            let mut spans = vec![Span::styled(format!(" {label:<3} "), label_style)];
-            if profile_layout.show_values {
-                spans.push(Span::styled(
-                    format!("{:>8} ", format_tokens(value)),
-                    Style::default().fg(app.theme.foreground),
-                ));
-            }
-            spans.extend([
-                Span::styled("█".repeat(filled), Style::default().fg(Color::Green)),
-                Span::styled(
-                    "░".repeat(profile_layout.bar_width.saturating_sub(filled)),
-                    app.theme.subtle_text_style(),
-                ),
-                Span::styled(
-                    format!(" {:>5.1}%", percentage),
-                    Style::default().fg(app.theme.muted),
-                ),
-            ]);
-            Line::from(spans)
-        })
-        .take(inner.height as usize)
-        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(build_daily_profile_lines(app, inner.width)),
+        inner,
+    );
+}
 
-    frame.render_widget(Paragraph::new(lines), inner);
+pub(crate) fn build_daily_profile_lines(app: &App, area_width: u16) -> Vec<Line<'static>> {
+    let weekdays = aggregate_weekdays(&app.data.daily);
+    let peak = peak_weekday(&weekdays);
+    let total_tokens = app.data.total_tokens;
+    let max_tokens = weekdays
+        .iter()
+        .map(|weekday| weekday.tokens)
+        .max()
+        .unwrap_or(0);
+    let bar_width = usage_profile::bar_width(area_width);
+    let mut lines = usage_profile::summary_lines(
+        app,
+        app.data.daily.iter().map(|day| day.date),
+        app.data.daily.len(),
+        "active days",
+    )
+    .into_iter()
+    .collect::<Vec<_>>();
+    lines.push(Line::default());
+
+    for weekday in weekdays {
+        let percentage = if total_tokens > 0 {
+            weekday.tokens as f64 / total_tokens as f64 * 100.0
+        } else {
+            0.0
+        };
+        let filled = if max_tokens > 0 {
+            (weekday.tokens as f64 / max_tokens as f64 * bar_width as f64).round() as usize
+        } else {
+            0
+        }
+        .min(bar_width);
+        let is_peak = peak.is_some_and(|peak| peak.label == weekday.label);
+        let label_style = if is_peak {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.foreground)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<10}", weekday.label), label_style),
+            Span::styled(
+                format!("{:>12}", format_tokens(weekday.tokens)),
+                Style::default().fg(app.theme.muted),
+            ),
+            Span::raw("  "),
+            Span::styled("█".repeat(filled), Style::default().fg(Color::Green)),
+            Span::styled(
+                "░".repeat(bar_width.saturating_sub(filled)),
+                app.theme.subtle_text_style(),
+            ),
+            Span::styled(
+                format!("  {:>5.1}%", percentage),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    }
+
+    lines.push(Line::default());
+    if let Some(peak) = peak {
+        lines.push(usage_profile::peak_line(
+            app,
+            "Peak day ",
+            peak.label.to_string(),
+            peak.tokens,
+            peak.cost,
+        ));
+    }
+    lines.extend([Line::default(), usage_profile::switch_to_table_line(app)]);
+    lines
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{profile_layout, WEEKDAYS};
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::TokenBreakdown;
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::collections::BTreeMap;
 
-    #[test]
-    fn profile_covers_every_weekday() {
-        assert_eq!(WEEKDAYS.len(), 7);
+    fn make_app() -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        App::new_with_cached_data(config, None).unwrap()
+    }
+
+    fn day(date: &str, tokens: u64, cost: f64) -> DailyUsage {
+        DailyUsage {
+            date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            tokens: TokenBreakdown {
+                input: tokens,
+                ..TokenBreakdown::default()
+            },
+            cost,
+            source_breakdown: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn render_screen(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
-    fn wide_profile_reserves_aligned_values_and_caps_the_bar() {
-        let layout = profile_layout(80);
+    fn weekday_aggregation_combines_dates_and_costs() {
+        let daily = vec![
+            day("2026-07-13", 100, 1.0),
+            day("2026-07-17", 700, 7.0),
+            day("2026-07-20", 200, 2.0),
+        ];
 
-        assert!(layout.show_values);
-        assert_eq!(layout.bar_width, 28);
-        assert!(21 + layout.bar_width <= 80);
+        let weekdays = aggregate_weekdays(&daily);
+
+        assert_eq!(weekdays[0].label, "Monday");
+        assert_eq!(weekdays[0].tokens, 300);
+        assert_eq!(weekdays[0].cost, 3.0);
+        assert_eq!(weekdays[4].label, "Friday");
+        assert_eq!(weekdays[4].tokens, 700);
+        assert_eq!(weekdays[4].cost, 7.0);
+        assert_eq!(peak_weekday(&weekdays).unwrap().label, "Friday");
     }
 
     #[test]
-    fn compact_profile_drops_values_before_squeezing_labels_or_percentages() {
-        let layout = profile_layout(29);
+    fn daily_profile_matches_hourly_summary_and_peak_structure() {
+        let mut app = make_app();
+        app.data.daily = vec![day("2026-07-13", 400, 4.0), day("2026-07-17", 600, 6.0)];
+        app.data.total_tokens = 1_000;
+        app.data.total_cost = 10.0;
 
-        assert!(!layout.show_values);
-        assert_eq!(layout.bar_width, 17);
-        assert_eq!(12 + layout.bar_width, 29);
+        let text = build_daily_profile_lines(&app, 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(text[0].contains("2026-07-13 to 2026-07-17"));
+        assert!(text[1].contains("2 active days"));
+        assert!(text[1].contains("1K tokens"));
+        assert!(text[1].contains("$10.00"));
+        assert!(text[7].contains("Friday"));
+        assert!(text[7].contains("60.0%"));
+        assert!(text[11].contains("Peak day Friday"));
+        assert!(text[11].contains("600 tokens"));
+        assert!(text[11].contains("$6.00"));
+        assert!(text[13].contains("[v]"));
+    }
+
+    #[test]
+    fn percentages_use_the_authoritative_global_token_total() {
+        let mut app = make_app();
+        app.data.daily = vec![day("2026-07-13", 500, 5.0)];
+        app.data.total_tokens = 1_000;
+
+        let monday = line_text(&build_daily_profile_lines(&app, 120)[3]);
+
+        assert!(monday.contains("50.0%"));
+    }
+
+    #[test]
+    fn standard_height_renders_the_complete_profile_without_clipping() {
+        let mut app = make_app();
+        app.data.daily = vec![day("2026-07-17", 600, 6.0)];
+        app.data.total_tokens = 600;
+        app.data.total_cost = 6.0;
+
+        let screen = render_screen(&app, 120, 16);
+
+        assert!(screen.contains("Daily Profile"));
+        assert!(screen.contains("When You Work Most"));
+        assert!(screen.contains("Peak day Friday"));
+        assert!(screen.contains("Press [v] to switch to table view"));
+        assert!(!screen.contains("Most productive"));
     }
 }
