@@ -10,6 +10,8 @@ use crate::tui::data::TokenBreakdown;
 
 const TWO_COLUMN_MIN_WIDTH: u16 = 84;
 const METRIC_LABEL_WIDTH: usize = 20;
+const CONTENT_PADDING: u16 = 1;
+const COLUMN_GAP: u16 = 2;
 
 #[derive(Debug, Clone, Default)]
 struct Aggregate {
@@ -22,7 +24,6 @@ struct SnapshotData {
     models: BTreeMap<String, Aggregate>,
     harnesses: BTreeMap<String, Aggregate>,
     tokens: TokenBreakdown,
-    active_days: usize,
     peak_daily_tokens: u64,
     peak_daily_cost: f64,
 }
@@ -44,7 +45,10 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(app.theme.background));
-    let inner = block.inner(snapshot_area);
+    let inner = block.inner(snapshot_area).inner(Margin {
+        horizontal: CONTENT_PADDING,
+        vertical: 0,
+    });
     frame.render_widget(block, snapshot_area);
     if inner.is_empty() {
         return;
@@ -55,21 +59,15 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Percentage(48),
-                Constraint::Length(1),
+                Constraint::Length(COLUMN_GAP),
                 Constraint::Min(0),
             ])
             .split(inner);
         render_left(frame, app, columns[0], &data);
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::LEFT)
-                .border_style(Style::default().fg(app.theme.border)),
-            columns[1],
-        );
         render_right(frame, app, columns[2], &data);
     } else {
         let left = left_lines(app, &data, inner.width as usize, false);
-        let right = right_lines(app, &data, inner.width as usize);
+        let right = right_lines(app, &data);
         let lines = left
             .into_iter()
             .chain(std::iter::once(Line::default()))
@@ -91,10 +89,6 @@ fn collect_snapshot(app: &App) -> SnapshotData {
         if day.cost.is_finite() {
             data.peak_daily_cost = data.peak_daily_cost.max(day.cost.max(0.0));
         }
-        if day.tokens.total() > 0 || day.message_count > 0 || day.turn_count > 0 {
-            data.active_days = data.active_days.saturating_add(1);
-        }
-
         for (harness, source) in &day.source_breakdown {
             let harness_entry = data.harnesses.entry(harness.clone()).or_default();
             harness_entry.tokens = harness_entry.tokens.saturating_add(source.tokens.total());
@@ -136,7 +130,7 @@ fn render_left(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
 fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     frame.render_widget(
         Paragraph::new(
-            right_lines(app, data, area.width as usize)
+            right_lines(app, data)
                 .into_iter()
                 .take(area.height as usize)
                 .collect::<Vec<_>>(),
@@ -231,6 +225,11 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, spacious: bool) -> V
             truncate(favorite_model, favorite_width),
             app.model_color(favorite_model),
         ),
+    ]);
+    if spacious {
+        lines.push(Line::default());
+    }
+    lines.extend([
         metric_line(
             app,
             "Harnesses Used",
@@ -243,17 +242,11 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, spacious: bool) -> V
             truncate(&favorite_harness, favorite_width),
             app.theme.foreground,
         ),
-        metric_line(
-            app,
-            "Active Days",
-            data.active_days.to_string(),
-            Color::Cyan,
-        ),
     ]);
     lines
 }
 
-fn right_lines(app: &App, data: &SnapshotData, width: usize) -> Vec<Line<'static>> {
+fn right_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
     let total = data.tokens.total();
     let mut lines = vec![Line::from(Span::styled(
         "Tokens",
@@ -262,49 +255,25 @@ fn right_lines(app: &App, data: &SnapshotData, width: usize) -> Vec<Line<'static
             .add_modifier(Modifier::BOLD),
     ))];
     let buckets = [
-        (
-            "Cache Read",
-            data.tokens.cache_read,
-            app.theme.metric_cache_read_style(),
-        ),
-        (
-            "Cache Write",
-            data.tokens.cache_write,
-            app.theme.metric_cache_write_style(),
-        ),
-        ("Input", data.tokens.input, app.theme.metric_input_style()),
-        (
-            "Output",
-            data.tokens.displayed_output(),
-            app.theme.metric_output_style(),
-        ),
+        ("Cache Read", data.tokens.cache_read),
+        ("Cache Write", data.tokens.cache_write),
+        ("Input", data.tokens.input),
+        ("Output", data.tokens.displayed_output()),
     ];
-    let bar_width = width.saturating_sub(28).clamp(1, 32);
-    lines.extend(buckets.into_iter().map(|(label, value, style)| {
+    lines.extend(buckets.into_iter().map(|(label, value)| {
         let percentage = if total > 0 {
             value as f64 / total as f64 * 100.0
         } else {
             0.0
         };
-        let filled = if total > 0 {
-            ((value as f64 / total as f64) * bar_width as f64).round() as usize
-        } else {
-            0
-        }
-        .min(bar_width);
         Line::from(vec![
             Span::styled(format!("{label:<12}"), Style::default().fg(app.theme.muted)),
             Span::styled(
-                format!("{:>8} ", format_tokens(value)),
+                format!("{:>8}", format_tokens(value)),
                 Style::default().fg(app.theme.foreground),
             ),
-            Span::styled("█".repeat(filled), style),
             Span::styled(
-                "░".repeat(bar_width.saturating_sub(filled)),
-                app.theme.subtle_text_style(),
-            ),
-            Span::styled(
-                format!(" {:>5.1}%", percentage),
+                format!("  {:>5.1}%", percentage),
                 Style::default().fg(app.theme.muted),
             ),
         ])
@@ -336,7 +305,10 @@ fn right_lines(app: &App, data: &SnapshotData, width: usize) -> Vec<Line<'static
         Color::Red,
     ));
     lines.push(Line::from(vec![
-        Span::styled("Rejected ", Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!("{:<10}", "Rejected"),
+            Style::default().fg(app.theme.muted),
+        ),
         Span::styled(
             app.data.health.rejected_records.to_string(),
             Style::default().fg(if app.data.health.rejected_records == 0 {
@@ -477,6 +449,13 @@ mod tests {
             .sum()
     }
 
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
     #[test]
     fn overview_render_clears_the_replaced_dashboard_before_drawing_snapshot() {
         let width = 120;
@@ -498,10 +477,11 @@ mod tests {
         assert!(!screen.contains('X'), "stale dashboard symbols remained");
         assert!(!screen.contains("Token Profile"));
         assert!(!screen.contains("Agent profiles"));
+        assert!(!screen.contains("Active Days"));
     }
 
     #[test]
-    fn wide_snapshot_has_one_internal_divider_and_aligned_content() {
+    fn wide_snapshot_uses_padded_content_without_an_internal_divider() {
         let width = 120;
         let height = 30;
         let mut app = make_app(width);
@@ -516,7 +496,63 @@ mod tests {
             .iter()
             .find(|line| line.contains("Total Tokens"))
             .expect("snapshot metric row should render");
-        assert_eq!(metric_row.matches('│').count(), 3, "{metric_row}");
+        assert_eq!(metric_row.matches('│').count(), 2, "{metric_row}");
+        let metric_offset = metric_row
+            .find("Total Tokens")
+            .expect("metric label should render");
+        assert_eq!(UnicodeWidthStr::width(&metric_row[..metric_offset]), 2);
+    }
+
+    #[test]
+    fn left_metrics_are_arranged_as_related_pairs() {
+        let app = make_app(120);
+        let data = SnapshotData::default();
+        let lines = left_lines(&app, &data, 54, true);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(text[2].is_empty());
+        assert!(text[5].is_empty());
+        assert!(text[8].is_empty());
+        assert!(text[11].is_empty());
+        assert!(text[9].starts_with("Models Used"));
+        assert!(text[10].starts_with("Favorite Model"));
+        assert!(text[12].starts_with("Harnesses Used"));
+        assert!(text[13].starts_with("Favorite Harness"));
+        assert!(text.iter().all(|line| !line.contains("Active Days")));
+    }
+
+    #[test]
+    fn token_breakdown_is_compact_text_without_bar_glyphs() {
+        let app = make_app(120);
+        let mut data = SnapshotData::default();
+        data.tokens.cache_read = 80;
+        data.tokens.input = 20;
+
+        let lines = right_lines(&app, &data);
+        let token_rows = lines.iter().take(5).map(line_text).collect::<Vec<_>>();
+
+        assert!(token_rows[1].contains("80.0%"));
+        assert!(token_rows[3].contains("20.0%"));
+        assert!(token_rows
+            .iter()
+            .all(|line| !line.contains('█') && !line.contains('░')));
+    }
+
+    #[test]
+    fn rejected_count_uses_the_same_value_column_as_other_source_counts() {
+        let mut app = make_app(120);
+        app.data.health.clean_sources = 12;
+        app.data.health.partial_sources = 3;
+        app.data.health.rejected_records = 7;
+
+        let lines = right_lines(&app, &SnapshotData::default());
+        let clean = line_text(&lines[7]);
+        let partial = line_text(&lines[8]);
+        let rejected = line_text(&lines[9]);
+
+        assert_eq!(clean.find("12"), Some(10));
+        assert_eq!(partial.find('3'), Some(10));
+        assert_eq!(rejected.find('7'), Some(10));
     }
 
     #[test]
@@ -527,7 +563,7 @@ mod tests {
         assert!(left_lines(&app, &data, 54, true)
             .iter()
             .all(|line| line_width(line) <= 54));
-        assert!(right_lines(&app, &data, 60)
+        assert!(right_lines(&app, &data)
             .iter()
             .all(|line| line_width(line) <= 60));
     }
