@@ -35,50 +35,65 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Check source-first Sessions patch
-        id: patch
+      - name: Normalize and apply source-first Sessions patch
         run: |
-          set +e
-          git apply --check .github/session-navigation-v2.patch > session-patch-diagnostics.log 2>&1
-          status=$?
-          cat session-patch-diagnostics.log
-          echo "status=${status}" >> "$GITHUB_OUTPUT"
-          exit 0
+          python3 <<'PY'
+          from pathlib import Path
+          import re
 
-      - name: Upload patch diagnostics
-        if: steps.patch.outputs.status != '0'
-        uses: actions/upload-artifact@v4
-        with:
-          name: session-patch-diagnostics
-          path: session-patch-diagnostics.log
-          if-no-files-found: error
+          source = Path('.github/session-navigation-v2.patch').read_text().splitlines(keepends=True)
+          output: list[str] = []
+          index = 0
+          header = re.compile(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*?)(\r?\n)?$')
 
-      - name: Stop after patch failure
-        if: steps.patch.outputs.status != '0'
-        run: exit 1
+          while index < len(source):
+              match = header.match(source[index])
+              if match is None:
+                  output.append(source[index])
+                  index += 1
+                  continue
 
-      - name: Apply source-first Sessions implementation
-        if: steps.patch.outputs.status == '0'
-        run: |
-          git apply .github/session-navigation-v2.patch
+              end = index + 1
+              while end < len(source):
+                  line = source[end]
+                  if line.startswith('@@ ') or line.startswith('--- '):
+                      break
+                  end += 1
+
+              body = source[index + 1:end]
+              old_count = sum(
+                  1 for line in body if line.startswith(' ') or line.startswith('-')
+              )
+              new_count = sum(
+                  1 for line in body if line.startswith(' ') or line.startswith('+')
+              )
+              newline = match.group(4) or '\n'
+              output.append(
+                  f'@@ -{match.group(1)},{old_count} +{match.group(2)},{new_count} @@'
+                  f'{match.group(3)}{newline}'
+              )
+              output.extend(body)
+              index = end
+
+          Path('/tmp/session-navigation-v2.patch').write_text(''.join(output))
+          PY
+
+          git apply --check /tmp/session-navigation-v2.patch
+          git apply /tmp/session-navigation-v2.patch
           git rm -f \
             .github/session-navigation-v2.patch \
             .github/workflows/session-navigation-validation.yml
 
       - name: Format
-        if: steps.patch.outputs.status == '0'
         run: cargo fmt --all
 
       - name: Clippy
-        if: steps.patch.outputs.status == '0'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
-        if: steps.patch.outputs.status == '0'
         run: cargo test --workspace --all-features
 
       - name: Commit validated implementation
-        if: steps.patch.outputs.status == '0'
         run: |
           git config user.name "OpenAI Codex"
           git config user.email "codex@openai.com"
