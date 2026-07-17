@@ -57,6 +57,49 @@ pub(crate) struct SessionSnapshot {
     pub source_space: BTreeMap<String, u64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum SessionProjectionStatus {
+    #[default]
+    Pending,
+    Ready,
+    Degraded {
+        diagnostic: String,
+    },
+    Unavailable {
+        diagnostic: String,
+    },
+}
+
+#[derive(Debug, Default)]
+struct SessionProjection {
+    snapshot: SessionSnapshot,
+    status: SessionProjectionStatus,
+}
+
+impl SessionProjection {
+    fn apply_refresh(&mut self, result: Result<SessionSnapshot>) -> Result<()> {
+        match result {
+            Ok(snapshot) => {
+                self.snapshot = snapshot;
+                self.status = SessionProjectionStatus::Ready;
+                Ok(())
+            }
+            Err(error) => {
+                let diagnostic = single_line_diagnostic(&error);
+                self.status = if matches!(
+                    self.status,
+                    SessionProjectionStatus::Ready | SessionProjectionStatus::Degraded { .. }
+                ) {
+                    SessionProjectionStatus::Degraded { diagnostic }
+                } else {
+                    SessionProjectionStatus::Unavailable { diagnostic }
+                };
+                Err(error)
+            }
+        }
+    }
+}
+
 impl SessionSnapshot {
     pub(crate) fn source_summaries(&self) -> Vec<SourceSummary> {
         let mut summaries = BTreeMap::<String, (usize, BTreeSet<String>, i64)>::new();
@@ -110,19 +153,36 @@ impl SessionSnapshot {
     }
 }
 
-fn snapshot_store() -> &'static RwLock<SessionSnapshot> {
-    static SNAPSHOT: OnceLock<RwLock<SessionSnapshot>> = OnceLock::new();
-    SNAPSHOT.get_or_init(|| RwLock::new(SessionSnapshot::default()))
+fn projection_store() -> &'static RwLock<SessionProjection> {
+    static PROJECTION: OnceLock<RwLock<SessionProjection>> = OnceLock::new();
+    PROJECTION.get_or_init(|| RwLock::new(SessionProjection::default()))
 }
 
 pub(crate) fn snapshot() -> SessionSnapshot {
-    snapshot_store()
+    projection_store()
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .snapshot
+        .clone()
+}
+
+pub(crate) fn projection_status() -> SessionProjectionStatus {
+    projection_store()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .status
         .clone()
 }
 
 pub(crate) fn refresh(loader: &DataLoader, clients: &[ClientId]) -> Result<()> {
+    let result = build_snapshot(loader, clients);
+    projection_store()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .apply_refresh(result)
+}
+
+fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionSnapshot> {
     let home_override = loader
         .home_dir
         .as_ref()
@@ -165,13 +225,17 @@ pub(crate) fn refresh(loader: &DataLoader, clients: &[ClientId]) -> Result<()> {
         &scanner_settings,
     )?;
 
-    *snapshot_store()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = SessionSnapshot {
+    Ok(SessionSnapshot {
         sessions,
         source_space,
-    };
-    Ok(())
+    })
+}
+
+fn single_line_diagnostic(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn aggregate_sessions(messages: Vec<tokscale_core::UnifiedMessage>) -> Vec<SessionEntry> {
@@ -324,4 +388,58 @@ fn is_database_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension, "db" | "sqlite" | "sqlite3"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot_with_session(session_id: &str) -> SessionSnapshot {
+        SessionSnapshot {
+            sessions: vec![SessionEntry {
+                session_id: session_id.to_string(),
+                ..SessionEntry::default()
+            }],
+            source_space: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn projection_failure_is_non_blocking_and_preserves_the_last_snapshot() {
+        let mut projection = SessionProjection::default();
+
+        let first_error = projection
+            .apply_refresh(Err(anyhow::anyhow!("scanner\nfailed")))
+            .expect_err("the refresh error must still reach the warning logger");
+        assert_eq!(first_error.to_string(), "scanner\nfailed");
+        assert_eq!(
+            projection.status,
+            SessionProjectionStatus::Unavailable {
+                diagnostic: "scanner failed".to_string(),
+            }
+        );
+
+        projection
+            .apply_refresh(Ok(snapshot_with_session("session-1")))
+            .expect("a successful refresh should install its snapshot");
+        assert_eq!(projection.status, SessionProjectionStatus::Ready);
+
+        projection
+            .apply_refresh(Err(anyhow::anyhow!("database locked")))
+            .expect_err("a later refresh failure must remain observable");
+        assert_eq!(
+            projection.status,
+            SessionProjectionStatus::Degraded {
+                diagnostic: "database locked".to_string(),
+            }
+        );
+        assert_eq!(projection.snapshot.sessions.len(), 1);
+        assert_eq!(projection.snapshot.sessions[0].session_id, "session-1");
+
+        projection
+            .apply_refresh(Ok(snapshot_with_session("session-2")))
+            .expect("the next successful refresh should recover the projection");
+        assert_eq!(projection.status, SessionProjectionStatus::Ready);
+        assert_eq!(projection.snapshot.sessions[0].session_id, "session-2");
+    }
 }

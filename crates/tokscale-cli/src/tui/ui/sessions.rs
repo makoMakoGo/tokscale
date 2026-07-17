@@ -13,6 +13,7 @@ use super::widgets::{
     viewport_scrollbar_state,
 };
 use crate::tui::app::App;
+use crate::tui::session_data::{self, SessionProjectionStatus};
 use crate::tui::view_state::ViewState;
 
 const SOURCE_MIN_WIDTH: u16 = 12;
@@ -112,11 +113,22 @@ fn right_aligned_cell(value: impl AsRef<str>, width: usize) -> Cell<'static> {
     Cell::from(format!("{:>width$}", value.as_ref()))
 }
 
+fn source_column_label(column: SourceColumn) -> &'static str {
+    match column {
+        SourceColumn::Source => "Source",
+        SourceColumn::Sessions => "Sessions",
+        SourceColumn::Workspaces => "Workspaces",
+        SourceColumn::Active => "Active",
+        SourceColumn::Space => "Space",
+    }
+}
+
 pub(crate) fn render(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
+    let projection_status = session_data::projection_status();
     if state.session_detail_active() {
-        render_session_details(frame, app, state, area);
+        render_session_details(frame, app, state, area, &projection_status);
     } else {
-        render_sources(frame, app, state, area);
+        render_sources(frame, app, state, area, &projection_status);
     }
 }
 
@@ -128,7 +140,13 @@ fn panel_block<'a>(app: &App, title: impl Into<Line<'a>>) -> Block<'a> {
         .style(Style::default().bg(app.theme.background))
 }
 
-fn render_sources(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
+fn render_sources(
+    frame: &mut Frame,
+    app: &App,
+    state: &mut ViewState,
+    area: Rect,
+    projection_status: &SessionProjectionStatus,
+) {
     let rows = state.source_rows(app);
     let block = panel_block(
         app,
@@ -140,24 +158,28 @@ fn render_sources(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rec
         ),
     );
     let inner = block.inner(area);
-    let table_area = distributed_table_area(inner);
+    let (content_area, status_area) = panel_body_areas(inner, projection_status);
+    let table_area = distributed_table_area(content_area);
     frame.render_widget(block, area);
-    if inner.is_empty() {
+    if let Some(status_area) = status_area {
+        render_projection_status(frame, app, status_area, projection_status);
+    }
+    if content_area.is_empty() {
         return;
     }
 
     if rows.is_empty() {
-        state.set_source_viewport(inner.height as usize, 0);
+        state.set_source_viewport(content_area.height as usize, 0);
         frame.render_widget(
             Paragraph::new("No session data available")
                 .style(Style::default().fg(app.theme.muted))
                 .alignment(Alignment::Center),
-            inner,
+            content_area,
         );
         return;
     }
 
-    let visible = inner.height.saturating_sub(1).max(1) as usize;
+    let visible = content_area.height.saturating_sub(1).max(1) as usize;
     state.set_source_viewport(visible, rows.len());
     let range = state.source_visible_range(rows.len());
     let selected = state.source_selected();
@@ -218,13 +240,7 @@ fn render_sources(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rec
         columns
             .iter()
             .map(|column| {
-                let label = match column {
-                    SourceColumn::Source => "  Source",
-                    SourceColumn::Sessions => "Sessions",
-                    SourceColumn::Workspaces => "Workspaces",
-                    SourceColumn::Active => "Active",
-                    SourceColumn::Space => "Space",
-                };
+                let label = source_column_label(*column);
                 if *column == SourceColumn::Source {
                     Cell::from(label)
                 } else {
@@ -243,10 +259,22 @@ fn render_sources(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rec
         .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX);
     frame.render_widget(table, table_area);
-    render_scrollbar(frame, area, rows.len(), visible, state.source_scroll());
+    render_scrollbar(
+        frame,
+        scrollbar_area(area, status_area.is_some()),
+        rows.len(),
+        visible,
+        state.source_scroll(),
+    );
 }
 
-fn render_session_details(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
+fn render_session_details(
+    frame: &mut Frame,
+    app: &App,
+    state: &mut ViewState,
+    area: Rect,
+    projection_status: &SessionProjectionStatus,
+) {
     let source = state.selected_session_source().unwrap_or_default();
     let display_source = get_client_display_name(source);
     let title = Line::from(Span::styled(
@@ -258,24 +286,28 @@ fn render_session_details(frame: &mut Frame, app: &App, state: &mut ViewState, a
     let rows = state.session_rows(app);
     let block = panel_block(app, title);
     let inner = block.inner(area);
-    let table_area = distributed_table_area(inner);
+    let (content_area, status_area) = panel_body_areas(inner, projection_status);
+    let table_area = distributed_table_area(content_area);
     frame.render_widget(block, area);
-    if inner.is_empty() {
+    if let Some(status_area) = status_area {
+        render_projection_status(frame, app, status_area, projection_status);
+    }
+    if content_area.is_empty() {
         return;
     }
 
     if rows.is_empty() {
-        state.set_detail_viewport(inner.height as usize, 0);
+        state.set_detail_viewport(content_area.height as usize, 0);
         frame.render_widget(
             Paragraph::new("No sessions found for this source")
                 .style(Style::default().fg(app.theme.muted))
                 .alignment(Alignment::Center),
-            inner,
+            content_area,
         );
         return;
     }
 
-    let visible = inner.height.saturating_sub(1).max(1) as usize;
+    let visible = content_area.height.saturating_sub(1).max(1) as usize;
     state.set_detail_viewport(visible, rows.len());
     let range = state.detail_visible_range(rows.len());
     let selected = state.detail_selected();
@@ -396,7 +428,83 @@ fn render_session_details(frame: &mut Frame, app: &App, state: &mut ViewState, a
         .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX);
     frame.render_widget(table, table_area);
-    render_scrollbar(frame, area, rows.len(), visible, state.detail_scroll());
+    render_scrollbar(
+        frame,
+        scrollbar_area(area, status_area.is_some()),
+        rows.len(),
+        visible,
+        state.detail_scroll(),
+    );
+}
+
+fn panel_body_areas(
+    inner: Rect,
+    projection_status: &SessionProjectionStatus,
+) -> (Rect, Option<Rect>) {
+    if inner.height < 2
+        || !matches!(
+            projection_status,
+            SessionProjectionStatus::Degraded { .. } | SessionProjectionStatus::Unavailable { .. }
+        )
+    {
+        return (inner, None);
+    }
+
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    (rows[0], Some(rows[1]))
+}
+
+fn scrollbar_area(area: Rect, status_visible: bool) -> Rect {
+    if status_visible {
+        Rect {
+            height: area.height.saturating_sub(1),
+            ..area
+        }
+    } else {
+        area
+    }
+}
+
+fn render_projection_status(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    projection_status: &SessionProjectionStatus,
+) {
+    let Some(line) = projection_status_line(projection_status, app.theme.muted) else {
+        return;
+    };
+    frame.render_widget(Paragraph::new(line), distributed_table_area(area));
+}
+
+fn projection_status_line(
+    projection_status: &SessionProjectionStatus,
+    muted: Color,
+) -> Option<Line<'static>> {
+    let (label, message, diagnostic) = match projection_status {
+        SessionProjectionStatus::Degraded { diagnostic } => (
+            "Degraded",
+            " · last refresh failed; showing previous snapshot",
+            diagnostic,
+        ),
+        SessionProjectionStatus::Unavailable { diagnostic } => (
+            "Unavailable",
+            " · refresh failed before the first snapshot",
+            diagnostic,
+        ),
+        SessionProjectionStatus::Pending | SessionProjectionStatus::Ready => return None,
+    };
+
+    Some(Line::from(vec![
+        Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(message, Style::default().fg(muted)),
+        Span::styled(format!(" · {diagnostic}"), Style::default().fg(muted)),
+    ]))
 }
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, scroll: usize) {
@@ -449,6 +557,46 @@ mod tests {
 
     fn layout_width<C>(layout: &ResponsiveTableLayout<C>) -> u16 {
         spaced_width(&constraint_lengths(&layout.widths))
+    }
+
+    fn line_text(line: Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn source_header_has_no_duplicate_left_padding() {
+        assert_eq!(source_column_label(SourceColumn::Source), "Source");
+    }
+
+    #[test]
+    fn degraded_status_occupies_the_panel_bottom_row() {
+        let inner = Rect::new(12, 4, 80, 20);
+        let status = SessionProjectionStatus::Degraded {
+            diagnostic: "database locked".to_string(),
+        };
+
+        let (content, status_area) = panel_body_areas(inner, &status);
+
+        assert_eq!(content, Rect::new(12, 4, 80, 19));
+        assert_eq!(status_area, Some(Rect::new(12, 23, 80, 1)));
+        assert_eq!(
+            line_text(projection_status_line(&status, Color::Gray).unwrap()),
+            "Degraded · last refresh failed; showing previous snapshot · database locked"
+        );
+    }
+
+    #[test]
+    fn healthy_projection_does_not_reserve_a_status_row() {
+        let inner = Rect::new(12, 4, 80, 20);
+
+        assert_eq!(
+            panel_body_areas(inner, &SessionProjectionStatus::Ready),
+            (inner, None)
+        );
+        assert!(projection_status_line(&SessionProjectionStatus::Ready, Color::Gray).is_none());
     }
 
     #[test]
