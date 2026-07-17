@@ -38,6 +38,15 @@ jobs:
           script = path.read_text()
           for token in ('agent_map,', 'session_map,', 'daily_map,'):
               script = script.replace(f'\n        {token}', f'\n            {token}')
+          script = script.replace('\n        .sessions', '\n            .sessions')
+          script = script.replace(
+              '\n        .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));',
+              '\n            .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));',
+          )
+          script = script.replace(
+              '\n    if let Some(agent) = msg.agent.as_ref() {',
+              '\n        if let Some(agent) = msg.agent.as_ref() {',
+          )
           script = script.replace(
               "\n        daily_map: HashMap::new(),'''",
               "\n            daily_map: HashMap::new(),'''",
