@@ -54,6 +54,8 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // Snapshot rows are ordered by display priority. Compact layouts intentionally
+    // clip lower-priority rows from the tail so the Overview remains usable.
     if inner.width >= TWO_COLUMN_MIN_WIDTH {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
