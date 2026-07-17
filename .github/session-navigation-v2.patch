@@ -1,0 +1,1846 @@
+--- a/crates/tokscale-core/src/usage_views.rs
++++ b/crates/tokscale-core/src/usage_views.rs
+@@ -82,6 +82,21 @@
+     pub cost: f64,
+     pub message_count: u32,
+     pub instance_count: u32,
++}
++
++#[derive(Debug, Clone)]
++pub struct SessionUsage {
++    pub source: String,
++    pub session_id: String,
++    pub workspace_key: Option<String>,
++    pub workspace_label: Option<String>,
++    pub models: BTreeSet<String>,
++    pub tokens: UsageTokenBreakdown,
++    pub cost: f64,
++    pub message_count: u32,
++    pub turn_count: u32,
++    pub first_seen: i64,
++    pub last_seen: i64,
+ }
+ 
+ #[derive(Debug, Clone)]
+@@ -180,6 +195,7 @@
+     pub health: crate::source_health::HealthReport,
+     pub models: Vec<UsageModelEntry>,
+     pub agents: Vec<AgentEntry>,
++    pub sessions: Vec<SessionUsage>,
+     pub daily: Vec<DailyUsage>,
+     pub hourly: Vec<HourlyUsage>,
+     pub graph: Option<UsageGraphData>,
+--- a/crates/tokscale-core/src/aggregate/tui.rs
++++ b/crates/tokscale-core/src/aggregate/tui.rs
+@@ -5,7 +5,7 @@
+ //! fold (#37).
+ 
+ use std::{
+-    collections::{BTreeMap, HashMap, HashSet},
++    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+     sync::Arc,
+ };
+ 
+@@ -13,8 +13,8 @@
+ 
+ use crate::usage_views::{
+     AgentEntry, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, HourlyModelInfo,
+-    HourlyUsage, PeriodKind, PeriodUsage, UsageData, UsageGraphData, UsageModelEntry,
+-    UsageTokenBreakdown,
++    HourlyUsage, PeriodKind, PeriodUsage, SessionUsage, UsageData, UsageGraphData,
++    UsageModelEntry, UsageTokenBreakdown,
+ };
+ use crate::{
+     aggregate::keys::{workspace_fields, GroupedModelKey, HourlyModelKey, IdentitySet},
+@@ -448,6 +448,7 @@
+     group_by: GroupBy,
+     model_map: HashMap<GroupedModelKey, TuiModelBucket>,
+     agent_map: HashMap<String, AgentBucket>,
++    session_map: HashMap<(Arc<str>, Arc<str>), SessionBucket>,
+     daily_map: HashMap<NaiveDate, DailyBucket>,
+     hourly_map: HashMap<NaiveDateTime, HourlyBucket>,
+     next_sequence: usize,
+@@ -483,6 +484,21 @@
+     message_count: u32,
+ }
+ 
++struct SessionBucket {
++    source: Arc<str>,
++    session_id: Arc<str>,
++    workspace_key: Option<Arc<str>>,
++    workspace_label: Option<Arc<str>>,
++    models: BTreeSet<Arc<str>>,
++    tokens: UsageTokenBreakdown,
++    cost: f64,
++    message_count: u32,
++    turn_count: u32,
++    first_seen: i64,
++    last_seen: i64,
++}
++
+ struct DailyBucket {
+     date: NaiveDate,
+     tokens: UsageTokenBreakdown,
+@@ -562,6 +578,25 @@
+     }
+ }
+ 
++fn materialize_session(bucket: SessionBucket) -> SessionUsage {
++    SessionUsage {
++        source: bucket.source.to_string(),
++        session_id: bucket.session_id.to_string(),
++        workspace_key: bucket.workspace_key.map(|value| value.to_string()),
++        workspace_label: bucket.workspace_label.map(|value| value.to_string()),
++        models: bucket
++            .models
++            .into_iter()
++            .map(|model| model.to_string())
++            .collect(),
++        tokens: bucket.tokens,
++        cost: bucket.cost,
++        message_count: bucket.message_count,
++        turn_count: bucket.turn_count,
++        first_seen: bucket.first_seen,
++        last_seen: bucket.last_seen,
++    }
++}
++
+ fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> DailyModelInfo {
+     let provider = model.provider.to_string();
+     let display_name = daily_source_model_display_name(
+@@ -648,6 +683,7 @@
+             group_by,
+             model_map: HashMap::new(),
+             agent_map: HashMap::new(),
++            session_map: HashMap::new(),
+             daily_map: HashMap::new(),
+             hourly_map: HashMap::new(),
+             next_sequence: 0,
+@@ -715,6 +751,37 @@
+             .sessions
+             .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));
+ 
++        let session_entry = self
++            .session_map
++            .entry((Arc::clone(&msg.client), Arc::clone(&msg.session_id)))
++            .or_insert_with(|| SessionBucket {
++                source: Arc::clone(&msg.client),
++                session_id: Arc::clone(&msg.session_id),
++                workspace_key: msg.workspace_key.as_ref().map(Arc::clone),
++                workspace_label: msg.workspace_label.as_ref().map(Arc::clone),
++                models: BTreeSet::new(),
++                tokens: UsageTokenBreakdown::default(),
++                cost: 0.0,
++                message_count: 0,
++                turn_count: 0,
++                first_seen: msg.timestamp,
++                last_seen: msg.timestamp,
++            });
++        if session_entry.workspace_key.is_none() {
++            session_entry.workspace_key = msg.workspace_key.as_ref().map(Arc::clone);
++        }
++        if session_entry.workspace_label.is_none() {
++            session_entry.workspace_label = msg.workspace_label.as_ref().map(Arc::clone);
++        }
++        session_entry.models.insert(Arc::clone(&msg.model_id));
++        add_unified_tokens(&mut session_entry.tokens, &msg.tokens);
++        session_entry.cost += msg_cost;
++        session_entry.message_count = session_entry
++            .message_count
++            .saturating_add(msg.message_count.max(0) as u32);
++        if msg.is_turn_start {
++            session_entry.turn_count = session_entry.turn_count.saturating_add(1);
++        }
++        session_entry.first_seen = session_entry.first_seen.min(msg.timestamp);
++        session_entry.last_seen = session_entry.last_seen.max(msg.timestamp);
++
+         if let Some(agent) = msg.agent.as_ref() {
+             let normalized_agent = if msg.client.as_ref() == "opencode" {
+                 sessions::normalize_opencode_agent_name(agent)
+@@ -838,6 +905,7 @@
+             group_by,
+             model_map,
+             agent_map,
++            session_map,
+             daily_map,
+             hourly_map,
+             ..
+@@ -881,6 +949,17 @@
+                 .then_with(|| a.agent.cmp(&b.agent))
+         });
+ 
++        let mut sessions: Vec<SessionUsage> =
++            session_map.into_values().map(materialize_session).collect();
++        sessions.sort_by(|left, right| {
++            right
++                .last_seen
++                .cmp(&left.last_seen)
++                .then_with(|| left.source.cmp(&right.source))
++                .then_with(|| left.session_id.cmp(&right.session_id))
++        });
++
+         let mut daily: Vec<DailyUsage> = daily_map
+             .into_values()
+             .map(|bucket| materialize_daily(bucket, &group_by))
+@@ -907,6 +986,7 @@
+             health: Default::default(),
+             models,
+             agents,
++            sessions,
+             daily,
+             hourly,
+             graph: Some(graph),
+@@ -1008,6 +1088,95 @@
+         )
+     }
+ 
++    #[test]
++    fn session_projection_groups_by_source_and_session_before_models() {
++        let mut first = UnifiedMessage::new(
++            "codex",
++            "gpt-5.6-sol",
++            "openai",
++            "session-a",
++            1_000,
++            crate::TokenBreakdown {
++                input: 10,
++                output: 2,
++                ..Default::default()
++            },
++            0.25,
++        );
++        first.message_count = 2;
++        first.is_turn_start = true;
++        first.set_workspace(
++            Some("/repo/tokscale".to_string()),
++            Some("tokscale".to_string()),
++        );
++
++        let mut second = UnifiedMessage::new(
++            "codex",
++            "gpt-5.6-mini",
++            "openai",
++            "session-a",
++            2_000,
++            crate::TokenBreakdown {
++                input: 20,
++                output: 4,
++                ..Default::default()
++            },
++            0.50,
++        );
++        second.message_count = 3;
++
++        let other_codex_session = UnifiedMessage::new(
++            "codex",
++            "gpt-5.6-sol",
++            "openai",
++            "session-b",
++            3_000,
++            crate::TokenBreakdown {
++                input: 7,
++                output: 1,
++                ..Default::default()
++            },
++            0.10,
++        );
++        let same_id_other_source = UnifiedMessage::new(
++            "claude",
++            "claude-sonnet-4",
++            "anthropic",
++            "session-a",
++            4_000,
++            crate::TokenBreakdown {
++                input: 5,
++                output: 1,
++                ..Default::default()
++            },
++            0.08,
++        );
++
++        let data = TuiUsageHarness
++            .aggregate_messages(
++                vec![
++                    first,
++                    second,
++                    other_codex_session,
++                    same_id_other_source,
++                ],
++                &GroupBy::WorkspaceModel,
++            )
++            .unwrap();
++
++        assert_eq!(data.sessions.len(), 3);
++        let codex = data
++            .sessions
++            .iter()
++            .find(|session| session.source == "codex" && session.session_id == "session-a")
++            .unwrap();
++        assert_eq!(codex.workspace_label.as_deref(), Some("tokscale"));
++        assert_eq!(
++            codex.models.iter().map(String::as_str).collect::<Vec<_>>(),
++            vec!["gpt-5.6-mini", "gpt-5.6-sol"]
++        );
++        assert_eq!(codex.tokens.total(), 36);
++        assert_eq!(codex.message_count, 5);
++        assert_eq!(codex.turn_count, 1);
++        assert_eq!(codex.first_seen, 1_000);
++        assert_eq!(codex.last_seen, 2_000);
++    }
++
+     #[test]
+     fn test_aggregate_messages_model_grouping_uses_finalized_provider_ids() {
+         let loader = TuiUsageHarness;
+--- a/crates/tokscale-cli/src/tui/data/mod.rs
++++ b/crates/tokscale-cli/src/tui/data/mod.rs
+@@ -16,8 +16,9 @@
+ // existing imports.
+ pub use tokscale_core::usage_views::{
+     AgentEntry as AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage,
+-    HourlyModelInfo, HourlyUsage, PeriodKind, PeriodUsage, UsageData, UsageGraphData as GraphData,
+-    UsageModelEntry as ModelUsage, UsageTokenBreakdown as TokenBreakdown,
++    HourlyModelInfo, HourlyUsage, PeriodKind, PeriodUsage, SessionUsage, UsageData,
++    UsageGraphData as GraphData, UsageModelEntry as ModelUsage,
++    UsageTokenBreakdown as TokenBreakdown,
+ };
+ pub use tokscale_core::{
+     aggregate_by_period, build_period_usage, find_peak_hour,
+--- a/crates/tokscale-cli/src/tui/cache.rs
++++ b/crates/tokscale-cli/src/tui/cache.rs
+@@ -18,11 +18,11 @@
+ 
+ use super::data::{
+     AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, GraphData,
+-    HourlyModelInfo, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
++    HourlyModelInfo, HourlyUsage, ModelUsage, SessionUsage, TokenBreakdown, UsageData,
+ };
+ 
+ /// Cache staleness threshold: 5 minutes (matches TS implementation)
+ const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
+-const CACHE_SCHEMA_VERSION: u32 = 37;
++const CACHE_SCHEMA_VERSION: u32 = 38;
+ 
+ #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -127,6 +127,7 @@
+ struct CachedUsageData {
+     models: Vec<CachedModelUsage>,
+     agents: Vec<CachedAgentUsage>,
++    sessions: Vec<CachedSessionUsage>,
+     daily: Vec<CachedDailyUsage>,
+     hourly: Vec<CachedHourlyUsage>,
+     graph: Option<CachedGraphData>,
+@@ -177,6 +178,22 @@
+     instance_count: u32,
+ }
+ 
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct CachedSessionUsage {
++    source: String,
++    session_id: String,
++    workspace_key: Option<String>,
++    workspace_label: Option<String>,
++    models: Vec<String>,
++    tokens: CachedTokenBreakdown,
++    cost: f64,
++    message_count: u32,
++    turn_count: u32,
++    first_seen: i64,
++    last_seen: i64,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ struct CachedDailyModelInfo {
+@@ -276,6 +293,7 @@
+ struct CachedUsageDataRef<'a> {
+     models: CachedModelsRef<'a>,
+     agents: CachedAgentsRef<'a>,
++    sessions: CachedSessionsRef<'a>,
+     daily: CachedDailyEntriesRef<'a>,
+     hourly: CachedHourlyEntriesRef<'a>,
+     graph: Option<CachedGraphDataRef<'a>>,
+@@ -291,6 +309,7 @@
+         Self {
+             models: CachedModelsRef(&data.models),
+             agents: CachedAgentsRef(&data.agents),
++            sessions: CachedSessionsRef(&data.sessions),
+             daily: CachedDailyEntriesRef(&data.daily),
+             hourly: CachedHourlyEntriesRef(&data.hourly),
+             graph: data.graph.as_ref().map(CachedGraphDataRef::from),
+@@ -401,6 +420,49 @@
+     }
+ }
+ 
++struct CachedSessionsRef<'a>(&'a [SessionUsage]);
++
++impl Serialize for CachedSessionsRef<'_> {
++    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
++    where
++        S: Serializer,
++    {
++        serializer.collect_seq(self.0.iter().map(CachedSessionUsageRef::from))
++    }
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct CachedSessionUsageRef<'a> {
++    source: &'a str,
++    session_id: &'a str,
++    workspace_key: Option<&'a str>,
++    workspace_label: Option<&'a str>,
++    models: &'a BTreeSet<String>,
++    tokens: CachedTokenBreakdownRef,
++    cost: f64,
++    message_count: u32,
++    turn_count: u32,
++    first_seen: i64,
++    last_seen: i64,
++}
++
++impl<'a> From<&'a SessionUsage> for CachedSessionUsageRef<'a> {
++    fn from(session: &'a SessionUsage) -> Self {
++        Self {
++            source: &session.source,
++            session_id: &session.session_id,
++            workspace_key: session.workspace_key.as_deref(),
++            workspace_label: session.workspace_label.as_deref(),
++            models: &session.models,
++            tokens: (&session.tokens).into(),
++            cost: session.cost,
++            message_count: session.message_count,
++            turn_count: session.turn_count,
++            first_seen: session.first_seen,
++            last_seen: session.last_seen,
++        }
++    }
++}
++
+ #[derive(Serialize)]
+ #[serde(rename_all = "camelCase")]
+ struct CachedDailyModelInfoRef<'a> {
+@@ -770,6 +832,24 @@
+     }
+ }
+ 
++impl From<CachedSessionUsage> for SessionUsage {
++    fn from(session: CachedSessionUsage) -> Self {
++        Self {
++            source: session.source,
++            session_id: session.session_id,
++            workspace_key: session.workspace_key,
++            workspace_label: session.workspace_label,
++            models: session.models.into_iter().collect(),
++            tokens: session.tokens.into(),
++            cost: session.cost,
++            message_count: session.message_count,
++            turn_count: session.turn_count,
++            first_seen: session.first_seen,
++            last_seen: session.last_seen,
++        }
++    }
++}
++
+ fn daily_model_info_from_cached(value: CachedDailyModelInfo) -> DailyModelInfo {
+     DailyModelInfo {
+         provider: value.provider,
+@@ -922,6 +1002,7 @@
+             health: u.health,
+             models: u.models.into_iter().map(|m| m.into()).collect(),
+             agents: normalize_cached_agents(u.agents)?,
++            sessions: u.sessions.into_iter().map(SessionUsage::from).collect(),
+             daily: daily?,
+             hourly: hourly?,
+             graph: graph.transpose()?,
+@@ -1382,6 +1463,19 @@
+                 message_count: 4,
+                 instance_count: 2,
+             }],
++            sessions: vec![SessionUsage {
++                source: "claude".to_string(),
++                session_id: "session-1".to_string(),
++                workspace_key: Some("workspace-key".to_string()),
++                workspace_label: Some("Workspace Label".to_string()),
++                models: ["claude-sonnet-4".to_string()].into_iter().collect(),
++                tokens: token_breakdown(12),
++                cost: 1.2,
++                message_count: 5,
++                turn_count: 3,
++                first_seen: 1_720_656_000_000,
++                last_seen: 1_720_659_600_000,
++            }],
+             daily: vec![DailyUsage {
+                 date,
+                 tokens: token_breakdown(41),
+@@ -1468,6 +1562,12 @@
+             value["data"]["hourly"][0]["datetime"],
+             "2026-07-11 14:05:06"
+         );
++        assert_eq!(value["data"]["sessions"][0]["source"], "claude");
++        assert_eq!(value["data"]["sessions"][0]["sessionId"], "session-1");
++        assert_eq!(
++            value["data"]["sessions"][0]["models"],
++            serde_json::json!(["claude-sonnet-4"])
++        );
+         assert!(value["data"]["daily"][0]["sourceBreakdown"][0].is_array());
+         assert!(value["data"]["daily"][0]["sourceBreakdown"][0][1]["models"][0].is_array());
+         assert!(value["data"]["hourly"][0]["models"][0].is_array());
+@@ -1515,6 +1615,7 @@
+             vec![
+                 "models",
+                 "agents",
++                "sessions",
+                 "daily",
+                 "hourly",
+                 "graph",
+@@ -1559,6 +1660,25 @@
+             ]
+         );
+ 
++        let ordered_session = ordered_data.field("sessions").element(0);
++        assert_eq!(
++            ordered_session.keys(),
++            vec![
++                "source",
++                "sessionId",
++                "workspaceKey",
++                "workspaceLabel",
++                "models",
++                "tokens",
++                "cost",
++                "messageCount",
++                "turnCount",
++                "firstSeen",
++                "lastSeen",
++            ]
++        );
++
+         let ordered_daily = ordered_data.field("daily").element(0);
+         assert_eq!(
+             ordered_daily.keys(),
+@@ -1784,6 +1904,7 @@
+                     cached_agent("Sisyphus", "opencode", u64::MAX),
+                     cached_agent("Sisyphus", "opencode", 1),
+                 ],
++                sessions: Vec::new(),
+                 daily: Vec::new(),
+                 hourly: Vec::new(),
+                 graph: None,
+--- a/crates/tokscale-cli/src/tui/app.rs
++++ b/crates/tokscale-cli/src/tui/app.rs
+@@ -1,5 +1,5 @@
+ use std::cell::RefCell;
+-use std::collections::{BTreeMap, HashMap, HashSet};
++use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+ use std::rc::Rc;
+ use std::time::{Duration, Instant};
+ 
+@@ -15,7 +15,7 @@
+ use super::colors::{get_model_color, get_provider_shade, provider_color_key};
+ use super::data::{
+     build_period_usage, AgentUsage, DailySourceInfo, DailyUsage, DataLoader, HourlyUsage,
+-    ModelUsage, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
++    ModelUsage, PeriodKind, PeriodUsage, SessionUsage, TokenBreakdown, UsageData,
+ };
+ use super::interaction::{
+     InteractionOutcome, ListInteraction, MoveCommand, TextViewport, WrapMode,
+@@ -213,6 +213,27 @@
+ 
+ pub type PeriodDetailRow = DetailRow;
+ 
++#[derive(Debug, Clone)]
++pub(crate) struct SessionSourceSummary {
++    pub source: String,
++    pub session_count: usize,
++    pub model_count: usize,
++    pub message_count: u32,
++    pub turn_count: u32,
++    pub tokens: u64,
++    pub cost: f64,
++    pub last_seen: i64,
++}
++
++#[derive(Debug, Default)]
++struct SessionSourceAccumulator {
++    models: BTreeSet<String>,
++    session_count: usize,
++    message_count: u32,
++    turn_count: u32,
++    tokens: u64,
++    cost: f64,
++    last_seen: i64,
++}
++
+ #[derive(Debug, Clone)]
+ pub enum ClickAction {
+     Tab(Tab),
+@@ -370,10 +391,9 @@
+     usage_text_total_lines: usize,
+     pub(crate) hourly_profile_viewport: TextViewport,
+     hourly_profile_text_total_lines: usize,
+-    pub(crate) issues_viewport: TextViewport,
+-    issues_text_total_lines: usize,
+     pub selected_daily_detail_date: Option<NaiveDate>,
+     pub selected_period_detail: Option<PeriodDetailSelection>,
++    selected_session_source: Option<String>,
+     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
+ 
+     pub selected_graph_cell: Option<(usize, usize)>,
+@@ -526,10 +546,9 @@
+             usage_text_total_lines: 0,
+             hourly_profile_viewport: TextViewport::default(),
+             hourly_profile_text_total_lines: 0,
+-            issues_viewport: TextViewport::default(),
+-            issues_text_total_lines: 0,
+             selected_daily_detail_date: None,
+             selected_period_detail: None,
++            selected_session_source: None,
+             detail_sort_contexts: HashMap::new(),
+             selected_graph_cell: None,
+             stats_breakdown_total_lines: 0,
+@@ -662,6 +681,12 @@
+                 self.set_current_list_interaction(self.stored_list_interaction(tab));
+             }
+         }
++        if let Some(source) = self.selected_session_source.as_deref() {
++            if !self.data.sessions.iter().any(|session| session.source == source) {
++                self.selected_session_source = None;
++                self.set_current_list_interaction(self.stored_list_interaction(Tab::Issues));
++            }
++        }
+ 
+         self.clamp_selection();
+         super::data::trim_allocator();
+@@ -697,6 +722,7 @@
+         !self.data.models.is_empty()
+             || !self.data.daily.is_empty()
+             || !self.data.agents.is_empty()
++            || !self.data.sessions.is_empty()
+             || self.data.graph.is_some()
+             || self.data.total_tokens > 0
+             || self.data.total_cost > 0.0
+@@ -921,6 +947,9 @@
+             KeyCode::Enter if self.current_tab == Tab::Stats => {
+                 self.handle_graph_selection();
+             }
++            KeyCode::Enter if self.current_tab == Tab::Issues => {
++                self.open_selected_session_source();
++            }
+             KeyCode::Esc | KeyCode::Backspace
+                 if self.current_tab == Tab::Daily && self.is_daily_detail_active() =>
+             {
+@@ -931,6 +960,11 @@
+             {
+                 self.close_period_detail();
+             }
++            KeyCode::Esc | KeyCode::Backspace
++                if self.current_tab == Tab::Issues && self.is_session_detail_active() =>
++            {
++                self.close_session_detail();
++            }
+             KeyCode::Esc if self.selected_graph_cell.is_some() => {
+                 self.selected_graph_cell = None;
+                 self.stats_breakdown_total_lines = 0;
+@@ -1078,33 +1112,16 @@
+             .visible_range(self.hourly_profile_text_total_lines)
+     }
+ 
+-    pub(crate) fn set_issues_text_viewport(&mut self, visible: usize, total_lines: usize) {
+-        self.issues_text_total_lines = total_lines;
+-        self.issues_viewport.set_visible(visible, total_lines);
+-    }
+-
+-    pub(crate) fn issues_text_visible_range(&self) -> std::ops::Range<usize> {
+-        self.issues_viewport
+-            .visible_range(self.issues_text_total_lines)
+-    }
+-
+     fn active_text_viewport_mut(&mut self) -> Option<&mut TextViewport> {
+         match self.current_tab {
+             Tab::Usage => Some(&mut self.usage_viewport),
+             Tab::Hourly if self.hourly_view_mode == HourlyViewMode::Profile => {
+                 Some(&mut self.hourly_profile_viewport)
+             }
+-            Tab::Issues => Some(&mut self.issues_viewport),
+             _ => None,
+         }
+     }
+@@ -1115,7 +1132,6 @@
+             Tab::Hourly if self.hourly_view_mode == HourlyViewMode::Profile => {
+                 Some(self.hourly_profile_text_total_lines)
+             }
+-            Tab::Issues => Some(self.issues_text_total_lines),
+             _ => None,
+         }
+     }
+@@ -1159,6 +1175,9 @@
+         if self.current_period_kind().is_some() && self.is_period_detail_active() {
+             return false;
+         }
++        if self.current_tab == Tab::Issues && self.is_session_detail_active() {
++            return false;
++        }
+         true
+     }
+ 
+@@ -1243,6 +1262,9 @@
+             self.selected_graph_cell = None;
+             self.stats_breakdown_total_lines = 0;
+         }
++        if target != Tab::Issues {
++            self.selected_session_source = None;
++        }
+ 
+         let (field, dir) = self
+             .tab_sort_state
+@@ -1259,10 +1281,10 @@
+     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
+         match tab {
+             Tab::Models => (SortField::Tokens, SortDirection::Descending),
+-            Tab::Monthly | Tab::Weekly | Tab::Daily | Tab::Hourly => {
++            Tab::Monthly | Tab::Weekly | Tab::Daily | Tab::Hourly | Tab::Issues => {
+                 (SortField::Date, SortDirection::Descending)
+             }
+-            Tab::Overview | Tab::Usage | Tab::Stats | Tab::Agents | Tab::Issues => {
++            Tab::Overview | Tab::Usage | Tab::Stats | Tab::Agents => {
+                 (SortField::Cost, SortDirection::Descending)
+             }
+         }
+@@ -1485,7 +1507,8 @@
+                 .iter()
+                 .map(|u| u.metrics.len())
+                 .sum(),
+-            Tab::Issues => 0,
++            Tab::Issues if self.is_session_detail_active() => self.get_sorted_sessions().len(),
++            Tab::Issues => self.get_sorted_session_sources().len(),
+         }
+     }
+ 
+@@ -1721,6 +1744,132 @@
+         self.clamp_selection();
+     }
+ 
++    pub(crate) fn is_session_detail_active(&self) -> bool {
++        self.selected_session_source.is_some()
++    }
++
++    pub(crate) fn selected_session_source(&self) -> Option<&str> {
++        self.selected_session_source.as_deref()
++    }
++
++    fn open_selected_session_source(&mut self) {
++        if self.is_session_detail_active() {
++            return;
++        }
++
++        let selected = self
++            .get_sorted_session_sources()
++            .get(self.selected_index)
++            .map(|source| source.source.clone());
++        let Some(source) = selected else {
++            return;
++        };
++
++        self.persist_list_interaction_for(Tab::Issues);
++        self.selected_session_source = Some(source.clone());
++        self.selected_index = 0;
++        self.scroll_offset = 0;
++        self.set_local_report_status(&format!("Viewing sessions for {source}"));
++        self.clamp_selection();
++    }
++
++    fn close_session_detail(&mut self) {
++        let Some(source) = self.selected_session_source.take() else {
++            return;
++        };
++
++        let source_interaction = self.stored_list_interaction(Tab::Issues);
++        let restored_index = self
++            .get_sorted_session_sources()
++            .iter()
++            .position(|summary| summary.source == source)
++            .unwrap_or(source_interaction.selected);
++        let max_visible = source_interaction.visible.max(1);
++        let viewport_still_holds = restored_index >= source_interaction.scroll
++            && restored_index < source_interaction.scroll + max_visible;
++        let scroll = if viewport_still_holds {
++            source_interaction.scroll
++        } else {
++            restored_index.saturating_sub(max_visible / 2)
++        };
++        self.set_current_list_interaction(ListInteraction {
++            selected: restored_index,
++            scroll,
++            visible: source_interaction.visible,
++        });
++        self.set_local_report_status("Returned to session sources");
++        self.clamp_selection();
++    }
++
++    pub(crate) fn get_sorted_session_sources(&self) -> Vec<SessionSourceSummary> {
++        let mut sources = BTreeMap::<String, SessionSourceAccumulator>::new();
++        for session in &self.data.sessions {
++            let entry = sources.entry(session.source.clone()).or_default();
++            entry.session_count = entry.session_count.saturating_add(1);
++            entry.models.extend(session.models.iter().cloned());
++            entry.message_count = entry.message_count.saturating_add(session.message_count);
++            entry.turn_count = entry.turn_count.saturating_add(session.turn_count);
++            entry.tokens = entry
++                .tokens
++                .checked_add(session.tokens.total())
++                .expect("session source token total exceeds u64::MAX");
++            entry.cost += session.cost;
++            entry.last_seen = entry.last_seen.max(session.last_seen);
++        }
++
++        let mut rows = sources
++            .into_iter()
++            .map(|(source, aggregate)| SessionSourceSummary {
++                source,
++                session_count: aggregate.session_count,
++                model_count: aggregate.models.len(),
++                message_count: aggregate.message_count,
++                turn_count: aggregate.turn_count,
++                tokens: aggregate.tokens,
++                cost: aggregate.cost,
++                last_seen: aggregate.last_seen,
++            })
++            .collect::<Vec<_>>();
++        rows.sort_by(|left, right| {
++            let ordering = match self.sort_field {
++                SortField::Date => left.last_seen.cmp(&right.last_seen),
++                SortField::Tokens => left.tokens.cmp(&right.tokens),
++                SortField::Cost => left.cost.total_cmp(&right.cost),
++            };
++            let ordering = match self.sort_direction {
++                SortDirection::Ascending => ordering,
++                SortDirection::Descending => ordering.reverse(),
++            };
++            ordering.then_with(|| left.source.cmp(&right.source))
++        });
++        rows
++    }
++
++    pub(crate) fn get_sorted_sessions(&self) -> Vec<SessionUsage> {
++        let Some(source) = self.selected_session_source.as_deref() else {
++            return Vec::new();
++        };
++        let mut sessions = self
++            .data
++            .sessions
++            .iter()
++            .filter(|session| session.source == source)
++            .cloned()
++            .collect::<Vec<_>>();
++        sessions.sort_by(|left, right| {
++            let ordering = match self.sort_field {
++                SortField::Date => left.last_seen.cmp(&right.last_seen),
++                SortField::Tokens => left.tokens.total().cmp(&right.tokens.total()),
++                SortField::Cost => left.cost.total_cmp(&right.cost),
++            };
++            let ordering = match self.sort_direction {
++                SortDirection::Ascending => ordering,
++                SortDirection::Descending => ordering.reverse(),
++            };
++            ordering.then_with(|| left.session_id.cmp(&right.session_id))
++        });
++        sessions
++    }
++
+     fn toggle_auto_refresh(&mut self) {
+         self.auto_refresh = !self.auto_refresh;
+         if self.auto_refresh {
+@@ -1878,7 +2027,28 @@
+                     h.cost
+                 )
+             }),
+-            Tab::Stats | Tab::Usage | Tab::Issues => None,
++            Tab::Issues if self.is_session_detail_active() => self
++                .get_sorted_sessions()
++                .get(self.selected_index)
++                .map(|session| {
++                    format!(
++                        "{} / {}: {} tokens, ${:.4}",
++                        session.source,
++                        session.session_id,
++                        session.tokens.total(),
++                        session.cost
++                    )
++                }),
++            Tab::Issues => self
++                .get_sorted_session_sources()
++                .get(self.selected_index)
++                .map(|source| {
++                    format!(
++                        "{}: {} sessions, {} tokens, ${:.4}",
++                        source.source, source.session_count, source.tokens, source.cost
++                    )
++                }),
++            Tab::Stats | Tab::Usage => None,
+         };
+ 
+         if let Some(text) = text {
+@@ -2561,7 +2731,34 @@
+         app
+     }
+ 
++    fn session_usage(
++        source: &str,
++        session_id: &str,
++        models: &[&str],
++        last_seen: i64,
++        tokens: u64,
++        cost: f64,
++    ) -> SessionUsage {
++        SessionUsage {
++            source: source.to_string(),
++            session_id: session_id.to_string(),
++            workspace_key: Some(format!("/repo/{session_id}")),
++            workspace_label: Some(format!("workspace-{session_id}")),
++            models: models.iter().map(|model| (*model).to_string()).collect(),
++            tokens: TokenBreakdown {
++                input: tokens,
++                ..Default::default()
++            },
++            cost,
++            message_count: 3,
++            turn_count: 2,
++            first_seen: last_seen.saturating_sub(1_000),
++            last_seen,
++        }
++    }
++
+     fn daily_usage(date: &str, cost: f64, models: Vec<(&str, &str, f64)>) -> DailyUsage {
+         daily_usage_by_source(date, cost, vec![("claude", models)])
+     }
+@@ -3335,6 +3532,93 @@
+         assert!((rows[0].cost - 7.0).abs() < f64::EPSILON);
+     }
+ 
++    #[test]
++    fn sessions_drill_down_from_source_to_real_session_rows() {
++        let mut app = make_app();
++        app.current_tab = Tab::Issues;
++        app.sort_field = SortField::Date;
++        app.sort_direction = SortDirection::Descending;
++        app.data.sessions = vec![
++            session_usage(
++                "codex",
++                "session-a",
++                &["gpt-5.6-mini", "gpt-5.6-sol"],
++                3_000,
++                36,
++                0.75,
++            ),
++            session_usage("codex", "session-b", &["gpt-5.6-sol"], 2_000, 8, 0.10),
++            session_usage(
++                "claude",
++                "session-a",
++                &["claude-sonnet-4"],
++                1_000,
++                6,
++                0.08,
++            ),
++        ];
++
++        let sources = app.get_sorted_session_sources();
++        assert_eq!(sources.len(), 2);
++        assert_eq!(sources[0].source, "codex");
++        assert_eq!(sources[0].session_count, 2);
++        assert_eq!(sources[0].model_count, 2);
++
++        app.selected_index = 0;
++        app.handle_key_event(key(KeyCode::Enter));
++
++        assert!(app.is_session_detail_active());
++        assert_eq!(app.selected_session_source(), Some("codex"));
++        assert_eq!(app.get_current_list_len(), 2);
++        let sessions = app.get_sorted_sessions();
++        assert_eq!(sessions[0].session_id, "session-a");
++        assert_eq!(
++            sessions[0]
++                .models
++                .iter()
++                .map(String::as_str)
++                .collect::<Vec<_>>(),
++            vec!["gpt-5.6-mini", "gpt-5.6-sol"]
++        );
++
++        app.handle_key_event(key(KeyCode::Esc));
++
++        assert!(!app.is_session_detail_active());
++        assert_eq!(app.selected_index, 0);
++        assert_eq!(app.get_current_list_len(), 2);
++    }
++
++    #[test]
++    fn session_detail_closes_when_refresh_removes_selected_source() {
++        let mut app = make_app();
++        app.current_tab = Tab::Issues;
++        app.data.sessions = vec![session_usage(
++            "codex",
++            "session-a",
++            &["gpt-5.6-sol"],
++            3_000,
++            12,
++            0.25,
++        )];
++        app.handle_key_event(key(KeyCode::Enter));
++        assert!(app.is_session_detail_active());
++
++        app.update_data(UsageData {
++            sessions: vec![session_usage(
++                "claude",
++                "session-b",
++                &["claude-sonnet-4"],
++                4_000,
++                8,
++                0.10,
++            )],
++            ..Default::default()
++        });
++
++        assert!(!app.is_session_detail_active());
++        assert_eq!(app.get_current_list_len(), 1);
++        assert_eq!(app.get_sorted_session_sources()[0].source, "claude");
++    }
++
+     // ── handle_key_event: sort ──────────────────────────────────────
+ 
+     #[test]
+@@ -3724,24 +4008,6 @@
+         assert_eq!(app.scroll_offset, 1);
+     }
+ 
+-    #[test]
+-    fn issues_tab_key_scrolls_text_viewport_without_table_selection() {
+-        let mut app = make_app();
+-        app.current_tab = Tab::Issues;
+-        app.selected_index = 2;
+-        app.scroll_offset = 1;
+-        app.set_issues_text_viewport(4, 10);
+-
+-        app.handle_key_event(key(KeyCode::PageDown));
+-
+-        assert_eq!(app.issues_viewport.scroll, 2);
+-        assert_eq!(app.selected_index, 2);
+-        assert_eq!(app.scroll_offset, 1);
+-    }
+-
+     #[test]
+     fn usage_tab_mouse_wheel_scrolls_text_viewport_without_table_selection() {
+         let mut app = make_app_with_usage();
+--- a/crates/tokscale-cli/src/tui/ui/issues.rs
++++ b/crates/tokscale-cli/src/tui/ui/issues.rs
+@@ -1,16 +1,15 @@
+-use std::collections::{BTreeMap, BTreeSet};
++use std::collections::BTreeMap;
+ 
++use chrono::{Local, TimeZone};
+ use ratatui::prelude::*;
+ use ratatui::widgets::{
+     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
+ };
+ 
+-use crate::tui::app::{App, SortDirection, SortField};
++use crate::tui::app::App;
+ 
+ use super::widgets::{
+     format_cost, format_tokens, get_client_display_name, truncate_display_width,
+     viewport_scrollbar_state,
+ };
+ 
+-#[derive(Debug, Clone)]
+-struct SessionCoverageRow {
+-    harness: String,
+-    model: String,
+-    sessions: u32,
+-    tokens: u64,
+-    cost: f64,
+-}
+-
+-#[derive(Debug, Clone, Default)]
+-struct HarnessCoverage {
+-    tokens: u64,
+-    cost: f64,
+-    models: BTreeSet<String>,
+-    active_days: BTreeSet<chrono::NaiveDate>,
+-}
+-
+ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+     if area.is_empty() {
+         return;
+     }
+ 
+-    if area.height < 10 {
+-        render_session_coverage(frame, app, area);
+-        return;
++    if app.is_session_detail_active() {
++        render_session_detail(frame, app, area);
++    } else {
++        render_source_index(frame, app, area);
+     }
++}
+ 
+-    let health_height = if area.height >= 18 { 9 } else { 6 };
++fn panel_block<'a>(app: &App, title: &'a str) -> Block<'a> {
++    Block::default()
++        .borders(Borders::ALL)
++        .border_style(Style::default().fg(app.theme.border))
++        .title(Span::styled(
++            format!(" {title} "),
++            Style::default()
++                .fg(app.theme.accent)
++                .add_modifier(Modifier::BOLD),
++        ))
++        .style(Style::default().bg(app.theme.background))
++}
++
++fn render_source_index(frame: &mut Frame, app: &mut App, area: Rect) {
++    if area.height < 10 {
++        render_source_table(frame, app, area);
++        return;
++    }
++
++    let health_height = if area.height >= 15 { 5 } else { 4 };
+     let chunks = Layout::default()
+         .direction(Direction::Vertical)
+         .constraints([
+@@ -18,104 +17,419 @@
+             Constraint::Length(health_height.min(area.height)),
+         ])
+         .split(area);
+-    render_session_coverage(frame, app, chunks[0]);
+-    render_harness_health(frame, app, chunks[1]);
+-}
+ 
+-fn panel_block<'a>(app: &App, title: &'a str) -> Block<'a> {
+-    Block::default()
+-        .borders(Borders::ALL)
+-        .border_style(Style::default().fg(app.theme.border))
+-        .title(Span::styled(
+-            format!(" {title} "),
+-            Style::default()
+-                .fg(app.theme.accent)
+-                .add_modifier(Modifier::BOLD),
+-        ))
+-        .style(Style::default().bg(app.theme.background))
++    render_source_table(frame, app, chunks[0]);
++    render_source_health(frame, app, chunks[1]);
+ }
+ 
+-fn session_coverage_rows(app: &App) -> Vec<SessionCoverageRow> {
+-    let mut rows = app
+-        .data
+-        .models
+-        .iter()
+-        .map(|model| SessionCoverageRow {
+-            harness: display_harnesses(&model.client),
+-            model: model
+-                .workspace_label
+-                .as_ref()
+-                .map(|workspace| format!("{workspace} / {}", model.model))
+-                .unwrap_or_else(|| model.model.clone()),
+-            sessions: model.session_count,
+-            tokens: model.tokens.total(),
+-            cost: model.cost,
+-        })
+-        .collect::<Vec<_>>();
+-
+-    rows.sort_by(|left, right| {
+-        let ordering = match app.sort_field {
+-            SortField::Cost => left.cost.total_cmp(&right.cost),
+-            SortField::Tokens => left.tokens.cmp(&right.tokens),
+-            SortField::Date => left.sessions.cmp(&right.sessions),
+-        };
+-        let ordering = match app.sort_direction {
+-            SortDirection::Ascending => ordering,
+-            SortDirection::Descending => ordering.reverse(),
+-        };
+-        ordering
+-            .then_with(|| left.harness.cmp(&right.harness))
+-            .then_with(|| left.model.cmp(&right.model))
+-    });
+-    rows
+-}
+-
+-fn display_harnesses(raw: &str) -> String {
+-    raw.split(", ")
+-        .map(get_client_display_name)
+-        .collect::<Vec<_>>()
+-        .join(", ")
+-}
+-
+-fn render_session_coverage(frame: &mut Frame, app: &mut App, area: Rect) {
+-    let rows = session_coverage_rows(app);
+-    let session_links = rows.iter().fold(0u64, |total, row| {
+-        total.saturating_add(u64::from(row.sessions))
+-    });
+-    let block = panel_block(app, "Session Coverage").title_top(
++fn render_source_table(frame: &mut Frame, app: &mut App, area: Rect) {
++    let rows = app.get_sorted_session_sources();
++    let total_sessions = app.data.sessions.len();
++    let block = panel_block(app, "Code Agents / Sources").title_top(
+         Line::from(Span::styled(
+-            format!(" {session_links} model-session links "),
++            format!(" {} sources · {total_sessions} sessions ", rows.len()),
+             Style::default().fg(app.theme.muted),
+         ))
+         .right_aligned(),
+@@ -125,119 +439,70 @@
+     }
+ 
+     if rows.is_empty() {
+-        app.set_issues_text_viewport(inner.height as usize, 0);
++        app.set_max_visible_items(1);
+         frame.render_widget(
+-            Paragraph::new("No session coverage data available")
++            Paragraph::new("No session data available")
+                 .style(Style::default().fg(app.theme.muted))
+                 .alignment(Alignment::Center),
+             inner,
+@@ -245,44 +510,14 @@
+     }
+ 
+     let visible_height = inner.height.saturating_sub(1) as usize;
+-    app.set_issues_text_viewport(visible_height, rows.len());
+-    let visible_rows = rows[app.issues_text_visible_range()]
++    app.set_max_visible_items(visible_height.max(1));
++    let start = app.scroll_offset.min(rows.len());
++    let end = start.saturating_add(visible_height).min(rows.len());
++    let wide = inner.width >= 105;
++    let medium = inner.width >= 72;
++
++    let table_rows = rows[start..end]
+         .iter()
+-        .map(|row| {
+-            Row::new(vec![
+-                Cell::from(truncate_display_width(&row.harness, 24))
+-                    .style(Style::default().fg(app.theme.muted)),
+-                Cell::from(truncate_display_width(&row.model, 38))
+-                    .style(Style::default().fg(app.theme.foreground)),
+-                Cell::from(Line::from(row.sessions.to_string()).centered())
+-                    .style(Style::default().fg(Color::Cyan)),
+-                Cell::from(Line::from(format_tokens(row.tokens)).right_aligned())
+-                    .style(Style::default().fg(Color::Cyan)),
+-                Cell::from(Line::from(format_cost(row.cost)).right_aligned())
+-                    .style(Style::default().fg(Color::Green)),
+-            ])
+-        })
+-        .collect::<Vec<_>>();
+-    let header = Row::new(vec![
+-        "Harness",
+-        "Model / Workspace",
+-        "Sessions",
+-        "Tokens",
+-        "Cost",
+-    ])
+-    .style(
+-        Style::default()
+-            .fg(app.theme.accent)
+-            .add_modifier(Modifier::BOLD),
+-    )
+-    .height(1);
+-    let widths = if app.is_narrow() {
+-        [
+-            Constraint::Percentage(24),
+-            Constraint::Percentage(38),
+-            Constraint::Length(9),
+-            Constraint::Length(11),
+-            Constraint::Length(10),
+-        ]
++        .enumerate()
++        .map(|(offset, row)| {
++            let index = start + offset;
++            let selected = index == app.selected_index;
++            let marker = if selected { "▶ " } else { "  " };
++            let source = format!(
++                "{marker}{}",
++                truncate_display_width(&get_client_display_name(&row.source), 24)
++            );
++
++            let mut cells = vec![
++                Cell::from(source).style(value_style(app, selected, app.theme.foreground)),
++                centered_cell(app, selected, row.session_count.to_string(), Color::Cyan),
++                centered_cell(app, selected, row.model_count.to_string(), Color::Cyan),
++            ];
++            if medium {
++                cells.push(centered_cell(
++                    app,
++                    selected,
++                    row.message_count.to_string(),
++                    Color::Cyan,
++                ));
++            }
++            if wide {
++                cells.push(centered_cell(
++                    app,
++                    selected,
++                    row.turn_count.to_string(),
++                    Color::Cyan,
++                ));
++            }
++            cells.push(right_cell(
++                app,
++                selected,
++                format_tokens(row.tokens),
++                Color::Cyan,
++            ));
++            cells.push(right_cell(
++                app,
++                selected,
++                format_cost(row.cost),
++                Color::Green,
++            ));
++            if wide {
++                cells.push(right_cell(
++                    app,
++                    selected,
++                    format_timestamp(row.last_seen, true),
++                    app.theme.muted,
++                ));
++            }
++            Row::new(cells)
++        })
++        .collect::<Vec<_>>();
++
++    let (header, widths) = if wide {
++        (
++            Row::new(vec![
++                "Code Agent / Source",
++                "Sessions",
++                "Models",
++                "Messages",
++                "Turns",
++                "Tokens",
++                "Cost",
++                "Last Active",
++            ]),
++            vec![
++                Constraint::Min(22),
++                Constraint::Length(9),
++                Constraint::Length(7),
++                Constraint::Length(9),
++                Constraint::Length(7),
++                Constraint::Length(12),
++                Constraint::Length(11),
++                Constraint::Length(14),
++            ],
++        )
++    } else if medium {
++        (
++            Row::new(vec![
++                "Code Agent / Source",
++                "Sessions",
++                "Models",
++                "Messages",
++                "Tokens",
++                "Cost",
++            ]),
++            vec![
++                Constraint::Min(20),
++                Constraint::Length(9),
++                Constraint::Length(7),
++                Constraint::Length(9),
++                Constraint::Length(12),
++                Constraint::Length(11),
++            ],
++        )
+     } else {
+-        [
+-            Constraint::Percentage(24),
+-            Constraint::Percentage(42),
+-            Constraint::Length(10),
+-            Constraint::Length(13),
+-            Constraint::Length(12),
+-        ]
++        (
++            Row::new(vec![
++                "Code Agent / Source",
++                "Sessions",
++                "Models",
++                "Tokens",
++                "Cost",
++            ]),
++            vec![
++                Constraint::Min(18),
++                Constraint::Length(8),
++                Constraint::Length(7),
++                Constraint::Length(11),
++                Constraint::Length(10),
++            ],
++        )
+     };
+-    frame.render_widget(Table::new(visible_rows, widths).header(header), inner);
+ 
+-    if rows.len() > visible_height {
+-        let mut state = viewport_scrollbar_state(
+-            rows.len(),
+-            app.issues_viewport.scroll,
+-            visible_height.max(1),
+-        );
+-        frame.render_stateful_widget(
+-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+-                .begin_symbol(Some("▲"))
+-                .end_symbol(Some("▼")),
+-            area.inner(Margin {
+-                horizontal: 0,
+-                vertical: 1,
+-            }),
+-            &mut state,
+-        );
+-    }
++    frame.render_widget(
++        Table::new(table_rows, widths)
++            .header(header_style(app, header))
++            .column_spacing(1),
++        inner,
++    );
++    render_scrollbar(
++        frame,
++        area,
++        rows.len(),
++        visible_height,
++        app.scroll_offset,
++    );
+ }
+ 
+-fn harness_coverage(app: &App) -> BTreeMap<String, HarnessCoverage> {
+-    let mut harnesses = BTreeMap::<String, HarnessCoverage>::new();
+-    for day in &app.data.daily {
+-        for (harness, source) in &day.source_breakdown {
+-            let entry = harnesses.entry(harness.clone()).or_default();
+-            entry.tokens = entry
+-                .tokens
+-                .checked_add(source.tokens.total())
+-                .expect("harness coverage token total exceeds u64::MAX");
+-            entry.cost += source.cost;
+-            if source.tokens.total() > 0 {
+-                entry.active_days.insert(day.date);
+-            }
+-            for (model_key, model) in &source.models {
+-                entry.models.insert(if model.color_key.is_empty() {
+-                    model_key.clone()
+-                } else {
+-                    model.color_key.clone()
+-                });
+-            }
+-        }
++fn render_session_detail(frame: &mut Frame, app: &mut App, area: Rect) {
++    let source = app.selected_session_source().unwrap_or_default().to_string();
++    let display_source = get_client_display_name(&source);
++    let rows = app.get_sorted_sessions();
++    let title = format!("Sessions / {display_source}");
++    let block = panel_block(app, &title).title_top(
++        Line::from(Span::styled(
++            format!(" {} sessions ", rows.len()),
++            Style::default().fg(app.theme.muted),
++        ))
++        .right_aligned(),
++    );
++    let inner = block.inner(area);
++    frame.render_widget(block, area);
++    if inner.is_empty() {
++        return;
+     }
+-    harnesses
++
++    if rows.is_empty() {
++        app.set_max_visible_items(1);
++        frame.render_widget(
++            Paragraph::new("No sessions available for this source")
++                .style(Style::default().fg(app.theme.muted))
++                .alignment(Alignment::Center),
++            inner,
++        );
++        return;
++    }
++
++    let visible_height = inner.height.saturating_sub(1) as usize;
++    app.set_max_visible_items(visible_height.max(1));
++    let start = app.scroll_offset.min(rows.len());
++    let end = start.saturating_add(visible_height).min(rows.len());
++    let wide = inner.width >= 128;
++    let medium = inner.width >= 90;
++
++    let table_rows = rows[start..end]
++        .iter()
++        .enumerate()
++        .map(|(offset, session)| {
++            let index = start + offset;
++            let selected = index == app.selected_index;
++            let marker = if selected { "▶ " } else { "  " };
++            let session_id = format!(
++                "{marker}{}",
++                truncate_display_width(&session.session_id, 30)
++            );
++            let workspace = session
++                .workspace_label
++                .as_deref()
++                .or(session.workspace_key.as_deref())
++                .unwrap_or("—");
++            let models = session.models.iter().cloned().collect::<Vec<_>>().join(", ");
++
++            let mut cells = vec![
++                Cell::from(session_id).style(value_style(app, selected, app.theme.foreground)),
++                Cell::from(truncate_display_width(workspace, 26))
++                    .style(value_style(app, selected, app.theme.muted)),
++                Cell::from(truncate_display_width(&models, 34))
++                    .style(value_style(app, selected, app.theme.foreground)),
++            ];
++            if medium {
++                cells.push(centered_cell(
++                    app,
++                    selected,
++                    session.message_count.to_string(),
++                    Color::Cyan,
++                ));
++                cells.push(centered_cell(
++                    app,
++                    selected,
++                    session.turn_count.to_string(),
++                    Color::Cyan,
++                ));
++            }
++            cells.push(right_cell(
++                app,
++                selected,
++                format_tokens(session.tokens.total()),
++                Color::Cyan,
++            ));
++            if medium {
++                cells.push(right_cell(
++                    app,
++                    selected,
++                    format_cost(session.cost),
++                    Color::Green,
++                ));
++            }
++            if wide {
++                cells.push(right_cell(
++                    app,
++                    selected,
++                    format_timestamp(session.first_seen, true),
++                    app.theme.muted,
++                ));
++            }
++            cells.push(right_cell(
++                app,
++                selected,
++                format_timestamp(session.last_seen, true),
++                app.theme.muted,
++            ));
++            Row::new(cells)
++        })
++        .collect::<Vec<_>>();
++
++    let (header, widths) = if wide {
++        (
++            Row::new(vec![
++                "Session",
++                "Workspace",
++                "Models",
++                "Messages",
++                "Turns",
++                "Tokens",
++                "Cost",
++                "First Seen",
++                "Last Active",
++            ]),
++            vec![
++                Constraint::Min(18),
++                Constraint::Length(22),
++                Constraint::Min(22),
++                Constraint::Length(9),
++                Constraint::Length(7),
++                Constraint::Length(12),
++                Constraint::Length(11),
++                Constraint::Length(14),
++                Constraint::Length(14),
++            ],
++        )
++    } else if medium {
++        (
++            Row::new(vec![
++                "Session",
++                "Workspace",
++                "Models",
++                "Messages",
++                "Turns",
++                "Tokens",
++                "Cost",
++                "Last Active",
++            ]),
++            vec![
++                Constraint::Min(18),
++                Constraint::Length(20),
++                Constraint::Min(20),
++                Constraint::Length(9),
++                Constraint::Length(7),
++                Constraint::Length(12),
++                Constraint::Length(11),
++                Constraint::Length(14),
++            ],
++        )
++    } else {
++        (
++            Row::new(vec!["Session", "Workspace", "Models", "Tokens", "Last Active"]),
++            vec![
++                Constraint::Min(16),
++                Constraint::Length(18),
++                Constraint::Min(18),
++                Constraint::Length(11),
++                Constraint::Length(14),
++            ],
++        )
++    };
++
++    frame.render_widget(
++        Table::new(table_rows, widths)
++            .header(header_style(app, header))
++            .column_spacing(1),
++        inner,
++    );
++    render_scrollbar(
++        frame,
++        area,
++        rows.len(),
++        visible_height,
++        app.scroll_offset,
++    );
+ }
+ 
+-fn render_harness_health(frame: &mut Frame, app: &App, area: Rect) {
+-    let block = panel_block(app, "Harnesses & Source Health");
++fn header_style<'a>(app: &App, header: Row<'a>) -> Row<'a> {
++    header
++        .style(
++            Style::default()
++                .fg(app.theme.accent)
++                .add_modifier(Modifier::BOLD),
++        )
++        .height(1)
++}
++
++fn value_style(app: &App, selected: bool, color: Color) -> Style {
++    if selected {
++        Style::default()
++            .fg(app.theme.background)
++            .bg(app.theme.accent)
++            .add_modifier(Modifier::BOLD)
++    } else {
++        Style::default().fg(color)
++    }
++}
++
++fn centered_cell(app: &App, selected: bool, value: String, color: Color) -> Cell<'static> {
++    Cell::from(Line::from(value).centered()).style(value_style(app, selected, color))
++}
++
++fn right_cell(app: &App, selected: bool, value: String, color: Color) -> Cell<'static> {
++    Cell::from(Line::from(value).right_aligned()).style(value_style(app, selected, color))
++}
++
++fn render_source_health(frame: &mut Frame, app: &App, area: Rect) {
++    let block = panel_block(app, "Source Health");
+     let inner = block.inner(area);
+     frame.render_widget(block, area);
+     if inner.is_empty() {
+@@ -298,7 +664,7 @@
+             ),
+         ]),
+     ];
+ 
+     if !health.issues.is_empty() {
+@@ -316,49 +682,9 @@
+             .collect::<Vec<_>>()
+             .join(", ");
+         lines.push(Line::from(vec![
+-            Span::styled(
+-                "Affected source groups: ",
+-                Style::default().fg(app.theme.muted),
+-            ),
++            Span::styled("Affected: ", Style::default().fg(app.theme.muted)),
+             Span::styled(labels, Style::default().fg(Color::Yellow)),
+         ]));
+     }
+ 
+-    let mut harnesses = harness_coverage(app).into_iter().collect::<Vec<_>>();
+-    harnesses.sort_by(|(left_name, left), (right_name, right)| {
+-        right
+-            .tokens
+-            .cmp(&left.tokens)
+-            .then_with(|| right.cost.total_cmp(&left.cost))
+-            .then_with(|| left_name.cmp(right_name))
+-    });
+-    for (harness, coverage) in harnesses {
+-        lines.push(Line::from(vec![
+-            Span::styled(
+-                format!("{}  ", get_client_display_name(&harness)),
+-                Style::default()
+-                    .fg(app.theme.foreground)
+-                    .add_modifier(Modifier::BOLD),
+-            ),
+-            Span::styled(
+-                format!("{} models", coverage.models.len()),
+-                Style::default().fg(app.theme.muted),
+-            ),
+-            Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
+-            Span::styled(
+-                format!("{} active days", coverage.active_days.len()),
+-                Style::default().fg(app.theme.muted),
+-            ),
+-            Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
+-            Span::styled(
+-                format_tokens(coverage.tokens),
+-                Style::default().fg(Color::Cyan),
+-            ),
+-            Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
+-            Span::styled(
+-                format_cost(coverage.cost),
+-                Style::default().fg(Color::Green),
+-            ),
+-        ]));
+-    }
+-
+     frame.render_widget(
+         Paragraph::new(
+             lines
+@@ -370,6 +696,55 @@
+     );
+ }
+ 
++fn render_scrollbar(
++    frame: &mut Frame,
++    area: Rect,
++    total: usize,
++    visible: usize,
++    scroll: usize,
++) {
++    if total <= visible || visible == 0 {
++        return;
++    }
++
++    let mut state = viewport_scrollbar_state(total, scroll, visible);
++    frame.render_stateful_widget(
++        Scrollbar::new(ScrollbarOrientation::VerticalRight)
++            .begin_symbol(Some("▲"))
++            .end_symbol(Some("▼")),
++        area.inner(Margin {
++            horizontal: 0,
++            vertical: 1,
++        }),
++        &mut state,
++    );
++}
++
++fn format_timestamp(timestamp_ms: i64, compact: bool) -> String {
++    if timestamp_ms <= 0 {
++        return "—".to_string();
++    }
++    let Some(datetime) = Local.timestamp_millis_opt(timestamp_ms).single() else {
++        return "—".to_string();
++    };
++    if compact {
++        datetime.format("%m-%d %H:%M").to_string()
++    } else {
++        datetime.format("%Y-%m-%d %H:%M").to_string()
++    }
++}
++
+ fn format_bytes(bytes: u64) -> String {
+     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+     let mut value = bytes as f64;
+@@ -389,9 +764,10 @@
+ mod tests {
+     use super::*;
+ 
+     #[test]
+-    fn combined_harness_names_are_displayed_individually() {
+-        assert_eq!(display_harnesses("claude, codex"), "Claude, Codex");
++    fn invalid_or_unknown_timestamp_uses_placeholder() {
++        assert_eq!(format_timestamp(0, false), "—");
++        assert_eq!(format_timestamp(i64::MAX, false), "—");
+     }
+ 
+     #[test]
+--- a/crates/tokscale-cli/src/tui/ui/footer.rs
++++ b/crates/tokscale-cli/src/tui/ui/footer.rs
+@@ -138,7 +138,7 @@
+ 
+ fn sort_label(app: &App, field: SortField) -> &'static str {
+     match (app.current_tab, field) {
+-        (Tab::Issues, SortField::Date) => "Sessions",
++        (Tab::Issues, SortField::Date) => "Last active",
+         (_, SortField::Date) => "Date",
+         (_, SortField::Cost) => "Cost",
+         (_, SortField::Tokens) => "Tokens",
+@@ -190,15 +190,12 @@
+         ),
+         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
+         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
+-        Tab::Issues => {
+-            let links = app
+-                .data
+-                .models
+-                .iter()
+-                .map(|model| u64::from(model.session_count))
+-                .sum::<u64>();
+-            format!(" ({links} model-session links)")
+-        }
++        Tab::Issues if app.is_session_detail_active() => {
++            format!(" ({} sessions)", app.get_sorted_sessions().len())
++        }
++        Tab::Issues => format!(
++            " ({} sources · {} sessions)",
++            app.get_sorted_session_sources().len(),
++            app.data.sessions.len()
++        ),
+         Tab::Stats | Tab::Usage => String::new(),
+     }
+ }
+@@ -212,15 +209,27 @@
+     let is_very_narrow = app.is_very_narrow();
+ 
+     if app.current_tab == Tab::Issues {
++        let action = if app.is_session_detail_active() {
++            if is_very_narrow {
++                "esc"
++            } else {
++                "[esc:back]"
++            }
++        } else if is_very_narrow {
++            "↵"
++        } else {
++            "[enter:sessions]"
++        };
+         let text = if is_very_narrow {
+-            "↑↓·d/t/c·s·g·r·←→·q".to_string()
++            format!("↑↓·d/t/c·{action}·s·r·←→·q")
+         } else {
+             format!(
+-                "↑↓ scroll • [d/t/c:sort coverage] • [s:sources] • [g:{}] • [r:refresh local] • ←→/tab view • e • q",
+-                app.group_by.borrow()
++                "↑↓ scroll • [d/t/c:sort] • {action} • [s:sources] • [r:refresh local] • ←→/tab view • e • q"
+             )
+         };
+         return Line::from(Span::styled(text, Style::default().fg(app.theme.muted)));
+@@ -605,7 +614,7 @@
+         assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
+         assert_eq!(
+             current_count_label(&make_app_on(Tab::Issues)),
+-            " (0 model-session links)"
++            " (0 sources · 0 sessions)"
+         );
+         assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
+     }
+@@ -614,7 +623,7 @@
+     fn sessions_tab_renames_the_date_sort_dimension() {
+         let app = make_app_on(Tab::Issues);
+ 
+-        assert_eq!(sort_label(&app, SortField::Date), "Sessions");
++        assert_eq!(sort_label(&app, SortField::Date), "Last active");
+         assert_eq!(sort_label(&app, SortField::Cost), "Cost");
+     }
