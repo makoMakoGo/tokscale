@@ -91,8 +91,13 @@ enum BackgroundLoad {
     },
 }
 
-fn refresh_session_data(loader: &DataLoader, clients: &[ClientId]) {
-    if let Err(error) = session_data::refresh(loader, clients) {
+fn refresh_session_data(
+    loader: &DataLoader,
+    clients: &[ClientId],
+    source_digest: u64,
+    force: bool,
+) {
+    if let Err(error) = session_data::refresh_if_needed(loader, clients, source_digest, force) {
         tracing::warn!(error = %error, "failed to refresh TUI Sessions projection");
     }
 }
@@ -109,12 +114,15 @@ fn load_background_data(
         .refresh_source_inventory_signature()?
         .process_digest();
     if !force && last_digest == Some(digest) {
-        refresh_session_data(loader, clients);
+        refresh_session_data(loader, clients, digest, force);
         return Ok(BackgroundLoad::Unchanged);
     }
 
     let result = loader.execute_with_diagnostics(prepared, group_by);
-    refresh_session_data(loader, clients);
+    let session_digest = result
+        .as_ref()
+        .map_or(digest, |result| result.source_digest);
+    refresh_session_data(loader, clients, session_digest, force);
     result.map(|result| BackgroundLoad::Loaded {
         data: Box::new(result.data),
         digest: result.source_digest,

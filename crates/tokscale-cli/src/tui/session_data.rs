@@ -70,17 +70,37 @@ pub(crate) enum SessionProjectionStatus {
     },
 }
 
+#[derive(Debug)]
+struct SessionProjectionUpdate {
+    snapshot: SessionSnapshot,
+    source_digest: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionRefreshOutcome {
+    Reused,
+    Refreshed,
+}
+
 #[derive(Debug, Default)]
 struct SessionProjection {
     snapshot: SessionSnapshot,
     status: SessionProjectionStatus,
+    source_digest: Option<u64>,
 }
 
 impl SessionProjection {
-    fn apply_refresh(&mut self, result: Result<SessionSnapshot>) -> Result<()> {
+    fn should_refresh(&self, source_digest: u64, force: bool) -> bool {
+        force
+            || self.source_digest != Some(source_digest)
+            || !matches!(self.status, SessionProjectionStatus::Ready)
+    }
+
+    fn apply_refresh(&mut self, result: Result<SessionProjectionUpdate>) -> Result<()> {
         match result {
-            Ok(snapshot) => {
-                self.snapshot = snapshot;
+            Ok(update) => {
+                self.snapshot = update.snapshot;
+                self.source_digest = Some(update.source_digest);
                 self.status = SessionProjectionStatus::Ready;
                 Ok(())
             }
@@ -174,15 +194,43 @@ pub(crate) fn projection_status() -> SessionProjectionStatus {
         .clone()
 }
 
-pub(crate) fn refresh(loader: &DataLoader, clients: &[ClientId]) -> Result<()> {
-    let result = build_snapshot(loader, clients);
-    projection_store()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .apply_refresh(result)
+pub(crate) fn refresh_if_needed(
+    loader: &DataLoader,
+    clients: &[ClientId],
+    source_digest: u64,
+    force: bool,
+) -> Result<SessionRefreshOutcome> {
+    refresh_projection_with(projection_store(), source_digest, force, || {
+        build_snapshot(loader, clients)
+    })
 }
 
-fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionSnapshot> {
+fn refresh_projection_with<F>(
+    store: &RwLock<SessionProjection>,
+    source_digest: u64,
+    force: bool,
+    build: F,
+) -> Result<SessionRefreshOutcome>
+where
+    F: FnOnce() -> Result<SessionProjectionUpdate>,
+{
+    let should_refresh = store
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .should_refresh(source_digest, force);
+    if !should_refresh {
+        return Ok(SessionRefreshOutcome::Reused);
+    }
+
+    let result = build();
+    store
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .apply_refresh(result)?;
+    Ok(SessionRefreshOutcome::Refreshed)
+}
+
+fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionProjectionUpdate> {
     let home_override = loader
         .home_dir
         .as_ref()
@@ -216,6 +264,7 @@ fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionSn
     let report = tokio::runtime::Runtime::new()?
         .block_on(tokscale_core::parse_local_unified_messages(options))
         .map_err(anyhow::Error::new)?;
+    let source_digest = report.metadata.source_inventory_signature.process_digest();
     let sessions = aggregate_sessions(report.data);
     let source_space = collect_source_space(
         &home,
@@ -225,9 +274,12 @@ fn build_snapshot(loader: &DataLoader, clients: &[ClientId]) -> Result<SessionSn
         &scanner_settings,
     )?;
 
-    Ok(SessionSnapshot {
-        sessions,
-        source_space,
+    Ok(SessionProjectionUpdate {
+        snapshot: SessionSnapshot {
+            sessions,
+            source_space,
+        },
+        source_digest,
     })
 }
 
@@ -393,14 +445,18 @@ fn is_database_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
-    fn snapshot_with_session(session_id: &str) -> SessionSnapshot {
-        SessionSnapshot {
-            sessions: vec![SessionEntry {
-                session_id: session_id.to_string(),
-                ..SessionEntry::default()
-            }],
-            source_space: BTreeMap::new(),
+    fn projection_update(session_id: &str, source_digest: u64) -> SessionProjectionUpdate {
+        SessionProjectionUpdate {
+            snapshot: SessionSnapshot {
+                sessions: vec![SessionEntry {
+                    session_id: session_id.to_string(),
+                    ..SessionEntry::default()
+                }],
+                source_space: BTreeMap::new(),
+            },
+            source_digest,
         }
     }
 
@@ -418,11 +474,17 @@ mod tests {
                 diagnostic: "scanner failed".to_string(),
             }
         );
+        assert_eq!(projection.source_digest, None);
+        assert!(projection.should_refresh(11, false));
 
         projection
-            .apply_refresh(Ok(snapshot_with_session("session-1")))
+            .apply_refresh(Ok(projection_update("session-1", 11)))
             .expect("a successful refresh should install its snapshot");
         assert_eq!(projection.status, SessionProjectionStatus::Ready);
+        assert_eq!(projection.source_digest, Some(11));
+        assert!(!projection.should_refresh(11, false));
+        assert!(projection.should_refresh(12, false));
+        assert!(projection.should_refresh(11, true));
 
         projection
             .apply_refresh(Err(anyhow::anyhow!("database locked")))
@@ -435,11 +497,45 @@ mod tests {
         );
         assert_eq!(projection.snapshot.sessions.len(), 1);
         assert_eq!(projection.snapshot.sessions[0].session_id, "session-1");
+        assert_eq!(projection.source_digest, Some(11));
+        assert!(projection.should_refresh(11, false));
 
         projection
-            .apply_refresh(Ok(snapshot_with_session("session-2")))
+            .apply_refresh(Ok(projection_update("session-2", 22)))
             .expect("the next successful refresh should recover the projection");
         assert_eq!(projection.status, SessionProjectionStatus::Ready);
+        assert_eq!(projection.source_digest, Some(22));
         assert_eq!(projection.snapshot.sessions[0].session_id, "session-2");
+    }
+
+    #[test]
+    fn successful_refresh_records_its_actual_digest_and_reuses_it() {
+        let store = RwLock::new(SessionProjection::default());
+        let build_count = Cell::new(0);
+
+        let first = refresh_projection_with(&store, 40, false, || {
+            build_count.set(build_count.get() + 1);
+            Ok(projection_update("session-1", 41))
+        })
+        .expect("a pending projection should be initialized");
+        assert_eq!(first, SessionRefreshOutcome::Refreshed);
+        assert_eq!(build_count.get(), 1);
+
+        let second = refresh_projection_with(&store, 41, false, || {
+            build_count.set(build_count.get() + 1);
+            Ok(projection_update("unexpected", 41))
+        })
+        .expect("a matching ready projection should be reusable");
+        assert_eq!(second, SessionRefreshOutcome::Reused);
+        assert_eq!(build_count.get(), 1);
+        assert_eq!(
+            store
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .snapshot
+                .sessions[0]
+                .session_id,
+            "session-1"
+        );
     }
 }
