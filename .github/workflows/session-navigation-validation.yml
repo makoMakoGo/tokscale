@@ -82,6 +82,7 @@ jobs:
           from pathlib import Path
           import re
 
+          # Close the generated Footer match arm.
           path = Path('crates/tokscale-cli/src/tui/ui/footer.rs')
           text = path.read_text()
           pattern = re.compile(
@@ -95,6 +96,87 @@ jobs:
           if replacements != 1:
               raise SystemExit('could not repair generated footer match arm')
           path.write_text(text)
+
+          # The weekday aggregate moved out of Hourly Profile.
+          path = Path('crates/tokscale-cli/src/tui/data/mod.rs')
+          text = path.read_text()
+          old = 'aggregate_by_period, aggregate_by_weekday, build_period_usage, find_peak_hour,'
+          if old not in text:
+              raise SystemExit('could not remove obsolete weekday re-export')
+          path.write_text(text.replace(
+              old,
+              'aggregate_by_period, build_period_usage, find_peak_hour,',
+              1,
+          ))
+
+          # This test is self-contained after the profile simplification.
+          path = Path('crates/tokscale-cli/src/tui/ui/hourly_profile.rs')
+          text = path.read_text()
+          old = '#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]'
+          if old not in text:
+              raise SystemExit('could not remove obsolete hourly test import')
+          path.write_text(text.replace(
+              old,
+              '#[cfg(test)]\nmod tests {\n    #[test]',
+              1,
+          ))
+
+          # Sessions is now a selectable list, not the old text viewport.
+          path = Path('crates/tokscale-cli/src/tui/app.rs')
+          text = path.read_text()
+          obsolete_test = re.compile(
+              r'\n    #\[test\]\n'
+              r'    fn issues_tab_key_scrolls_text_viewport_without_table_selection\(\) \{.*?'
+              r'\n    \}\n',
+              flags=re.DOTALL,
+          )
+          text, replacements = obsolete_test.subn('\n', text, count=1)
+          if replacements != 1:
+              raise SystemExit('could not remove obsolete Issues viewport test')
+          signature = 'pub fn get_sorted_sessions(&self) -> Vec<&SessionUsage> {'
+          if signature not in text:
+              raise SystemExit('could not update owned session rows')
+          text = text.replace(
+              signature,
+              'pub fn get_sorted_sessions(&self) -> Vec<SessionUsage> {',
+              1,
+          )
+          collect_pattern = re.compile(
+              r'(\.filter\(\|session\| session\.source == source\)\s*)'
+              r'(\.collect::<Vec<_>>\(\);)'
+          )
+          text, replacements = collect_pattern.subn(
+              r'\1.cloned()\n            \2',
+              text,
+              count=1,
+          )
+          if replacements != 1:
+              raise SystemExit('could not clone sorted session rows')
+          path.write_text(text)
+
+          # A cache-overflow test constructs the DTO directly.
+          path = Path('crates/tokscale-cli/src/tui/cache.rs')
+          text = path.read_text()
+          function_at = text.index(
+              'fn test_load_cache_misses_when_agent_token_normalization_overflows()'
+          )
+          daily_at = text.index('daily: Vec::new(),', function_at)
+          line_at = text.rfind('\n', 0, daily_at) + 1
+          indent = text[line_at:daily_at]
+          text = text[:line_at] + indent + 'sessions: Vec::new(),\n' + text[line_at:]
+          path.write_text(text)
+
+          # Keep the dynamic title alive for the whole Block lifetime.
+          path = Path('crates/tokscale-cli/src/tui/ui/issues.rs')
+          text = path.read_text()
+          old = 'let block = panel_block(app, &format!("{source} Sessions")).title_top('
+          if old not in text:
+              raise SystemExit('could not bind the Sessions detail title')
+          path.write_text(text.replace(
+              old,
+              'let title = format!("{source} Sessions");\n    let block = panel_block(app, &title).title_top(',
+              1,
+          ))
           PY
           fi
           rm -f .github/workflows/prepare-session-navigation.yml
