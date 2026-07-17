@@ -123,9 +123,35 @@ jobs:
         if: steps.format.outcome == 'failure'
         run: exit 1
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        id: clippy
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | tee session-navigation-clippy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: session-navigation-clippy-log
+          path: session-navigation-clippy.log
+          if-no-files-found: warn
+      - name: Stop after Clippy failure
+        if: steps.clippy.outcome == 'failure'
+        run: exit 1
       - name: Test
-        run: cargo test --workspace --all-features
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test --workspace --all-features 2>&1 | tee session-navigation-test.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: session-navigation-test-log
+          path: session-navigation-test.log
+          if-no-files-found: warn
+      - name: Stop after test failure
+        if: steps.test.outcome == 'failure'
+        run: exit 1
       - name: Commit validated implementation
         run: |
           git config user.name "OpenAI Codex"
