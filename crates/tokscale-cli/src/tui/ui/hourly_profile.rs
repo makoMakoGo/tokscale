@@ -5,6 +5,10 @@ use super::widgets::{format_cost, format_tokens, viewport_scrollbar_state};
 use crate::tui::app::App;
 use crate::tui::data::{aggregate_by_period, find_peak_hour};
 
+fn profile_bar_width(area_width: u16) -> usize {
+    (area_width as usize).saturating_sub(36).min(80)
+}
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -62,7 +66,7 @@ pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line
     let total_cost = app.data.total_cost;
     let periods = aggregate_by_period(hourly);
     let peak_hour = find_peak_hour(hourly);
-    let bar_width = (area_width as usize).saturating_sub(36).clamp(4, 80);
+    let bar_width = profile_bar_width(area_width);
 
     let min_date = hourly.iter().map(|entry| entry.datetime.date()).min();
     let max_date = hourly.iter().map(|entry| entry.datetime.date()).max();
@@ -177,11 +181,12 @@ pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::profile_bar_width;
 
     #[test]
-    fn profile_bar_keeps_a_minimum_width() {
-        let width = (20usize).saturating_sub(36).clamp(4, 80);
-        assert_eq!(width, 4);
+    fn profile_bar_does_not_overflow_a_narrow_view() {
+        assert_eq!(profile_bar_width(20), 0);
+        assert_eq!(profile_bar_width(40), 4);
+        assert_eq!(profile_bar_width(200), 80);
     }
 }

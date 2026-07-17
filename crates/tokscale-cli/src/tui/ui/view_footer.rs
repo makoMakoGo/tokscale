@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::widgets::{format_cost, format_tokens};
 use crate::tui::app::{App, SortField, Tab};
@@ -30,6 +30,7 @@ fn row(area: Rect, offset: u16) -> Rect {
 }
 
 fn clear_row(frame: &mut Frame, app: &App, area: Rect) {
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default().style(Style::default().bg(app.theme.background)),
         area,
@@ -160,5 +161,60 @@ fn session_sort_label(state: &ViewState, field: SortField) -> &'static str {
             SortField::Tokens => "Sessions",
             SortField::Cost => "Space",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn make_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.current_tab = Tab::Issues;
+        app.terminal_width = width;
+        app
+    }
+
+    #[test]
+    fn sessions_footer_erases_the_removed_issues_copy() {
+        let width = 140;
+        let height = 5;
+        let mut app = make_app(width);
+        let mut state = ViewState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, &mut state, frame.area()))
+            .unwrap();
+
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("enter:sessions"));
+        assert!(!screen.contains("sort coverage"));
+        assert!(!screen.contains("model-session links"));
     }
 }

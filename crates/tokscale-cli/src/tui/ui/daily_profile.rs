@@ -2,9 +2,25 @@ use chrono::Datelike;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use super::widgets::format_tokens;
 use crate::tui::app::App;
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProfileLayout {
+    show_values: bool,
+    bar_width: usize,
+}
+
+fn profile_layout(width: u16) -> ProfileLayout {
+    let show_values = width >= 30;
+    let fixed_width = if show_values { 21 } else { 12 };
+    ProfileLayout {
+        show_values,
+        bar_width: (width as usize).saturating_sub(fixed_width).min(28),
+    }
+}
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let mut totals = [0u64; 7];
@@ -65,7 +81,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let bar_width = (inner.width as usize).saturating_sub(22).clamp(1, 28);
+    let profile_layout = profile_layout(inner.width);
     let lines = WEEKDAYS
         .iter()
         .enumerate()
@@ -73,11 +89,12 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             let value = totals[index];
             let percentage = value as f64 / total_tokens as f64 * 100.0;
             let filled = if max_tokens > 0 {
-                (value as f64 / max_tokens as f64 * bar_width as f64).round() as usize
+                (value as f64 / max_tokens as f64 * profile_layout.bar_width as f64).round()
+                    as usize
             } else {
                 0
             }
-            .min(bar_width);
+            .min(profile_layout.bar_width);
             let label_style = if index == best_index {
                 Style::default()
                     .fg(Color::Yellow)
@@ -85,18 +102,25 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(app.theme.foreground)
             };
-            Line::from(vec![
-                Span::styled(format!(" {label:<3} "), label_style),
+            let mut spans = vec![Span::styled(format!(" {label:<3} "), label_style)];
+            if profile_layout.show_values {
+                spans.push(Span::styled(
+                    format!("{:>8} ", format_tokens(value)),
+                    Style::default().fg(app.theme.foreground),
+                ));
+            }
+            spans.extend([
                 Span::styled("█".repeat(filled), Style::default().fg(Color::Green)),
                 Span::styled(
-                    "░".repeat(bar_width.saturating_sub(filled)),
+                    "░".repeat(profile_layout.bar_width.saturating_sub(filled)),
                     app.theme.subtle_text_style(),
                 ),
                 Span::styled(
-                    format!("  {:>5.1}%", percentage),
+                    format!(" {:>5.1}%", percentage),
                     Style::default().fg(app.theme.muted),
                 ),
-            ])
+            ]);
+            Line::from(spans)
         })
         .take(inner.height as usize)
         .collect::<Vec<_>>();
@@ -106,10 +130,28 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::WEEKDAYS;
+    use super::{profile_layout, WEEKDAYS};
 
     #[test]
     fn profile_covers_every_weekday() {
         assert_eq!(WEEKDAYS.len(), 7);
+    }
+
+    #[test]
+    fn wide_profile_reserves_aligned_values_and_caps_the_bar() {
+        let layout = profile_layout(80);
+
+        assert!(layout.show_values);
+        assert_eq!(layout.bar_width, 28);
+        assert!(21 + layout.bar_width <= 80);
+    }
+
+    #[test]
+    fn compact_profile_drops_values_before_squeezing_labels_or_percentages() {
+        let layout = profile_layout(29);
+
+        assert!(!layout.show_values);
+        assert_eq!(layout.bar_width, 17);
+        assert_eq!(12 + layout.bar_width, 29);
     }
 }

@@ -8,6 +8,9 @@ use super::widgets::{format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::App;
 use crate::tui::data::TokenBreakdown;
 
+const TWO_COLUMN_MIN_WIDTH: u16 = 84;
+const METRIC_LABEL_WIDTH: usize = 20;
+
 #[derive(Debug, Clone, Default)]
 struct Aggregate {
     tokens: u64,
@@ -25,8 +28,7 @@ struct SnapshotData {
 }
 
 pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    super::overview::render(frame, app, area);
-    let snapshot_area = snapshot_area(area);
+    let snapshot_area = super::overview::render(frame, app, area);
     if snapshot_area.is_empty() {
         return;
     }
@@ -48,15 +50,25 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if inner.width >= 84 {
+    if inner.width >= TWO_COLUMN_MIN_WIDTH {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+            .constraints([
+                Constraint::Percentage(48),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
             .split(inner);
         render_left(frame, app, columns[0], &data);
-        render_right(frame, app, columns[1], &data);
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(app.theme.border)),
+            columns[1],
+        );
+        render_right(frame, app, columns[2], &data);
     } else {
-        let left = left_lines(app, &data);
+        let left = left_lines(app, &data, inner.width as usize, false);
         let right = right_lines(app, &data, inner.width as usize);
         let lines = left
             .into_iter()
@@ -66,22 +78,6 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), inner);
     }
-}
-
-fn snapshot_area(area: Rect) -> Rect {
-    let chart_height = if area.height >= 24 {
-        (area.height * 2 / 5).max(8)
-    } else {
-        (area.height / 2).max(6)
-    };
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(chart_height.min(area.height)),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(area)[2]
 }
 
 fn collect_snapshot(app: &App) -> SnapshotData {
@@ -128,7 +124,7 @@ fn collect_snapshot(app: &App) -> SnapshotData {
 fn render_left(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     frame.render_widget(
         Paragraph::new(
-            left_lines(app, data)
+            left_lines(app, data, area.width as usize, area.height >= 14)
                 .into_iter()
                 .take(area.height as usize)
                 .collect::<Vec<_>>(),
@@ -149,7 +145,7 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     );
 }
 
-fn left_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
+fn left_lines(app: &App, data: &SnapshotData, width: usize, spacious: bool) -> Vec<Line<'static>> {
     let favorite_model = data
         .models
         .iter()
@@ -174,8 +170,9 @@ fn left_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
         .unwrap_or_else(|| "—".to_string());
     let health = health_percentage(app);
     let health_color = health_color(app);
+    let favorite_width = width.saturating_sub(METRIC_LABEL_WIDTH).clamp(1, 28);
 
-    vec![
+    let mut lines = vec![
         metric_line(
             app,
             "Total Tokens",
@@ -188,6 +185,11 @@ fn left_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
             format_tokens(data.peak_daily_tokens),
             Color::Cyan,
         ),
+    ];
+    if spacious {
+        lines.push(Line::default());
+    }
+    lines.extend([
         metric_line(
             app,
             "Total Cost",
@@ -200,6 +202,11 @@ fn left_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
             format_cost(data.peak_daily_cost),
             Color::Green,
         ),
+    ]);
+    if spacious {
+        lines.push(Line::default());
+    }
+    lines.extend([
         metric_line(
             app,
             "Source Data",
@@ -207,6 +214,11 @@ fn left_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
             app.theme.foreground,
         ),
         metric_line(app, "Source Health", health, health_color),
+    ]);
+    if spacious {
+        lines.push(Line::default());
+    }
+    lines.extend([
         metric_line(
             app,
             "Models Used",
@@ -216,7 +228,7 @@ fn left_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
         metric_line(
             app,
             "Favorite Model",
-            truncate(favorite_model, 28),
+            truncate(favorite_model, favorite_width),
             app.model_color(favorite_model),
         ),
         metric_line(
@@ -228,7 +240,7 @@ fn left_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
         metric_line(
             app,
             "Favorite Harness",
-            truncate(&favorite_harness, 28),
+            truncate(&favorite_harness, favorite_width),
             app.theme.foreground,
         ),
         metric_line(
@@ -237,7 +249,8 @@ fn left_lines(app: &App, data: &SnapshotData) -> Vec<Line<'static>> {
             data.active_days.to_string(),
             Color::Cyan,
         ),
-    ]
+    ]);
+    lines
 }
 
 fn right_lines(app: &App, data: &SnapshotData, width: usize) -> Vec<Line<'static>> {
@@ -266,7 +279,7 @@ fn right_lines(app: &App, data: &SnapshotData, width: usize) -> Vec<Line<'static
             app.theme.metric_output_style(),
         ),
     ];
-    let bar_width = width.saturating_sub(35).clamp(1, 30);
+    let bar_width = width.saturating_sub(28).clamp(1, 32);
     lines.extend(buckets.into_iter().map(|(label, value, style)| {
         let percentage = if total > 0 {
             value as f64 / total as f64 * 100.0
@@ -338,7 +351,10 @@ fn right_lines(app: &App, data: &SnapshotData, width: usize) -> Vec<Line<'static
 
 fn metric_line(app: &App, label: &str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:<20}"), Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!("{label:<METRIC_LABEL_WIDTH$}"),
+            Style::default().fg(app.theme.muted),
+        ),
         Span::styled(value, Style::default().fg(color)),
     ])
 }
@@ -413,5 +429,106 @@ fn truncate(value: &str, max_chars: usize) -> String {
         "…".to_string()
     } else {
         format!("{}…", value.chars().take(max_chars - 1).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use ratatui::{backend::TestBackend, Terminal};
+    use unicode_width::UnicodeWidthStr;
+
+    fn make_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.terminal_width = width;
+        app
+    }
+
+    fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn line_width(line: &Line<'_>) -> usize {
+        line.spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum()
+    }
+
+    #[test]
+    fn overview_render_clears_the_replaced_dashboard_before_drawing_snapshot() {
+        let width = 120;
+        let height = 30;
+        let mut app = make_app(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let stale = vec![Line::from("X".repeat(width as usize)); height as usize];
+                frame.render_widget(Paragraph::new(stale), area);
+                render(frame, &mut app, area);
+            })
+            .unwrap();
+
+        let screen = buffer_lines(&terminal).join("\n");
+        assert!(screen.contains("Snapshot"));
+        assert!(!screen.contains('X'), "stale dashboard symbols remained");
+        assert!(!screen.contains("Token Profile"));
+        assert!(!screen.contains("Agent profiles"));
+    }
+
+    #[test]
+    fn wide_snapshot_has_one_internal_divider_and_aligned_content() {
+        let width = 120;
+        let height = 30;
+        let mut app = make_app(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, frame.area()))
+            .unwrap();
+
+        let lines = buffer_lines(&terminal);
+        let metric_row = lines
+            .iter()
+            .find(|line| line.contains("Total Tokens"))
+            .expect("snapshot metric row should render");
+        assert_eq!(metric_row.matches('│').count(), 3, "{metric_row}");
+    }
+
+    #[test]
+    fn wide_snapshot_lines_fit_their_columns() {
+        let app = make_app(120);
+        let data = SnapshotData::default();
+
+        assert!(left_lines(&app, &data, 54, true)
+            .iter()
+            .all(|line| line_width(line) <= 54));
+        assert!(right_lines(&app, &data, 60)
+            .iter()
+            .all(|line| line_width(line) <= 60));
     }
 }
