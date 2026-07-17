@@ -39,6 +39,7 @@ jobs:
           for token in ('agent_map,', 'session_map,', 'daily_map,'):
               script = script.replace(f'\n        {token}', f'\n            {token}')
           script = script.replace('\n        .sessions', '\n            .sessions')
+          script = script.replace('\n        b.cost', '\n            b.cost')
           script = script.replace(
               '\n        .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));',
               '\n            .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));',
