@@ -81,16 +81,34 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Check prepared patch
+        id: patch
+        shell: bash
+        run: |
+          set +e
+          git apply --check .github/session-navigation-v2.patch > session-patch-diagnostics.log 2>&1
+          status=$?
+          cat session-patch-diagnostics.log
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload patch diagnostics
+        if: steps.patch.outputs.status != '0'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-patch-diagnostics
+          path: session-patch-diagnostics.log
+          if-no-files-found: error
+
+      - name: Stop after patch failure
+        if: steps.patch.outputs.status != '0'
+        run: exit 1
+
       - name: Apply, validate, and publish source changes
+        if: steps.patch.outputs.status == '0'
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f .github/session-navigation-v2.patch ]; then
-            echo "Session navigation source already materialized"
-            exit 0
-          fi
-
-          git apply --check .github/session-navigation-v2.patch
           git apply .github/session-navigation-v2.patch
           git rm -f \
             .github/session-navigation-v2.patch \
