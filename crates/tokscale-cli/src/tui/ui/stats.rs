@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
@@ -68,6 +69,15 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let selected_cell = app.selected_graph_cell;
+    let selected_date = selected_cell.and_then(|(week_idx, day_idx)| {
+        graph
+            .weeks
+            .get(week_idx)
+            .and_then(|week| week.get(day_idx))
+            .and_then(|day| day.as_ref())
+            .map(|day| day.date)
+    });
+    let selected_weekday = selected_date.map(|date| date.weekday().num_days_from_sunday() as usize);
     let is_narrow = app.is_narrow();
     let label_width = if is_narrow { 2u16 } else { 4u16 };
     let graph_start_x = inner.x.saturating_add(label_width);
@@ -75,12 +85,28 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let graph_bottom = inner.bottom();
 
     for (day_idx, label) in DAY_LABELS.iter().enumerate() {
-        if day_idx % 2 == 1 {
+        let is_selected_row = selected_weekday == Some(day_idx);
+        if day_idx % 2 == 1 || is_selected_row {
             let y = graph_start_y.saturating_add(day_idx as u16);
             if y < graph_bottom {
+                let display_label = if is_narrow {
+                    if is_selected_row {
+                        &label[..2]
+                    } else {
+                        ""
+                    }
+                } else {
+                    *label
+                };
+                let style = if is_selected_row {
+                    Style::default()
+                        .fg(app.theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.theme.muted)
+                };
                 frame.render_widget(
-                    Paragraph::new(if is_narrow { "" } else { *label })
-                        .style(Style::default().fg(app.theme.muted)),
+                    Paragraph::new(display_label).style(style),
                     Rect::new(inner.x, y, label_width, 1),
                 );
             }
@@ -116,7 +142,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             let actual_week = week_idx + start_week;
-            let selected = selected_cell == Some((actual_week, day_idx));
+            let selected = selected_date.is_some() && selected_cell == Some((actual_week, day_idx));
             let cell_area = Rect::new(x, y, CELL_WIDTH, 1);
             let (symbol, style) = match day {
                 Some(day) => {
@@ -134,16 +160,13 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                         ("██", Style::default().fg(color))
                     }
                 }
-                None if selected => (
-                    "▓▓",
-                    Style::default().fg(Color::White).bg(app.theme.colors[0]),
-                ),
                 None => ("· ", app.theme.subtle_text_style()),
             };
             frame.render_widget(Paragraph::new(symbol).style(style), cell_area);
         }
     }
 
+    let selected_month = selected_date.map(|date| (date.year(), date.month0() as usize));
     let mut current_month = None;
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
         if let Some(Some(day)) = week.first() {
@@ -158,9 +181,15 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 current_month = Some(month);
                 let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
                 if x.saturating_add(3) < inner.right() && month < MONTH_LABELS.len() {
+                    let style = if selected_month == Some((day.date.year(), month)) {
+                        Style::default()
+                            .fg(app.theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(app.theme.muted)
+                    };
                     frame.render_widget(
-                        Paragraph::new(MONTH_LABELS[month])
-                            .style(Style::default().fg(app.theme.muted)),
+                        Paragraph::new(MONTH_LABELS[month]).style(style),
                         Rect::new(x, inner.y, 3, 1),
                     );
                 }
@@ -230,7 +259,7 @@ fn render_graph_metrics(
             Span::styled("██", Style::default().fg(app.theme.colors[4])),
             Span::styled(" More", Style::default().fg(app.theme.muted)),
             Span::styled(
-                "    select a day with mouse or keyboard",
+                "    click a day to inspect details",
                 Style::default().fg(app.theme.muted),
             ),
         ]);
@@ -445,6 +474,22 @@ mod tests {
         .unwrap()
     }
 
+    fn sample_week_graph() -> GraphData {
+        let sunday = NaiveDate::from_ymd_opt(2026, 7, 12).unwrap();
+        GraphData {
+            weeks: vec![(0..7)
+                .map(|day_idx| {
+                    Some(ContributionDay {
+                        date: sunday + chrono::Duration::days(day_idx),
+                        tokens: if day_idx == 4 { 42 } else { 0 },
+                        cost: if day_idx == 4 { 0.5 } else { 0.0 },
+                        intensity: if day_idx == 4 { 0.75 } else { 0.0 },
+                    })
+                })
+                .collect()],
+        }
+    }
+
     #[test]
     fn stats_reserves_space_for_day_insights() {
         let area = Rect::new(0, 0, 100, 30);
@@ -485,5 +530,62 @@ mod tests {
             ClickAction::GraphCell { week, day } => assert_eq!((*week, *day), (0, 1)),
             action => panic!("unexpected click action: {action:?}"),
         }
+    }
+
+    #[test]
+    fn selected_real_day_highlights_cell_and_both_axes() {
+        let mut app = make_app();
+        app.data.graph = Some(sample_week_graph());
+        app.selected_graph_cell = Some((0, 4));
+        let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+        let selected_y = 3 + 4;
+
+        for x in 5..=6 {
+            let cell = buffer.cell((x, selected_y)).unwrap();
+            assert_eq!(cell.symbol(), "▓");
+            assert_eq!(cell.fg, Color::White);
+            assert_eq!(cell.bg, app.theme.colors[4]);
+        }
+
+        let weekday = buffer.cell((1, selected_y)).unwrap();
+        assert_eq!(weekday.symbol(), "T");
+        assert_eq!(weekday.fg, app.theme.accent);
+        assert!(weekday.modifier.contains(Modifier::BOLD));
+
+        let month = buffer.cell((5, 1)).unwrap();
+        assert_eq!(month.symbol(), "J");
+        assert_eq!(month.fg, app.theme.accent);
+        assert!(month.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn graph_without_selection_has_no_crosshair_and_mouse_only_hint() {
+        let mut app = make_app();
+        app.data.graph = Some(sample_week_graph());
+        let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+        let rendered = (0..GRAPH_PANEL_H)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(buffer.cell((5, 7)).unwrap().symbol(), "█");
+        assert_eq!(buffer.cell((1, 7)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((5, 1)).unwrap().fg, app.theme.muted);
+        assert!(rendered.contains("click a day to inspect details"));
+        assert!(!rendered.contains("keyboard"));
     }
 }
