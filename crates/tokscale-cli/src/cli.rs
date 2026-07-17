@@ -603,7 +603,7 @@ pub(crate) enum TuiTab {
     Hourly,
     Stats,
     Agents,
-    Issues,
+    Sessions,
     Usage,
 }
 
@@ -618,7 +618,7 @@ impl From<TuiTab> for Tab {
             TuiTab::Hourly => Tab::Hourly,
             TuiTab::Stats => Tab::Stats,
             TuiTab::Agents => Tab::Agents,
-            TuiTab::Issues => Tab::Issues,
+            TuiTab::Sessions => Tab::Sessions,
             TuiTab::Usage => Tab::Usage,
         }
     }

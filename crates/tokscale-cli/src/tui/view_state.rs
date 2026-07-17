@@ -44,7 +44,7 @@ impl ViewState {
             }
         }
 
-        if app.current_tab != Tab::Issues {
+        if app.current_tab != Tab::Sessions {
             return false;
         }
 
@@ -88,7 +88,7 @@ impl ViewState {
             return true;
         }
 
-        if app.current_tab != Tab::Issues {
+        if app.current_tab != Tab::Sessions {
             return false;
         }
 

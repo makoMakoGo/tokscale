@@ -574,8 +574,8 @@ mod tests {
     }
 
     #[test]
-    fn sessions_mouse_wheel_is_dispatched_before_legacy_app_list_state() {
-        let mut app = app_on(Tab::Issues);
+    fn sessions_mouse_wheel_is_dispatched_to_view_state() {
+        let mut app = app_on(Tab::Sessions);
         let mut view_state = view_state::ViewState::default();
         app.selected_index = 7;
 
@@ -587,7 +587,7 @@ mod tests {
 
         assert_eq!(
             app.selected_index, 7,
-            "Sessions wheel input must not reach App's empty legacy Issues list"
+            "Sessions wheel input must not reach App's non-owning list state"
         );
     }
 

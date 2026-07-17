@@ -64,7 +64,7 @@ pub enum Tab {
     Hourly,
     Stats,
     Agents,
-    Issues,
+    Sessions,
 }
 
 impl Tab {
@@ -79,7 +79,7 @@ impl Tab {
             Tab::Hourly,
             Tab::Stats,
             Tab::Agents,
-            Tab::Issues,
+            Tab::Sessions,
         ]
     }
 
@@ -94,7 +94,7 @@ impl Tab {
             Tab::Hourly => "Hourly",
             Tab::Stats => "Stats",
             Tab::Agents => "Agents",
-            Tab::Issues => "Issues",
+            Tab::Sessions => "Sessions",
         }
     }
 
@@ -109,7 +109,7 @@ impl Tab {
             Tab::Hourly => "Hr",
             Tab::Stats => "Sta",
             Tab::Agents => "Agt",
-            Tab::Issues => "Iss",
+            Tab::Sessions => "Ses",
         }
     }
 
@@ -123,14 +123,14 @@ impl Tab {
             Tab::Daily => Tab::Hourly,
             Tab::Hourly => Tab::Stats,
             Tab::Stats => Tab::Agents,
-            Tab::Agents => Tab::Issues,
-            Tab::Issues => Tab::Overview,
+            Tab::Agents => Tab::Sessions,
+            Tab::Sessions => Tab::Overview,
         }
     }
 
     pub fn prev(self) -> Tab {
         match self {
-            Tab::Overview => Tab::Issues,
+            Tab::Overview => Tab::Sessions,
             Tab::Usage => Tab::Overview,
             Tab::Models => Tab::Usage,
             Tab::Monthly => Tab::Models,
@@ -139,7 +139,7 @@ impl Tab {
             Tab::Hourly => Tab::Daily,
             Tab::Stats => Tab::Hourly,
             Tab::Agents => Tab::Stats,
-            Tab::Issues => Tab::Agents,
+            Tab::Sessions => Tab::Agents,
         }
     }
 }
@@ -1290,7 +1290,7 @@ impl App {
             Tab::Monthly | Tab::Weekly | Tab::Daily | Tab::Hourly => {
                 (SortField::Date, SortDirection::Descending)
             }
-            Tab::Overview | Tab::Usage | Tab::Stats | Tab::Agents | Tab::Issues => {
+            Tab::Overview | Tab::Usage | Tab::Stats | Tab::Agents | Tab::Sessions => {
                 (SortField::Cost, SortDirection::Descending)
             }
         }
@@ -1513,7 +1513,7 @@ impl App {
                 .iter()
                 .map(|u| u.metrics.len())
                 .sum(),
-            Tab::Issues => 0,
+            Tab::Sessions => 0,
         }
     }
 
@@ -1875,7 +1875,7 @@ impl App {
                     h.cost
                 )
             }),
-            Tab::Stats | Tab::Usage | Tab::Issues => None,
+            Tab::Stats | Tab::Usage | Tab::Sessions => None,
         };
 
         if let Some(text) = text {
@@ -2268,7 +2268,7 @@ mod tests {
         assert_eq!(tabs[6], Tab::Hourly);
         assert_eq!(tabs[7], Tab::Stats);
         assert_eq!(tabs[8], Tab::Agents);
-        assert_eq!(tabs[9], Tab::Issues);
+        assert_eq!(tabs[9], Tab::Sessions);
     }
 
     #[test]
@@ -2281,13 +2281,13 @@ mod tests {
         assert_eq!(Tab::Daily.next(), Tab::Hourly);
         assert_eq!(Tab::Hourly.next(), Tab::Stats);
         assert_eq!(Tab::Stats.next(), Tab::Agents);
-        assert_eq!(Tab::Agents.next(), Tab::Issues);
-        assert_eq!(Tab::Issues.next(), Tab::Overview);
+        assert_eq!(Tab::Agents.next(), Tab::Sessions);
+        assert_eq!(Tab::Sessions.next(), Tab::Overview);
     }
 
     #[test]
     fn test_tab_prev() {
-        assert_eq!(Tab::Overview.prev(), Tab::Issues);
+        assert_eq!(Tab::Overview.prev(), Tab::Sessions);
         assert_eq!(Tab::Usage.prev(), Tab::Overview);
         assert_eq!(Tab::Models.prev(), Tab::Usage);
         assert_eq!(Tab::Monthly.prev(), Tab::Models);
@@ -2296,7 +2296,7 @@ mod tests {
         assert_eq!(Tab::Hourly.prev(), Tab::Daily);
         assert_eq!(Tab::Stats.prev(), Tab::Hourly);
         assert_eq!(Tab::Agents.prev(), Tab::Stats);
-        assert_eq!(Tab::Issues.prev(), Tab::Agents);
+        assert_eq!(Tab::Sessions.prev(), Tab::Agents);
     }
 
     #[test]
@@ -2309,7 +2309,7 @@ mod tests {
         assert_eq!(Tab::Daily.as_str(), "Daily");
         assert_eq!(Tab::Hourly.as_str(), "Hourly");
         assert_eq!(Tab::Stats.as_str(), "Stats");
-        assert_eq!(Tab::Issues.as_str(), "Issues");
+        assert_eq!(Tab::Sessions.as_str(), "Sessions");
     }
 
     #[test]
@@ -2322,7 +2322,7 @@ mod tests {
         assert_eq!(Tab::Daily.short_name(), "Day");
         assert_eq!(Tab::Hourly.short_name(), "Hr");
         assert_eq!(Tab::Stats.short_name(), "Sta");
-        assert_eq!(Tab::Issues.short_name(), "Iss");
+        assert_eq!(Tab::Sessions.short_name(), "Ses");
     }
 
     #[test]
@@ -2716,7 +2716,7 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Agents);
 
         app.handle_key_event(key(KeyCode::Tab));
-        assert_eq!(app.current_tab, Tab::Issues);
+        assert_eq!(app.current_tab, Tab::Sessions);
 
         app.handle_key_event(key(KeyCode::Tab));
         assert_eq!(app.current_tab, Tab::Overview);
@@ -2728,7 +2728,7 @@ mod tests {
         assert_eq!(app.current_tab, Tab::Overview);
 
         app.handle_key_event(key(KeyCode::BackTab));
-        assert_eq!(app.current_tab, Tab::Issues);
+        assert_eq!(app.current_tab, Tab::Sessions);
 
         app.handle_key_event(key(KeyCode::BackTab));
         assert_eq!(app.current_tab, Tab::Agents);
@@ -2769,7 +2769,7 @@ mod tests {
             Tab::Hourly,
             Tab::Stats,
             Tab::Agents,
-            Tab::Issues,
+            Tab::Sessions,
             Tab::Overview,
         ] {
             app.handle_key_event(key(KeyCode::Tab));

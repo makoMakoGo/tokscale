@@ -62,7 +62,7 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
             Tab::Weekly => period::render_weekly(frame, app, chunks[1]),
             Tab::Stats => stats::render(frame, app, chunks[1]),
             Tab::Usage => usage::render(frame, app, chunks[1]),
-            Tab::Issues => sessions::render(frame, app, state, chunks[1]),
+            Tab::Sessions => sessions::render(frame, app, state, chunks[1]),
         }
     }
 

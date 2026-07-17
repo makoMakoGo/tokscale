@@ -88,11 +88,9 @@ fn tab_divider(app: &App) -> Span<'static> {
 }
 
 fn tab_label(_app: &App, tab: Tab, mode: TabLabelMode) -> Cow<'static, str> {
-    match (tab, mode) {
-        (Tab::Issues, TabLabelMode::Full) => Cow::Borrowed("Sessions"),
-        (Tab::Issues, TabLabelMode::Short) => Cow::Borrowed("Ses"),
-        (_, TabLabelMode::Full) => Cow::Borrowed(tab.as_str()),
-        (_, TabLabelMode::Short) => Cow::Borrowed(tab.short_name()),
+    match mode {
+        TabLabelMode::Full => Cow::Borrowed(tab.as_str()),
+        TabLabelMode::Short => Cow::Borrowed(tab.short_name()),
     }
 }
 
@@ -130,14 +128,14 @@ fn fitted_tabs(app: &App, tabs_area: Rect) -> (Vec<Tab>, TabLabelMode) {
 
     while tab_row_width(app, &tabs, mode) > tabs_area.width {
         let Some(index) = tabs.iter().enumerate().rev().find_map(|(index, tab)| {
-            (*tab != Tab::Issues && *tab != app.current_tab).then_some(index)
+            (*tab != Tab::Sessions && *tab != app.current_tab).then_some(index)
         }) else {
             break;
         };
         tabs.remove(index);
     }
 
-    if tab_row_width(app, &tabs, mode) > tabs_area.width && app.current_tab != Tab::Issues {
+    if tab_row_width(app, &tabs, mode) > tabs_area.width && app.current_tab != Tab::Sessions {
         tabs.retain(|tab| *tab == app.current_tab);
     }
 
@@ -268,7 +266,7 @@ mod tests {
             (Rect::new(78, 5, 8, 1), Tab::Hourly),
             (Rect::new(89, 5, 7, 1), Tab::Stats),
             (Rect::new(99, 5, 8, 1), Tab::Agents),
-            (Rect::new(110, 5, 10, 1), Tab::Issues),
+            (Rect::new(110, 5, 10, 1), Tab::Sessions),
         ]
     }
 
@@ -283,7 +281,7 @@ mod tests {
             (Rect::new(88, 5, 8, 1), Tab::Hourly),
             (Rect::new(99, 5, 7, 1), Tab::Stats),
             (Rect::new(109, 5, 8, 1), Tab::Agents),
-            (Rect::new(120, 5, 10, 1), Tab::Issues),
+            (Rect::new(120, 5, 10, 1), Tab::Sessions),
         ]
     }
 
@@ -297,7 +295,7 @@ mod tests {
             (Rect::new(47, 3, 4, 1), Tab::Hourly),
             (Rect::new(54, 3, 5, 1), Tab::Stats),
             (Rect::new(62, 3, 5, 1), Tab::Agents),
-            (Rect::new(70, 3, 5, 1), Tab::Issues),
+            (Rect::new(70, 3, 5, 1), Tab::Sessions),
         ]
     }
 
@@ -545,18 +543,21 @@ mod tests {
         app.data.health.rejected_records = 2;
         app.data.health.failed_sources = 1;
 
-        assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Full), "Sessions");
-        assert_eq!(tab_label(&app, Tab::Issues, TabLabelMode::Short), "Ses");
+        assert_eq!(
+            tab_label(&app, Tab::Sessions, TabLabelMode::Full),
+            "Sessions"
+        );
+        assert_eq!(tab_label(&app, Tab::Sessions, TabLabelMode::Short), "Ses");
 
         let area = Rect::new(20, 4, 106, 3);
         let lines = render_header_symbols(&mut app, area, 140, 8);
-        let issues_area = registered_tab_areas(&app)
+        let sessions_area = registered_tab_areas(&app)
             .into_iter()
-            .find(|(_, tab)| *tab == Tab::Issues)
-            .expect("Issues tab must remain visible");
+            .find(|(_, tab)| *tab == Tab::Sessions)
+            .expect("Sessions tab must remain visible");
 
         assert_eq!(symbols_at(&lines, 5, 110, 10), " Sessions ");
-        assert_eq!(issues_area, (Rect::new(110, 5, 10, 1), Tab::Issues));
+        assert_eq!(sessions_area, (Rect::new(110, 5, 10, 1), Tab::Sessions));
     }
 
     #[test]
@@ -565,10 +566,10 @@ mod tests {
         let lines = render_header_symbols(&mut app, Rect::new(0, 0, 50, 3), 50, 4);
         let (rect, tab) = registered_tab_areas(&app)
             .into_iter()
-            .find(|(_, tab)| *tab == Tab::Issues)
+            .find(|(_, tab)| *tab == Tab::Sessions)
             .expect("narrow fitting must reserve space for Sessions");
 
-        assert_eq!(tab, Tab::Issues);
+        assert_eq!(tab, Tab::Sessions);
         assert!(rect.right() <= 49);
         assert_eq!(symbols_at(&lines, rect.y, rect.x, rect.width), " Ses ");
 
@@ -578,7 +579,7 @@ mod tests {
             row: rect.y,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(app.current_tab, Tab::Issues);
+        assert_eq!(app.current_tab, Tab::Sessions);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::tui::view_state::ViewState;
 
 pub(crate) fn render(frame: &mut Frame, app: &mut App, state: &mut ViewState, area: Rect) {
     let content = match app.current_tab {
-        Tab::Issues => sessions_content(app, state),
+        Tab::Sessions => sessions_content(app, state),
         Tab::Daily if !app.is_daily_detail_active() => daily_content(app, state),
         _ => footer::standard_content(app),
     };
@@ -145,7 +145,7 @@ mod tests {
             initial_tab: None,
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
-        app.current_tab = Tab::Issues;
+        app.current_tab = Tab::Sessions;
         app.terminal_width = width;
         app
     }

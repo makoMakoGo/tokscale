@@ -49,7 +49,7 @@ impl FooterContent {
 }
 
 pub(super) fn standard_content(app: &App) -> FooterContent {
-    debug_assert_ne!(app.current_tab, Tab::Issues);
+    debug_assert_ne!(app.current_tab, Tab::Sessions);
     FooterContent::new(
         standard_sort_controls(app),
         summary_row_line(app),
@@ -265,7 +265,7 @@ fn current_count_label(app: &App) -> String {
         ),
         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
-        Tab::Issues => unreachable!("sessions footer supplies its own summary"),
+        Tab::Sessions => unreachable!("sessions footer supplies its own summary"),
         Tab::Stats | Tab::Usage => String::new(),
     }
 }
