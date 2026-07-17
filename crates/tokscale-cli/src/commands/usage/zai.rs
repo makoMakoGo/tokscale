@@ -29,6 +29,8 @@ struct Limit {
     current_value: Option<f64>,
     number: Option<i64>,
     unit: Option<i64>,
+    #[serde(rename = "nextResetTime")]
+    next_reset_time: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +46,103 @@ struct Sub {
 
 fn percentage_from_limit(limit: &Limit) -> Option<f64> {
     limit.percentage.map(|p| p.clamp(0.0, 100.0))
+}
+
+/// The API reports reset points as epoch milliseconds; the renderer expects
+/// RFC 3339.
+fn reset_time_rfc3339(epoch_ms: Option<i64>) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(epoch_ms?).map(|dt| dt.to_rfc3339())
+}
+
+fn usage_output_from_parts(quota: QuotaResp, sub: Option<SubResp>) -> UsageOutput {
+    let plan = sub
+        .as_ref()
+        .and_then(|s| s.data.as_ref())
+        .and_then(|d| d.first())
+        .and_then(|s| s.product_name.clone())
+        .or_else(|| {
+            quota
+                .data
+                .as_ref()
+                .and_then(|d| d.level.clone())
+                .map(|l| capitalize(&l))
+        });
+
+    let mut session_metric = None;
+    let mut weekly_metric = None;
+    let mut search_metric = None;
+
+    if let Some(limits) = quota.data.as_ref().and_then(|d| d.limits.as_ref()) {
+        for limit in limits.iter() {
+            let Some(pct) = percentage_from_limit(limit) else {
+                continue;
+            };
+
+            match limit.limit_type.as_deref() {
+                Some("TOKENS_LIMIT") => {
+                    let metric = UsageMetric {
+                        label: String::new(),
+                        used_percent: pct,
+                        remaining_percent: 100.0 - pct,
+                        remaining_label: None,
+                        resets_at: reset_time_rfc3339(limit.next_reset_time),
+                    };
+                    match (limit.unit, limit.number) {
+                        // Rolling window of `hours` hours (5 on current plans;
+                        // the only token limit on old plans).
+                        (Some(3), Some(hours)) => {
+                            session_metric = Some(UsageMetric {
+                                label: format!("{hours} Hour"),
+                                ..metric
+                            });
+                        }
+                        (Some(6), Some(1)) => {
+                            weekly_metric = Some(UsageMetric {
+                                label: "Weekly".into(),
+                                ..metric
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                Some("TIME_LIMIT") => {
+                    let remaining_label = limit.remaining.map(|r| format!("{:.0} left", r));
+                    search_metric = Some(UsageMetric {
+                        label: "Web Search".into(),
+                        used_percent: pct,
+                        remaining_percent: 100.0 - pct,
+                        remaining_label,
+                        resets_at: reset_time_rfc3339(limit.next_reset_time).or_else(|| {
+                            sub.as_ref()
+                                .and_then(|s| s.data.as_ref())
+                                .and_then(|d| d.first())
+                                .and_then(|s| s.next_renew_time.clone())
+                        }),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut metrics = Vec::new();
+    if let Some(m) = session_metric {
+        metrics.push(m);
+    }
+    if let Some(m) = weekly_metric {
+        metrics.push(m);
+    }
+    if let Some(m) = search_metric {
+        metrics.push(m);
+    }
+
+    UsageOutput {
+        provider: "Z.ai".into(),
+        account: None,
+        plan,
+        email: None,
+        metrics,
+    }
 }
 
 async fn fetch_quota(client: &reqwest::Client, key: &str) -> Result<QuotaResp> {
@@ -90,98 +189,59 @@ pub fn fetch() -> Result<UsageOutput> {
         let client = reqwest::Client::new();
         let quota = fetch_quota(&client, &api_key).await?;
         let sub = fetch_sub(&client, &api_key).await.ok();
-
-        let plan = sub
-            .as_ref()
-            .and_then(|s| s.data.as_ref())
-            .and_then(|d| d.first())
-            .and_then(|s| s.product_name.clone())
-            .or_else(|| {
-                quota
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.level.clone())
-                    .map(|l| capitalize(&l))
-            });
-
-        let mut session_metric = None;
-        let mut weekly_metric = None;
-        let mut search_metric = None;
-
-        if let Some(limits) = quota.data.as_ref().and_then(|d| d.limits.as_ref()) {
-            for limit in limits.iter() {
-                let Some(pct) = percentage_from_limit(limit) else {
-                    continue;
-                };
-
-                match limit.limit_type.as_deref() {
-                    Some("TOKENS_LIMIT") => {
-                        let metric = UsageMetric {
-                            label: String::new(),
-                            used_percent: pct,
-                            remaining_percent: 100.0 - pct,
-                            remaining_label: None,
-                            resets_at: None,
-                        };
-                        match (limit.unit, limit.number) {
-                            (Some(3), Some(5)) => {
-                                session_metric = Some(UsageMetric {
-                                    label: "Session".into(),
-                                    ..metric
-                                });
-                            }
-                            (Some(6), Some(1)) => {
-                                weekly_metric = Some(UsageMetric {
-                                    label: "Weekly".into(),
-                                    ..metric
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                    Some("TIME_LIMIT") => {
-                        let remaining_label = limit.remaining.map(|r| format!("{:.0} left", r));
-                        search_metric = Some(UsageMetric {
-                            label: "Web Search".into(),
-                            used_percent: pct,
-                            remaining_percent: 100.0 - pct,
-                            remaining_label,
-                            resets_at: sub
-                                .as_ref()
-                                .and_then(|s| s.data.as_ref())
-                                .and_then(|d| d.first())
-                                .and_then(|s| s.next_renew_time.clone()),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let mut metrics = Vec::new();
-        if let Some(m) = session_metric {
-            metrics.push(m);
-        }
-        if let Some(m) = weekly_metric {
-            metrics.push(m);
-        }
-        if let Some(m) = search_metric {
-            metrics.push(m);
-        }
-
-        Ok(UsageOutput {
-            provider: "Z.ai".into(),
-            account: None,
-            plan,
-            email: None,
-            metrics,
-        })
+        Ok(usage_output_from_parts(quota, sub))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_output_labels_limits_from_real_payload_shape() {
+        // Real api.z.ai/api/monitor/usage/quota/limit payload (verified
+        // 2026-07-17, "max" plan): the (unit 3, number 5) tokens limit is the
+        // rolling 5-hour window, (unit 6, number 1) is the weekly limit.
+        let quota: QuotaResp = serde_json::from_str(
+            r#"{"code":200,"msg":"Operation successful","data":{"limits":[
+                {"type":"TIME_LIMIT","unit":5,"number":1,"usage":4000,"currentValue":7,"remaining":3993,"percentage":1,"nextResetTime":1786200434990},
+                {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":1,"nextResetTime":1784241382278},
+                {"type":"TOKENS_LIMIT","unit":6,"number":1,"percentage":2,"nextResetTime":1784731634985}
+            ],"level":"max"},"success":true}"#,
+        )
+        .unwrap();
+
+        let output = usage_output_from_parts(quota, None);
+
+        assert_eq!(output.plan.as_deref(), Some("Max"));
+        assert_eq!(output.metrics.len(), 3);
+        assert_eq!(output.metrics[0].label, "5 Hour");
+        assert!((output.metrics[0].remaining_percent - 99.0).abs() < f64::EPSILON);
+        assert!(output.metrics[0].resets_at.is_some());
+        assert_eq!(output.metrics[1].label, "Weekly");
+        assert!(output.metrics[1].resets_at.is_some());
+        assert_eq!(output.metrics[2].label, "Web Search");
+        assert_eq!(
+            output.metrics[2].remaining_label.as_deref(),
+            Some("3993 left")
+        );
+    }
+
+    #[test]
+    fn usage_output_without_weekly_entry_shows_only_hour_limit() {
+        // Old-style plans carry no weekly TOKENS_LIMIT entry.
+        let quota: QuotaResp = serde_json::from_str(
+            r#"{"data":{"limits":[
+                {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":10,"nextResetTime":1784241382278}
+            ],"level":"pro"}}"#,
+        )
+        .unwrap();
+
+        let output = usage_output_from_parts(quota, None);
+
+        assert_eq!(output.metrics.len(), 1);
+        assert_eq!(output.metrics[0].label, "5 Hour");
+    }
 
     #[test]
     fn skips_missing_percentage_instead_of_fabricating_zero_used() {

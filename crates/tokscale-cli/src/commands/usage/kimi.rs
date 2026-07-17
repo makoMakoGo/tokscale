@@ -287,19 +287,27 @@ fn duration_label(duration: Option<&IntLike>, time_unit: Option<&String>) -> Opt
         return None;
     }
 
+    // The API sends enum-style units ("TIME_UNIT_MINUTE"); normalize before
+    // matching so they don't fall through to the seconds arm.
     let unit = time_unit
-        .map(|unit| unit.trim().to_ascii_uppercase())
+        .map(|unit| {
+            let normalized = unit.trim().to_ascii_uppercase();
+            normalized
+                .strip_prefix("TIME_UNIT_")
+                .unwrap_or(&normalized)
+                .to_string()
+        })
         .unwrap_or_else(|| "SECOND".to_string());
     match unit.as_str() {
-        "MINUTE" => {
+        "MINUTE" | "MINUTES" => {
             if duration >= 60 && duration % 60 == 0 {
-                Some(format!("{}h limit", duration / 60))
+                Some(format!("{} Hour", duration / 60))
             } else {
                 Some(format!("{duration}m limit"))
             }
         }
-        "HOUR" => Some(format!("{duration}h limit")),
-        "DAY" => Some(format!("{duration}d limit")),
+        "HOUR" | "HOURS" => Some(format!("{duration} Hour")),
+        "DAY" | "DAYS" => Some(format!("{duration}d limit")),
         _ => Some(format!("{duration}s limit")),
     }
 }
@@ -546,7 +554,7 @@ mod tests {
         let output = usage_output_from_response(resp);
 
         assert_eq!(output.metrics.len(), 2);
-        assert_eq!(output.metrics[0].label, "5h limit");
+        assert_eq!(output.metrics[0].label, "5 Hour");
         assert_eq!(
             output.metrics[0].remaining_label.as_deref(),
             Some("99/100 left")
@@ -561,6 +569,44 @@ mod tests {
         assert_eq!(
             output.metrics[1].resets_at.as_deref(),
             Some("2026-06-30T00:00:00Z")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn usage_output_labels_time_unit_prefixed_window_as_hours() -> Result<()> {
+        // Real api.kimi.com/coding/v1/usages payload shape (verified
+        // 2026-07-17): window.timeUnit is "TIME_UNIT_MINUTE", not "MINUTE".
+        let resp: UsageResponse = serde_json::from_str(
+            r#"{
+                "user": {"userId": "u1", "membership": {"level": "LEVEL_ADVANCED"}},
+                "usage": {"limit": "100", "used": "60", "remaining": "40", "resetTime": "2026-07-20T05:51:48.104954Z"},
+                "limits": [
+                    {
+                        "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                        "detail": {"limit": "100", "used": "3", "remaining": "97", "resetTime": "2026-07-16T23:51:48.104954Z"}
+                    }
+                ]
+            }"#,
+        )?;
+
+        let output = usage_output_from_response(resp);
+
+        assert_eq!(output.plan.as_deref(), Some("ADVANCED"));
+        assert_eq!(output.metrics.len(), 2);
+        assert_eq!(output.metrics[0].label, "5 Hour");
+        assert_eq!(
+            output.metrics[0].remaining_label.as_deref(),
+            Some("97/100 left")
+        );
+        assert_eq!(
+            output.metrics[0].resets_at.as_deref(),
+            Some("2026-07-16T23:51:48.104954Z")
+        );
+        assert_eq!(output.metrics[1].label, "Weekly");
+        assert_eq!(
+            output.metrics[1].remaining_label.as_deref(),
+            Some("40/100 left")
         );
         Ok(())
     }
@@ -587,7 +633,7 @@ mod tests {
         let output = usage_output_from_response(resp);
 
         assert_eq!(output.metrics.len(), 1);
-        assert_eq!(output.metrics[0].label, "24h limit");
+        assert_eq!(output.metrics[0].label, "24 Hour");
         assert_eq!(
             output.metrics[0].remaining_label.as_deref(),
             Some("200/1000 left")
