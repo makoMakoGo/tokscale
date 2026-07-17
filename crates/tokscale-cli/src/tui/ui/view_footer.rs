@@ -1,72 +1,32 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Clear, Paragraph};
 
+use super::footer::{self, FooterContent, SortControl};
 use super::widgets::{format_cost, format_tokens};
 use crate::tui::app::{App, SortField, Tab};
 use crate::tui::view_state::ViewState;
 
 pub(crate) fn render(frame: &mut Frame, app: &mut App, state: &mut ViewState, area: Rect) {
-    super::footer::render(frame, app, area);
-    let inner = area.inner(Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    if inner.is_empty() {
-        return;
-    }
-
-    if app.current_tab == Tab::Issues {
-        render_sessions_main_row(frame, app, state, row(inner, 0));
-        if inner.height >= 2 {
-            render_sessions_help_row(frame, app, state, row(inner, 1));
-        }
-    } else if app.current_tab == Tab::Daily && !app.is_daily_detail_active() && inner.height >= 2 {
-        render_daily_help_row(frame, app, state, row(inner, 1));
-    }
+    let content = match app.current_tab {
+        Tab::Issues => sessions_content(app, state),
+        Tab::Daily if !app.is_daily_detail_active() => daily_content(app, state),
+        _ => footer::standard_content(app),
+    };
+    footer::render(frame, app, area, content);
 }
 
-fn row(area: Rect, offset: u16) -> Rect {
-    Rect::new(area.x, area.y.saturating_add(offset), area.width, 1)
+fn sessions_content(app: &App, state: &ViewState) -> FooterContent {
+    let sort_controls = [SortField::Date, SortField::Tokens, SortField::Cost]
+        .map(|field| SortControl::new(field, session_sort_label(state, field)))
+        .to_vec();
+    FooterContent::new(
+        sort_controls,
+        sessions_summary_line(app, state),
+        sessions_help_line(app, state),
+    )
+    .with_sort_column_percent(42)
 }
 
-fn clear_row(frame: &mut Frame, app: &App, area: Rect) {
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(app.theme.background)),
-        area,
-    );
-}
-
-fn render_sessions_main_row(frame: &mut Frame, app: &App, state: &ViewState, area: Rect) {
-    clear_row(frame, app, area);
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(area);
-
-    if !app.is_very_narrow() {
-        let mut spans = vec![Span::styled("Sort: ", Style::default().fg(app.theme.muted))];
-        for field in [SortField::Date, SortField::Tokens, SortField::Cost] {
-            let active = app.sort_field == field;
-            spans.push(Span::styled(
-                session_sort_label(state, field),
-                Style::default()
-                    .fg(if active {
-                        app.theme.foreground
-                    } else {
-                        app.theme.muted
-                    })
-                    .add_modifier(if active {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ));
-            spans.push(Span::raw(" "));
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
-    }
-
+fn sessions_summary_line(app: &App, state: &ViewState) -> Line<'static> {
     let count = if state.session_detail_active() {
         format!(" ({} sessions)", state.session_count())
     } else {
@@ -76,7 +36,7 @@ fn render_sessions_main_row(frame: &mut Frame, app: &App, state: &ViewState, are
             state.session_count()
         )
     };
-    let right = Line::from(vec![
+    Line::from(vec![
         Span::styled(
             format_tokens(app.data.total_tokens),
             Style::default().fg(Color::Cyan),
@@ -89,12 +49,10 @@ fn render_sessions_main_row(frame: &mut Frame, app: &App, state: &ViewState, are
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(count, Style::default().fg(app.theme.muted)),
-    ]);
-    frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), chunks[1]);
+    ])
 }
 
-fn render_sessions_help_row(frame: &mut Frame, app: &App, state: &ViewState, area: Rect) {
-    clear_row(frame, app, area);
+fn sessions_help_line(app: &App, state: &ViewState) -> Line<'static> {
     let text = if app.is_very_narrow() {
         if state.session_detail_active() {
             "↑↓·d/t/c·esc·s·r·←→·q".to_string()
@@ -106,17 +64,23 @@ fn render_sessions_help_row(frame: &mut Frame, app: &App, state: &ViewState, are
     } else {
         "↑↓ scroll • [d:active / t:sessions / c:space] • [enter:sessions] • [s:sources] • [r:refresh local] • ←→/tab view • e • q".to_string()
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            text,
-            Style::default().fg(app.theme.muted),
-        ))),
-        area,
-    );
+    Line::from(Span::styled(text, Style::default().fg(app.theme.muted)))
 }
 
-fn render_daily_help_row(frame: &mut Frame, app: &App, state: &ViewState, area: Rect) {
-    clear_row(frame, app, area);
+fn daily_content(app: &App, state: &ViewState) -> FooterContent {
+    let sort_controls = if state.daily_profile_active() {
+        Vec::new()
+    } else {
+        footer::standard_sort_controls(app)
+    };
+    FooterContent::new(
+        sort_controls,
+        footer::summary_row_line(app),
+        daily_help_line(app, state),
+    )
+}
+
+fn daily_help_line(app: &App, state: &ViewState) -> Line<'static> {
     let view = if state.daily_profile_active() {
         "table"
     } else {
@@ -141,13 +105,7 @@ fn render_daily_help_row(frame: &mut Frame, app: &App, state: &ViewState, area: 
             app.theme.name.as_str()
         )
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            text,
-            Style::default().fg(app.theme.muted),
-        ))),
-        area,
-    );
+    Line::from(Span::styled(text, Style::default().fg(app.theme.muted)))
 }
 
 fn session_sort_label(state: &ViewState, field: SortField) -> &'static str {
@@ -169,8 +127,10 @@ fn session_sort_label(state: &ViewState, field: SortField) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::TuiConfig;
+    use crate::tui::app::{ClickAction, TuiConfig};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
+    use unicode_width::UnicodeWidthStr;
 
     fn make_app(width: u16) -> App {
         let config = TuiConfig {
@@ -190,8 +150,34 @@ mod tests {
         app
     }
 
+    fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+        let width = terminal.backend().buffer().area.width as usize;
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn sort_clicks(app: &App) -> Vec<(SortField, Rect)> {
+        app.click_areas
+            .iter()
+            .filter_map(|area| match &area.action {
+                ClickAction::Sort(field) => Some((*field, area.rect)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn sessions_footer_erases_the_removed_issues_copy() {
+    fn sessions_footer_renders_only_the_current_copy() {
         let width = 140;
         let height = 5;
         let mut app = make_app(width);
@@ -202,21 +188,86 @@ mod tests {
             .draw(|frame| render(frame, &mut app, &mut state, frame.area()))
             .unwrap();
 
-        let screen = terminal
-            .backend()
-            .buffer()
-            .content()
-            .chunks(width as usize)
-            .map(|row| {
-                row.iter()
-                    .map(|cell| cell.symbol().to_string())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let screen = screen_text(&terminal);
 
         assert!(screen.contains("enter:sessions"));
         assert!(!screen.contains("sort coverage"));
         assert!(!screen.contains("model-session links"));
+
+        let clicks = sort_clicks(&app);
+        assert_eq!(
+            clicks.iter().map(|(field, _)| *field).collect::<Vec<_>>(),
+            [SortField::Date, SortField::Tokens, SortField::Cost]
+        );
+        assert_eq!(
+            clicks
+                .iter()
+                .map(|(_, rect)| rect.width)
+                .collect::<Vec<_>>(),
+            ["Active".width(), "Sessions".width(), "Space".width()].map(|width| width as u16)
+        );
+        assert_eq!(clicks[1].1.x, clicks[0].1.right().saturating_add(1));
+        assert_eq!(clicks[2].1.x, clicks[1].1.right().saturating_add(1));
+    }
+
+    #[test]
+    fn daily_profile_omits_table_sort_controls_and_click_areas() {
+        let width = 140;
+        let height = 5;
+        let mut app = make_app(width);
+        app.current_tab = Tab::Daily;
+        let mut state = ViewState::default();
+        assert!(state.handle_key(&app, &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, &mut state, frame.area()))
+            .unwrap();
+
+        let screen = screen_text(&terminal);
+        assert!(screen.contains("[v:table]"));
+        assert!(!screen.contains("Sort:"));
+        assert!(sort_clicks(&app).is_empty());
+    }
+
+    #[test]
+    fn daily_table_keeps_its_sort_controls_and_click_areas() {
+        let width = 140;
+        let height = 5;
+        let mut app = make_app(width);
+        app.current_tab = Tab::Daily;
+        let mut state = ViewState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, &mut state, frame.area()))
+            .unwrap();
+
+        let screen = screen_text(&terminal);
+        assert!(screen.contains("Sort: Date Cost Tokens"));
+        assert!(screen.contains("[v:profile]"));
+        assert_eq!(
+            sort_clicks(&app)
+                .iter()
+                .map(|(field, _)| *field)
+                .collect::<Vec<_>>(),
+            [SortField::Date, SortField::Cost, SortField::Tokens]
+        );
+    }
+
+    #[test]
+    fn hidden_narrow_sort_controls_do_not_leave_click_areas() {
+        let width = 50;
+        let height = 5;
+        let mut app = make_app(width);
+        let mut state = ViewState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, &mut state, frame.area()))
+            .unwrap();
+
+        assert!(!screen_text(&terminal).contains("Sort:"));
+        assert!(sort_clicks(&app).is_empty());
     }
 }

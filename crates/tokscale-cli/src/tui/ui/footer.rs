@@ -2,13 +2,74 @@ use std::collections::BTreeSet;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use super::spinner::{get_phase_message, get_scanner_spans};
 use super::widgets::{format_cost, format_tokens};
 use crate::tui::app::{App, ClickAction, SortField, Tab};
 use crate::tui::data::{build_period_usage, PeriodKind};
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+#[derive(Clone, Copy)]
+pub(super) struct SortControl {
+    pub(super) field: SortField,
+    pub(super) label: &'static str,
+}
+
+impl SortControl {
+    pub(super) const fn new(field: SortField, label: &'static str) -> Self {
+        Self { field, label }
+    }
+}
+
+pub(super) struct FooterContent {
+    sort_controls: Vec<SortControl>,
+    sort_column_percent: u16,
+    summary: Line<'static>,
+    help: Line<'static>,
+}
+
+impl FooterContent {
+    pub(super) fn new(
+        sort_controls: Vec<SortControl>,
+        summary: Line<'static>,
+        help: Line<'static>,
+    ) -> Self {
+        Self {
+            sort_controls,
+            sort_column_percent: 40,
+            summary,
+            help,
+        }
+    }
+
+    pub(super) fn with_sort_column_percent(mut self, percent: u16) -> Self {
+        self.sort_column_percent = percent.min(100);
+        self
+    }
+}
+
+pub(super) fn standard_content(app: &App) -> FooterContent {
+    debug_assert_ne!(app.current_tab, Tab::Issues);
+    FooterContent::new(
+        standard_sort_controls(app),
+        summary_row_line(app),
+        help_row_line(app),
+    )
+}
+
+pub(super) fn standard_sort_controls(app: &App) -> Vec<SortControl> {
+    if matches!(app.current_tab, Tab::Overview | Tab::Stats | Tab::Usage) {
+        return Vec::new();
+    }
+
+    vec![
+        SortControl::new(SortField::Date, "Date"),
+        SortControl::new(SortField::Cost, "Cost"),
+        SortControl::new(SortField::Tokens, "Tokens"),
+    ]
+}
+
+pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: FooterContent) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -16,6 +77,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
 
     // Split into 3 rows: sources+sort, help text, status
     let row_constraints = if inner.height >= 3 {
@@ -35,39 +99,57 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints(row_constraints)
         .split(inner);
 
-    render_main_row(frame, app, rows[0]);
+    let FooterContent {
+        sort_controls,
+        sort_column_percent,
+        summary,
+        help,
+    } = content;
+    render_main_row(
+        frame,
+        app,
+        rows[0],
+        &sort_controls,
+        sort_column_percent,
+        summary,
+    );
 
-    if rows.len() >= 2 {
-        render_help_row(frame, app, rows[1]);
+    if let Some(area) = rows.get(1).copied() {
+        frame.render_widget(Paragraph::new(help), area);
     }
 
-    if rows.len() >= 3 {
-        render_status_row(frame, app, rows[2]);
+    if let Some(area) = rows.get(2).copied() {
+        render_status_row(frame, app, area);
     }
 }
 
-fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_main_row(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    sort_controls: &[SortControl],
+    sort_column_percent: u16,
+    summary: Line<'static>,
+) {
     let is_very_narrow = app.is_very_narrow();
 
     // Split into left (sort buttons) and right (totals)
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([
+            Constraint::Percentage(sort_column_percent),
+            Constraint::Percentage(100u16.saturating_sub(sort_column_percent)),
+        ])
         .split(area);
 
     // Left side: sort buttons
-    if !is_very_narrow && sort_controls_visible(app) {
+    if !is_very_narrow && !sort_controls.is_empty() {
         let mut spans: Vec<Span> = Vec::new();
-        let mut x_offset = chunks[0].x;
-
         spans.push(Span::styled("Sort: ", Style::default().fg(app.theme.muted)));
-        x_offset += 6;
+        let mut x_offset = chunks[0].x.saturating_add(6);
 
-        let sort_buttons = [SortField::Date, SortField::Cost, SortField::Tokens];
-
-        for field in sort_buttons {
-            let label = sort_label(app, field);
-            let is_active = app.sort_field == field;
+        for control in sort_controls {
+            let is_active = app.sort_field == control.field;
             let style = if is_active {
                 Style::default()
                     .fg(app.theme.foreground)
@@ -76,23 +158,31 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(app.theme.muted)
             };
 
-            spans.push(Span::styled(label, style));
+            spans.push(Span::styled(control.label, style));
             spans.push(Span::raw(" "));
 
-            let btn_width = label.len() as u16;
-            app.add_click_area(
-                Rect::new(x_offset, chunks[0].y, btn_width, 1),
-                ClickAction::Sort(field),
-            );
-            x_offset += btn_width + 1;
+            let label_width = control.label.width() as u16;
+            let visible_width = label_width.min(chunks[0].right().saturating_sub(x_offset));
+            if visible_width > 0 {
+                app.add_click_area(
+                    Rect::new(x_offset, chunks[0].y, visible_width, 1),
+                    ClickAction::Sort(control.field),
+                );
+            }
+            x_offset = x_offset.saturating_add(label_width).saturating_add(1);
         }
 
-        let line = Line::from(spans);
-        let paragraph = Paragraph::new(line);
-        frame.render_widget(paragraph, chunks[0]);
+        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
     }
 
-    // Right side: scroll info | tokens | cost
+    frame.render_widget(
+        Paragraph::new(summary).alignment(Alignment::Right),
+        chunks[1],
+    );
+}
+
+pub(super) fn summary_row_line(app: &App) -> Line<'static> {
+    let is_very_narrow = app.is_very_narrow();
     let mut right_spans: Vec<Span> = Vec::new();
 
     // Total tokens
@@ -127,22 +217,7 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
 
-    let right_line = Line::from(right_spans);
-    let right_para = Paragraph::new(right_line).alignment(Alignment::Right);
-    frame.render_widget(right_para, chunks[1]);
-}
-
-fn sort_controls_visible(app: &App) -> bool {
-    !matches!(app.current_tab, Tab::Overview | Tab::Stats | Tab::Usage)
-}
-
-fn sort_label(app: &App, field: SortField) -> &'static str {
-    match (app.current_tab, field) {
-        (Tab::Issues, SortField::Date) => "Sessions",
-        (_, SortField::Date) => "Date",
-        (_, SortField::Cost) => "Cost",
-        (_, SortField::Tokens) => "Tokens",
-    }
+    Line::from(right_spans)
 }
 
 fn current_count_label(app: &App) -> String {
@@ -190,38 +265,13 @@ fn current_count_label(app: &App) -> String {
         ),
         Tab::Daily => format!(" ({} days)", app.data.daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.data.hourly.len()),
-        Tab::Issues => {
-            let links = app
-                .data
-                .models
-                .iter()
-                .map(|model| u64::from(model.session_count))
-                .sum::<u64>();
-            format!(" ({links} model-session links)")
-        }
+        Tab::Issues => unreachable!("sessions footer supplies its own summary"),
         Tab::Stats | Tab::Usage => String::new(),
     }
 }
 
-fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
-    let paragraph = Paragraph::new(help_row_line(app));
-    frame.render_widget(paragraph, area);
-}
-
 fn help_row_line(app: &App) -> Line<'static> {
     let is_very_narrow = app.is_very_narrow();
-
-    if app.current_tab == Tab::Issues {
-        let text = if is_very_narrow {
-            "↑↓·d/t/c·s·g·r·←→·q".to_string()
-        } else {
-            format!(
-                "↑↓ scroll • [d/t/c:sort coverage] • [s:sources] • [g:{}] • [r:refresh local] • ←→/tab view • e • q",
-                app.group_by.borrow()
-            )
-        };
-        return Line::from(Span::styled(text, Style::default().fg(app.theme.muted)));
-    }
 
     if app.current_tab == Tab::Usage {
         let local_auto = if app.auto_refresh {
@@ -413,7 +463,7 @@ fn help_row_line(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
+pub(super) fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(status_row_line(app));
     frame.render_widget(paragraph, area);
 }
@@ -594,19 +644,7 @@ mod tests {
         assert_eq!(current_count_label(&make_app_on(Tab::Weekly)), " (0 weeks)");
         assert_eq!(current_count_label(&make_app_on(Tab::Daily)), " (0 days)");
         assert_eq!(current_count_label(&make_app_on(Tab::Hourly)), " (0 hours)");
-        assert_eq!(
-            current_count_label(&make_app_on(Tab::Issues)),
-            " (0 model-session links)"
-        );
         assert_eq!(current_count_label(&make_app_on(Tab::Stats)), "");
-    }
-
-    #[test]
-    fn sessions_tab_renames_the_date_sort_dimension() {
-        let app = make_app_on(Tab::Issues);
-
-        assert_eq!(sort_label(&app, SortField::Date), "Sessions");
-        assert_eq!(sort_label(&app, SortField::Cost), "Cost");
     }
 
     #[test]
