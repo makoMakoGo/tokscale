@@ -1,0 +1,51 @@
+name: Session Navigation Validation
+
+on:
+  pull_request:
+    branches:
+      - personal/local-clients
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'codex/issue-153-session-navigation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: codex/issue-153-session-navigation
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply prepared implementation once
+        run: |
+          if ! grep -q 'pub struct SessionUsage' crates/tokscale-core/src/usage_views.rs; then
+            awk '
+              /^      - name: Apply session navigation implementation$/ { found = 1; next }
+              found && /^        run: \|$/ { in_run = 1; next }
+              in_run && /^      - name: / { exit }
+              in_run { sub(/^          /, ""); print }
+            ' .github/workflows/prepare-session-navigation.yml > /tmp/apply-session-navigation.sh
+            test -s /tmp/apply-session-navigation.sh
+            bash /tmp/apply-session-navigation.sh
+          fi
+          rm -f .github/workflows/prepare-session-navigation.yml
+      - name: Format
+        run: cargo fmt --all
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features
+      - name: Commit validated implementation
+        run: |
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git add -A
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix(tui): add source-first session navigation"
+          git push origin HEAD:codex/issue-153-session-navigation
