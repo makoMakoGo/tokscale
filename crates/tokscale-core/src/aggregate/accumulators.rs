@@ -192,7 +192,7 @@ fn materialize_model_bucket(mut entry: ModelBucket) -> ModelUsage {
         entry.reasoning.max(0),
     ]);
     entry.performance.finalize(total_tokens);
-    let provider = entry.providers.into_sorted_string();
+    let provider = entry.providers.to_sorted_string();
     let merged_clients = entry
         .client_totals
         .as_ref()
@@ -439,7 +439,7 @@ impl DailyAcc {
             .map(|contribution| ClientContribution {
                 client: contribution.client.to_string(),
                 model_id: contribution.model_id.to_string(),
-                provider_id: contribution.providers.into_sorted_string(),
+                provider_id: contribution.providers.to_sorted_string(),
                 tokens: TokenBreakdown {
                     input: contribution.tokens.input.max(0),
                     output: contribution.tokens.output.max(0),

@@ -7,8 +7,9 @@ use tokio::runtime::{Handle, Runtime};
 use chrono::NaiveDate;
 
 use tokscale_core::{
-    load_prepared_usage_data_with_diagnostics, prepare_local_sources, ClientId, GroupBy,
-    LocalParseOptions, PreparedLocalSources, SourceInventorySignature,
+    load_prepared_usage_accumulator_with_diagnostics, load_prepared_usage_data_with_diagnostics,
+    prepare_local_sources, ClientId, DataHealth, GroupBy, LocalParseOptions, PreparedLocalSources,
+    SourceInventorySignature, TuiAcc,
 };
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
@@ -63,9 +64,19 @@ pub struct DataLoader {
 
 pub struct DataLoadResult {
     pub data: UsageData,
+    #[allow(dead_code)]
+    pub pricing_diagnostics: Vec<String>,
+    pub source_inventory_signature: SourceInventorySignature,
+    #[allow(dead_code)]
+    pub source_digest: u64,
+}
+
+pub struct AccumulatorLoadResult {
+    pub accumulator: TuiAcc,
     pub pricing_diagnostics: Vec<String>,
     pub source_inventory_signature: SourceInventorySignature,
     pub source_digest: u64,
+    pub health: DataHealth,
 }
 
 pub struct PreparedDataLoad {
@@ -171,6 +182,40 @@ impl DataLoader {
             pricing_diagnostics: result.pricing_diagnostics,
             source_inventory_signature: result.source_inventory_signature,
             source_digest: result.source_inventory_signature.process_digest(),
+        })
+    }
+
+    pub fn execute_accumulator_with_diagnostics(
+        &self,
+        prepared: PreparedDataLoad,
+    ) -> Result<AccumulatorLoadResult> {
+        let accumulator: Result<_> = if Handle::try_current().is_ok() {
+            std::thread::scope(|s| {
+                s.spawn(move || -> Result<_> {
+                    let rt = Runtime::new()?;
+                    rt.block_on(load_prepared_usage_accumulator_with_diagnostics(
+                        prepared.sources,
+                    ))
+                    .map_err(anyhow::Error::new)
+                })
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("data loader thread panicked")))
+            })
+        } else {
+            Runtime::new()?
+                .block_on(load_prepared_usage_accumulator_with_diagnostics(
+                    prepared.sources,
+                ))
+                .map_err(anyhow::Error::new)
+        };
+
+        trim_allocator();
+        accumulator.map(|result| AccumulatorLoadResult {
+            accumulator: result.accumulator,
+            pricing_diagnostics: result.pricing_diagnostics,
+            source_inventory_signature: result.source_inventory_signature,
+            source_digest: result.source_inventory_signature.process_digest(),
+            health: result.health,
         })
     }
 }

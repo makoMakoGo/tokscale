@@ -61,11 +61,14 @@ where
         }
     }
 
-    pub(crate) fn into_vec(self) -> Vec<T> {
+    pub(crate) fn to_vec(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
         match self {
             Self::Empty => panic!("identity set must contain a value before materialization"),
-            Self::One(value) => vec![value],
-            Self::Many(values) => (*values).into_iter().collect(),
+            Self::One(value) => vec![value.clone()],
+            Self::Many(values) => values.iter().cloned().collect(),
         }
     }
 }
@@ -74,12 +77,12 @@ impl<T> IdentitySet<T>
 where
     T: AsRef<str> + Eq + Hash,
 {
-    pub(crate) fn into_sorted_string(self) -> String {
+    pub(crate) fn to_sorted_string(&self) -> String {
         match self {
             Self::Empty => panic!("identity set must contain a value before materialization"),
             Self::One(value) => value.as_ref().to_owned(),
             Self::Many(values) => {
-                let mut values: Vec<_> = (*values).into_iter().collect();
+                let mut values: Vec<_> = values.iter().collect();
                 values.sort_unstable_by(|left, right| left.as_ref().cmp(right.as_ref()));
                 let value_bytes = values.iter().fold(0_usize, |total, value| {
                     total
@@ -119,6 +122,15 @@ impl WorkspaceKey {
         msg.workspace_key
             .as_ref()
             .map_or(Self::Unknown, |key| Self::Known(Arc::clone(key)))
+    }
+
+    /// The DTO workspace key: `Some` for a known workspace, `None` for the
+    /// unknown bucket.
+    pub(crate) fn to_key(&self) -> Option<Arc<str>> {
+        match self {
+            Self::Known(key) => Some(Arc::clone(key)),
+            Self::Unknown => None,
+        }
     }
 }
 
@@ -246,17 +258,6 @@ pub(crate) enum HourlyModelKey {
 }
 
 impl HourlyModelKey {
-    pub(crate) fn from_message(group_by: &GroupBy, msg: &UnifiedMessage) -> Self {
-        if *group_by == GroupBy::ClientProviderModel {
-            Self::ProviderModel {
-                provider: Arc::clone(&msg.provider_id),
-                model: Arc::clone(&msg.model_id),
-            }
-        } else {
-            Self::Model(Arc::clone(&msg.model_id))
-        }
-    }
-
     pub(crate) fn map_key(&self) -> String {
         let mut output = String::from(STORAGE_KEY_VERSION);
         match self {
@@ -271,6 +272,90 @@ impl HourlyModelKey {
             }
         }
         output
+    }
+}
+
+/// Finest-granularity model identity: every dimension a `GroupBy` projection
+/// can re-fold from (`client, provider, workspace, session, model`). The TUI
+/// accumulator keys its canonical buckets with this so switching groupings is
+/// an in-memory re-fold instead of a rescan (issue #161).
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct FineModelKey {
+    pub(crate) client: Arc<str>,
+    pub(crate) provider: Arc<str>,
+    pub(crate) workspace: WorkspaceKey,
+    pub(crate) session: Arc<str>,
+    pub(crate) model: Arc<str>,
+}
+
+impl FineModelKey {
+    pub(crate) fn from_message(msg: &UnifiedMessage) -> Self {
+        Self {
+            client: Arc::clone(&msg.client),
+            provider: Arc::clone(&msg.provider_id),
+            workspace: WorkspaceKey::from_message(msg),
+            session: Arc::clone(&msg.session_id),
+            model: Arc::clone(&msg.model_id),
+        }
+    }
+
+    /// Collapse to one grouping's bucket identity.
+    pub(crate) fn grouped(&self, group_by: &GroupBy) -> GroupedModelKey {
+        match group_by {
+            GroupBy::Model => GroupedModelKey::Model(Arc::clone(&self.model)),
+            GroupBy::ClientModel => GroupedModelKey::ClientModel {
+                client: Arc::clone(&self.client),
+                model: Arc::clone(&self.model),
+            },
+            GroupBy::ClientProviderModel => GroupedModelKey::ClientProviderModel {
+                client: Arc::clone(&self.client),
+                provider: Arc::clone(&self.provider),
+                model: Arc::clone(&self.model),
+            },
+            GroupBy::WorkspaceModel => GroupedModelKey::WorkspaceModel {
+                workspace: self.workspace.clone(),
+                model: Arc::clone(&self.model),
+            },
+            GroupBy::Session => GroupedModelKey::SessionModel {
+                session: Arc::clone(&self.session),
+                model: Arc::clone(&self.model),
+            },
+            GroupBy::ClientSession => GroupedModelKey::ClientSessionModel {
+                client: Arc::clone(&self.client),
+                session: Arc::clone(&self.session),
+                model: Arc::clone(&self.model),
+            },
+        }
+    }
+}
+
+/// Finest-granularity hourly model identity: `(provider, model)`. Only the
+/// ClientProviderModel grouping keeps the provider split; every other
+/// grouping re-folds providers back into the bare model.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct FineHourlyModelKey {
+    pub(crate) provider: Arc<str>,
+    pub(crate) model: Arc<str>,
+}
+
+impl FineHourlyModelKey {
+    pub(crate) fn from_message(msg: &UnifiedMessage) -> Self {
+        Self {
+            provider: Arc::clone(&msg.provider_id),
+            model: Arc::clone(&msg.model_id),
+        }
+    }
+
+    /// Collapse to one grouping's hourly bucket identity.
+    pub(crate) fn grouped(&self, group_by: &GroupBy) -> HourlyModelKey {
+        if *group_by == GroupBy::ClientProviderModel {
+            HourlyModelKey::ProviderModel {
+                provider: Arc::clone(&self.provider),
+                model: Arc::clone(&self.model),
+            }
+        } else {
+            HourlyModelKey::Model(Arc::clone(&self.model))
+        }
     }
 }
 
@@ -387,8 +472,8 @@ mod tests {
         right.provider_id = Arc::from("a");
         right.model_id = Arc::from("b:c");
 
-        let left = HourlyModelKey::from_message(&GroupBy::ClientProviderModel, &left);
-        let right = HourlyModelKey::from_message(&GroupBy::ClientProviderModel, &right);
+        let left = FineHourlyModelKey::from_message(&left).grouped(&GroupBy::ClientProviderModel);
+        let right = FineHourlyModelKey::from_message(&right).grouped(&GroupBy::ClientProviderModel);
         assert_ne!(left, right);
         assert_ne!(left.map_key(), right.map_key());
         assert_eq!(left.map_key(), "v1|pm|3:a:b1:c");

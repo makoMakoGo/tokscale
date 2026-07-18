@@ -76,6 +76,14 @@ fn should_force_source_reload(
     explicitly_requested || health.requires_source_retry()
 }
 
+fn session_reload_force(
+    force: bool,
+    group_only_reload: bool,
+    health: &tokscale_core::source_health::HealthReport,
+) -> bool {
+    force && (!group_only_reload || health.requires_source_retry())
+}
+
 /// Background loader result: a full reload, or proof that no source changed.
 enum BackgroundLoad {
     Unchanged {
@@ -83,6 +91,7 @@ enum BackgroundLoad {
     },
     Loaded {
         data: Box<UsageData>,
+        accumulator: Box<tokscale_core::TuiAcc>,
         digest: u64,
         /// The grouping this `data` projection was aggregated with; the App
         /// records it so exports describe the loaded rows, not a pending
@@ -112,20 +121,6 @@ fn refresh_session_data(
     }
 }
 
-/// Sessions are group-agnostic (ADR 0026): a grouping-triggered reload
-/// re-aggregates the usage projection but must not force a Sessions rescan;
-/// session refresh follows source-digest changes instead. When health still
-/// requires a source retry, the source gets rescanned anyway, so the Sessions
-/// snapshot must not miss that recovery attempt — a session-only change does
-/// not move the inventory digest.
-fn session_reload_force(
-    force: bool,
-    group_only_reload: bool,
-    health: &tokscale_core::source_health::HealthReport,
-) -> bool {
-    force && (!group_only_reload || health.requires_source_retry())
-}
-
 fn load_background_data(
     loader: &DataLoader,
     clients: &[ClientId],
@@ -145,18 +140,23 @@ fn load_background_data(
         });
     }
 
-    let result = loader.execute_with_diagnostics(prepared, group_by);
+    let result = loader.execute_accumulator_with_diagnostics(prepared);
     let session_digest = result
         .as_ref()
         .map_or(digest, |result| result.source_digest);
     let _ = refresh_session_data(loader, clients, session_digest, session_force);
-    result.map(|result| BackgroundLoad::Loaded {
-        data: Box::new(result.data),
-        digest: result.source_digest,
-        group_by: group_by.clone(),
-        source_inventory_signature: result.source_inventory_signature,
-        pricing_diagnostics: result.pricing_diagnostics,
-        cache_persistence_warning: None,
+    result.map(|result| {
+        let mut data = result.accumulator.project(group_by);
+        data.health = result.health.to_report();
+        BackgroundLoad::Loaded {
+            data: Box::new(data),
+            accumulator: Box::new(result.accumulator),
+            digest: result.source_digest,
+            group_by: group_by.clone(),
+            source_inventory_signature: result.source_inventory_signature,
+            pricing_diagnostics: result.pricing_diagnostics,
+            cache_persistence_warning: None,
+        }
     })
 }
 
@@ -210,14 +210,26 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
     match result {
         Ok(BackgroundLoad::Loaded {
             data,
+            accumulator,
             digest,
             group_by,
             source_inventory_signature: _,
             pricing_diagnostics,
             cache_persistence_warning,
         }) => {
-            app.update_data(*data);
-            app.data_group_by = group_by;
+            let accumulator = *accumulator;
+            let selected_group_by = { app.group_by.borrow().clone() };
+            if selected_group_by == group_by {
+                app.update_data(*data);
+                app.data_group_by = group_by;
+            } else {
+                let mut current_data = accumulator.project(&selected_group_by);
+                current_data.health = data.health.clone();
+                app.update_data(current_data);
+                app.data_group_by = selected_group_by;
+            }
+            app.accumulator = Some(accumulator);
+            app.clear_pending_cache_bootstrap();
             app.last_source_digest = Some(digest);
             app.set_cache_persistence_warning(cache_persistence_warning);
             app.set_pricing_diagnostics(&pricing_diagnostics);
@@ -655,6 +667,10 @@ mod tests {
     }
 
     fn write_amp_source(home: &std::path::Path, input_tokens: u64) {
+        write_amp_model_source(home, "claude-opus-4-7", input_tokens);
+    }
+
+    fn write_amp_model_source(home: &std::path::Path, model: &str, input_tokens: u64) {
         let directory = home.join(".local/share/amp/threads");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(
@@ -668,7 +684,7 @@ mod tests {
                         "messageId": 1,
                         "usage": {{
                             "timestamp": "2026-05-21T04:00:00Z",
-                            "model": "claude-opus-4-7",
+                            "model": "{model}",
                             "inputTokens": {input_tokens},
                             "outputTokens": 2
                         }}
@@ -730,6 +746,21 @@ mod tests {
     }
 
     #[test]
+    fn session_reload_force_preserves_cache_bootstrap_session_scope() {
+        let healthy = tokscale_core::source_health::HealthReport::default();
+        let degraded = tokscale_core::source_health::HealthReport {
+            failed_sources: 1,
+            complete: false,
+            ..Default::default()
+        };
+
+        assert!(!session_reload_force(true, true, &healthy));
+        assert!(session_reload_force(true, true, &degraded));
+        assert!(session_reload_force(true, false, &healthy));
+        assert!(!session_reload_force(false, false, &healthy));
+    }
+
+    #[test]
     fn background_loader_preserves_filters() {
         let loader = background_data_loader(
             None,
@@ -741,33 +772,6 @@ mod tests {
         assert_eq!(loader.since.as_deref(), Some("2026-05-01"));
         assert_eq!(loader.until.as_deref(), Some("2026-05-19"));
         assert_eq!(loader.year.as_deref(), Some("2026"));
-    }
-
-    #[test]
-    fn session_reload_force_skips_grouping_triggered_reloads() {
-        // Grouping switches re-aggregate the usage projection but leave the
-        // Sessions snapshot to the source-digest probe (ADR 0026).
-        let healthy = tokscale_core::source_health::HealthReport::default();
-        assert!(!session_reload_force(true, true, &healthy));
-        assert!(session_reload_force(true, false, &healthy));
-        assert!(!session_reload_force(false, true, &healthy));
-        assert!(!session_reload_force(false, false, &healthy));
-    }
-
-    #[test]
-    fn session_reload_force_retries_sessions_when_health_requires_source_retry() {
-        // A degraded report forces the source rescan even on a grouping-only
-        // reload; the Sessions snapshot must join that retry because session
-        // edits do not move the inventory digest.
-        let degraded = tokscale_core::source_health::HealthReport {
-            failed_sources: 1,
-            complete: false,
-            ..Default::default()
-        };
-
-        assert!(session_reload_force(true, true, &degraded));
-        assert!(session_reload_force(true, false, &degraded));
-        assert!(!session_reload_force(false, true, &degraded));
     }
 
     #[test]
@@ -822,6 +826,147 @@ mod tests {
 
     #[test]
     #[serial]
+    fn background_reload_replaces_accumulator_and_projects_selected_group() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(home.path());
+        write_amp_model_source(home.path(), "old-model", 10);
+        let loader = background_data_loader(None, None, None, None);
+        let clients = [ClientId::Amp];
+        let old = load_background_data(
+            &loader,
+            &clients,
+            &tokscale_core::GroupBy::Model,
+            true,
+            true,
+            None,
+        )
+        .unwrap();
+        let mut app = app_on(Tab::Models);
+        apply_background_result(&mut app, Ok(old));
+        assert_eq!(app.data.models[0].model, "old-model");
+
+        write_amp_model_source(home.path(), "new-model", 100);
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientProviderModel;
+        let loaded = load_background_data(
+            &loader,
+            &clients,
+            &tokscale_core::GroupBy::ClientProviderModel,
+            true,
+            true,
+            app.last_source_digest,
+        )
+        .unwrap();
+        apply_background_result(&mut app, Ok(loaded));
+
+        assert_eq!(
+            app.data_group_by,
+            tokscale_core::GroupBy::ClientProviderModel
+        );
+        assert_eq!(app.data.models[0].model, "new-model");
+        assert_eq!(app.data.models[0].client, "amp");
+        assert_eq!(
+            app.accumulator
+                .as_ref()
+                .unwrap()
+                .project(&tokscale_core::GroupBy::Model)
+                .models[0]
+                .model,
+            "new-model"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn pending_cache_bootstrap_is_consumed_by_successful_background_load() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(home.path());
+        write_amp_model_source(home.path(), "race-model", 10);
+        let loader = background_data_loader(None, None, None, None);
+        let loaded = load_background_data(
+            &loader,
+            &[ClientId::Amp],
+            &tokscale_core::GroupBy::Model,
+            true,
+            true,
+            None,
+        )
+        .unwrap();
+        let mut app = app_on(Tab::Models);
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientProviderModel;
+        app.background_loading = true;
+        app.blocking_loading = true;
+        app.needs_reload = true;
+        app.reload_force = true;
+        app.reload_group_only = true;
+
+        apply_background_result(&mut app, Ok(loaded));
+
+        assert!(!app.background_loading);
+        assert!(!app.blocking_loading);
+        assert!(app.accumulator.is_some());
+        assert_eq!(
+            app.data_group_by,
+            tokscale_core::GroupBy::ClientProviderModel
+        );
+        assert_eq!(app.data.models[0].model, "race-model");
+        assert_eq!(app.data.models[0].client, "amp");
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert!(!app.reload_group_only);
+    }
+
+    #[test]
+    fn pending_source_reload_survives_successful_background_load() {
+        let signature = tokscale_core::SourceInventorySignature::from_bytes([9; 32]);
+        let mut app = app_on(Tab::Models);
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::Model;
+        app.background_loading = true;
+        app.blocking_loading = true;
+        app.needs_reload = true;
+        app.reload_force = true;
+        app.reload_group_only = false;
+        let loaded = BackgroundLoad::Loaded {
+            data: Box::new(UsageData::default()),
+            accumulator: Box::new(tokscale_core::TuiAcc::new()),
+            digest: signature.process_digest(),
+            group_by: tokscale_core::GroupBy::Model,
+            source_inventory_signature: signature,
+            pricing_diagnostics: Vec::new(),
+            cache_persistence_warning: None,
+        };
+
+        apply_background_result(&mut app, Ok(loaded));
+
+        assert!(!app.background_loading);
+        assert!(!app.blocking_loading);
+        assert!(app.accumulator.is_some());
+        assert!(app.needs_reload);
+        assert!(app.reload_force);
+        assert!(!app.reload_group_only);
+    }
+
+    #[test]
+    fn pending_cache_bootstrap_survives_failed_background_load() {
+        let mut app = app_on(Tab::Models);
+        app.background_loading = true;
+        app.blocking_loading = true;
+        app.needs_reload = true;
+        app.reload_force = true;
+        app.reload_group_only = true;
+
+        apply_background_result(&mut app, Err(anyhow::anyhow!("load failed")));
+
+        assert!(!app.background_loading);
+        assert!(!app.blocking_loading);
+        assert!(app.accumulator.is_none());
+        assert!(app.needs_reload);
+        assert!(app.reload_force);
+        assert!(app.reload_group_only);
+        assert_eq!(app.data.error.as_deref(), Some("load failed"));
+    }
+
+    #[test]
+    #[serial]
     fn force_stale_and_miss_paths_execute_the_prepared_inventory() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
@@ -850,6 +995,41 @@ mod tests {
                 BackgroundLoad::Loaded { .. }
             ));
         }
+    }
+
+    #[test]
+    #[serial]
+    fn failed_background_reload_keeps_existing_data_and_accumulator() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(home.path());
+        write_amp_model_source(home.path(), "retained-model", 10);
+        let loader = background_data_loader(None, None, None, None);
+        let loaded = load_background_data(
+            &loader,
+            &[ClientId::Amp],
+            &tokscale_core::GroupBy::Model,
+            true,
+            true,
+            None,
+        )
+        .unwrap();
+        let mut app = app_on(Tab::Models);
+        apply_background_result(&mut app, Ok(loaded));
+        let old_tokens = app.data.total_tokens;
+
+        apply_background_result(&mut app, Err(anyhow::anyhow!("load failed")));
+
+        assert_eq!(app.data.total_tokens, old_tokens);
+        assert_eq!(app.data.models[0].model, "retained-model");
+        assert_eq!(
+            app.accumulator
+                .as_ref()
+                .unwrap()
+                .project(&tokscale_core::GroupBy::Model)
+                .total_tokens,
+            old_tokens
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Error: load failed"));
     }
 
     #[test]
@@ -896,6 +1076,7 @@ mod tests {
                 total_tokens: 42,
                 ..UsageData::default()
             }),
+            accumulator: Box::new(tokscale_core::TuiAcc::new()),
             digest,
             group_by: tokscale_core::GroupBy::Model,
             source_inventory_signature: signature,
@@ -962,6 +1143,7 @@ mod tests {
                     total_tokens: 99,
                     ..UsageData::default()
                 }),
+                accumulator: Box::new(tokscale_core::TuiAcc::new()),
                 digest,
                 group_by: tokscale_core::GroupBy::Model,
                 source_inventory_signature: signature,
@@ -973,6 +1155,7 @@ mod tests {
         );
 
         assert_eq!(app.data.total_tokens, 99);
+        assert!(app.accumulator.is_some());
         assert_eq!(app.last_source_digest, Some(digest));
         assert_eq!(
             app.cache_persistence_warning(),

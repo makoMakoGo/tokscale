@@ -20,7 +20,7 @@ use super::{DialogContent, DialogResult};
 pub struct GroupByPickerDialog {
     options: Vec<GroupByOption>,
     selected: Rc<RefCell<GroupBy>>,
-    needs_reload: Rc<RefCell<bool>>,
+    changed: Rc<RefCell<bool>>,
     cursor: usize,
 }
 
@@ -39,7 +39,7 @@ struct GroupByPickerAreas {
 }
 
 impl GroupByPickerDialog {
-    pub fn new(selected: Rc<RefCell<GroupBy>>, needs_reload: Rc<RefCell<bool>>) -> Self {
+    pub fn new(selected: Rc<RefCell<GroupBy>>, changed: Rc<RefCell<bool>>) -> Self {
         let current = selected.borrow().clone();
         let options = vec![
             GroupByOption {
@@ -69,7 +69,7 @@ impl GroupByPickerDialog {
         Self {
             options,
             selected,
-            needs_reload,
+            changed,
             cursor,
         }
     }
@@ -90,7 +90,7 @@ impl GroupByPickerDialog {
         let changed = *self.selected.borrow() != new_value;
         if changed {
             *self.selected.borrow_mut() = new_value;
-            *self.needs_reload.borrow_mut() = true;
+            *self.changed.borrow_mut() = true;
             InteractionOutcome::NeedsReload
         } else {
             InteractionOutcome::Handled
@@ -282,8 +282,8 @@ mod tests {
 
     fn make_dialog(initial: GroupBy) -> GroupByPickerDialog {
         let selected = Rc::new(RefCell::new(initial));
-        let needs_reload = Rc::new(RefCell::new(false));
-        GroupByPickerDialog::new(selected, needs_reload)
+        let changed = Rc::new(RefCell::new(false));
+        GroupByPickerDialog::new(selected, changed)
     }
 
     fn render_symbols(dialog: &GroupByPickerDialog, area: Rect) -> String {
@@ -325,7 +325,7 @@ mod tests {
 
         assert!(matches!(result, DialogResult::Close));
         assert_eq!(*dialog.selected.borrow(), GroupBy::WorkspaceModel);
-        assert!(*dialog.needs_reload.borrow());
+        assert!(*dialog.changed.borrow());
     }
 
     #[test]
@@ -338,7 +338,7 @@ mod tests {
 
         assert!(matches!(result, DialogResult::Close));
         assert_eq!(*dialog.selected.borrow(), GroupBy::WorkspaceModel);
-        assert!(*dialog.needs_reload.borrow());
+        assert!(*dialog.changed.borrow());
     }
 
     #[test]
@@ -354,7 +354,7 @@ mod tests {
             DialogResult::Ignored("click outside rows")
         ));
         assert_eq!(*dialog.selected.borrow(), GroupBy::ClientModel);
-        assert!(!*dialog.needs_reload.borrow());
+        assert!(!*dialog.changed.borrow());
     }
 
     #[test]

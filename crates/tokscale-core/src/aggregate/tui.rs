@@ -2,7 +2,9 @@
 //! [`crate::usage_views::UsageData`] (models/agents/daily/hourly/graph/streaks).
 //! `AggregationEngine` owns this accumulator when `ViewSet::TUI` is requested;
 //! core report loading drives that engine instead of the CLI carrying its own
-//! fold (#37).
+//! fold (#37). The fold is group-independent: messages land in canonical
+//! finest-granularity buckets, and [`TuiAcc::project`] re-folds them into any
+//! grouping's `UsageData` in memory (issue #161).
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -17,7 +19,10 @@ use crate::usage_views::{
     UsageTokenBreakdown,
 };
 use crate::{
-    aggregate::keys::{workspace_fields, GroupedModelKey, HourlyModelKey, IdentitySet},
+    aggregate::keys::{
+        workspace_fields, FineHourlyModelKey, FineModelKey, GroupedModelKey, HourlyModelKey,
+        IdentitySet,
+    },
     sessions, ClientContributionOrder, GroupBy, ModelPerformance, UnifiedMessage,
 };
 
@@ -442,17 +447,38 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
 }
 
 /// TUI usage accumulator owned by `AggregationEngine` when `ViewSet::TUI` is
-/// requested. `push` is the per-message fold; `finish` sorts and derives the
-/// graph + streaks from the finished daily buckets.
-pub(super) struct TuiAcc {
-    group_by: GroupBy,
-    model_map: HashMap<GroupedModelKey, TuiModelBucket>,
+/// requested. `push` folds each message into canonical finest-granularity
+/// buckets (group-independent); `project` re-folds them into one grouping's
+/// [`UsageData`] and may be called repeatedly with different groupings —
+/// switching the TUI group-by no longer rescans, reparses, or reprices local
+/// sources (issue #161).
+#[derive(Default)]
+pub struct TuiAcc {
+    model_map: HashMap<FineModelKey, FineModelBucket>,
     agent_map: HashMap<String, AgentBucket>,
     daily_map: HashMap<NaiveDate, DailyBucket>,
     hourly_map: HashMap<NaiveDateTime, HourlyBucket>,
     next_sequence: usize,
 }
 
+/// Canonical `(client, provider, workspace, session, model)` bucket. Keeps
+/// the additive counters plus the two creation-time attributes every
+/// grouping re-derives materialized fields from: `first_seen` (arrival order
+/// of the bucket's first message, for provider/label attribution and client
+/// ordering tie-breaks) and `workspace_label` (the workspace DTO label of
+/// that first message).
+struct FineModelBucket {
+    workspace_label: Arc<str>,
+    first_seen: usize,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    contribution_tokens: u64,
+    performance: ModelPerformance,
+}
+
+/// Grouped model bucket materialized by re-folding [`FineModelBucket`]s for
+/// one `GroupBy`; converted to [`UsageModelEntry`] by
+/// [`materialize_tui_model`].
 struct TuiModelBucket {
     model: Arc<str>,
     providers: IdentitySet<Arc<str>>,
@@ -495,9 +521,20 @@ struct DailyBucket {
 struct DailySourceBucket {
     tokens: UsageTokenBreakdown,
     cost: f64,
-    models: HashMap<GroupedModelKey, DailyModelBucket>,
+    models: HashMap<FineModelKey, FineDailyModelBucket>,
 }
 
+struct FineDailyModelBucket {
+    workspace_label: Arc<str>,
+    first_seen: usize,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    messages: u64,
+}
+
+/// Grouped daily model bucket materialized by re-folding
+/// [`FineDailyModelBucket`]s for one `GroupBy`; converted to
+/// [`DailyModelInfo`] by [`materialize_daily_model`].
 struct DailyModelBucket {
     provider: Arc<str>,
     workspace_key: Option<Arc<str>>,
@@ -514,11 +551,20 @@ struct HourlyBucket {
     tokens: UsageTokenBreakdown,
     cost: f64,
     clients: IdentitySet<Arc<str>>,
-    models: HashMap<HourlyModelKey, HourlyModelBucket>,
+    models: HashMap<FineHourlyModelKey, FineHourlyModelBucket>,
     message_count: u32,
     turn_count: u32,
 }
 
+struct FineHourlyModelBucket {
+    first_seen: usize,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+}
+
+/// Grouped hourly model bucket materialized by re-folding
+/// [`FineHourlyModelBucket`]s for one `GroupBy`; converted to
+/// [`HourlyModelInfo`] by [`materialize_hourly_model`].
 struct HourlyModelBucket {
     provider: Arc<str>,
     model: Arc<str>,
@@ -527,7 +573,7 @@ struct HourlyModelBucket {
 }
 
 fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
-    let provider = bucket.providers.into_sorted_string();
+    let provider = bucket.providers.to_sorted_string();
     let client = if let Some(client_totals) = bucket.client_totals {
         let mut clients: Vec<_> = (*client_totals).into_iter().collect();
         clients.sort_by(|(left_client, left), (right_client, right)| {
@@ -580,18 +626,53 @@ fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> Daily
     }
 }
 
-fn materialize_daily(bucket: DailyBucket, group_by: &GroupBy) -> DailyUsage {
+/// Re-fold one day's fine-grained source models into `group_by`'s daily
+/// breakdown. Fine buckets fold in creation order so merged floating-point
+/// sums stay deterministic; the first-created bucket in each merged group
+/// attributes the provider and workspace label (its first message is the
+/// group's first message, matching a direct grouped fold).
+fn materialize_daily(bucket: &DailyBucket, group_by: &GroupBy) -> DailyUsage {
     let mut source_breakdown = BTreeMap::new();
-    for (client, source) in bucket.sources {
-        let models = source
-            .models
+    for (client, source) in &bucket.sources {
+        let mut fine_models: Vec<_> = source.models.iter().collect();
+        fine_models.sort_by_key(|(_, model)| model.first_seen);
+        let mut grouped_models: HashMap<GroupedModelKey, DailyModelBucket> = HashMap::new();
+        for (fine_key, fine_model) in fine_models {
+            let grouped_model = grouped_models
+                .entry(fine_key.grouped(group_by))
+                .or_insert_with(|| {
+                    let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
+                        (
+                            fine_key.workspace.to_key(),
+                            Some(Arc::clone(&fine_model.workspace_label)),
+                        )
+                    } else {
+                        (None, None)
+                    };
+                    DailyModelBucket {
+                        provider: Arc::clone(&fine_key.provider),
+                        workspace_key,
+                        workspace_label,
+                        session_id: matches!(group_by, GroupBy::Session | GroupBy::ClientSession)
+                            .then(|| Arc::clone(&fine_key.session)),
+                        model: Arc::clone(&fine_key.model),
+                        tokens: UsageTokenBreakdown::default(),
+                        cost: 0.0,
+                        messages: 0,
+                    }
+                });
+            add_tokens(&mut grouped_model.tokens, &fine_model.tokens);
+            grouped_model.cost += fine_model.cost;
+            grouped_model.messages = grouped_model.messages.saturating_add(fine_model.messages);
+        }
+        let models = grouped_models
             .into_iter()
             .map(|(key, model)| (key.map_key(), materialize_daily_model(model, group_by)))
             .collect();
         source_breakdown.insert(
             client.to_string(),
             DailySourceInfo {
-                tokens: source.tokens,
+                tokens: source.tokens.clone(),
                 cost: source.cost,
                 models,
             },
@@ -599,7 +680,7 @@ fn materialize_daily(bucket: DailyBucket, group_by: &GroupBy) -> DailyUsage {
     }
     DailyUsage {
         date: bucket.date,
-        tokens: bucket.tokens,
+        tokens: bucket.tokens.clone(),
         cost: bucket.cost,
         source_breakdown,
         message_count: bucket.message_count,
@@ -618,21 +699,39 @@ fn materialize_hourly_model(model: HourlyModelBucket, group_by: &GroupBy) -> Hou
     }
 }
 
-fn materialize_hourly(bucket: HourlyBucket, group_by: &GroupBy) -> HourlyUsage {
-    let models = bucket
-        .models
+/// Re-fold one hour's `(provider, model)` buckets into `group_by`'s hourly
+/// models map. Only ClientProviderModel keeps the provider split; the other
+/// groupings merge providers, attributing the first-created bucket's
+/// provider (matching a direct grouped fold).
+fn materialize_hourly(bucket: &HourlyBucket, group_by: &GroupBy) -> HourlyUsage {
+    let mut fine_models: Vec<_> = bucket.models.iter().collect();
+    fine_models.sort_by_key(|(_, model)| model.first_seen);
+    let mut grouped_models: HashMap<HourlyModelKey, HourlyModelBucket> = HashMap::new();
+    for (fine_key, fine_model) in fine_models {
+        let grouped_model = grouped_models
+            .entry(fine_key.grouped(group_by))
+            .or_insert_with(|| HourlyModelBucket {
+                provider: Arc::clone(&fine_key.provider),
+                model: Arc::clone(&fine_key.model),
+                tokens: UsageTokenBreakdown::default(),
+                cost: 0.0,
+            });
+        add_tokens(&mut grouped_model.tokens, &fine_model.tokens);
+        grouped_model.cost += fine_model.cost;
+    }
+    let models = grouped_models
         .into_iter()
         .map(|(key, model)| (key.map_key(), materialize_hourly_model(model, group_by)))
         .collect();
     let clients = bucket
         .clients
-        .into_vec()
+        .to_vec()
         .into_iter()
         .map(|client| client.to_string())
         .collect();
     HourlyUsage {
         datetime: bucket.datetime,
-        tokens: bucket.tokens,
+        tokens: bucket.tokens.clone(),
         cost: bucket.cost,
         clients,
         models,
@@ -642,77 +741,40 @@ fn materialize_hourly(bucket: HourlyBucket, group_by: &GroupBy) -> HourlyUsage {
 }
 
 impl TuiAcc {
-    pub(super) fn new(group_by: GroupBy) -> Self {
-        Self {
-            group_by,
-            model_map: HashMap::new(),
-            agent_map: HashMap::new(),
-            daily_map: HashMap::new(),
-            hourly_map: HashMap::new(),
-            next_sequence: 0,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub(super) fn push(&mut self, msg: &UnifiedMessage) {
+    pub(crate) fn push(&mut self, msg: &UnifiedMessage) {
         let sequence = self.next_sequence;
         self.next_sequence = self
             .next_sequence
             .checked_add(1)
             .expect("TUI aggregation sequence exceeds usize::MAX");
-        let group_by = &self.group_by;
-        let key = GroupedModelKey::from_message(group_by, msg);
-        let merge_clients = key.merges_clients();
 
         let msg_cost = sane_cost(msg.cost);
 
-        let model_entry = self.model_map.entry(key).or_insert_with(|| {
-            let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
-                let (key, label) = workspace_fields(msg);
-                (key, Some(label))
-            } else {
-                (None, None)
-            };
-            TuiModelBucket {
-                model: Arc::clone(&msg.model_id),
-                providers: IdentitySet::one(Arc::clone(&msg.provider_id)),
-                client: Arc::clone(&msg.client),
-                workspace_key,
-                workspace_label,
+        let model_entry = self
+            .model_map
+            .entry(FineModelKey::from_message(msg))
+            .or_insert_with(|| FineModelBucket {
+                workspace_label: workspace_fields(msg).1,
+                first_seen: sequence,
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
+                contribution_tokens: 0,
                 performance: ModelPerformance::default(),
-                sessions: IdentitySet::default(),
-                client_totals: merge_clients.then(|| Box::new(HashMap::new())),
-            }
-        });
-
-        if merge_clients {
-            let totals = model_entry
-                .client_totals
-                .as_mut()
-                .expect("merge-client TUI grouping has client totals")
-                .entry(Arc::clone(&msg.client))
-                .or_insert_with(|| ClientContributionOrder {
-                    first_seen: sequence,
-                    total_tokens: 0,
-                });
-            totals.total_tokens = totals
-                .total_tokens
-                .checked_add(msg.tokens.total().max(0) as u64)
-                .expect("client token contribution exceeds u64::MAX");
-        }
-
-        model_entry.providers.insert(Arc::clone(&msg.provider_id));
+            });
 
         add_unified_tokens(&mut model_entry.tokens, &msg.tokens);
         model_entry.cost += msg_cost;
+        model_entry.contribution_tokens = model_entry
+            .contribution_tokens
+            .checked_add(msg.tokens.total().max(0) as u64)
+            .expect("client token contribution exceeds u64::MAX");
         model_entry
             .performance
             .record_message(positive_unified_token_total(&msg.tokens), msg.duration_ms);
-
-        model_entry
-            .sessions
-            .insert((Arc::clone(&msg.client), Arc::clone(&msg.session_id)));
 
         if let Some(agent) = msg.agent.as_ref() {
             let normalized_agent = if msg.client.as_ref() == "opencode" {
@@ -775,28 +837,15 @@ impl TuiAcc {
             add_unified_tokens(&mut source_entry.tokens, &msg.tokens);
             source_entry.cost += msg_cost;
 
-            let daily_model_key = GroupedModelKey::from_message(group_by, msg);
             let model_info = source_entry
                 .models
-                .entry(daily_model_key)
-                .or_insert_with(|| {
-                    let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
-                        let (key, label) = workspace_fields(msg);
-                        (key, Some(label))
-                    } else {
-                        (None, None)
-                    };
-                    DailyModelBucket {
-                        provider: Arc::clone(&msg.provider_id),
-                        workspace_key,
-                        workspace_label,
-                        session_id: matches!(group_by, GroupBy::Session | GroupBy::ClientSession)
-                            .then(|| Arc::clone(&msg.session_id)),
-                        model: Arc::clone(&msg.model_id),
-                        tokens: UsageTokenBreakdown::default(),
-                        cost: 0.0,
-                        messages: 0,
-                    }
+                .entry(FineModelKey::from_message(msg))
+                .or_insert_with(|| FineDailyModelBucket {
+                    workspace_label: workspace_fields(msg).1,
+                    first_seen: sequence,
+                    tokens: UsageTokenBreakdown::default(),
+                    cost: 0.0,
+                    messages: 0,
                 });
             add_unified_tokens(&mut model_info.tokens, &msg.tokens);
             model_info.cost += msg_cost;
@@ -825,13 +874,11 @@ impl TuiAcc {
             if msg.is_turn_start {
                 hourly_entry.turn_count += 1;
             }
-            let hkey = HourlyModelKey::from_message(group_by, msg);
             let hmodel = hourly_entry
                 .models
-                .entry(hkey)
-                .or_insert_with(|| HourlyModelBucket {
-                    provider: Arc::clone(&msg.provider_id),
-                    model: Arc::clone(&msg.model_id),
+                .entry(FineHourlyModelKey::from_message(msg))
+                .or_insert_with(|| FineHourlyModelBucket {
+                    first_seen: sequence,
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                 });
@@ -840,15 +887,76 @@ impl TuiAcc {
         }
     }
 
-    pub(super) fn finish(self) -> UsageData {
-        let Self {
-            group_by,
-            model_map,
-            agent_map,
-            daily_map,
-            hourly_map,
-            ..
-        } = self;
+    /// Re-fold the canonical model buckets into `group_by`'s grouping. Fine
+    /// buckets fold in creation order so merged floating-point sums stay
+    /// deterministic across runs and repeated projections; the first-created
+    /// bucket in each merged group attributes the single-client field,
+    /// workspace label, and client first-seen (its first message is the
+    /// group's first message, matching a direct grouped fold).
+    fn refold_models(&self, group_by: &GroupBy) -> HashMap<GroupedModelKey, TuiModelBucket> {
+        let mut fine_models: Vec<_> = self.model_map.iter().collect();
+        fine_models.sort_by_key(|(_, model)| model.first_seen);
+        let mut model_map: HashMap<GroupedModelKey, TuiModelBucket> = HashMap::new();
+        for (fine_key, fine_model) in fine_models {
+            let key = fine_key.grouped(group_by);
+            let merge_clients = key.merges_clients();
+            let model_entry = model_map.entry(key).or_insert_with(|| {
+                let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
+                    (
+                        fine_key.workspace.to_key(),
+                        Some(Arc::clone(&fine_model.workspace_label)),
+                    )
+                } else {
+                    (None, None)
+                };
+                TuiModelBucket {
+                    model: Arc::clone(&fine_key.model),
+                    providers: IdentitySet::default(),
+                    client: Arc::clone(&fine_key.client),
+                    workspace_key,
+                    workspace_label,
+                    tokens: UsageTokenBreakdown::default(),
+                    cost: 0.0,
+                    performance: ModelPerformance::default(),
+                    sessions: IdentitySet::default(),
+                    client_totals: merge_clients.then(|| Box::new(HashMap::new())),
+                }
+            });
+
+            if merge_clients {
+                let totals = model_entry
+                    .client_totals
+                    .as_mut()
+                    .expect("merge-client TUI grouping has client totals")
+                    .entry(Arc::clone(&fine_key.client))
+                    .or_insert_with(|| ClientContributionOrder {
+                        first_seen: fine_model.first_seen,
+                        total_tokens: 0,
+                    });
+                totals.total_tokens = totals
+                    .total_tokens
+                    .checked_add(fine_model.contribution_tokens)
+                    .expect("client token contribution exceeds u64::MAX");
+            }
+
+            model_entry.providers.insert(Arc::clone(&fine_key.provider));
+
+            add_tokens(&mut model_entry.tokens, &fine_model.tokens);
+            model_entry.cost += fine_model.cost;
+            model_entry.performance.merge(&fine_model.performance);
+
+            model_entry
+                .sessions
+                .insert((Arc::clone(&fine_key.client), Arc::clone(&fine_key.session)));
+        }
+        model_map
+    }
+
+    /// Materialize one grouping's [`UsageData`] from the canonical fold
+    /// state. Borrowing, so the same accumulator can be projected repeatedly
+    /// with different groupings without rescanning local sources.
+    pub fn project(&self, group_by: &GroupBy) -> UsageData {
+        let model_map = self.refold_models(group_by);
 
         let mut keyed_models: Vec<_> = model_map
             .into_iter()
@@ -867,12 +975,13 @@ impl TuiAcc {
         let models: Vec<UsageModelEntry> =
             keyed_models.into_iter().map(|(_, model)| model).collect();
 
-        let mut agents: Vec<AgentEntry> = agent_map
-            .into_iter()
+        let mut agents: Vec<AgentEntry> = self
+            .agent_map
+            .iter()
             .map(|(agent_name, agent)| AgentEntry {
-                agent: agent_name,
-                clients: agent.clients.into_sorted_string(),
-                tokens: agent.tokens,
+                agent: agent_name.clone(),
+                clients: agent.clients.to_sorted_string(),
+                tokens: agent.tokens.clone(),
                 cost: agent.cost,
                 message_count: agent.message_count,
                 instance_count: agent
@@ -889,15 +998,17 @@ impl TuiAcc {
                 .then_with(|| a.agent.cmp(&b.agent))
         });
 
-        let mut daily: Vec<DailyUsage> = daily_map
-            .into_values()
-            .map(|bucket| materialize_daily(bucket, &group_by))
+        let mut daily: Vec<DailyUsage> = self
+            .daily_map
+            .values()
+            .map(|bucket| materialize_daily(bucket, group_by))
             .collect();
         daily.sort_by_key(|b| std::cmp::Reverse(b.date));
 
-        let mut hourly: Vec<HourlyUsage> = hourly_map
-            .into_values()
-            .map(|bucket| materialize_hourly(bucket, &group_by))
+        let mut hourly: Vec<HourlyUsage> = self
+            .hourly_map
+            .values()
+            .map(|bucket| materialize_hourly(bucket, group_by))
             .collect();
         hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
@@ -945,11 +1056,11 @@ mod tests {
             messages: Vec<UnifiedMessage>,
             group_by: &GroupBy,
         ) -> Result<UsageData, String> {
-            let mut acc = TuiAcc::new(group_by.clone());
+            let mut acc = TuiAcc::new();
             for message in &messages {
                 acc.push(message);
             }
-            Ok(acc.finish())
+            Ok(acc.project(group_by))
         }
     }
 
@@ -1998,10 +2109,10 @@ mod tests {
         ];
 
         for (group_by, first, second) in cases {
-            let mut acc = TuiAcc::new(group_by);
+            let mut acc = TuiAcc::new();
             acc.push(&first);
             acc.push(&second);
-            let usage = acc.finish();
+            let usage = acc.project(&group_by);
             assert_eq!(usage.models.len(), 2);
             assert_eq!(usage.models[0].tokens.total(), 20);
             assert_eq!(usage.models[0].cost, 20.0);
@@ -2015,10 +2126,10 @@ mod tests {
         let timestamp = 1_735_689_600_000;
         let first = collision_message("a", "b:c", "same", "d", 10, timestamp);
         let second = collision_message("a", "b", "same", "c:d", 20, timestamp);
-        let mut acc = TuiAcc::new(GroupBy::ClientProviderModel);
+        let mut acc = TuiAcc::new();
         acc.push(&first);
         acc.push(&second);
-        let usage = acc.finish();
+        let usage = acc.project(&GroupBy::ClientProviderModel);
 
         let daily = &usage.daily[0].source_breakdown["a"].models;
         assert_eq!(daily.len(), 2);
@@ -2056,7 +2167,7 @@ mod tests {
     #[test]
     fn hourly_client_identity_order_is_deterministic() {
         let timestamp = 1_735_689_600_000;
-        let mut acc = TuiAcc::new(GroupBy::Model);
+        let mut acc = TuiAcc::new();
         acc.push(&collision_message(
             "z-client",
             "provider",
@@ -2074,7 +2185,7 @@ mod tests {
             timestamp,
         ));
 
-        let usage = acc.finish();
+        let usage = acc.project(&GroupBy::Model);
 
         assert_eq!(
             usage.hourly[0]
@@ -2097,10 +2208,10 @@ mod tests {
         known.workspace_key = Some(Arc::from(""));
         known.workspace_label = Some(Arc::from("Empty workspace key"));
 
-        let mut acc = TuiAcc::new(GroupBy::WorkspaceModel);
+        let mut acc = TuiAcc::new();
         acc.push(&unknown);
         acc.push(&known);
-        let usage = acc.finish();
+        let usage = acc.project(&GroupBy::WorkspaceModel);
 
         assert_eq!(usage.models.len(), 2);
         let daily_models = &usage.daily[0].source_breakdown["client"].models;
@@ -2116,11 +2227,14 @@ mod tests {
             collision_message("a:b", "provider", "c", "model", 10, timestamp),
             collision_message("a", "provider", "b:c", "model", 20, timestamp),
         ];
-        let mut model_acc = TuiAcc::new(GroupBy::Model);
+        let mut model_acc = TuiAcc::new();
         for message in &model_messages {
             model_acc.push(message);
         }
-        assert_eq!(model_acc.finish().models[0].session_count, 2);
+        assert_eq!(
+            model_acc.project(&GroupBy::Model).models[0].session_count,
+            2
+        );
 
         let mut explicit = UnifiedMessage::new_with_agent(
             "a",
@@ -2153,11 +2267,14 @@ mod tests {
             0.0,
             Some("builder".to_string()),
         );
-        let mut agent_acc = TuiAcc::new(GroupBy::Model);
+        let mut agent_acc = TuiAcc::new();
         for message in [&explicit, &derived_left, &derived_right] {
             agent_acc.push(message);
         }
-        assert_eq!(agent_acc.finish().agents[0].instance_count, 3);
+        assert_eq!(
+            agent_acc.project(&GroupBy::Model).agents[0].instance_count,
+            3
+        );
     }
 
     #[test]
@@ -2170,14 +2287,537 @@ mod tests {
             collision_message("client", "provider", "session-a", "model", 10, timestamp);
         session_a.cost = 1.0;
 
-        let mut acc = TuiAcc::new(GroupBy::Session);
+        let mut acc = TuiAcc::new();
         acc.push(&session_b);
         acc.push(&session_a);
-        let usage = acc.finish();
+        let usage = acc.project(&GroupBy::Session);
 
         assert_eq!(usage.models.len(), 2);
         assert_eq!(usage.models[0].tokens.total(), 10);
         assert_eq!(usage.models[1].tokens.total(), 20);
+    }
+
+    // ---- group-by re-projection (issue #161) ----
+
+    #[allow(clippy::too_many_arguments)]
+    fn reprojection_message(
+        client: &str,
+        model: &str,
+        provider: &str,
+        session: &str,
+        timestamp: i64,
+        input: i64,
+        output: i64,
+        cost: f64,
+        workspace_key: Option<&str>,
+        workspace_label: Option<&str>,
+        duration_ms: Option<i64>,
+        is_turn_start: bool,
+        agent: Option<&str>,
+    ) -> UnifiedMessage {
+        let mut msg = UnifiedMessage::new_with_agent(
+            client,
+            model,
+            provider,
+            session,
+            timestamp,
+            crate::TokenBreakdown {
+                input,
+                output,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+            agent.map(str::to_string),
+        );
+        msg.set_workspace(
+            workspace_key.map(str::to_string),
+            workspace_label.map(str::to_string),
+        );
+        msg.duration_ms = duration_ms;
+        msg.is_turn_start = is_turn_start;
+        msg
+    }
+
+    /// Noon-based UTC timestamps keep day and hour buckets stable across test
+    /// host time zones.
+    fn reprojection_ts(day_offset: i64, hour: i64) -> i64 {
+        (1_749_945_600 + day_offset * 86_400 + hour * 3_600) * 1_000
+    }
+
+    /// One corpus exercising every dimension a grouping can re-fold: shared
+    /// models across clients, one client:model pair across two providers,
+    /// workspaces with/without labels and an unknown workspace, two sessions
+    /// per client, two days, two hours, durations, turn starts, and an agent.
+    fn reprojection_corpus() -> Vec<UnifiedMessage> {
+        vec![
+            reprojection_message(
+                "claude",
+                "gpt-5.5",
+                "openai",
+                "s1",
+                reprojection_ts(0, 12),
+                100,
+                50,
+                0.1,
+                Some("/repo-a"),
+                Some("repo-a"),
+                Some(1000),
+                true,
+                Some("builder"),
+            ),
+            reprojection_message(
+                "codex",
+                "gpt-5.5",
+                "openai",
+                "s2",
+                reprojection_ts(0, 12),
+                200,
+                60,
+                0.2,
+                Some("/repo-a"),
+                Some("repo-a"),
+                Some(2000),
+                false,
+                None,
+            ),
+            reprojection_message(
+                "claude",
+                "gpt-5.5",
+                "azure",
+                "s1",
+                reprojection_ts(0, 13),
+                300,
+                70,
+                0.3,
+                Some("/repo-b"),
+                None,
+                None,
+                false,
+                None,
+            ),
+            reprojection_message(
+                "claude",
+                "claude-sonnet-4.5",
+                "anthropic",
+                "s3",
+                reprojection_ts(1, 12),
+                400,
+                80,
+                0.4,
+                None,
+                None,
+                Some(4000),
+                true,
+                None,
+            ),
+            reprojection_message(
+                "qwen",
+                "gpt-5.5",
+                "openai",
+                "s4",
+                reprojection_ts(1, 13),
+                500,
+                90,
+                0.5,
+                Some("/repo-a"),
+                Some("repo-a"),
+                None,
+                false,
+                None,
+            ),
+        ]
+    }
+
+    fn reprojection_accumulator() -> TuiAcc {
+        let mut acc = TuiAcc::new();
+        for message in reprojection_corpus() {
+            acc.push(&message);
+        }
+        acc
+    }
+
+    fn assert_tokens_eq(left: &UsageTokenBreakdown, right: &UsageTokenBreakdown) {
+        assert_eq!(left.input, right.input);
+        assert_eq!(left.output, right.output);
+        assert_eq!(left.cache_read, right.cache_read);
+        assert_eq!(left.cache_write, right.cache_write);
+        assert_eq!(left.reasoning, right.reasoning);
+    }
+
+    fn assert_agents_eq(left: &[AgentEntry], right: &[AgentEntry]) {
+        assert_eq!(left.len(), right.len());
+        for (left, right) in left.iter().zip(right) {
+            assert_eq!(left.agent, right.agent);
+            assert_eq!(left.clients, right.clients);
+            assert_tokens_eq(&left.tokens, &right.tokens);
+            assert_eq!(left.cost.to_bits(), right.cost.to_bits());
+            assert_eq!(left.message_count, right.message_count);
+            assert_eq!(left.instance_count, right.instance_count);
+        }
+    }
+
+    fn assert_graph_eq(left: &Option<UsageGraphData>, right: &Option<UsageGraphData>) {
+        match (left, right) {
+            (Some(left), Some(right)) => {
+                assert_eq!(left.weeks.len(), right.weeks.len());
+                for (left_week, right_week) in left.weeks.iter().zip(&right.weeks) {
+                    assert_eq!(left_week.len(), right_week.len());
+                    for (left_day, right_day) in left_week.iter().zip(right_week) {
+                        match (left_day, right_day) {
+                            (Some(left), Some(right)) => {
+                                assert_eq!(left.date, right.date);
+                                assert_eq!(left.tokens, right.tokens);
+                                assert_eq!(left.cost.to_bits(), right.cost.to_bits());
+                                assert_eq!(left.intensity.to_bits(), right.intensity.to_bits());
+                            }
+                            (None, None) => {}
+                            _ => panic!("graph day presence mismatch"),
+                        }
+                    }
+                }
+            }
+            (None, None) => {}
+            _ => panic!("graph presence mismatch"),
+        }
+    }
+
+    fn assert_usage_data_eq(left: &UsageData, right: &UsageData) {
+        assert_eq!(left.total_tokens, right.total_tokens);
+        assert_eq!(left.total_cost.to_bits(), right.total_cost.to_bits());
+        assert_eq!(left.current_streak, right.current_streak);
+        assert_eq!(left.longest_streak, right.longest_streak);
+
+        assert_eq!(left.models.len(), right.models.len());
+        for (left, right) in left.models.iter().zip(&right.models) {
+            assert_eq!(left.model, right.model);
+            assert_eq!(left.provider, right.provider);
+            assert_eq!(left.client, right.client);
+            assert_eq!(left.workspace_key, right.workspace_key);
+            assert_eq!(left.workspace_label, right.workspace_label);
+            assert_tokens_eq(&left.tokens, &right.tokens);
+            assert_eq!(left.cost.to_bits(), right.cost.to_bits());
+            assert_eq!(left.performance, right.performance);
+            assert_eq!(left.session_count, right.session_count);
+        }
+
+        assert_agents_eq(&left.agents, &right.agents);
+
+        assert_eq!(left.daily.len(), right.daily.len());
+        for (left, right) in left.daily.iter().zip(&right.daily) {
+            assert_eq!(left.date, right.date);
+            assert_tokens_eq(&left.tokens, &right.tokens);
+            assert_eq!(left.cost.to_bits(), right.cost.to_bits());
+            assert_eq!(left.message_count, right.message_count);
+            assert_eq!(left.turn_count, right.turn_count);
+            assert_eq!(left.source_breakdown.len(), right.source_breakdown.len());
+            for ((left_client, left_source), (right_client, right_source)) in
+                left.source_breakdown.iter().zip(&right.source_breakdown)
+            {
+                assert_eq!(left_client, right_client);
+                assert_tokens_eq(&left_source.tokens, &right_source.tokens);
+                assert_eq!(left_source.cost.to_bits(), right_source.cost.to_bits());
+                assert_eq!(left_source.models.len(), right_source.models.len());
+                for ((left_key, left_model), (right_key, right_model)) in
+                    left_source.models.iter().zip(&right_source.models)
+                {
+                    assert_eq!(left_key, right_key);
+                    assert_eq!(left_model.provider, right_model.provider);
+                    assert_eq!(left_model.model_id, right_model.model_id);
+                    assert_eq!(left_model.display_name, right_model.display_name);
+                    assert_eq!(left_model.color_key, right_model.color_key);
+                    assert_eq!(left_model.workspace_key, right_model.workspace_key);
+                    assert_eq!(left_model.workspace_label, right_model.workspace_label);
+                    assert_tokens_eq(&left_model.tokens, &right_model.tokens);
+                    assert_eq!(left_model.cost.to_bits(), right_model.cost.to_bits());
+                    assert_eq!(left_model.messages, right_model.messages);
+                }
+            }
+        }
+
+        assert_eq!(left.hourly.len(), right.hourly.len());
+        for (left, right) in left.hourly.iter().zip(&right.hourly) {
+            assert_eq!(left.datetime, right.datetime);
+            assert_tokens_eq(&left.tokens, &right.tokens);
+            assert_eq!(left.cost.to_bits(), right.cost.to_bits());
+            assert_eq!(left.clients, right.clients);
+            assert_eq!(left.message_count, right.message_count);
+            assert_eq!(left.turn_count, right.turn_count);
+            assert_eq!(left.models.len(), right.models.len());
+            for ((left_key, left_model), (right_key, right_model)) in
+                left.models.iter().zip(&right.models)
+            {
+                assert_eq!(left_key, right_key);
+                assert_eq!(left_model.provider, right_model.provider);
+                assert_eq!(left_model.model_id, right_model.model_id);
+                assert_eq!(left_model.display_name, right_model.display_name);
+                assert_eq!(left_model.color_key, right_model.color_key);
+                assert_tokens_eq(&left_model.tokens, &right_model.tokens);
+                assert_eq!(left_model.cost.to_bits(), right_model.cost.to_bits());
+            }
+        }
+
+        assert_graph_eq(&left.graph, &right.graph);
+    }
+
+    #[test]
+    fn reprojection_is_repeatable_and_deterministic() {
+        let acc = reprojection_accumulator();
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
+        ] {
+            let first = acc.project(&group_by);
+            let second = acc.project(&group_by);
+            assert_usage_data_eq(&first, &second);
+        }
+    }
+
+    #[test]
+    fn reprojection_switching_groupings_does_not_pollute_state() {
+        let acc = reprojection_accumulator();
+        let baseline = acc.project(&GroupBy::Model);
+        let _ = acc.project(&GroupBy::ClientProviderModel);
+        let _ = acc.project(&GroupBy::WorkspaceModel);
+        let _ = acc.project(&GroupBy::ClientSession);
+        let rerun = acc.project(&GroupBy::Model);
+        assert_usage_data_eq(&baseline, &rerun);
+    }
+
+    #[test]
+    fn reprojection_preserves_group_independent_views() {
+        let acc = reprojection_accumulator();
+        let reference = acc.project(&GroupBy::Model);
+        for group_by in [
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
+        ] {
+            let projected = acc.project(&group_by);
+            assert_eq!(projected.total_tokens, reference.total_tokens);
+            assert!((projected.total_cost - reference.total_cost).abs() < 1e-9);
+            assert_agents_eq(&projected.agents, &reference.agents);
+            assert_eq!(
+                (projected.current_streak, projected.longest_streak),
+                (reference.current_streak, reference.longest_streak)
+            );
+
+            // Day- and hour-level rollups are accumulated per message, not
+            // re-folded, so they stay bit-identical across groupings.
+            let daily_rollup = |data: &UsageData| {
+                data.daily
+                    .iter()
+                    .map(|day| {
+                        (
+                            day.date,
+                            day.tokens.total(),
+                            day.cost.to_bits(),
+                            day.message_count,
+                            day.turn_count,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(daily_rollup(&projected), daily_rollup(&reference));
+            let hourly_rollup = |data: &UsageData| {
+                data.hourly
+                    .iter()
+                    .map(|hour| {
+                        (
+                            hour.datetime,
+                            hour.tokens.total(),
+                            hour.cost.to_bits(),
+                            hour.message_count,
+                            hour.turn_count,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(hourly_rollup(&projected), hourly_rollup(&reference));
+            assert_graph_eq(&projected.graph, &reference.graph);
+        }
+    }
+
+    #[test]
+    fn reprojection_derives_each_grouping_from_one_accumulator() {
+        let corpus = reprojection_corpus();
+        let day0 = corpus[0].local_date().expect("day0 local date");
+        let day1 = corpus[3].local_date().expect("day1 local date");
+        let day0_hour12 = timestamp_to_hour(corpus[0].timestamp).expect("day0 hour12");
+        let day0_hour13 = timestamp_to_hour(corpus[2].timestamp).expect("day0 hour13");
+        let mut acc = TuiAcc::new();
+        for message in &corpus {
+            acc.push(message);
+        }
+
+        let model = acc.project(&GroupBy::Model);
+        assert_eq!(model.models.len(), 2);
+        let gpt = model
+            .models
+            .iter()
+            .find(|entry| entry.model == "gpt-5.5")
+            .expect("merged gpt-5.5 entry");
+        assert_eq!(gpt.provider, "azure, openai");
+        assert_eq!(gpt.client, "qwen, claude, codex");
+        assert_eq!(gpt.session_count, 3);
+        assert_eq!(gpt.tokens.total(), 1370);
+        assert!((gpt.cost - 1.1).abs() < 1e-9);
+        assert_eq!(gpt.workspace_key, None);
+        assert_eq!(gpt.workspace_label, None);
+        assert_eq!(gpt.performance.total_duration_ms, 3000);
+        assert_eq!(gpt.performance.timed_tokens, 410);
+        assert_eq!(gpt.performance.sample_count, 2);
+        let sonnet = model
+            .models
+            .iter()
+            .find(|entry| entry.model == "claude-sonnet-4.5")
+            .expect("claude-sonnet-4.5 entry");
+        assert_eq!(sonnet.session_count, 1);
+        assert_eq!(
+            sonnet.performance.ms_per_1k_tokens,
+            Some(4000.0 * 1000.0 / 480.0)
+        );
+        assert_eq!(sonnet.performance.token_coverage, 1.0);
+
+        // Model grouping merges providers in the daily detail, attributing
+        // the first-seen provider, and keeps bare-model hourly keys.
+        let day0_claude = &model
+            .daily
+            .iter()
+            .find(|day| day.date == day0)
+            .expect("day0 usage")
+            .source_breakdown["claude"];
+        let gpt_daily = &day0_claude.models["v1|m|7:gpt-5.5"];
+        assert_eq!(gpt_daily.provider, "openai");
+        assert_eq!(gpt_daily.tokens.total(), 520);
+        assert!((gpt_daily.cost - 0.4).abs() < 1e-9);
+        let hour12 = model
+            .hourly
+            .iter()
+            .find(|hour| hour.datetime == day0_hour12)
+            .expect("day0 hour12 usage");
+        assert!(hour12.models.contains_key("v1|m|7:gpt-5.5"));
+
+        let client_model = acc.project(&GroupBy::ClientModel);
+        assert_eq!(client_model.models.len(), 4);
+        let claude_gpt = client_model
+            .models
+            .iter()
+            .find(|entry| entry.model == "gpt-5.5" && entry.client == "claude")
+            .expect("claude gpt-5.5 entry");
+        assert_eq!(claude_gpt.provider, "azure, openai");
+        assert_eq!(claude_gpt.tokens.total(), 520);
+        assert_eq!(claude_gpt.session_count, 1);
+        let day0_claude = &client_model
+            .daily
+            .iter()
+            .find(|day| day.date == day0)
+            .expect("day0 usage")
+            .source_breakdown["claude"];
+        assert!(day0_claude.models.contains_key("v1|cm|6:claude7:gpt-5.5"));
+
+        let cpm = acc.project(&GroupBy::ClientProviderModel);
+        assert_eq!(cpm.models.len(), 5);
+        let day0_claude = &cpm
+            .daily
+            .iter()
+            .find(|day| day.date == day0)
+            .expect("day0 usage")
+            .source_breakdown["claude"];
+        assert!(day0_claude
+            .models
+            .contains_key("v1|cpm|6:claude6:openai7:gpt-5.5"));
+        assert!(day0_claude
+            .models
+            .contains_key("v1|cpm|6:claude5:azure7:gpt-5.5"));
+        // Only ClientProviderModel splits the hourly models map by provider.
+        let cpm_hour13 = cpm
+            .hourly
+            .iter()
+            .find(|hour| hour.datetime == day0_hour13)
+            .expect("day0 hour13 usage");
+        assert_eq!(cpm_hour13.models.len(), 1);
+        assert!(cpm_hour13.models.contains_key("v1|pm|5:azure7:gpt-5.5"));
+        let model_hour13 = model
+            .hourly
+            .iter()
+            .find(|hour| hour.datetime == day0_hour13)
+            .expect("day0 hour13 usage");
+        assert!(model_hour13.models.contains_key("v1|m|7:gpt-5.5"));
+
+        let workspace = acc.project(&GroupBy::WorkspaceModel);
+        assert_eq!(workspace.models.len(), 3);
+        let repo_a = workspace
+            .models
+            .iter()
+            .find(|entry| entry.workspace_key.as_deref() == Some("/repo-a"))
+            .expect("repo-a workspace entry");
+        assert_eq!(repo_a.workspace_label.as_deref(), Some("repo-a"));
+        assert_eq!(repo_a.client, "qwen, codex, claude");
+        assert_eq!(repo_a.session_count, 3);
+        assert_eq!(repo_a.tokens.total(), 1000);
+        let repo_b = workspace
+            .models
+            .iter()
+            .find(|entry| entry.workspace_key.as_deref() == Some("/repo-b"))
+            .expect("repo-b workspace entry");
+        assert_eq!(repo_b.workspace_label.as_deref(), Some("repo-b"));
+        let unknown = workspace
+            .models
+            .iter()
+            .find(|entry| entry.workspace_key.is_none())
+            .expect("unknown workspace entry");
+        assert_eq!(
+            unknown.workspace_label.as_deref(),
+            Some(UNKNOWN_WORKSPACE_LABEL)
+        );
+        let day0_claude = &workspace
+            .daily
+            .iter()
+            .find(|day| day.date == day0)
+            .expect("day0 usage")
+            .source_breakdown["claude"];
+        assert!(day0_claude.models.contains_key("v1|wmk|7:/repo-a7:gpt-5.5"));
+        assert!(day0_claude.models.contains_key("v1|wmk|7:/repo-b7:gpt-5.5"));
+        let day1_claude = &workspace
+            .daily
+            .iter()
+            .find(|day| day.date == day1)
+            .expect("day1 usage")
+            .source_breakdown["claude"];
+        assert!(day1_claude
+            .models
+            .contains_key("v1|wmu|17:claude-sonnet-4.5"));
+
+        let session = acc.project(&GroupBy::Session);
+        assert_eq!(session.models.len(), 4);
+        let day0_claude = &session
+            .daily
+            .iter()
+            .find(|day| day.date == day0)
+            .expect("day0 usage")
+            .source_breakdown["claude"];
+        let session_daily = &day0_claude.models["v1|sm|2:s17:gpt-5.5"];
+        assert_eq!(session_daily.display_name, "s1 / gpt-5.5");
+        assert_eq!(session_daily.tokens.total(), 520);
+
+        let client_session = acc.project(&GroupBy::ClientSession);
+        assert_eq!(client_session.models.len(), 4);
+        let day0_claude = &client_session
+            .daily
+            .iter()
+            .find(|day| day.date == day0)
+            .expect("day0 usage")
+            .source_breakdown["claude"];
+        let session_daily = &day0_claude.models["v1|csm|6:claude2:s17:gpt-5.5"];
+        assert_eq!(session_daily.display_name, "s1 / gpt-5.5");
     }
 
     fn hourly(hour: u32, input_tokens: u64, cost: f64) -> HourlyUsage {
