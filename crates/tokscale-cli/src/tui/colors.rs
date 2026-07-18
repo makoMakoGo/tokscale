@@ -21,10 +21,6 @@ fn parse_catalog_color(hex: &str) -> Color {
     parse_hex_color(hex).expect("client catalog colors are validated as #RRGGBB")
 }
 
-pub fn get_model_color(_model: &str) -> Color {
-    get_provider_shade("unknown", 0)
-}
-
 /// Returns the shade for a given `(provider, rank)` pair.
 /// Honors `[colors.providers]` config overrides at every rank by deriving
 /// a 7-step lighten-to-white palette from the override base color.
@@ -168,38 +164,72 @@ pub fn model_shade_key(provider: &str, model: &str) -> String {
     format!("{provider}\0{model}")
 }
 
+/// Color assignment for the model charts: per-`(provider, model)` shades plus
+/// the resolved provider for every canonical model.
+#[derive(Debug, Default)]
+pub struct ModelShadeMap {
+    pub shades: HashMap<String, Color>,
+    pub providers: HashMap<String, String>,
+}
+
 /// Builds a `(provider, model) -> Color` map where each provider's models are
 /// cost-ranked; rank 0 (highest cost) gets the base provider color and later
 /// ranks get progressively lighter shades.
 ///
-/// Aggregates cost per (provider, model) so the same model appearing in
-/// multiple group-by buckets (e.g. `GroupBy::WorkspaceModel`) doesn't inflate
-/// the rank count. Ties on cost are resolved by model name so shade assignment
-/// stays deterministic across refreshes.
-pub fn build_model_shade_map(models: &[ModelUsage]) -> HashMap<String, Color> {
-    let mut by_provider: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
+/// Aggregation is canonical (ADR 0026): cost is summed per bare model id, and
+/// each model resolves to one deterministic provider — the lexicographically
+/// smallest provider color key across its entries, which matches the first
+/// segment of the sorted merged-provider string a `GroupBy::Model` projection
+/// produces. The same model therefore gets the same shade no matter how the
+/// active grouping buckets `UsageData.models` (e.g. `ClientProviderModel`
+/// splitting providers, `WorkspaceModel` repeating rows per workspace). Ties
+/// on cost are resolved by model name so shade assignment stays deterministic
+/// across refreshes.
+pub fn build_model_shade_map(models: &[ModelUsage]) -> ModelShadeMap {
+    let mut cost_by_model: HashMap<&str, f64> = HashMap::new();
+    let mut provider_by_model: HashMap<&str, &str> = HashMap::new();
     for m in models {
         let provider = provider_color_key(&m.provider);
         let cost = if m.cost.is_finite() { m.cost } else { 0.0 };
-        *by_provider
-            .entry(provider)
-            .or_default()
+        *cost_by_model.entry(m.model.as_str()).or_insert(0.0) += cost;
+        provider_by_model
             .entry(m.model.as_str())
-            .or_insert(0.0) += cost;
+            .and_modify(|current| {
+                if provider < *current {
+                    *current = provider;
+                }
+            })
+            .or_insert(provider);
     }
 
-    let mut map = HashMap::new();
+    let mut by_provider: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
+    for (model, cost) in &cost_by_model {
+        let provider = provider_by_model[model];
+        by_provider
+            .entry(provider)
+            .or_default()
+            .push((*model, *cost));
+    }
+
+    let mut shades = HashMap::new();
     for (provider, models_map) in by_provider {
-        let mut ranked: Vec<(&str, f64)> = models_map.into_iter().collect();
+        let mut ranked = models_map;
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         for (rank, (name, _)) in ranked.iter().enumerate() {
-            map.insert(
+            shades.insert(
                 model_shade_key(provider, name),
                 get_provider_shade(provider, rank),
             );
         }
     }
-    map
+
+    ModelShadeMap {
+        shades,
+        providers: provider_by_model
+            .into_iter()
+            .map(|(model, provider)| (model.to_string(), provider.to_string()))
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -226,8 +256,8 @@ mod tests {
         TokscaleConfig::initialize_default_for_tests();
         let map = build_model_shade_map(&[model_usage("", "u2")]);
 
-        assert!(map.contains_key(&model_shade_key("unknown", "u2")));
-        assert!(!map.contains_key(&model_shade_key("unisound", "u2")));
+        assert!(map.shades.contains_key(&model_shade_key("unknown", "u2")));
+        assert!(!map.shades.contains_key(&model_shade_key("unisound", "u2")));
     }
 
     #[test]
@@ -235,8 +265,46 @@ mod tests {
         TokscaleConfig::initialize_default_for_tests();
         let map = build_model_shade_map(&[model_usage("openai, anthropic", "shared-model")]);
 
-        assert!(map.contains_key(&model_shade_key("openai", "shared-model")));
-        assert!(!map.contains_key(&model_shade_key("anthropic", "shared-model")));
+        assert!(map
+            .shades
+            .contains_key(&model_shade_key("openai", "shared-model")));
+        assert!(!map
+            .shades
+            .contains_key(&model_shade_key("anthropic", "shared-model")));
+    }
+
+    #[test]
+    fn shade_map_is_grouping_invariant_for_split_provider_buckets() {
+        TokscaleConfig::initialize_default_for_tests();
+        // GroupBy::Model shape: one entry per model with the sorted
+        // merged-provider string and the total cost.
+        let merged = build_model_shade_map(&[
+            model_usage("anthropic, openai", "shared-model"),
+            model_usage("openai", "openai-only"),
+        ]);
+        // GroupBy::ClientProviderModel shape: the same messages bucketed per
+        // provider, so costs are split across entries.
+        let mut split_entries = vec![
+            model_usage("anthropic", "shared-model"),
+            model_usage("openai", "shared-model"),
+            model_usage("openai", "openai-only"),
+        ];
+        split_entries[0].cost = 0.6;
+        split_entries[1].cost = 0.4;
+        let split = build_model_shade_map(&split_entries);
+
+        assert_eq!(merged.shades, split.shades);
+        assert_eq!(merged.providers, split.providers);
+        assert_eq!(
+            split.providers.get("shared-model").map(String::as_str),
+            Some("anthropic")
+        );
+        // Costs are summed per canonical model, so ranks match the merged
+        // projection instead of the per-bucket splits.
+        assert_eq!(
+            split.shades.get(&model_shade_key("openai", "openai-only")),
+            Some(&get_provider_shade("openai", 0))
+        );
     }
 
     #[test]

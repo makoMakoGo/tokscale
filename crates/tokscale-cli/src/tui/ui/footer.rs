@@ -228,12 +228,8 @@ fn current_count_label(app: &App) -> String {
             for day in &app.data.daily {
                 for (harness, source) in &day.source_breakdown {
                     harnesses.insert(harness.as_str());
-                    for (key, model) in &source.models {
-                        models.insert(if model.color_key.is_empty() {
-                            key.as_str()
-                        } else {
-                            model.color_key.as_str()
-                        });
+                    for model in source.models.values() {
+                        models.insert(model.model_id.as_str());
                     }
                 }
             }
@@ -340,15 +336,19 @@ fn help_row_line(app: &App) -> Line<'static> {
             Span::styled("d/t/c", Style::default().fg(Color::Blue)),
             Span::styled("·", Style::default().fg(app.theme.muted)),
             Span::styled("[s]", Style::default().fg(Color::Cyan)),
-            Span::styled("·", Style::default().fg(app.theme.muted)),
-            Span::styled("[g]", Style::default().fg(Color::Cyan)),
+        ];
+        if app.group_by_applies_to_current_tab() {
+            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            spans.push(Span::styled("[g]", Style::default().fg(Color::Cyan)));
+        }
+        spans.extend([
             Span::styled("·", Style::default().fg(app.theme.muted)),
             Span::styled("[p]", Style::default().fg(Color::Magenta)),
             Span::styled("·", Style::default().fg(app.theme.muted)),
             Span::styled("[r]", Style::default().fg(Color::Yellow)),
             Span::styled("·", Style::default().fg(app.theme.muted)),
             Span::styled("q", Style::default().fg(app.theme.muted)),
-        ];
+        ]);
         if app.current_tab == Tab::Daily {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
             if app.is_daily_detail_active() {
@@ -425,11 +425,13 @@ fn help_row_line(app: &App) -> Line<'static> {
             "[s:sources]",
             Style::default().fg(Color::Cyan),
         ));
-        spans.push(Span::styled(" ", Style::default()));
-        spans.push(Span::styled(
-            format!("[g:{}]", app.group_by.borrow()),
-            Style::default().fg(Color::Cyan),
-        ));
+        if app.group_by_applies_to_current_tab() {
+            spans.push(Span::styled(" ", Style::default()));
+            spans.push(Span::styled(
+                format!("[g:{}]", app.group_by.borrow()),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
         spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
         spans.push(Span::styled(
             format!("[p:{}]", app.theme.name.as_str()),
@@ -717,6 +719,45 @@ mod tests {
         assert!(text.contains("[r:local]"));
         assert!(text.contains("[R:local]"));
         assert!(text.contains("·e·q"));
+    }
+
+    #[test]
+    fn group_by_hint_only_shows_on_group_keyed_tabs() {
+        for tab in [Tab::Models, Tab::Daily, Tab::Monthly, Tab::Weekly] {
+            let text = line_text(help_row_line(&make_app_on(tab)));
+            assert!(text.contains("[g:"), "expected [g: hint on {tab:?}");
+        }
+        for tab in [
+            Tab::Overview,
+            Tab::Stats,
+            Tab::Hourly,
+            Tab::Usage,
+            Tab::Sessions,
+            Tab::Agents,
+        ] {
+            let text = line_text(help_row_line(&make_app_on(tab)));
+            assert!(!text.contains("[g:"), "unexpected [g: hint on {tab:?}");
+        }
+    }
+
+    #[test]
+    fn narrow_group_by_hint_only_shows_on_group_keyed_tabs() {
+        for (tab, expected) in [
+            (Tab::Models, true),
+            (Tab::Daily, true),
+            (Tab::Monthly, true),
+            (Tab::Weekly, true),
+            (Tab::Overview, false),
+            (Tab::Stats, false),
+            (Tab::Hourly, false),
+            (Tab::Sessions, false),
+            (Tab::Agents, false),
+        ] {
+            let mut app = make_app_on(tab);
+            app.terminal_width = 50;
+            let text = line_text(help_row_line(&app));
+            assert_eq!(text.contains("[g]"), expected, "tab {tab:?}");
+        }
     }
 
     #[test]

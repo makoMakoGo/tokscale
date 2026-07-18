@@ -27,47 +27,44 @@ fn positive_unified_token_total(tokens: &crate::TokenBreakdown) -> i64 {
 
 fn grouped_model_display_label(
     group_by: &GroupBy,
-    workspace_label: Option<&str>,
     session_id: Option<&str>,
     model: &str,
 ) -> String {
     match group_by {
-        GroupBy::WorkspaceModel => workspace_label
-            .map(|label| format!("{label} / {model}"))
-            .unwrap_or_else(|| model.to_string()),
         GroupBy::Session | GroupBy::ClientSession => session_id
             .map(|session_id| format!("{session_id} / {model}"))
             .unwrap_or_else(|| model.to_string()),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::ClientProviderModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::ClientProviderModel
+        | GroupBy::WorkspaceModel => model.to_string(),
     }
 }
 
 fn daily_source_model_display_name(
     group_by: &GroupBy,
-    workspace_label: Option<&str>,
     session_id: Option<&str>,
     model: &str,
 ) -> String {
     match group_by {
-        GroupBy::WorkspaceModel => format!(
-            "{} / {model}",
-            workspace_label.expect("workspace model bucket has a display label")
-        ),
         GroupBy::Session | GroupBy::ClientSession => format!(
             "{} / {model}",
             session_id.expect("session model bucket has a session identity")
         ),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::ClientProviderModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::ClientProviderModel
+        | GroupBy::WorkspaceModel => model.to_string(),
     }
 }
 
-fn model_color_key(_group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
-    // All GroupBy variants currently reduce to the bare model name.
+fn model_color_key(model: &str) -> String {
+    // All GroupBy variants reduce to the bare model name (ADR 0026).
     model.to_string()
 }
 
 fn hourly_model_display_name(group_by: &GroupBy, model: &str) -> String {
-    grouped_model_display_label(group_by, None, None, model)
+    grouped_model_display_label(group_by, None, model)
 }
 
 /// Sanitize a message cost: non-finite/negative -> 0 (the TUI never shows debt).
@@ -149,8 +146,11 @@ fn merge_daily_sources(
                 .entry(model_key.clone())
                 .or_insert_with(|| DailyModelInfo {
                     provider: model_info.provider.clone(),
+                    model_id: model_info.model_id.clone(),
                     display_name: model_info.display_name.clone(),
                     color_key: model_info.color_key.clone(),
+                    workspace_key: model_info.workspace_key.clone(),
+                    workspace_label: model_info.workspace_label.clone(),
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                     messages: 0,
@@ -500,6 +500,7 @@ struct DailySourceBucket {
 
 struct DailyModelBucket {
     provider: Arc<str>,
+    workspace_key: Option<Arc<str>>,
     workspace_label: Option<Arc<str>>,
     session_id: Option<Arc<str>>,
     model: Arc<str>,
@@ -564,17 +565,15 @@ fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
 
 fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> DailyModelInfo {
     let provider = model.provider.to_string();
-    let display_name = daily_source_model_display_name(
-        group_by,
-        model.workspace_label.as_deref(),
-        model.session_id.as_deref(),
-        &model.model,
-    );
-    let color_key = model_color_key(group_by, &provider, &model.model);
+    let display_name =
+        daily_source_model_display_name(group_by, model.session_id.as_deref(), &model.model);
     DailyModelInfo {
         provider,
+        model_id: model.model.to_string(),
         display_name,
-        color_key,
+        color_key: model_color_key(&model.model),
+        workspace_key: model.workspace_key.map(|key| key.to_string()),
+        workspace_label: model.workspace_label.map(|label| label.to_string()),
         tokens: model.tokens,
         cost: model.cost,
         messages: model.messages,
@@ -609,11 +608,11 @@ fn materialize_daily(bucket: DailyBucket, group_by: &GroupBy) -> DailyUsage {
 }
 
 fn materialize_hourly_model(model: HourlyModelBucket, group_by: &GroupBy) -> HourlyModelInfo {
-    let provider = model.provider.to_string();
     HourlyModelInfo {
-        provider: provider.clone(),
+        provider: model.provider.to_string(),
+        model_id: model.model.to_string(),
         display_name: hourly_model_display_name(group_by, &model.model),
-        color_key: model_color_key(group_by, &provider, &model.model),
+        color_key: model_color_key(&model.model),
         tokens: model.tokens,
         cost: model.cost,
     }
@@ -780,16 +779,24 @@ impl TuiAcc {
             let model_info = source_entry
                 .models
                 .entry(daily_model_key)
-                .or_insert_with(|| DailyModelBucket {
-                    provider: Arc::clone(&msg.provider_id),
-                    workspace_label: (*group_by == GroupBy::WorkspaceModel)
-                        .then(|| workspace_fields(msg).1),
-                    session_id: matches!(group_by, GroupBy::Session | GroupBy::ClientSession)
-                        .then(|| Arc::clone(&msg.session_id)),
-                    model: Arc::clone(&msg.model_id),
-                    tokens: UsageTokenBreakdown::default(),
-                    cost: 0.0,
-                    messages: 0,
+                .or_insert_with(|| {
+                    let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
+                        let (key, label) = workspace_fields(msg);
+                        (key, Some(label))
+                    } else {
+                        (None, None)
+                    };
+                    DailyModelBucket {
+                        provider: Arc::clone(&msg.provider_id),
+                        workspace_key,
+                        workspace_label,
+                        session_id: matches!(group_by, GroupBy::Session | GroupBy::ClientSession)
+                            .then(|| Arc::clone(&msg.session_id)),
+                        model: Arc::clone(&msg.model_id),
+                        tokens: UsageTokenBreakdown::default(),
+                        cost: 0.0,
+                        messages: 0,
+                    }
                 });
             add_unified_tokens(&mut model_info.tokens, &msg.tokens);
             model_info.cost += msg_cost;
@@ -1484,16 +1491,36 @@ mod tests {
         let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
         assert_eq!(daily_keys.len(), 2);
         assert_ne!(daily_keys[0], daily_keys[1]);
-        let daily_display_names: Vec<_> = claude
+
+        // The workspace dimension travels in structured fields; display_name
+        // and model_id stay the bare canonical model (ADR 0026).
+        let daily_identities: Vec<_> = claude
             .models
             .values()
-            .map(|info| info.display_name.clone())
+            .map(|info| {
+                (
+                    info.display_name.clone(),
+                    info.model_id.clone(),
+                    info.workspace_key.clone(),
+                    info.workspace_label.clone(),
+                )
+            })
             .collect();
         assert_eq!(
-            daily_display_names,
+            daily_identities,
             vec![
-                "repo-a / claude-sonnet-4.5".to_string(),
-                "repo-b / claude-sonnet-4.5".to_string()
+                (
+                    "claude-sonnet-4.5".to_string(),
+                    "claude-sonnet-4.5".to_string(),
+                    Some("/repo-a".to_string()),
+                    Some("repo-a".to_string()),
+                ),
+                (
+                    "claude-sonnet-4.5".to_string(),
+                    "claude-sonnet-4.5".to_string(),
+                    Some("/repo-b".to_string()),
+                    Some("repo-b".to_string()),
+                ),
             ]
         );
     }
@@ -1544,10 +1571,69 @@ mod tests {
         assert_eq!(
             display_names,
             vec![
-                "demo / claude-sonnet-4.5".to_string(),
-                "demo / claude-sonnet-4.5".to_string()
+                "claude-sonnet-4.5".to_string(),
+                "claude-sonnet-4.5".to_string()
             ]
         );
+        let workspace_keys: Vec<_> = claude
+            .models
+            .values()
+            .map(|info| info.workspace_key.clone())
+            .collect();
+        assert_eq!(
+            workspace_keys,
+            vec![
+                Some("/srv/team-a/demo".to_string()),
+                Some("/srv/team-b/demo".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn daily_model_identity_fields_follow_the_group_by_contract() {
+        let loader = TuiUsageHarness;
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+        ] {
+            let usage = loader
+                .aggregate_messages(
+                    vec![make_workspace_message(
+                        "claude",
+                        "claude-sonnet-4.5",
+                        "anthropic",
+                        "session-1",
+                        1.0,
+                        Some("/repo-a"),
+                        Some("repo-a"),
+                    )],
+                    &group_by,
+                )
+                .unwrap();
+
+            let models = &usage.daily[0].source_breakdown["claude"].models;
+            assert_eq!(models.len(), 1);
+            let info = models.values().next().unwrap();
+            assert_eq!(info.model_id, "claude-sonnet-4.5");
+            assert_eq!(info.color_key, "claude-sonnet-4.5");
+            assert_eq!(info.display_name, "claude-sonnet-4.5");
+            if group_by == GroupBy::WorkspaceModel {
+                assert_eq!(info.workspace_key.as_deref(), Some("/repo-a"));
+                assert_eq!(info.workspace_label.as_deref(), Some("repo-a"));
+            } else {
+                assert_eq!(info.workspace_key, None);
+                assert_eq!(info.workspace_label, None);
+            }
+
+            let hourly = &usage.hourly[0].models;
+            assert_eq!(hourly.len(), 1);
+            assert_eq!(
+                hourly.values().next().unwrap().model_id,
+                "claude-sonnet-4.5"
+            );
+        }
     }
 
     #[test]
@@ -1938,12 +2024,14 @@ mod tests {
         assert_eq!(daily.len(), 2);
         let first_daily = &daily["v1|cpm|1:a3:b:c1:d"];
         assert_eq!(first_daily.provider, "b:c");
+        assert_eq!(first_daily.model_id, "d");
         assert_eq!(first_daily.display_name, "d");
         assert_eq!(first_daily.tokens.total(), 10);
         assert_eq!(first_daily.cost, 10.0);
         assert_eq!(first_daily.messages, 1);
         let second_daily = &daily["v1|cpm|1:a1:b3:c:d"];
         assert_eq!(second_daily.provider, "b");
+        assert_eq!(second_daily.model_id, "c:d");
         assert_eq!(second_daily.display_name, "c:d");
         assert_eq!(second_daily.tokens.total(), 20);
         assert_eq!(second_daily.cost, 20.0);
@@ -1953,11 +2041,13 @@ mod tests {
         assert_eq!(hourly.len(), 2);
         let first_hourly = &hourly["v1|pm|3:b:c1:d"];
         assert_eq!(first_hourly.provider, "b:c");
+        assert_eq!(first_hourly.model_id, "d");
         assert_eq!(first_hourly.display_name, "d");
         assert_eq!(first_hourly.tokens.total(), 10);
         assert_eq!(first_hourly.cost, 10.0);
         let second_hourly = &hourly["v1|pm|1:b3:c:d"];
         assert_eq!(second_hourly.provider, "b");
+        assert_eq!(second_hourly.model_id, "c:d");
         assert_eq!(second_hourly.display_name, "c:d");
         assert_eq!(second_hourly.tokens.total(), 20);
         assert_eq!(second_hourly.cost, 20.0);
