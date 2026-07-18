@@ -1960,6 +1960,7 @@ fn write_kimi_code_usage_fixture(source_home: &std::path::Path) {
         r#"[models."openai-pro/gpt-5.5"]
 provider = "openai-pro"
 model = "gpt-5.5"
+max_context_size = 128000
 "#,
     )
     .unwrap();
@@ -1970,6 +1971,7 @@ model = "gpt-5.5"
         session_dir.join("wire.jsonl"),
         r#"{"type":"metadata","protocol_version":"1.5"}
 {"type":"context.append_loop_event","time":1770983410000,"event":{"type":"step.end","usage":{"inputOther":10,"output":1,"inputCacheRead":0,"inputCacheCreation":0}}}
+{"type":"llm.request","kind":"loop","provider":"openai-responses","model":"gpt-5.5","modelAlias":"openai-pro/gpt-5.5","maxTokens":128000,"time":1770983409000}
 {"type":"usage.record","time":1770983410000,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":10,"output":1,"inputCacheRead":0,"inputCacheCreation":0}}
 {"type":"usage.record","time":1770983420000,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":20,"output":2,"inputCacheRead":5,"inputCacheCreation":0}}"#,
     )
@@ -2056,6 +2058,81 @@ fn test_local_message_loader_kimi_code_usage_records() {
         Some(home) => std::env::set_var("HOME", home),
         None => std::env::remove_var("HOME"),
     }
+}
+
+#[test]
+#[serial_test::serial]
+fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_pipeline() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let source_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+    write_kimi_code_usage_fixture(source_home.path());
+
+    let options = inventory_options(source_home.path(), &["kimi"]);
+    let prepared = super::prepare_local_sources(options.clone()).unwrap();
+    let wire_path = source_home
+        .path()
+        .join(".kimi-code/sessions/wd-project/session_1/agents/main/wire.jsonl");
+    let parser_version = prepared.groups[0].units[0].parser_version;
+    let mut cold_messages = Vec::new();
+    let (_, cold_health) =
+        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut cold_messages)
+            .unwrap();
+    assert_eq!(cold_messages.len(), 2);
+    assert_eq!(cold_health.issue_count(), 0);
+    assert!(message_cache::SourceMessageCache::load()
+        .unwrap()
+        .get_meta(&wire_path, parser_version)
+        .unwrap()
+        .is_some());
+
+    let mut prepared = super::prepare_local_sources(options).unwrap();
+    let regular_config_signature = prepared.source_inventory_signature();
+    let config_path = source_home.path().join(".kimi-code/config.toml");
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::create_dir(&config_path).unwrap();
+    let unavailable_config_signature = prepared.refresh_source_inventory_signature().unwrap();
+    assert_ne!(regular_config_signature, unavailable_config_signature);
+    assert_eq!(prepared.health.failed_sources(), 0);
+
+    let mut messages = Vec::new();
+    let (_, health) =
+        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages).unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(messages
+        .iter()
+        .all(|message| message.model_id.as_ref() == "gpt-5.5"));
+    assert!(messages
+        .iter()
+        .all(|message| message.provider_id.as_ref() == "openai"));
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.tokens.input)
+            .sum::<i64>(),
+        30
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.tokens.output)
+            .sum::<i64>(),
+        3
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.tokens.cache_read)
+            .sum::<i64>(),
+        5
+    );
+    assert_eq!(health.partial_sources(), 1);
+    assert_eq!(health.failed_sources(), 0);
+    assert!(message_cache::SourceMessageCache::load()
+        .unwrap()
+        .get_meta(&wire_path, parser_version)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

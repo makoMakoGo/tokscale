@@ -33,7 +33,7 @@ impl LocalSourceAdapter for KiroAdapter {
         .into_iter()
         .map(|unit| {
             let sidecar = unit.path.with_extension("jsonl");
-            unit.with_dependency(sidecar)
+            unit.with_optional_dependency(sidecar)
                 .with_meta(SourceUnitMeta::KiroFile)
                 .with_parser_version(ParserVersion::new(
                     ParserId::KiroFile,
@@ -80,13 +80,11 @@ impl LocalSourceAdapter for KiroAdapter {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
-                SourceUnitMeta::KiroFile => {
-                    adapter_cache::load_or_scan_unit_with_optional_related_inputs(
-                        unit,
-                        ctx,
-                        sessions::kiro::parse_kiro_file,
-                    )
-                }
+                SourceUnitMeta::KiroFile => adapter_cache::load_or_scan_unit_with(
+                    unit,
+                    ctx,
+                    sessions::kiro::parse_kiro_file,
+                ),
                 SourceUnitMeta::KiroSqlite => {
                     adapter_cache::parse_uncached_unit(unit, ctx, sessions::kiro::parse_kiro_sqlite)
                 }
@@ -201,7 +199,7 @@ mod tests {
     fn kiro_file_unit(path: PathBuf) -> SourceUnit {
         let sidecar = path.with_extension("jsonl");
         SourceUnit::plain_file(ClientId::Kiro, path)
-            .with_dependency(sidecar)
+            .with_optional_dependency(sidecar)
             .with_meta(SourceUnitMeta::KiroFile)
             .with_parser_version(ParserVersion::new(
                 ParserId::KiroFile,
@@ -247,7 +245,9 @@ mod tests {
         assert_eq!(
             file_unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
-                dependency_path: file_path.with_extension("jsonl")
+                dependency_path: file_path.with_extension("jsonl"),
+                related_failure_policy:
+                    crate::message_cache::RelatedInputFailurePolicy::PreservePrimary,
             }
         );
         let global_unit = units

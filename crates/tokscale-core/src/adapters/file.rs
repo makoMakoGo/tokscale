@@ -10,7 +10,7 @@ use crate::adapters::{
     MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
 use crate::sessions::error::SessionParseResult;
 use crate::sessions::WorkspaceMetadata;
 use crate::source_health::ScannedSource;
@@ -39,7 +39,7 @@ pub(crate) struct CachedFileAdapter {
     client: ClientId,
     parser_version: ParserVersion,
     fingerprint_policy: FingerprintPolicy,
-    optional_related_inputs: bool,
+    dependency_failure_policy: RelatedInputFailurePolicy,
     dependency_path: Option<fn(&Path) -> Option<PathBuf>>,
     workspace_enrichment: Option<fn(&Path, &mut [UnifiedMessage])>,
     parse: fn(&Path) -> SessionParseResult<ScannedSource>,
@@ -56,7 +56,7 @@ impl CachedFileAdapter {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            optional_related_inputs: false,
+            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
             dependency_path: None,
             workspace_enrichment: None,
             parse,
@@ -74,7 +74,7 @@ impl CachedFileAdapter {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            optional_related_inputs: false,
+            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
             dependency_path: Some(dependency_path),
             workspace_enrichment: None,
             parse,
@@ -92,7 +92,7 @@ impl CachedFileAdapter {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            optional_related_inputs: true,
+            dependency_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             dependency_path: Some(dependency_path),
             workspace_enrichment: None,
             parse,
@@ -109,8 +109,11 @@ impl CachedFileAdapter {
         Self {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
-            fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings { sibling_names },
-            optional_related_inputs: true,
+            fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings {
+                sibling_names,
+                related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
+            },
+            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
             dependency_path: None,
             workspace_enrichment: None,
             parse,
@@ -143,6 +146,12 @@ impl LocalSourceAdapter for CachedFileAdapter {
                 .dependency_path
                 .and_then(|dependency_path| dependency_path(&unit.path));
             let unit = match dependency_path {
+                Some(dependency_path)
+                    if self.dependency_failure_policy
+                        == RelatedInputFailurePolicy::PreservePrimary =>
+                {
+                    unit.with_optional_dependency(dependency_path)
+                }
                 Some(dependency_path) => unit.with_dependency(dependency_path),
                 None => unit,
             };
@@ -153,16 +162,9 @@ impl LocalSourceAdapter for CachedFileAdapter {
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
-        let optional_related_inputs = self.optional_related_inputs;
         units
             .into_par_iter()
-            .map(|unit| {
-                if optional_related_inputs {
-                    adapter_cache::load_or_scan_unit_with_optional_related_inputs(unit, ctx, parse)
-                } else {
-                    adapter_cache::load_or_scan_unit_with(unit, ctx, parse)
-                }
-            })
+            .map(|unit| adapter_cache::load_or_scan_unit_with(unit, ctx, parse))
             .collect()
     }
 
@@ -479,7 +481,8 @@ model = "gpt-5"
         assert_eq!(
             cold_unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
-                dependency_path: config_path.clone()
+                dependency_path: config_path.clone(),
+                related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             }
         );
         let cold_messages = fold_with_adapter(&KIMI_ADAPTER, vec![cold_unit], &mut cache);
@@ -606,7 +609,8 @@ model = "claude-sonnet-4"
         assert_eq!(
             cold_unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
-                dependency_path: config_path.clone()
+                dependency_path: config_path.clone(),
+                related_failure_policy: RelatedInputFailurePolicy::FailSource,
             }
         );
         let cold_messages = fold_with_adapter(&COMMANDCODE_ADAPTER, vec![cold_unit], &mut cache);
@@ -999,7 +1003,8 @@ model = "claude-sonnet-4"
         assert_eq!(
             unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
-                dependency_path: features_path.clone()
+                dependency_path: features_path.clone(),
+                related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             }
         );
 
@@ -1195,6 +1200,7 @@ model = "claude-sonnet-4"
             units[0].fingerprint_policy,
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names: GROK_RELATED_METADATA_SIBLINGS,
+                related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             }
         );
     }

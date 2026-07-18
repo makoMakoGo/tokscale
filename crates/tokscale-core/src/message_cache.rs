@@ -135,10 +135,14 @@ pub(crate) enum SourceSnapshotError {
     },
     #[error("modification time for `{path}` exceeds the supported nanosecond range")]
     ModifiedTimeOutOfRange { path: PathBuf },
+    #[error("source input `{path}` is not a regular file")]
+    NotARegularFile { path: PathBuf },
     #[error("invalid source snapshot for `{path}`: {detail}")]
     InvalidSnapshot { path: PathBuf, detail: String },
     #[error("source fingerprint has no primary input")]
     MissingPrimaryInput,
+    #[error("optional related source input `{path}` is unavailable: {failure}")]
+    OptionalRelatedInputUnavailable { path: PathBuf, failure: String },
     #[cfg(test)]
     #[error("failed to resolve related fingerprint input for `{path}`: {source}")]
     RelatedInput {
@@ -163,6 +167,26 @@ impl SourceSnapshotError {
             detail: detail.into(),
         }
     }
+
+    fn optional_related_input_unavailable(
+        path: &Path,
+        source: &SourceSnapshotError,
+    ) -> SourceSnapshotError {
+        Self::OptionalRelatedInputUnavailable {
+            path: path.to_path_buf(),
+            failure: source.to_string(),
+        }
+    }
+
+    pub(crate) fn is_optional_related_input_unavailable(&self) -> bool {
+        matches!(self, Self::OptionalRelatedInputUnavailable { .. })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelatedInputFailurePolicy {
+    FailSource,
+    PreservePrimary,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -568,12 +592,17 @@ pub(crate) fn source_file_identity_from_open_file(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SourceInputFileSnapshot {
-    present: bool,
-    size: u64,
-    modified_ns: u64,
-    identity: Option<SourceFileIdentity>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourceInputFileSnapshot {
+    Present {
+        size: u64,
+        modified_ns: u64,
+        identity: SourceFileIdentity,
+    },
+    Absent,
+    Unavailable {
+        failure: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,14 +612,17 @@ pub(crate) struct SourceInputSnapshot {
 
 impl SourceInputSnapshot {
     pub(crate) fn primary_identity(&self) -> Option<SourceFileIdentity> {
-        self.files.first().and_then(|file| file.identity)
+        match self.files.first() {
+            Some(SourceInputFileSnapshot::Present { identity, .. }) => Some(*identity),
+            _ => None,
+        }
     }
 
     pub(crate) fn primary_size(&self) -> Option<u64> {
-        self.files
-            .first()
-            .filter(|file| file.present)
-            .map(|file| file.size)
+        match self.files.first() {
+            Some(SourceInputFileSnapshot::Present { size, .. }) => Some(*size),
+            _ => None,
+        }
     }
 
     pub(crate) fn input_matches_single_file_snapshot(
@@ -604,28 +636,28 @@ impl SourceInputSnapshot {
 
     pub(crate) fn visit_present_files(&self, mut visit: impl FnMut(SourceFileIdentity, u64)) {
         for file in &self.files {
-            if file.present {
-                visit(
-                    file.identity
-                        .expect("present source input must carry a stable file identity"),
-                    file.size,
-                );
+            if let SourceInputFileSnapshot::Present { size, identity, .. } = file {
+                visit(*identity, *size);
             }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn primary_modified_ms(&self) -> Option<i64> {
-        self.files.first().filter(|file| file.present).map(|file| {
-            i64::try_from(file.modified_ns / 1_000_000)
-                .expect("source mtime milliseconds exceed i64")
-        })
+        match self.files.first() {
+            Some(SourceInputFileSnapshot::Present { modified_ns, .. }) => Some(
+                i64::try_from(modified_ns / 1_000_000)
+                    .expect("source mtime milliseconds exceed i64"),
+            ),
+            _ => None,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct SourceInputPolicy {
     inputs: Vec<(String, PathBuf)>,
+    related_failure_policy: RelatedInputFailurePolicy,
 }
 
 impl SourceInputPolicy {
@@ -678,6 +710,11 @@ impl SourceInputPolicy {
         Self::with_related(path, related)
     }
 
+    pub(crate) fn with_related_failure_policy(mut self, policy: RelatedInputFailurePolicy) -> Self {
+        self.related_failure_policy = policy;
+        self
+    }
+
     fn with_related<I>(path: &Path, related: I) -> Self
     where
         I: IntoIterator<Item = (String, PathBuf)>,
@@ -686,7 +723,10 @@ impl SourceInputPolicy {
         let mut related: Vec<_> = related.into_iter().collect();
         related.sort_by(|left, right| left.0.cmp(&right.0));
         inputs.extend(related);
-        Self { inputs }
+        Self {
+            inputs,
+            related_failure_policy: RelatedInputFailurePolicy::FailSource,
+        }
     }
 
     #[cfg(test)]
@@ -704,12 +744,23 @@ impl SourceInputPolicy {
             let file = snapshot.files.get(index);
             hash_inventory_bytes(hasher, policy_label.as_bytes());
             hash_inventory_path(hasher, path);
-            hasher.update([u8::from(file.is_some_and(|file| file.present))]);
-            hasher.update(file.map_or(0, |file| file.size).to_le_bytes());
-            hasher.update(file.map_or(0, |file| file.modified_ns).to_le_bytes());
-            match file.and_then(|file| file.identity) {
-                Some(identity) => identity.update_inventory_signature(hasher),
+            match file {
                 None => hasher.update([0]),
+                Some(SourceInputFileSnapshot::Present {
+                    size,
+                    modified_ns,
+                    identity,
+                }) => {
+                    hasher.update([1]);
+                    hasher.update(size.to_le_bytes());
+                    hasher.update(modified_ns.to_le_bytes());
+                    identity.update_inventory_signature(hasher);
+                }
+                Some(SourceInputFileSnapshot::Absent) => hasher.update([2]),
+                Some(SourceInputFileSnapshot::Unavailable { failure }) => {
+                    hasher.update([3]);
+                    hash_inventory_bytes(hasher, failure.as_bytes());
+                }
             }
         }
     }
@@ -723,28 +774,40 @@ impl SourceInputPolicy {
     pub(crate) fn snapshot(&self) -> Result<SourceInputSnapshot, SourceSnapshotError> {
         let mut files = Vec::with_capacity(self.inputs.len());
         for (index, (_, path)) in self.inputs.iter().enumerate() {
-            let file = match source_metadata_and_identity(path) {
-                Ok((metadata, identity)) => SourceInputFileSnapshot {
-                    present: true,
-                    size: metadata.len(),
-                    modified_ns: modified_ns(path, &metadata)?,
-                    identity: Some(identity),
-                },
+            let file_result = match source_metadata_and_identity(path) {
+                Ok((metadata, _)) if !metadata.is_file() => {
+                    Err(SourceSnapshotError::NotARegularFile {
+                        path: path.to_path_buf(),
+                    })
+                }
+                Ok((metadata, identity)) => modified_ns(path, &metadata).map(|modified_ns| {
+                    SourceInputFileSnapshot::Present {
+                        size: metadata.len(),
+                        modified_ns,
+                        identity,
+                    }
+                }),
                 Err(error) if index > 0 && error.kind() == std::io::ErrorKind::NotFound => {
-                    SourceInputFileSnapshot {
-                        present: false,
-                        size: 0,
-                        modified_ns: 0,
-                        identity: None,
+                    Ok(SourceInputFileSnapshot::Absent)
+                }
+                Err(source) => Err(SourceSnapshotError::io(
+                    "read source metadata and file identity",
+                    path,
+                    source,
+                )),
+            };
+            let file = match file_result {
+                Ok(file) => file,
+                Err(source)
+                    if index > 0
+                        && self.related_failure_policy
+                            == RelatedInputFailurePolicy::PreservePrimary =>
+                {
+                    SourceInputFileSnapshot::Unavailable {
+                        failure: source.to_string(),
                     }
                 }
-                Err(source) => {
-                    return Err(SourceSnapshotError::io(
-                        "read source metadata and file identity",
-                        path,
-                        source,
-                    ));
-                }
+                Err(source) => return Err(source),
             };
             files.push(file);
         }
@@ -755,30 +818,45 @@ impl SourceInputPolicy {
         &self,
         snapshot: &SourceInputSnapshot,
     ) -> Result<SourceStamp, SourceSnapshotError> {
-        if snapshot.files.len() != self.inputs.len()
-            || snapshot
-                .files
-                .iter()
-                .any(|file| file.present && file.identity.is_none())
-        {
+        if snapshot.files.len() != self.inputs.len() {
             return Err(SourceSnapshotError::invalid(
                 &self.inputs[0].1,
-                "file count or stable identity does not match the input policy",
+                "file count does not match the input policy",
             ));
         }
         let files = self
             .inputs
             .iter()
             .zip(&snapshot.files)
-            .map(|((label, path), snapshot)| SourceFileStamp {
-                label: label.clone(),
-                path: CachedPath::from_path(path),
-                present: snapshot.present,
-                size: snapshot.size,
-                modified_ns: snapshot.modified_ns,
-                identity: snapshot.identity,
+            .map(|((label, path), snapshot)| match snapshot {
+                SourceInputFileSnapshot::Present {
+                    size,
+                    modified_ns,
+                    identity,
+                } => Ok(SourceFileStamp {
+                    label: label.clone(),
+                    path: CachedPath::from_path(path),
+                    present: true,
+                    size: *size,
+                    modified_ns: *modified_ns,
+                    identity: Some(*identity),
+                }),
+                SourceInputFileSnapshot::Absent => Ok(SourceFileStamp {
+                    label: label.clone(),
+                    path: CachedPath::from_path(path),
+                    present: false,
+                    size: 0,
+                    modified_ns: 0,
+                    identity: None,
+                }),
+                SourceInputFileSnapshot::Unavailable { failure } => {
+                    Err(SourceSnapshotError::OptionalRelatedInputUnavailable {
+                        path: path.clone(),
+                        failure: failure.clone(),
+                    })
+                }
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         Ok(SourceStamp { files })
     }
 
@@ -874,7 +952,18 @@ impl SourceInputPolicy {
             .enumerate()
         {
             let content_hash = if file_stamp.present {
-                Some(hash_input(index + 1, path, file_stamp.size)?)
+                match hash_input(index + 1, path, file_stamp.size) {
+                    Ok(content_hash) => Some(content_hash),
+                    Err(source)
+                        if self.related_failure_policy
+                            == RelatedInputFailurePolicy::PreservePrimary =>
+                    {
+                        return Err(SourceSnapshotError::optional_related_input_unavailable(
+                            path, &source,
+                        ));
+                    }
+                    Err(source) => return Err(source),
+                }
             } else {
                 None
             };
@@ -2850,6 +2939,125 @@ mod tests {
     }
 
     #[test]
+    fn optional_related_directory_is_preserved_as_unavailable_snapshot_state() {
+        let dir = TempDir::new().unwrap();
+        let primary = dir.path().join("primary.jsonl");
+        let related = dir.path().join("config.toml");
+        std::fs::write(&primary, b"primary").unwrap();
+        std::fs::create_dir(&related).unwrap();
+        let policy = SourceInputPolicy::with_dependency(&primary, related.clone())
+            .with_related_failure_policy(RelatedInputFailurePolicy::PreservePrimary);
+
+        let snapshot = policy
+            .snapshot()
+            .expect("optional related failures must remain in the snapshot");
+        assert_eq!(snapshot, snapshot.clone());
+        assert!(matches!(
+            snapshot.files.as_slice(),
+            [
+                SourceInputFileSnapshot::Present { .. },
+                SourceInputFileSnapshot::Unavailable { .. }
+            ]
+        ));
+
+        let mut visited = Vec::new();
+        snapshot.visit_present_files(|identity, size| visited.push((identity, size)));
+        assert_eq!(visited.len(), 1);
+        assert_eq!(visited[0].1, 7);
+
+        let stamp_error = policy.stamp_from_snapshot(&snapshot).unwrap_err();
+        assert!(stamp_error.is_optional_related_input_unavailable());
+        assert!(matches!(
+            stamp_error,
+            SourceSnapshotError::OptionalRelatedInputUnavailable { path, .. }
+                if path == related
+        ));
+        assert!(policy
+            .fingerprint_from_snapshot(&snapshot)
+            .unwrap_err()
+            .is_optional_related_input_unavailable());
+    }
+
+    #[test]
+    fn required_related_directory_still_fails_the_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let primary = dir.path().join("primary.jsonl");
+        let related = dir.path().join("config.toml");
+        std::fs::write(&primary, b"primary").unwrap();
+        std::fs::create_dir(&related).unwrap();
+
+        let error = SourceInputPolicy::with_dependency(&primary, related.clone())
+            .snapshot()
+            .unwrap_err();
+        assert!(error.to_string().contains(&related.display().to_string()));
+        assert!(!error.is_optional_related_input_unavailable());
+    }
+
+    #[test]
+    fn primary_directory_fails_even_when_related_failures_are_optional() {
+        let dir = TempDir::new().unwrap();
+        let primary = dir.path().join("primary.jsonl");
+        std::fs::create_dir(&primary).unwrap();
+        let policy =
+            SourceInputPolicy::with_dependency(&primary, dir.path().join("optional-config.toml"))
+                .with_related_failure_policy(RelatedInputFailurePolicy::PreservePrimary);
+
+        let error = policy.snapshot().unwrap_err();
+        assert!(error.to_string().contains(&primary.display().to_string()));
+        assert!(!error.is_optional_related_input_unavailable());
+    }
+
+    #[test]
+    fn optional_related_hash_failure_is_precisely_classified() {
+        let dir = TempDir::new().unwrap();
+        let primary = dir.path().join("primary.jsonl");
+        let related = dir.path().join("config.toml");
+        std::fs::write(&primary, b"primary").unwrap();
+        std::fs::write(&related, b"config").unwrap();
+        let required_policy = SourceInputPolicy::with_dependency(&primary, related.clone());
+        let optional_policy = required_policy
+            .clone()
+            .with_related_failure_policy(RelatedInputFailurePolicy::PreservePrimary);
+        let snapshot = optional_policy.snapshot().unwrap();
+        std::fs::remove_file(&related).unwrap();
+
+        let optional_error = optional_policy
+            .fingerprint_from_snapshot(&snapshot)
+            .unwrap_err();
+        assert!(optional_error.is_optional_related_input_unavailable());
+        let required_error = required_policy
+            .fingerprint_from_snapshot(&snapshot)
+            .unwrap_err();
+        assert!(matches!(required_error, SourceSnapshotError::Io { path, .. } if path == related));
+    }
+
+    #[test]
+    fn inventory_signature_distinguishes_present_absent_and_unavailable_inputs() {
+        let dir = TempDir::new().unwrap();
+        let primary = dir.path().join("primary.jsonl");
+        let related = dir.path().join("config.toml");
+        std::fs::write(&primary, b"primary").unwrap();
+        let policy = SourceInputPolicy::with_dependency(&primary, related.clone())
+            .with_related_failure_policy(RelatedInputFailurePolicy::PreservePrimary);
+        let signature = |snapshot: &SourceInputSnapshot| {
+            let mut hasher = Sha256::new();
+            policy.update_inventory_signature(snapshot, &mut hasher);
+            <[u8; 32]>::from(hasher.finalize())
+        };
+
+        let absent = policy.snapshot().unwrap();
+        std::fs::write(&related, b"config").unwrap();
+        let present = policy.snapshot().unwrap();
+        std::fs::remove_file(&related).unwrap();
+        std::fs::create_dir(&related).unwrap();
+        let unavailable = policy.snapshot().unwrap();
+
+        assert_ne!(signature(&present), signature(&absent));
+        assert_ne!(signature(&present), signature(&unavailable));
+        assert_ne!(signature(&absent), signature(&unavailable));
+    }
+
+    #[test]
     fn source_stamp_changes_when_same_size_and_mtime_path_is_replaced() {
         let dir = TempDir::new().unwrap();
         let source = dir.path().join("source.jsonl");
@@ -2965,10 +3173,6 @@ mod tests {
 
     #[test]
     fn input_snapshot_entries_do_not_own_policy_labels_or_paths() {
-        fn assert_copy<T: Copy>() {}
-
-        assert_copy::<SourceInputFileSnapshot>();
-        assert!(!std::mem::needs_drop::<SourceInputFileSnapshot>());
         assert_eq!(
             std::mem::size_of::<SourceInputSnapshot>(),
             std::mem::size_of::<Vec<SourceInputFileSnapshot>>()
@@ -2983,6 +3187,7 @@ mod tests {
         let snapshot = policy.snapshot().unwrap();
 
         assert_eq!(snapshot.files.len(), 2);
+        assert_eq!(snapshot, snapshot.clone());
         let stamp = policy.stamp_from_snapshot(&snapshot).unwrap();
         assert_eq!(stamp.files[0].label, "source");
         assert_eq!(stamp.files[0].path, CachedPath::from_path(&primary));

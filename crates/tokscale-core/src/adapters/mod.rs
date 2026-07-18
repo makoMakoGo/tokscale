@@ -223,8 +223,35 @@ impl SourceUnit {
     }
 
     pub(crate) fn with_dependency(mut self, dependency_path: PathBuf) -> Self {
-        self.fingerprint_policy = FingerprintPolicy::PrimaryWithDependency { dependency_path };
+        self.fingerprint_policy = FingerprintPolicy::PrimaryWithDependency {
+            dependency_path,
+            related_failure_policy: message_cache::RelatedInputFailurePolicy::FailSource,
+        };
         self
+    }
+
+    pub(crate) fn with_optional_dependency(mut self, dependency_path: PathBuf) -> Self {
+        self.fingerprint_policy = FingerprintPolicy::PrimaryWithDependency {
+            dependency_path,
+            related_failure_policy: message_cache::RelatedInputFailurePolicy::PreservePrimary,
+        };
+        self
+    }
+
+    pub(crate) fn preserves_primary_on_related_failure(&self) -> bool {
+        match &self.fingerprint_policy {
+            FingerprintPolicy::PrimaryWithSiblings {
+                related_failure_policy,
+                ..
+            }
+            | FingerprintPolicy::PrimaryWithDependency {
+                related_failure_policy,
+                ..
+            } => {
+                *related_failure_policy == message_cache::RelatedInputFailurePolicy::PreservePrimary
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn with_claude_parent_session(mut self, parent_session_path: PathBuf) -> Self {
@@ -387,15 +414,39 @@ impl SourceUnit {
                     message_cache::hash_inventory_path(hasher, parent_session_path);
                 }
             }
-            FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
+            FingerprintPolicy::PrimaryWithSiblings {
+                sibling_names,
+                related_failure_policy,
+            } => {
                 message_cache::hash_inventory_bytes(hasher, b"primary-with-siblings");
+                message_cache::hash_inventory_bytes(
+                    hasher,
+                    match related_failure_policy {
+                        message_cache::RelatedInputFailurePolicy::FailSource => b"fail-source",
+                        message_cache::RelatedInputFailurePolicy::PreservePrimary => {
+                            b"preserve-primary"
+                        }
+                    },
+                );
                 message_cache::hash_inventory_len(hasher, sibling_names.len());
                 for name in *sibling_names {
                     message_cache::hash_inventory_bytes(hasher, name.as_bytes());
                 }
             }
-            FingerprintPolicy::PrimaryWithDependency { dependency_path } => {
+            FingerprintPolicy::PrimaryWithDependency {
+                dependency_path,
+                related_failure_policy,
+            } => {
                 message_cache::hash_inventory_bytes(hasher, b"primary-with-dependency");
+                message_cache::hash_inventory_bytes(
+                    hasher,
+                    match related_failure_policy {
+                        message_cache::RelatedInputFailurePolicy::FailSource => b"fail-source",
+                        message_cache::RelatedInputFailurePolicy::PreservePrimary => {
+                            b"preserve-primary"
+                        }
+                    },
+                );
                 message_cache::hash_inventory_path(hasher, dependency_path);
             }
             FingerprintPolicy::NoMessageCache => {
@@ -421,18 +472,22 @@ impl SourceUnit {
                 variant_path.clone(),
                 parent_session_path.clone(),
             ),
-            FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
-                message_cache::SourceInputPolicy::with_siblings(
-                    &self.path,
-                    sibling_names.iter().copied(),
-                )
-            }
-            FingerprintPolicy::PrimaryWithDependency { dependency_path } => {
-                message_cache::SourceInputPolicy::with_dependency(
-                    &self.path,
-                    dependency_path.clone(),
-                )
-            }
+            FingerprintPolicy::PrimaryWithSiblings {
+                sibling_names,
+                related_failure_policy,
+            } => message_cache::SourceInputPolicy::with_siblings(
+                &self.path,
+                sibling_names.iter().copied(),
+            )
+            .with_related_failure_policy(*related_failure_policy),
+            FingerprintPolicy::PrimaryWithDependency {
+                dependency_path,
+                related_failure_policy,
+            } => message_cache::SourceInputPolicy::with_dependency(
+                &self.path,
+                dependency_path.clone(),
+            )
+            .with_related_failure_policy(*related_failure_policy),
         }
     }
 }
@@ -536,9 +591,11 @@ pub(crate) enum FingerprintPolicy {
     },
     PrimaryWithSiblings {
         sibling_names: &'static [&'static str],
+        related_failure_policy: message_cache::RelatedInputFailurePolicy,
     },
     PrimaryWithDependency {
         dependency_path: PathBuf,
+        related_failure_policy: message_cache::RelatedInputFailurePolicy,
     },
     NoMessageCache,
 }
