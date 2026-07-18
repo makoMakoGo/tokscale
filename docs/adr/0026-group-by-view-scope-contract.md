@@ -6,8 +6,8 @@ Status: Accepted
 
 The TUI `GroupBy` selector (`GroupBy::Model`, `ClientModel`,
 `ClientProviderModel`, `WorkspaceModel`; `Session` and `ClientSession` exist
-in core but are not exposed) rebuilds the whole `UsageData` when the user
-switches grouping. The authoritative numbers — totals, per-day and per-hour
+in core but are not exposed) reshapes `UsageData` when the user switches
+grouping. The authoritative numbers — totals, per-day and per-hour
 aggregates, the contribution graph, and streaks — do not depend on the
 grouping, but the model identity carried by the view types did: the
 canonical model identity was smuggled through `DailyModelInfo.color_key`,
@@ -27,7 +27,11 @@ color concern and a storage encoding silently double as semantic identity.
 
 Group By is a display projection of the Models-class tables. Switching it
 changes how model rows are keyed and labeled; it must not change any
-authoritative number.
+authoritative number. The TUI retains the canonical fine-grained accumulator
+after each successful source load and projects a new grouping in memory;
+source scans, session refreshes, and disk-cache writes occur only on real
+refreshes. Until that accumulator is available (for example, while rendering a
+startup cache hit), a grouping change falls back to the full reload path.
 
 **Projection classification.** Every projection of `UsageData` is either:
 

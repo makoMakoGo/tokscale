@@ -408,10 +408,11 @@ pub struct App {
     /// Set of clients currently selected in the source picker.
     pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
-    /// The grouping the currently loaded `data` was projected with. The
-    /// picker writes `group_by` immediately, but `data` only switches to the
-    /// new projection once the background reload lands, so exports must use
-    /// this value to stay consistent with the rows they contain.
+    /// Canonical source fold retained after a successful background load so
+    /// Group By changes can re-project in memory.
+    pub accumulator: Option<tokscale_core::TuiAcc>,
+    /// The grouping the currently loaded `data` was projected with. It stays
+    /// paired with `data` for exports while a fallback reload is pending.
     pub data_group_by: tokscale_core::GroupBy,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
@@ -463,9 +464,8 @@ pub struct App {
     /// (manual refresh and filter changes must always re-aggregate).
     pub reload_force: bool,
 
-    /// Marks the pending reload as grouping-triggered. Grouping is a
-    /// view-scope projection (ADR 0026), so such reloads re-aggregate but
-    /// must not force a Sessions rescan; only source-digest changes may.
+    /// Marks the no-accumulator Group By fallback so it reloads usage without
+    /// forcing the group-agnostic Sessions projection when health is clean.
     pub reload_group_only: bool,
 
     /// Digest of the scanned sources at the last completed load; auto-refresh
@@ -475,11 +475,7 @@ pub struct App {
     pub dialog_stack: DialogStack,
 
     pub dialog_needs_reload: Rc<RefCell<bool>>,
-
-    /// Reload channel for the Group By picker, kept separate from
-    /// `dialog_needs_reload` so grouping reloads stay distinguishable from
-    /// source-filter reloads.
-    pub dialog_group_reload: Rc<RefCell<bool>>,
+    pub dialog_group_changed: Rc<RefCell<bool>>,
 
     pub hourly_view_mode: HourlyViewMode,
 
@@ -566,7 +562,7 @@ impl App {
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_needs_reload = Rc::new(RefCell::new(false));
-        let dialog_group_reload = Rc::new(RefCell::new(false));
+        let dialog_group_changed = Rc::new(RefCell::new(false));
         let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
         if !Self::tab_visible(&settings, requested_tab) {
             anyhow::bail!(
@@ -585,6 +581,7 @@ impl App {
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
             group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
+            accumulator: None,
             data_group_by: super::cache::TUI_DEFAULT_GROUP_BY,
             sort_field,
             sort_direction,
@@ -634,7 +631,7 @@ impl App {
             last_source_digest: None,
             dialog_stack,
             dialog_needs_reload,
-            dialog_group_reload,
+            dialog_group_changed,
             hourly_view_mode: HourlyViewMode::default(),
             model_shade_map: HashMap::new(),
             model_provider_map: HashMap::new(),
@@ -673,7 +670,16 @@ impl App {
     pub fn request_blocking_reload(&mut self) {
         self.needs_reload = true;
         self.reload_force = true;
+        self.reload_group_only = false;
         self.blocking_loading = true;
+    }
+
+    pub(crate) fn clear_pending_group_only_reload(&mut self) {
+        if self.needs_reload && self.reload_group_only {
+            self.needs_reload = false;
+            self.reload_force = false;
+            self.reload_group_only = false;
+        }
     }
 
     pub fn has_enabled_subscription_providers(&self) -> bool {
@@ -689,8 +695,7 @@ impl App {
 
     pub fn is_blocking_loading(&self) -> bool {
         self.blocking_loading
-            || (!self.dialog_stack.is_active()
-                && (*self.dialog_needs_reload.borrow() || *self.dialog_group_reload.borrow()))
+            || (!self.dialog_stack.is_active() && *self.dialog_needs_reload.borrow())
     }
 
     fn consume_dialog_reload_if_ready(&mut self) {
@@ -698,14 +703,31 @@ impl App {
             return;
         }
         let source_reload = std::mem::take(&mut *self.dialog_needs_reload.borrow_mut());
-        let group_reload = std::mem::take(&mut *self.dialog_group_reload.borrow_mut());
+        let group_changed = std::mem::take(&mut *self.dialog_group_changed.borrow_mut());
 
-        if source_reload || group_reload {
+        if source_reload {
             self.request_blocking_reload();
-            // Grouping is a view-scope projection (ADR 0026): a reload it
-            // triggers must not force a Sessions rescan.
-            self.reload_group_only = group_reload && !source_reload;
+            return;
         }
+        if group_changed {
+            self.apply_selected_group_by();
+        }
+    }
+
+    fn apply_selected_group_by(&mut self) {
+        let group_by = self.group_by.borrow().clone();
+        let Some(accumulator) = self.accumulator.as_ref() else {
+            self.request_blocking_reload();
+            self.reload_group_only = true;
+            return;
+        };
+
+        let mut data = accumulator.project(&group_by);
+        data.health = self.data.health.clone();
+        data.error = self.data.error.clone();
+        self.update_data(data);
+        self.data_group_by = group_by.clone();
+        self.set_local_report_status(&format!("Regrouped by {group_by}"));
     }
 
     fn graph_cell_for_date(&self, date: NaiveDate) -> Option<(usize, usize)> {
@@ -865,6 +887,7 @@ impl App {
             && !self.background_loading
         {
             self.last_refresh = now;
+            self.reload_group_only = false;
             self.needs_reload = true;
         }
     }
@@ -1009,6 +1032,7 @@ impl App {
                 } else {
                     self.needs_reload = true;
                     self.reload_force = true;
+                    self.reload_group_only = false;
                 }
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -1712,7 +1736,7 @@ impl App {
     fn open_group_by_picker(&mut self) {
         use super::ui::dialog::GroupByPickerDialog;
         let dialog =
-            GroupByPickerDialog::new(self.group_by.clone(), self.dialog_group_reload.clone());
+            GroupByPickerDialog::new(self.group_by.clone(), self.dialog_group_changed.clone());
         self.dialog_stack.show(Box::new(dialog));
     }
 
@@ -2293,7 +2317,9 @@ mod tests {
     use super::*;
     use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
     use chrono::NaiveDate;
+    use serial_test::serial;
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
 
     type SourceModelCosts<'a> = Vec<(&'a str, Vec<(&'a str, &'a str, f64)>)>;
 
@@ -2610,6 +2636,64 @@ mod tests {
         drop(file);
 
         Settings::default().with_save_path_override(path)
+    }
+
+    struct EnvGuard {
+        home: Option<OsString>,
+        pricing_cache_only: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(home: &std::path::Path) -> Self {
+            let guard = Self {
+                home: std::env::var_os("HOME"),
+                pricing_cache_only: std::env::var_os("TOKSCALE_PRICING_CACHE_ONLY"),
+            };
+            unsafe {
+                std::env::set_var("HOME", home);
+                std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", "1");
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.home.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.pricing_cache_only.take() {
+                    Some(value) => std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", value),
+                    None => std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY"),
+                }
+            }
+        }
+    }
+
+    fn load_test_accumulator() -> (tempfile::TempDir, tokscale_core::TuiAcc) {
+        let home = tempfile::TempDir::new().unwrap();
+        for (project, workspace, input_tokens) in
+            [("project-a", "/work/a", 10), ("project-b", "/work/b", 20)]
+        {
+            let project_dir = home.path().join(".claude/projects").join(project);
+            std::fs::create_dir_all(&project_dir).unwrap();
+            std::fs::write(
+                project_dir.join("session.jsonl"),
+                format!(
+                    r#"{{"type":"assistant","timestamp":"2026-05-27T10:00:00.000Z","cwd":"{workspace}","requestId":"request-{project}","message":{{"id":"message-{project}","model":"claude-sonnet-4.6","usage":{{"input_tokens":{input_tokens},"output_tokens":1}}}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let _guard = EnvGuard::set(home.path());
+        let loader = DataLoader::with_filters(None, None, None, None);
+        let prepared = loader.prepare(&[ClientId::Claude]).unwrap();
+        let result = loader
+            .execute_accumulator_with_diagnostics(prepared)
+            .unwrap();
+        (home, result.accumulator)
     }
 
     fn make_app() -> App {
@@ -3964,9 +4048,12 @@ mod tests {
     #[ignore] // triggers load_data() which requires network + filesystem I/O
     fn test_handle_key_refresh() {
         let mut app = make_app();
+        app.reload_group_only = true;
         std::thread::sleep(Duration::from_millis(5));
         app.handle_key_event(key(KeyCode::Char('r')));
         assert!(app.needs_reload);
+        assert!(app.reload_force);
+        assert!(!app.reload_group_only);
     }
 
     #[test]
@@ -3984,7 +4071,70 @@ mod tests {
     }
 
     #[test]
-    fn test_group_by_change_requests_blocking_reload() {
+    #[serial]
+    fn test_group_by_change_reprojects_immediately_with_accumulator() {
+        let (_home, accumulator) = load_test_accumulator();
+        let mut app = make_app();
+        app.current_tab = Tab::Models;
+        app.data = accumulator.project(&tokscale_core::GroupBy::ClientModel);
+        app.data.health.complete = false;
+        app.data.health.failed_sources = 1;
+        app.data.error = Some("retained error".to_string());
+        app.set_pricing_diagnostics(&[format!(
+            "{}: offline",
+            tokscale_core::pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
+        )]);
+        app.set_cache_persistence_warning(Some("retained cache warning".to_string()));
+        app.accumulator = Some(accumulator);
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
+        app.data_group_by = tokscale_core::GroupBy::ClientModel;
+
+        app.handle_key_event(key(KeyCode::Char('g')));
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(app.data_group_by, tokscale_core::GroupBy::WorkspaceModel);
+        assert_eq!(app.data.models.len(), 2);
+        assert!(app
+            .data
+            .models
+            .iter()
+            .all(|model| model.workspace_key.is_some()));
+        assert!(!app.needs_reload);
+        assert!(!app.background_loading);
+        assert!(!app.blocking_loading);
+        assert!(!app.reload_group_only);
+        assert!(!app.is_blocking_loading());
+        assert!(!app.data.health.complete);
+        assert_eq!(app.data.health.failed_sources, 1);
+        assert_eq!(app.data.error.as_deref(), Some("retained error"));
+        assert_eq!(
+            app.pricing_warning(),
+            Some("Pricing unavailable; costs may be missing")
+        );
+        assert_eq!(
+            app.cache_persistence_warning(),
+            Some("retained cache warning")
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Regrouped by workspace,model")
+        );
+
+        let export =
+            super::super::export::build_export_json(&app.data, &app.export_group_by()).unwrap();
+        let exported: serde_json::Value = serde_json::from_str(&export).unwrap();
+        assert_eq!(exported["groupBy"], "workspace,model");
+        assert!(exported["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model.get("workspaceKey").is_some()));
+    }
+
+    #[test]
+    fn test_group_by_change_without_accumulator_requests_blocking_reload() {
         let mut app = make_app();
         app.current_tab = Tab::Models;
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
@@ -4000,10 +4150,10 @@ mod tests {
         );
         assert!(!app.dialog_stack.is_active());
         assert!(app.needs_reload);
+        assert!(app.reload_force);
+        assert!(app.reload_group_only);
         assert!(app.blocking_loading);
         assert!(app.is_blocking_loading());
-        // Grouping reloads re-aggregate but must not force a Sessions rescan.
-        assert!(app.reload_group_only);
     }
 
     #[test]
@@ -4027,8 +4177,9 @@ mod tests {
     }
 
     #[test]
-    fn test_source_picker_reload_is_not_marked_group_only() {
+    fn test_source_picker_still_requests_forced_reload() {
         let mut app = make_app();
+        app.reload_group_only = true;
 
         app.handle_key_event(key(KeyCode::Char('s')));
         app.handle_key_event(key(KeyCode::Enter));
@@ -4323,12 +4474,14 @@ mod tests {
         let mut app = make_app();
         app.current_tab = Tab::Overview;
         app.auto_refresh = true;
+        app.reload_group_only = true;
         app.auto_refresh_interval = Duration::from_millis(1);
         app.last_refresh = Instant::now() - Duration::from_secs(1);
 
         app.on_tick();
 
         assert!(app.needs_reload);
+        assert!(!app.reload_group_only);
         assert!(!app.usage_fetch_attempted);
         assert!(!app.is_fetching_usage());
     }
