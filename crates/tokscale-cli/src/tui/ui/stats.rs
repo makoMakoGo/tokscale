@@ -5,7 +5,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::tui::app::{App, ClickAction};
-use crate::tui::colors::get_client_color;
+use crate::tui::colors::{get_client_color, get_provider_shade};
 use crate::tui::data::{ContributionDay, DailySourceInfo, DailyUsage};
 
 use super::radar::{render_radar, RadarAxis};
@@ -488,12 +488,18 @@ fn render_day_stats_lines(
         let name_budget = (area.width as usize)
             .saturating_sub(value.chars().count() + 12)
             .max(4);
+        // Canonical ids aggregate usage across providers, so there is no
+        // single provider color to look up; color by the model family
+        // inferred from the id itself, falling back to neutral gray.
+        let model_color = tokscale_core::inferred_provider_from_model(&model.canonical_id)
+            .map(|provider| get_provider_shade(provider, 0))
+            .unwrap_or_else(|| app.model_color(&model.canonical_id));
         rows.push(StatRow::KeyVal(
             Line::from(vec![
                 Span::styled("Top model: ", Style::default().fg(app.theme.muted)),
                 Span::styled(
                     truncate_model_display_name_to(&model.canonical_id, name_budget),
-                    Style::default().fg(app.model_color(&model.canonical_id)),
+                    Style::default().fg(model_color),
                 ),
             ]),
             value,
@@ -1208,6 +1214,49 @@ mod tests {
             .find(|line| line.contains("Top model:"))
             .unwrap();
         assert!(top_model_row.contains("6K (50%)"));
+    }
+
+    #[test]
+    fn top_model_uses_inferred_family_color() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        let mut app = make_app(120);
+        app.data.daily = vec![day_usage(
+            date,
+            5_000,
+            0.0,
+            vec![(
+                "harnessfoo",
+                source_info(
+                    5_000,
+                    0.0,
+                    vec![(
+                        "gpt-5.4",
+                        model_info("openai", "gpt-5.4", "gpt-5.4", 5_000, 0.0),
+                    )],
+                ),
+            )],
+        )];
+        select_day(&mut app, date, 5_000, 0.0);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let frame = terminal
+            .draw(|f| render(f, &mut app, Rect::new(0, 0, 120, 40)))
+            .unwrap();
+        let buf = frame.buffer;
+        let (top_y, top_row) = (0..40u16)
+            .map(|y| {
+                let row: String = (0..120u16)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol())
+                    .collect();
+                (y, row)
+            })
+            .find(|(_, row)| row.contains("Top model:"))
+            .expect("top model row rendered");
+        let name_x = top_row.find("gpt-5.4").expect("model name rendered") as u16;
+        assert_eq!(
+            buf.cell((name_x, top_y)).unwrap().fg,
+            get_provider_shade("openai", 0)
+        );
     }
 
     #[test]
