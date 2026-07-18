@@ -157,20 +157,8 @@ fn normalize_model_name(model: &str) -> String {
     model_aliases::canonicalize_source_model_id(&claude_prefixed).unwrap_or(claude_prefixed)
 }
 
-fn get_provider_from_model_and_lock(model: &str, provider_lock: Option<&str>) -> Option<String> {
-    let inferred = provider_identity::inferred_provider_from_model(model);
-    let provider_lock = provider_lock
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty());
-
-    match provider_lock {
-        Some(provider) => Some(
-            provider_identity::provider_override_from_model_and_provider(model, provider)
-                .unwrap_or(provider)
-                .to_string(),
-        ),
-        None => inferred.map(str::to_string),
-    }
+fn get_provider_from_model_and_lock(model: &str, provider_lock: Option<&str>) -> String {
+    provider_identity::source_provider_id(provider_lock.unwrap_or_default(), model)
 }
 
 fn invalid_at_path(
@@ -452,12 +440,7 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
             .record(RecordRejectionReason::MissingModel);
         return Ok(scanned);
     }
-    let Some(provider) = get_provider_from_model_and_lock(&model, provider_lock) else {
-        scanned
-            .rejections
-            .record(RecordRejectionReason::MissingProvider);
-        return Ok(scanned);
-    };
+    let provider = get_provider_from_model_and_lock(&model, provider_lock);
 
     let Some(raw_timestamp) = settings.provider_lock_timestamp.as_deref() else {
         scanned
@@ -752,36 +735,36 @@ mod tests {
         let provider =
             |model: &str| get_provider_from_model_and_lock(&normalize_model_name(model), None);
 
-        assert_eq!(provider("claude-3-sonnet").as_deref(), Some("anthropic"));
-        assert_eq!(provider("opus-4").as_deref(), Some("anthropic"));
-        assert_eq!(provider("custom:opus-4.5").as_deref(), Some("anthropic"));
-        assert_eq!(provider("sonnet-4").as_deref(), Some("anthropic"));
-        assert_eq!(provider("haiku-3").as_deref(), Some("anthropic"));
-        assert_eq!(provider("gpt-4o").as_deref(), Some("openai"));
-        assert_eq!(provider("o1-preview").as_deref(), Some("openai"));
-        assert_eq!(provider("o3-mini").as_deref(), Some("openai"));
-        assert_eq!(provider("gemini-pro").as_deref(), Some("google"));
-        assert_eq!(provider("grok-2").as_deref(), Some("xai"));
-        assert_eq!(provider("unknown-model"), None);
+        assert_eq!(provider("claude-3-sonnet"), "anthropic");
+        assert_eq!(provider("opus-4"), "anthropic");
+        assert_eq!(provider("custom:opus-4.5"), "anthropic");
+        assert_eq!(provider("sonnet-4"), "anthropic");
+        assert_eq!(provider("haiku-3"), "anthropic");
+        assert_eq!(provider("gpt-4o"), "openai");
+        assert_eq!(provider("o1-preview"), "openai");
+        assert_eq!(provider("o3-mini"), "openai");
+        assert_eq!(provider("gemini-pro"), "google");
+        assert_eq!(provider("grok-2"), "xai");
+        assert_eq!(provider("unknown-model"), "unknown");
     }
 
     #[test]
-    fn test_get_provider_from_model_and_lock_rejects_anthropic_for_non_claude_model() {
+    fn test_get_provider_from_model_and_lock_preserves_explicit_lock() {
         assert_eq!(
-            get_provider_from_model_and_lock("glm-5.1", Some("anthropic")).as_deref(),
-            Some("zai")
+            get_provider_from_model_and_lock("glm-5.1", Some("anthropic")),
+            "anthropic"
         );
         assert_eq!(
-            get_provider_from_model_and_lock("mimo-v2.5-pro", Some("anthropic")).as_deref(),
-            Some("xiaomi")
+            get_provider_from_model_and_lock("mimo-v2.5-pro", Some("anthropic")),
+            "anthropic"
         );
         assert_eq!(
-            get_provider_from_model_and_lock("claude-opus-4.5", Some("anthropic")).as_deref(),
-            Some("anthropic")
+            get_provider_from_model_and_lock("claude-opus-4.5", Some("anthropic")),
+            "anthropic"
         );
         assert_eq!(
-            get_provider_from_model_and_lock("model1", Some("some-reseller")).as_deref(),
-            Some("deepseek")
+            get_provider_from_model_and_lock("model1", Some("some-reseller")),
+            "some-reseller"
         );
     }
 
@@ -843,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_droid_file_uses_model_provider_over_anthropic_lock() {
+    fn test_parse_droid_file_preserves_explicit_provider_lock_over_model_inference() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("session.settings.json");
         std::fs::write(
@@ -864,7 +847,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "glm-5.1");
-        assert_eq!(messages[0].provider_id.as_ref(), "zai");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
     }
 
     #[test]
@@ -992,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_droid_file_records_unknown_provider() {
+    fn test_parse_droid_file_keeps_unknown_provider() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("session.settings.json");
         std::fs::write(
@@ -1007,10 +990,9 @@ mod tests {
 
         let scanned = super::parse_droid_file(&path).unwrap();
 
-        assert!(scanned.messages.is_empty());
-        let rejection = scanned.rejections.entries().next().unwrap();
-        assert_eq!(rejection.key, "missing-provider");
-        assert_eq!(rejection.count, 1);
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert!(scanned.rejections.is_empty());
     }
 
     #[test]

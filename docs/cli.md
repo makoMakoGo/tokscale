@@ -25,9 +25,9 @@ for example, `tokscale | jq` fails and points to `tokscale models --json`
 instead of changing into a report command.
 
 Available `--tab` values are `overview`, `models`, `monthly`, `weekly`,
-`daily`, `hourly`, `stats`, `agents`, `issues`, and `usage`. Requesting the
-Usage tab while `usageTabEnabled` is false is an error; Tokscale does not
-silently open Overview.
+`daily`, `hourly`, `stats`, `agents`, and `usage`. Requesting the Usage tab
+while `usageTabEnabled` is false is an error; Tokscale does not silently open
+Overview.
 
 CLI options override settings for the current TUI process and do not rewrite
 `settings.json`. The TUI captures normal mouse input; use the terminal's
@@ -53,7 +53,9 @@ These commands always produce reports, even when stdout is a terminal. Table
 output is the default; the removed `--light` mode is not an alias. To open a
 specific TUI view, use `tokscale tui --tab models` or the corresponding tab.
 
-All local JSON reports use the same top-level envelope:
+All local JSON reports currently use the same top-level envelope. This
+documents the present wire shape; individual health census fields are report
+projections, not an ADR-frozen TUI or JSON layout:
 
 ```json
 {

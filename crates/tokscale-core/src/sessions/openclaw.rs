@@ -201,26 +201,15 @@ fn parse_openclaw_session(
                     let model = explicit_model
                         .clone()
                         .or_else(|| current_model.clone().filter(|m| !m.is_empty()));
-                    let provider = model.as_deref().and_then(|model| {
-                        if explicit_model.is_some() {
-                            explicit_provider.clone().or_else(|| {
-                                provider_identity::inferred_provider_from_model(model)
-                                    .map(str::to_string)
-                            })
-                        } else {
-                            explicit_provider
+                    let raw_provider = if explicit_model.is_some() {
+                        explicit_provider
+                    } else {
+                        explicit_provider.or_else(|| {
+                            current_provider
                                 .clone()
-                                .or_else(|| {
-                                    current_provider
-                                        .clone()
-                                        .filter(|provider| !provider.trim().is_empty())
-                                })
-                                .or_else(|| {
-                                    provider_identity::inferred_provider_from_model(model)
-                                        .map(str::to_string)
-                                })
-                        }
-                    });
+                                .filter(|provider| !provider.trim().is_empty())
+                        })
+                    };
 
                     let Some(model) = model else {
                         scanned
@@ -228,12 +217,10 @@ fn parse_openclaw_session(
                             .record(RecordRejectionReason::MissingModel);
                         continue;
                     };
-                    let Some(provider) = provider else {
-                        scanned
-                            .rejections
-                            .record(RecordRejectionReason::MissingProvider);
-                        continue;
-                    };
+                    let provider = provider_identity::source_provider_id(
+                        raw_provider.as_deref().unwrap_or_default(),
+                        &model,
+                    );
 
                     let timestamp = msg.timestamp.filter(|timestamp| *timestamp > 0);
 
@@ -301,10 +288,8 @@ fn explicit_openclaw_identity(
         .filter(|model| !model.trim().is_empty())
         .map(|model| canonicalize_openclaw_model(&model))
         .ok_or(RecordRejectionReason::MissingModel)?;
-    let provider = provider
-        .filter(|provider| !provider.trim().is_empty())
-        .or_else(|| provider_identity::inferred_provider_from_model(&model).map(str::to_string))
-        .ok_or(RecordRejectionReason::MissingProvider)?;
+    let provider =
+        provider_identity::source_provider_id(provider.as_deref().unwrap_or_default(), &model);
     Ok((model, provider))
 }
 
@@ -474,6 +459,30 @@ mod tests {
         let messages = parse_openclaw_session(Path::new(&session_path), "test-session");
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+    }
+
+    #[test]
+    fn unknown_provider_does_not_discard_state_or_inline_usage() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"model_change","modelId":"private-state-model"}
+{"type":"message","message":{"role":"assistant","usage":{"input":10,"output":5},"timestamp":1700000000000}}
+{"type":"message","message":{"role":"assistant","model":"private-inline-model","usage":{"input":7,"output":2},"timestamp":1700000001000}}"#;
+        let session_path = create_test_session(&dir, "unknown.jsonl", content);
+
+        let scanned =
+            super::parse_openclaw_session(Path::new(&session_path), "test-session").unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "private-state-model");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.total(), 15);
+        assert_eq!(
+            scanned.messages[1].model_id.as_ref(),
+            "private-inline-model"
+        );
+        assert_eq!(scanned.messages[1].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[1].tokens.total(), 9);
     }
 
     #[test]

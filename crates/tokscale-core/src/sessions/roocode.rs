@@ -8,7 +8,7 @@ use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::UnifiedMessage;
 use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource};
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -78,10 +78,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
             rejections.record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
-        let Some(provider) = provider_from_api_protocol(payload.api_protocol.as_deref()) else {
-            rejections.record(RecordRejectionReason::MissingProvider);
-            continue;
-        };
+        let provider = provider_from_api_protocol(payload.api_protocol.as_deref());
         usage_events.push((timestamp, token_breakdown, provider));
     }
 
@@ -107,6 +104,10 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
     };
     let mut messages = Vec::with_capacity(usage_events.len());
     for (timestamp, token_breakdown, provider) in usage_events {
+        let provider = provider_identity::source_provider_id(
+            provider.as_deref().unwrap_or_default(),
+            &model_id,
+        );
         messages.push(UnifiedMessage::new_with_agent(
             source,
             model_id.clone(),
@@ -495,11 +496,11 @@ after"#;
             Some(history),
         );
         let scanned = super::parse_roocode_file(&missing_provider).unwrap();
-        assert!(scanned.messages.is_empty());
-        assert_eq!(
-            scanned.rejections.entries().next().unwrap().key,
-            "missing-provider"
-        );
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gpt-5");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(scanned.messages[0].tokens.input, 1);
 
         let malformed_tokens = setup_task(
             &dir,
@@ -513,6 +514,25 @@ after"#;
             scanned.rejections.entries().next().unwrap().key,
             "malformed-record"
         );
+    }
+
+    #[test]
+    fn missing_protocol_keeps_usage_for_unknown_model_family() {
+        let dir = TempDir::new().unwrap();
+        let path = setup_task(
+            &dir,
+            "private-model",
+            r#"[{"type":"say","say":"api_req_started","ts":"2026-02-18T12:00:00Z","text":"{\"tokensIn\":7,\"tokensOut\":2}"}]"#,
+            Some("<environment_details><model>private-preview</model></environment_details>"),
+        );
+
+        let scanned = super::parse_roocode_file(&path).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "private-preview");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.total(), 9);
     }
 
     #[test]
@@ -570,8 +590,7 @@ after"#;
             reasons,
             vec![
                 ("malformed-record", 1),
-                ("missing-model", 1),
-                ("missing-provider", 1),
+                ("missing-model", 2),
                 ("missing-timestamp", 1),
             ]
         );

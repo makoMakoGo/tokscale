@@ -10,7 +10,7 @@ use crate::adapters::{
     MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
 use crate::sessions::error::SessionParseResult;
 use crate::sessions::WorkspaceMetadata;
 use crate::source_health::ScannedSource;
@@ -20,26 +20,26 @@ const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVIS
 const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const QWEN_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const ZCODE_OVERLAP_NORMALIZATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-const KIMI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const KIMI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
 const COMMANDCODE_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-const COMMANDCODE_WORKSPACE_REVISION: u32 = COMMANDCODE_RECORD_REJECTION_REVISION + 1;
+const COMMANDCODE_WORKSPACE_REVISION: u32 = COMMANDCODE_RECORD_REJECTION_REVISION + 2;
 const ZCODE_RECORD_REJECTION_REVISION: u32 = ZCODE_OVERLAP_NORMALIZATION_REVISION + 1;
-const MUX_RECORD_REJECTION_REVISION: u32 = MUX_STABLE_DEDUP_REVISION + 1;
-const AMP_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
+const MUX_RECORD_REJECTION_REVISION: u32 = MUX_STABLE_DEDUP_REVISION + 2;
+const AMP_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
 const COPILOT_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-const COPILOT_WORKSPACE_REVISION: u32 = COPILOT_RECORD_REJECTION_REVISION + 1;
+const COPILOT_WORKSPACE_REVISION: u32 = COPILOT_RECORD_REJECTION_REVISION + 2;
 const GROK_RECORD_REJECTION_REVISION: u32 = GROK_TOTAL_ONLY_IMPUTATION_REVISION + 1;
 const GROK_RELATED_METADATA_REVISION: u32 = GROK_RECORD_REJECTION_REVISION + 1;
 const GEMINI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const DROID_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-const DROID_AGENT_ATTRIBUTION_REVISION: u32 = DROID_RECORD_REJECTION_REVISION + 1;
+const DROID_AGENT_ATTRIBUTION_REVISION: u32 = DROID_RECORD_REJECTION_REVISION + 2;
 const GROK_RELATED_METADATA_SIBLINGS: &[&str] = &["summary.json", "events.jsonl"];
 
 pub(crate) struct CachedFileAdapter {
     client: ClientId,
     parser_version: ParserVersion,
     fingerprint_policy: FingerprintPolicy,
-    optional_related_inputs: bool,
+    dependency_failure_policy: RelatedInputFailurePolicy,
     dependency_path: Option<fn(&Path) -> Option<PathBuf>>,
     workspace_enrichment: Option<fn(&Path, &mut [UnifiedMessage])>,
     parse: fn(&Path) -> SessionParseResult<ScannedSource>,
@@ -56,14 +56,14 @@ impl CachedFileAdapter {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            optional_related_inputs: false,
+            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
             dependency_path: None,
             workspace_enrichment: None,
             parse,
         }
     }
 
-    pub(crate) const fn new_with_dependency(
+    pub(crate) const fn new_with_required_dependency(
         client: ClientId,
         parser_id: ParserId,
         revision: u32,
@@ -74,7 +74,25 @@ impl CachedFileAdapter {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            optional_related_inputs: false,
+            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
+            dependency_path: Some(dependency_path),
+            workspace_enrichment: None,
+            parse,
+        }
+    }
+
+    pub(crate) const fn new_with_optional_dependency(
+        client: ClientId,
+        parser_id: ParserId,
+        revision: u32,
+        dependency_path: fn(&Path) -> Option<PathBuf>,
+        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+    ) -> Self {
+        Self {
+            client,
+            parser_version: ParserVersion::new(parser_id, revision),
+            fingerprint_policy: FingerprintPolicy::PlainFile,
+            dependency_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             dependency_path: Some(dependency_path),
             workspace_enrichment: None,
             parse,
@@ -91,8 +109,11 @@ impl CachedFileAdapter {
         Self {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
-            fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings { sibling_names },
-            optional_related_inputs: true,
+            fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings {
+                sibling_names,
+                related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
+            },
+            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
             dependency_path: None,
             workspace_enrichment: None,
             parse,
@@ -125,6 +146,12 @@ impl LocalSourceAdapter for CachedFileAdapter {
                 .dependency_path
                 .and_then(|dependency_path| dependency_path(&unit.path));
             let unit = match dependency_path {
+                Some(dependency_path)
+                    if self.dependency_failure_policy
+                        == RelatedInputFailurePolicy::PreservePrimary =>
+                {
+                    unit.with_optional_dependency(dependency_path)
+                }
                 Some(dependency_path) => unit.with_dependency(dependency_path),
                 None => unit,
             };
@@ -135,16 +162,9 @@ impl LocalSourceAdapter for CachedFileAdapter {
 
     fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
-        let optional_related_inputs = self.optional_related_inputs;
         units
             .into_par_iter()
-            .map(|unit| {
-                if optional_related_inputs {
-                    adapter_cache::load_or_scan_unit_with_optional_related_inputs(unit, ctx, parse)
-                } else {
-                    adapter_cache::load_or_scan_unit_with(unit, ctx, parse)
-                }
-            })
+            .map(|unit| adapter_cache::load_or_scan_unit_with(unit, ctx, parse))
             .collect()
     }
 
@@ -296,21 +316,24 @@ pub(crate) static AMP_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     AMP_RECORD_REJECTION_REVISION,
     sessions::amp::parse_amp_file,
 );
-pub(crate) static DROID_ADAPTER: CachedFileAdapter = CachedFileAdapter::new_with_dependency(
-    ClientId::Droid,
-    ParserId::Droid,
-    DROID_AGENT_ATTRIBUTION_REVISION,
-    sessions::droid::droid_agent_dependency_path,
-    sessions::droid::parse_droid_file,
-)
-.with_workspace_enrichment(enrich_droid_workspace);
-pub(crate) static KIMI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::Kimi,
-    ParserId::Kimi,
-    KIMI_RECORD_REJECTION_REVISION,
-    sessions::kimi::parse_kimi_file,
-)
-.with_workspace_enrichment(enrich_kimi_workspace);
+pub(crate) static DROID_ADAPTER: CachedFileAdapter =
+    CachedFileAdapter::new_with_optional_dependency(
+        ClientId::Droid,
+        ParserId::Droid,
+        DROID_AGENT_ATTRIBUTION_REVISION,
+        sessions::droid::droid_agent_dependency_path,
+        sessions::droid::parse_droid_file,
+    )
+    .with_workspace_enrichment(enrich_droid_workspace);
+pub(crate) static KIMI_ADAPTER: CachedFileAdapter =
+    CachedFileAdapter::new_with_optional_dependency(
+        ClientId::Kimi,
+        ParserId::Kimi,
+        KIMI_RECORD_REJECTION_REVISION,
+        sessions::kimi::kimi_config_dependency_path,
+        sessions::kimi::parse_kimi_file,
+    )
+    .with_workspace_enrichment(enrich_kimi_workspace);
 pub(crate) static QWEN_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Qwen,
     ParserId::Qwen,
@@ -323,12 +346,14 @@ pub(crate) static MUX_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     MUX_RECORD_REJECTION_REVISION,
     sessions::mux::parse_mux_file,
 );
-pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::CommandCode,
-    ParserId::CommandCode,
-    COMMANDCODE_WORKSPACE_REVISION,
-    sessions::commandcode::parse_commandcode_file,
-);
+pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter =
+    CachedFileAdapter::new_with_required_dependency(
+        ClientId::CommandCode,
+        ParserId::CommandCode,
+        COMMANDCODE_WORKSPACE_REVISION,
+        sessions::commandcode::commandcode_config_dependency_path,
+        sessions::commandcode::parse_commandcode_file,
+    );
 pub(crate) static ZCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
     ClientId::Zcode,
     ParserId::Zcode,
@@ -428,6 +453,258 @@ not-json
         let expected = finalized(sessions::amp::parse_amp_file(&path).unwrap().messages);
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn kimi_config_change_invalidates_usage_cache_identity_projection() {
+        let home = tempfile::TempDir::new().unwrap();
+        let wire_path = home
+            .path()
+            .join(".kimi-code/sessions/wd_project/session_1/agents/main/wire.jsonl");
+        let config_path = home.path().join(".kimi-code/config.toml");
+        write_file(
+            &wire_path,
+            r#"{"type":"usage.record","time":1780942009099,"model":"active-model","usage":{"inputOther":10,"output":2}}"#,
+        );
+        write_file(
+            &config_path,
+            r#"[models.active-model]
+provider = "openai"
+model = "gpt-5"
+"#,
+        );
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let cold_unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        assert_eq!(
+            cold_unit.fingerprint_policy,
+            FingerprintPolicy::PrimaryWithDependency {
+                dependency_path: config_path.clone(),
+                related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
+            }
+        );
+        let cold_messages = fold_with_adapter(&KIMI_ADAPTER, vec![cold_unit], &mut cache);
+        assert_eq!(cold_messages.len(), 1);
+        assert_eq!(cold_messages[0].model_id.as_ref(), "gpt-5");
+        assert_eq!(cold_messages[0].provider_id.as_ref(), "openai");
+
+        write_file(
+            &config_path,
+            r#"[models.active-model]
+provider = "anthropic"
+model = "claude-sonnet-4"
+"#,
+        );
+        let changed_unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let changed_unit = match KIMI_ADAPTER.plan_cache_hit(changed_unit, &cache).unwrap() {
+            crate::adapters::CacheHitPlan::Miss(unit) => unit,
+            crate::adapters::CacheHitPlan::Hit(_) => {
+                panic!("changed Kimi config must invalidate the usage cache")
+            }
+        };
+        let changed_messages = fold_with_adapter(&KIMI_ADAPTER, vec![changed_unit], &mut cache);
+        assert_eq!(changed_messages.len(), 1);
+        assert_eq!(changed_messages[0].model_id.as_ref(), "claude-sonnet-4");
+        assert_eq!(changed_messages[0].provider_id.as_ref(), "anthropic");
+    }
+
+    #[test]
+    fn kimi_directory_config_keeps_usage_partial_and_does_not_cache() {
+        let home = tempfile::TempDir::new().unwrap();
+        let wire_path = home
+            .path()
+            .join(".kimi-code/sessions/wd_project/session_1/agents/main/wire.jsonl");
+        let config_path = home.path().join(".kimi-code/config.toml");
+        write_file(
+            &wire_path,
+            r#"{"type":"usage.record","time":1780942009099,"model":"active-model","usage":{"inputOther":10,"output":2}}"#,
+        );
+        std::fs::create_dir(&config_path).unwrap();
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let parsed = KIMI_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(
+            parsed[0].source_health().status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert!(parsed[0].cache_write.is_none());
+
+        let mut messages = Vec::new();
+        let mut fold_ctx = FoldContext::new(&mut cache, None);
+        KIMI_ADAPTER
+            .fold(parsed, &mut fold_ctx, &mut messages)
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "active-model");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 2);
+        assert_eq!(fold_ctx.health.partial_sources(), 1);
+        assert!(cache
+            .get_meta(&wire_path, KIMI_ADAPTER.parser_version)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn kimi_missing_config_keeps_usage_and_caches_the_absent_dependency() {
+        let home = tempfile::TempDir::new().unwrap();
+        let wire_path = home
+            .path()
+            .join(".kimi-code/sessions/wd_project/session_1/agents/main/wire.jsonl");
+        let config_path = home.path().join(".kimi-code/config.toml");
+        write_file(
+            &wire_path,
+            r#"{"type":"usage.record","time":1780942009099,"model":"active-model","usage":{"inputOther":10,"output":2}}"#,
+        );
+        assert!(!config_path.exists());
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let messages = fold_with_adapter(&KIMI_ADAPTER, vec![unit], &mut cache);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "active-model");
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 2);
+        assert!(cache
+            .get_meta(&wire_path, KIMI_ADAPTER.parser_version)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn commandcode_config_change_invalidates_usage_cache_identity_projection() {
+        let home = tempfile::TempDir::new().unwrap();
+        let session_path = home
+            .path()
+            .join(".commandcode/projects/project/session.jsonl");
+        let config_path = home.path().join(".commandcode/config.json");
+        write_file(
+            &session_path,
+            concat!(
+                r#"{"role":"user","sessionId":"session","content":"hello"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"session","timestamp":"2026-06-16T05:58:20Z","content":"world"}"#
+            ),
+        );
+        write_file(&config_path, r#"{"provider":"openai","model":"gpt-5"}"#);
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let cold_unit = COMMANDCODE_ADAPTER
+            .discover_checked(&ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            cold_unit.fingerprint_policy,
+            FingerprintPolicy::PrimaryWithDependency {
+                dependency_path: config_path.clone(),
+                related_failure_policy: RelatedInputFailurePolicy::FailSource,
+            }
+        );
+        let cold_messages = fold_with_adapter(&COMMANDCODE_ADAPTER, vec![cold_unit], &mut cache);
+        assert_eq!(cold_messages.len(), 1);
+        assert_eq!(cold_messages[0].model_id.as_ref(), "gpt-5");
+        assert_eq!(cold_messages[0].provider_id.as_ref(), "openai");
+
+        write_file(&config_path, r#"{"model":"private-preview"}"#);
+        let changed_unit = COMMANDCODE_ADAPTER
+            .discover_checked(&ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let changed_unit = match COMMANDCODE_ADAPTER
+            .plan_cache_hit(changed_unit, &cache)
+            .unwrap()
+        {
+            crate::adapters::CacheHitPlan::Miss(unit) => unit,
+            crate::adapters::CacheHitPlan::Hit(_) => {
+                panic!("changed Command Code config must invalidate the usage cache")
+            }
+        };
+        let changed_messages =
+            fold_with_adapter(&COMMANDCODE_ADAPTER, vec![changed_unit], &mut cache);
+        assert_eq!(changed_messages.len(), 1);
+        assert_eq!(changed_messages[0].model_id.as_ref(), "private-preview");
+        assert_eq!(changed_messages[0].provider_id.as_ref(), "unknown");
+    }
+
+    #[test]
+    fn commandcode_checkpoint_sidecars_are_not_discovered_as_usage_sources() {
+        let home = tempfile::TempDir::new().unwrap();
+        let checkpoint_path = home
+            .path()
+            .join(".commandcode/projects/project/session.checkpoints.jsonl");
+        write_file(
+            &checkpoint_path,
+            r#"{"type":"file-history-snapshot","messageId":"message","snapshot":{"messageId":"message","trackedFileBackups":{},"timestamp":1784371763},"isSnapshotUpdate":false}"#,
+        );
+        assert!(!home.path().join(".commandcode/config.json").exists());
+
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let units = COMMANDCODE_ADAPTER.discover_checked(&ctx).unwrap();
+
+        assert!(units.is_empty());
+    }
+
+    #[test]
+    fn commandcode_directory_config_remains_a_required_input() {
+        let home = tempfile::TempDir::new().unwrap();
+        let session_path = home
+            .path()
+            .join(".commandcode/projects/project/session.jsonl");
+        let config_path = home.path().join(".commandcode/config.json");
+        write_file(
+            &session_path,
+            concat!(
+                r#"{"role":"user","sessionId":"session","content":"hello"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"session","timestamp":"2026-06-16T05:58:20Z","content":"world"}"#
+            ),
+        );
+        std::fs::create_dir(&config_path).unwrap();
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let unit = COMMANDCODE_ADAPTER
+            .discover_checked(&ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let parsed = COMMANDCODE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(
+            parsed[0].source_health().status,
+            crate::source_health::SourceStatus::Unavailable { .. }
+        ));
+        assert!(parsed[0].cache_write.is_none());
+
+        let mut messages = Vec::new();
+        COMMANDCODE_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext::new(&mut cache, None),
+                &mut messages,
+            )
+            .unwrap();
+        assert!(messages.is_empty());
+        assert!(cache
+            .get_meta(&session_path, COMMANDCODE_ADAPTER.parser_version)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -745,7 +1022,8 @@ not-json
         assert_eq!(
             unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
-                dependency_path: features_path.clone()
+                dependency_path: features_path.clone(),
+                related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             }
         );
 
@@ -771,6 +1049,63 @@ not-json
             validator_messages[0].agent.as_deref(),
             Some("Droid Validator")
         );
+    }
+
+    #[test]
+    fn droid_directory_features_keeps_usage_partial_and_does_not_cache() {
+        let home = tempfile::TempDir::new().unwrap();
+        let settings_path = home
+            .path()
+            .join(".factory/sessions/project/mission-worker.settings.json");
+        let features_path = home
+            .path()
+            .join(".factory/missions/mission-root/features.json");
+        write_file(
+            &settings_path,
+            r#"{
+                "model": "custom:gpt-5.6-sol-xhigh",
+                "providerLock": "openai",
+                "providerLockTimestamp": "2026-07-15T08:55:13.871Z",
+                "tokenUsage": {"inputTokens": 10, "outputTokens": 5},
+                "tags": [
+                    {"name": "exec"},
+                    {"name": "mission-worker"},
+                    {
+                        "name": "mission-session",
+                        "metadata": {"role": "worker", "missionId": "mission-root"}
+                    }
+                ]
+            }"#,
+        );
+        std::fs::create_dir_all(&features_path).unwrap();
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let mut cache = message_cache::SourceMessageCache::default();
+
+        let parsed = DROID_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(
+            parsed[0].source_health().status,
+            crate::source_health::SourceStatus::Partial { .. }
+        ));
+        assert!(parsed[0].cache_write.is_none());
+
+        let mut messages = Vec::new();
+        let mut fold_ctx = FoldContext::new(&mut cache, None);
+        DROID_ADAPTER
+            .fold(parsed, &mut fold_ctx, &mut messages)
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 10);
+        assert_eq!(messages[0].tokens.output, 5);
+        assert_eq!(messages[0].agent.as_deref(), Some("Droid Worker"));
+        assert_eq!(fold_ctx.health.partial_sources(), 1);
+        assert!(cache
+            .get_meta(&settings_path, DROID_ADAPTER.parser_version)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -827,7 +1162,7 @@ not-json
     }
 
     #[test]
-    fn copilot_discovery_uses_the_actual_record_rejection_revision() {
+    fn copilot_discovery_uses_current_revision() {
         let home = tempfile::TempDir::new().unwrap();
         let path = home.path().join(".copilot/otel/copilot.jsonl");
         write_file(&path, "");
@@ -884,6 +1219,7 @@ not-json
             units[0].fingerprint_policy,
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names: GROK_RELATED_METADATA_SIBLINGS,
+                related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             }
         );
     }

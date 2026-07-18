@@ -32,16 +32,26 @@ struct CommandCodeEntry {
 
 #[derive(Debug, Deserialize)]
 struct CommandCodeConfig {
-    provider: String,
+    #[serde(default)]
+    provider: Option<String>,
     model: String,
 }
 
-pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
-    if path
-        .file_name()
+fn is_checkpoint_file(path: &Path) -> bool {
+    path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".checkpoints.jsonl"))
-    {
+}
+
+pub(crate) fn is_usage_transcript_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl"))
+        && !is_checkpoint_file(path)
+}
+
+pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
+    if is_checkpoint_file(path) {
         return Ok(ScannedSource::default());
     }
 
@@ -49,7 +59,10 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let (raw_model, configured_provider) = model_from_config(path)?;
-    let provider_id = provider_hint_for_model(&raw_model).unwrap_or(&configured_provider);
+    let provider_id = crate::provider_identity::source_provider_id(
+        configured_provider.as_deref().unwrap_or_default(),
+        &raw_model,
+    );
     let model_id = canonicalize_model(&raw_model);
     let project_slug = workspace_key_from_path(path);
     let fallback_workspace_label = project_slug.as_deref().and_then(workspace_label_from_key);
@@ -170,7 +183,7 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
                 let mut message = UnifiedMessage::new_with_dedup(
                     CLIENT_ID,
                     model_id.clone(),
-                    provider_id,
+                    &provider_id,
                     resolved_session,
                     timestamp,
                     tokens,
@@ -236,10 +249,6 @@ fn canonicalize_model(model: &str) -> String {
     }
 }
 
-fn provider_hint_for_model(model: &str) -> Option<&'static str> {
-    crate::provider_identity::inferred_provider_from_model(model)
-}
-
 fn commandcode_root(session_path: &Path) -> Option<&Path> {
     session_path
         .parent()
@@ -247,7 +256,11 @@ fn commandcode_root(session_path: &Path) -> Option<&Path> {
         .and_then(Path::parent)
 }
 
-fn model_from_config(session_path: &Path) -> SessionParseResult<(String, String)> {
+pub(crate) fn commandcode_config_dependency_path(session_path: &Path) -> Option<PathBuf> {
+    commandcode_root(session_path).map(|root| root.join("config.json"))
+}
+
+fn model_from_config(session_path: &Path) -> SessionParseResult<(String, Option<String>)> {
     let Some(commandcode_root) = commandcode_root(session_path) else {
         return Err(SessionParseError::invalid(
             "locate model config",
@@ -266,14 +279,11 @@ fn model_from_config(session_path: &Path) -> SessionParseResult<(String, String)
             "Command Code config has an empty model",
         ));
     }
-    let provider = config.provider.trim();
-    if provider.is_empty() {
-        return Err(SessionParseError::invalid(
-            "validate model config",
-            "Command Code config has an empty provider",
-        ));
-    }
-    Ok((model.to_string(), provider.to_string()))
+    let provider = config
+        .provider
+        .map(|provider| provider.trim().to_string())
+        .filter(|provider| !provider.is_empty());
+    Ok((model.to_string(), provider))
 }
 
 fn workspace_key_from_path(path: &Path) -> Option<String> {
@@ -403,7 +413,15 @@ mod tests {
     fn write_config(root: &Path, model: &str) {
         std::fs::write(
             root.join("config.json"),
-            format!(r#"{{"provider":"commandcode","model":"{model}"}}"#),
+            format!(r#"{{"model":"{model}"}}"#),
+        )
+        .unwrap();
+    }
+
+    fn write_config_with_provider(root: &Path, provider: &str, model: &str) {
+        std::fs::write(
+            root.join("config.json"),
+            format!(r#"{{"provider":"{provider}","model":"{model}"}}"#),
         )
         .unwrap();
     }
@@ -454,6 +472,56 @@ mod tests {
         assert!(message.is_turn_start);
         assert_eq!(message.timestamp, 1781589500332);
         assert_eq!(message.workspace_key.as_deref(), Some("users-alice-repo"));
+    }
+
+    #[test]
+    fn keeps_estimated_usage_when_config_provider_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model":"private-preview"}"#,
+        )
+        .unwrap();
+        let path = write_session(
+            dir.path(),
+            "proj",
+            "session",
+            concat!(
+                r#"{"role":"user","sessionId":"session","content":"hello"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"session","timestamp":"2026-06-16T05:58:20Z","content":"world"}"#
+            ),
+        );
+
+        let scanned = super::parse_commandcode_file(&path).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "private-preview");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert!(scanned.messages[0].tokens.total() > 0);
+    }
+
+    #[test]
+    fn preserves_explicit_provider_when_model_implies_another_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config_with_provider(dir.path(), "private-router", "MiniMaxAI/MiniMax-M3-Free");
+        let path = write_session(
+            dir.path(),
+            "proj",
+            "session",
+            concat!(
+                r#"{"role":"user","sessionId":"session","content":"hello"}"#,
+                "\n",
+                r#"{"role":"assistant","sessionId":"session","timestamp":"2026-06-16T05:58:20Z","content":"world"}"#
+            ),
+        );
+
+        let messages = parse_commandcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "MiniMax-M3");
+        assert_eq!(messages[0].provider_id.as_ref(), "private-router");
     }
 
     #[test]

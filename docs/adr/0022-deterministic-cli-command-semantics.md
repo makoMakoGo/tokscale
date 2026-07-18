@@ -72,7 +72,7 @@ emit one common envelope:
 }
 ```
 
-Third-party record or source damage remains in `health` under ADR 0021 and
+Third-party record or source damage remains in `health` under ADR 0020 and
 does not change a successfully produced report's exit code. Invalid CLI usage
 or environment is exit code `2`; internal, I/O, network, and authentication
 failures are exit code `1`; user interruption remains `130` where the child or

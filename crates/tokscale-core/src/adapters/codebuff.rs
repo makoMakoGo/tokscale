@@ -16,7 +16,7 @@ use crate::sessions;
 pub(crate) struct CodebuffAdapter;
 
 const CODEBUFF_RECORD_REJECTION_REVISION: u32 =
-    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
+    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 2;
 
 impl LocalSourceAdapter for CodebuffAdapter {
     fn client(&self) -> ClientId {

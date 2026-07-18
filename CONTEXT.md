@@ -16,6 +16,12 @@ file take precedence when upstream semantics conflict with local needs.
   the core model canonicalizer before aggregation and pricing. Date, release,
   free-channel, and source decorations are not preserved as model identity in
   this branch.
+- `raw_model_label` is the non-empty model observation persisted by a source
+  before final canonicalization. It remains valid usage identity when optional
+  alias or provider enrichment is unavailable.
+- `provider_id` is attribution metadata resolved from an explicit source value,
+  deterministic model-family inference, or `unknown`. It is not a prerequisite
+  for retaining model and token facts.
 - `workspace` is the local working directory attribution used by reports and
   the TUI.
 
@@ -24,6 +30,9 @@ file take precedence when upstream semantics conflict with local needs.
 - Do not add silent fallback, fake success, mock execution, or defensive
   degradation to make an unclear state look successful. Failures should surface
   as explicit errors, logs, or failing tests.
+- Do not reject a positive, timestamped usage record with a non-empty model
+  label merely because provider attribution cannot be resolved. Keep the model
+  and tokens, infer centrally when possible, and otherwise use `unknown`.
 - Read local client storage in its accepted current format only, as established
   by ADR 0019. OpenCode reads current SQLite databases, not legacy message JSON;
   obsolete schemas and database I/O/query failures are explicit errors.

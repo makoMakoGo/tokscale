@@ -127,15 +127,7 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
             };
             let model_id = model_aliases::canonicalize_source_model_id(model_raw)
                 .unwrap_or_else(|| model_raw.trim().to_string());
-            let provider_id = match provider_from_usage(usage, &model_id) {
-                Ok(provider_id) => provider_id,
-                Err(_error) => {
-                    scanned
-                        .rejections
-                        .record(RecordRejectionReason::MissingProvider);
-                    continue;
-                }
-            };
+            let provider_id = provider_from_usage(usage, &model_id);
 
             let dedup_key = format!(
                 "{CLIENT_ID}:{session_id}:{timestamp}:{model_id}:{}:{}:{}:{}:{}:{usage_index}",
@@ -238,16 +230,11 @@ fn agent_name(agent_event: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn provider_from_usage(usage: &Value, model_id: &str) -> SessionParseResult<String> {
-    string_field(usage, "provider")
-        .and_then(provider_identity::canonical_provider)
-        .or_else(|| provider_identity::inferred_provider_from_model(model_id).map(str::to_string))
-        .ok_or_else(|| {
-            SessionParseError::invalid(
-                "validate Junie usage row",
-                format!("cannot determine provider for model `{model_id}`"),
-            )
-        })
+fn provider_from_usage(usage: &Value, model_id: &str) -> String {
+    provider_identity::source_provider_id(
+        string_field(usage, "provider").unwrap_or_default(),
+        model_id,
+    )
 }
 
 fn tokens_from_usage(usage: &Value) -> SessionParseResult<TokenBreakdown> {
@@ -458,14 +445,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_usage_whose_provider_cannot_be_determined() {
+    fn keeps_usage_whose_provider_cannot_be_determined() {
         let scanned = parse_events_result(
             r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"claude-opus-4-8","inputTokens":10,"outputTokens":2},{"model":"local-router","inputTokens":3,"outputTokens":4}]}}}"#,
         )
         .unwrap();
 
-        assert_eq!(scanned.messages.len(), 1);
-        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(scanned.messages[1].provider_id.as_ref(), "unknown");
+        assert!(scanned.rejections.is_empty());
+    }
+
+    #[test]
+    fn preserves_explicit_provider_route_over_model_inference() {
+        let messages = parse_events(
+            r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"gpt-5","provider":"OpenRouter.Route","inputTokens":3,"outputTokens":4}]}}}"#,
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id.as_ref(), "OpenRouter.Route");
     }
 
     #[test]
@@ -564,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_usage_event_does_not_hide_later_events() {
+    fn unknown_provider_event_is_kept_with_surrounding_events() {
         let content = format!(
             "{}\n{}\n{}\n",
             usage_event(1_750_000_000_000, "gpt-5", 10, 2),
@@ -574,8 +573,9 @@ mod tests {
 
         let scanned = parse_events_result(&content).unwrap();
 
-        assert_eq!(scanned.messages.len(), 2);
-        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(scanned.messages.len(), 3);
+        assert_eq!(scanned.messages[1].provider_id.as_ref(), "unknown");
+        assert!(scanned.rejections.is_empty());
         assert!(scanned.interrupted.is_none());
     }
 

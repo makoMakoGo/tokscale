@@ -17,9 +17,9 @@ use crate::UnifiedMessage;
 
 const MIRROR_DEDUP_WINDOW_MS: i64 = 1000;
 const CODEBUDDY_JSONL_RECORD_REJECTION_REVISION: u32 =
-    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
+    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 2;
 const CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION: u32 =
-    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 1;
+    crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 2;
 
 pub(crate) struct CodeBuddyAdapter;
 

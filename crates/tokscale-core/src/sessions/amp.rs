@@ -97,16 +97,6 @@ pub struct AmpThread {
     pub usage_ledger: Option<AmpUsageLedger>,
 }
 
-/// Get provider from model name
-fn get_provider_from_model(model: &str) -> SessionParseResult<&'static str> {
-    provider_identity::inferred_provider_from_model(model).ok_or_else(|| {
-        SessionParseError::invalid(
-            "validate usage provider",
-            format!("Amp cannot determine a provider for model `{model}`"),
-        )
-    })
-}
-
 #[derive(Debug, Clone)]
 struct AmpUsageRecord {
     model: String,
@@ -122,9 +112,9 @@ impl AmpUsageRecord {
         self.model == other.model && self.tokens == other.tokens
     }
 
-    fn into_unified(self, thread_id: &str) -> SessionParseResult<UnifiedMessage> {
-        let provider = get_provider_from_model(&self.model)?;
-        Ok(UnifiedMessage::new(
+    fn into_unified(self, thread_id: &str) -> UnifiedMessage {
+        let provider = provider_identity::source_provider_id("", &self.model);
+        UnifiedMessage::new(
             "amp",
             &self.model,
             provider,
@@ -132,7 +122,7 @@ impl AmpUsageRecord {
             self.timestamp,
             self.tokens,
             0.0,
-        ))
+        )
     }
 }
 
@@ -341,19 +331,11 @@ fn merge_amp_records(
     }
 }
 
-fn build_amp_messages(
-    records: Vec<AmpUsageRecord>,
-    thread_id: &str,
-    rejections: &mut RejectionSummary,
-) -> Vec<UnifiedMessage> {
-    let mut messages = Vec::with_capacity(records.len());
-    for record in records {
-        match record.into_unified(thread_id) {
-            Ok(message) => messages.push(message),
-            Err(_error) => rejections.record(RecordRejectionReason::MissingProvider),
-        }
-    }
-    messages
+fn build_amp_messages(records: Vec<AmpUsageRecord>, thread_id: &str) -> Vec<UnifiedMessage> {
+    records
+        .into_iter()
+        .map(|record| record.into_unified(thread_id))
+        .collect()
 }
 
 /// Parse an Amp thread JSON file
@@ -382,7 +364,7 @@ pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let mut message_records = message_records;
         message_records.sort_by_key(|record| record.timestamp);
         return Ok(ScannedSource {
-            messages: build_amp_messages(message_records, &thread_id, &mut rejections),
+            messages: build_amp_messages(message_records, &thread_id),
             rejections,
             interrupted: None,
         });
@@ -408,7 +390,7 @@ pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedSource> {
     ledger_records.extend(unmatched_message_records);
     ledger_records.sort_by_key(|record| record.timestamp);
     Ok(ScannedSource {
-        messages: build_amp_messages(ledger_records, &thread_id, &mut rejections),
+        messages: build_amp_messages(ledger_records, &thread_id),
         rejections,
         interrupted: None,
     })
@@ -712,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_amp_rejects_models_without_a_known_provider() {
+    fn test_parse_amp_keeps_models_without_a_known_provider() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let path = temp_dir.path().join("T-unknown-model.json");
 
@@ -737,12 +719,12 @@ mod tests {
         );
 
         let scanned = parse_amp_file_result(&path).unwrap();
-        assert!(scanned.messages.is_empty());
-        assert_eq!(scanned.rejections.total(), 1);
-        assert_eq!(
-            scanned.rejections.entries().next().unwrap().key,
-            "missing-provider"
-        );
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "internal-preview");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert_eq!(scanned.messages[0].tokens.output, 2);
+        assert_eq!(scanned.rejections.total(), 0);
     }
 
     #[test]

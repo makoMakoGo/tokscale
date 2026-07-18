@@ -1,12 +1,13 @@
 //! Kimi session parser
 //!
-//! Parses Kimi Code `usage.record` entries from
+//! Parses Kimi Code `usage.record` entries and their preceding `llm.request`
+//! model identities from
 //! `~/.kimi-code/sessions/<WORKDIR_KEY>/<SESSION_ID>/agents/<AGENT_ID>/wire.jsonl`.
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
 use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
-use crate::TokenBreakdown;
+use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -43,6 +44,8 @@ struct WireLine {
     line_type: Option<String>,
     time: Option<i64>,
     model: Option<String>,
+    #[serde(rename = "modelAlias")]
+    model_alias: Option<String>,
     usage: Option<TokenUsage>,
     cwd: Option<String>,
     #[serde(rename = "profileName")]
@@ -57,7 +60,7 @@ struct KimiSessionIndexLine {
 }
 
 #[derive(Debug, Clone)]
-struct ModelAlias {
+struct ModelIdentity {
     provider: String,
     model: String,
 }
@@ -86,10 +89,13 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let wire_path = parse_wire_path(path)?;
-    let aliases = read_model_aliases(&wire_path.home)?;
+    let aliases = read_model_aliases(&wire_path.home);
     let session_id = wire_path.session_id;
     let agent_instance = Some(format!("{session_id}:{}", wire_path.agent_id));
     let mut agent = None;
+    // Updated while reading so only an identity observed before a usage row
+    // can resolve it; a later request must never rewrite historical usage.
+    let mut observed_aliases = HashMap::new();
     let reader = BufReader::new(file);
     let mut scanned = ScannedSource::default();
 
@@ -121,6 +127,13 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
                 continue;
             }
         };
+
+        if wire_line.line_type.as_deref() == Some("llm.request") {
+            if let Some((alias, identity)) = request_model_identity(&wire_line) {
+                observed_aliases.insert(alias, identity);
+            }
+            continue;
+        }
 
         if wire_line.line_type.as_deref() == Some("config.update") {
             if let Some(profile_name) = wire_line.profile_name.as_deref() {
@@ -182,15 +195,7 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
                 .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
-        let (provider_id, model_id) = match resolve_model(path, raw_model, &aliases) {
-            Ok(resolved) => resolved,
-            Err(_error) => {
-                scanned
-                    .rejections
-                    .record(RecordRejectionReason::MalformedRecord);
-                continue;
-            }
-        };
+        let (provider_id, model_id) = resolve_model(raw_model, &observed_aliases, &aliases);
         let mut message = UnifiedMessage::new_with_agent(
             CLIENT_ID,
             model_id,
@@ -221,101 +226,100 @@ fn normalize_kimi_agent_label(profile_name: &str) -> Option<String> {
     Some(label.to_string())
 }
 
-fn resolve_model(
-    path: &Path,
-    raw_model: &str,
-    aliases: &HashMap<String, ModelAlias>,
-) -> SessionParseResult<(String, String)> {
-    if let Some(alias) = aliases.get(raw_model) {
-        return Ok((alias.provider.clone(), alias.model.clone()));
-    }
+fn request_model_identity(wire_line: &WireLine) -> Option<(String, ModelIdentity)> {
+    let alias = wire_line
+        .model_alias
+        .as_deref()
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())?;
+    let model = wire_line
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())?;
+    let provider = provider_identity::inferred_provider_from_model(model)
+        .map(str::to_string)
+        .unwrap_or_else(|| "unknown".to_string());
 
-    Err(invalid_at_path(
-        path,
-        "resolve usage model",
-        format!("model alias `{raw_model}` is not defined in config.toml [models]"),
+    Some((
+        alias.to_string(),
+        ModelIdentity {
+            provider,
+            model: model.to_string(),
+        },
     ))
 }
 
-fn read_model_aliases(home: &Path) -> SessionParseResult<HashMap<String, ModelAlias>> {
+fn resolve_model(
+    raw_model: &str,
+    observed_aliases: &HashMap<String, ModelIdentity>,
+    config_aliases: &HashMap<String, ModelIdentity>,
+) -> (String, String) {
+    if let Some(alias) = observed_aliases.get(raw_model) {
+        return (alias.provider.clone(), alias.model.clone());
+    }
+
+    if let Some(alias) = config_aliases.get(raw_model) {
+        return (alias.provider.clone(), alias.model.clone());
+    }
+
+    (
+        provider_identity::source_provider_id("", raw_model),
+        raw_model.to_string(),
+    )
+}
+
+/// Older Kimi wires persist only a source-local alias. The current config can
+/// enrich aliases that still exist, but it is neither historical nor required
+/// evidence. If it is unavailable or malformed, the raw wire label remains
+/// the authoritative model observation.
+fn read_model_aliases(home: &Path) -> HashMap<String, ModelIdentity> {
     let config_path = home.join("config.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
-        Err(error) => {
-            return Err(SessionParseError::at_path(
-                &config_path,
-                "read model config",
-                error,
-            ))
-        }
+    let Ok(content) = std::fs::read_to_string(&config_path) else {
+        return HashMap::new();
     };
 
-    let value = content
-        .parse::<toml::Value>()
-        .map_err(|error| SessionParseError::at_path(&config_path, "decode model config", error))?;
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return HashMap::new();
+    };
 
     let Some(models_value) = value.get("models") else {
-        return Ok(HashMap::new());
+        return HashMap::new();
     };
-    let models = models_value.as_table().ok_or_else(|| {
-        invalid_at_path(
-            &config_path,
-            "validate model config",
-            "[models] must be a TOML table",
-        )
-    })?;
+    let Some(models) = models_value.as_table() else {
+        return HashMap::new();
+    };
 
     let mut aliases = HashMap::with_capacity(models.len());
     for (alias, value) in models {
         if alias.trim().is_empty() {
-            return Err(invalid_at_path(
-                &config_path,
-                "validate model config",
-                "model alias must not be empty",
-            ));
+            continue;
         }
-        let table = value.as_table().ok_or_else(|| {
-            invalid_at_path(
-                &config_path,
-                "validate model config",
-                format!("model alias `{alias}` must be a TOML table"),
-            )
-        })?;
-        let provider = table
-            .get("provider")
-            .and_then(toml::Value::as_str)
-            .map(str::trim)
-            .filter(|provider| !provider.is_empty())
-            .ok_or_else(|| {
-                invalid_at_path(
-                    &config_path,
-                    "validate model config",
-                    format!("model alias `{alias}` is missing a non-empty string provider"),
-                )
-            })?;
-        let model = table
+        let Some(table) = value.as_table() else {
+            continue;
+        };
+        let Some(model) = table
             .get("model")
             .and_then(toml::Value::as_str)
             .map(str::trim)
             .filter(|model| !model.is_empty())
-            .ok_or_else(|| {
-                invalid_at_path(
-                    &config_path,
-                    "validate model config",
-                    format!("model alias `{alias}` is missing a non-empty string model"),
-                )
-            })?;
+        else {
+            continue;
+        };
+        let raw_provider = table
+            .get("provider")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
         aliases.insert(
             alias.clone(),
-            ModelAlias {
-                provider: provider.to_string(),
+            ModelIdentity {
+                provider: provider_identity::source_provider_id(raw_provider, model),
                 model: model.to_string(),
             },
         );
     }
 
-    Ok(aliases)
+    aliases
 }
 
 fn parse_wire_path(path: &Path) -> SessionParseResult<KimiWirePath> {
@@ -361,6 +365,15 @@ fn parse_wire_path(path: &Path) -> SessionParseResult<KimiWirePath> {
         session_id: session_id.to_string(),
         agent_id: agent_id.to_string(),
     })
+}
+
+/// The current config is optional identity enrichment, but any change to it
+/// can change the canonical model/provider projection for aliases it contains.
+/// Include even an absent path so create/delete transitions invalidate cache.
+pub(crate) fn kimi_config_dependency_path(path: &Path) -> Option<PathBuf> {
+    parse_wire_path(path)
+        .ok()
+        .map(|wire_path| wire_path.home.join("config.toml"))
 }
 
 /// Current Kimi records place `cwd` in the initial config snapshot. Older
@@ -491,6 +504,172 @@ model = "gpt-5.5"
     }
 
     #[test]
+    fn request_maps_alias_to_real_model_and_model_family_provider() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"llm.request","provider":"openai","model":"kimi-k2.5","modelAlias":"routed-kimi"}
+{"type":"usage.record","time":1780942009099,"model":"routed-kimi","usage":{"inputOther":11,"output":2}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "kimi-k2.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "kimi");
+        assert_eq!(messages[0].tokens.total(), 13);
+    }
+
+    #[test]
+    fn latest_preceding_request_can_change_identity_for_same_alias() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"llm.request","provider":"openai","model":"gpt-5.5","modelAlias":"moving-alias"}
+{"type":"usage.record","time":1780942009001,"model":"moving-alias","usage":{"inputOther":1}}
+{"type":"llm.request","provider":"anthropic","model":"claude-sonnet-4-6","modelAlias":"moving-alias"}
+{"type":"usage.record","time":1780942009002,"model":"moving-alias","usage":{"output":2}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(messages[1].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[1].provider_id.as_ref(), "anthropic");
+    }
+
+    #[test]
+    fn future_request_does_not_backfill_earlier_usage() {
+        let dir = TempDir::new().unwrap();
+        write_config(dir.path(), "[models]\n");
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009001,"model":"future-alias","usage":{"inputOther":1}}
+{"type":"llm.request","provider":"openai","model":"gpt-5.5","modelAlias":"future-alias"}
+{"type":"usage.record","time":1780942009002,"model":"future-alias","usage":{"output":2}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id.as_ref(), "future-alias");
+        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(messages[1].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[1].provider_id.as_ref(), "openai");
+    }
+
+    #[test]
+    fn repeated_retry_requests_do_not_duplicate_usage() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"llm.request","kind":"loop","attempt":"initial","provider":"openai-responses","model":"gpt-5.5","modelAlias":"retry-alias"}
+{"type":"llm.request","kind":"loop","attempt":"retry","provider":"openai-responses","model":"gpt-5.5","modelAlias":"retry-alias"}
+{"type":"usage.record","time":1780942009001,"model":"retry-alias","usage":{"inputOther":3,"output":4}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(messages[0].tokens.total(), 7);
+    }
+
+    #[test]
+    fn tracks_multiple_request_aliases_independently() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"llm.request","provider":"openai","model":"gpt-5.5","modelAlias":"fast"}
+{"type":"llm.request","provider":"anthropic","model":"claude-opus-4-6","modelAlias":"deep"}
+{"type":"usage.record","time":1780942009001,"model":"deep","usage":{"output":2}}
+{"type":"usage.record","time":1780942009002,"model":"fast","usage":{"inputOther":3}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(messages[1].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages[1].provider_id.as_ref(), "openai");
+    }
+
+    #[test]
+    fn request_resolves_env_only_alias_absent_from_config() {
+        let dir = TempDir::new().unwrap();
+        write_config(dir.path(), "[models]\n");
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"llm.request","provider":"openai","model":"kimi-for-coding","modelAlias":"__kimi_env_model__"}
+{"type":"usage.record","time":1780942009001,"model":"__kimi_env_model__","usage":{"inputOther":5}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "kimi-for-coding");
+        assert_eq!(messages[0].provider_id.as_ref(), "kimi");
+    }
+
+    #[test]
+    fn request_transport_does_not_claim_provider_for_unknown_model_family() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"llm.request","provider":"openai-responses","model":"private-preview","modelAlias":"private-alias"}
+{"type":"usage.record","time":1780942009001,"model":"private-alias","usage":{"inputOther":5}}"#,
+        );
+
+        let messages = parse_kimi_file(&wire);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "private-preview");
+        assert_eq!(messages[0].provider_id.as_ref(), "unknown");
+    }
+
+    #[test]
+    fn incomplete_request_mapping_is_ignored_without_poisoning_usage() {
+        let dir = TempDir::new().unwrap();
+        write_config(dir.path(), "[models]\n");
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"llm.request","provider":"openai","model":"gpt-5.5","modelAlias":"stable-alias"}
+{"type":"llm.request","provider":"openai","model":"claude-opus-4-6"}
+{"type":"llm.request","provider":"openai","model":"  ","modelAlias":"stable-alias"}
+{"type":"usage.record","time":1780942009001,"model":"stable-alias","usage":{"inputOther":5}}"#,
+        );
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "openai");
+    }
+
+    #[test]
+    fn malformed_request_does_not_discard_later_usage() {
+        let dir = TempDir::new().unwrap();
+        write_config(dir.path(), "[models]\n");
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"llm.request","provider":"openai","model":123,"modelAlias":"broken"}
+{"type":"usage.record","time":1780942009001,"model":"gpt-5.5","usage":{"inputOther":5}}"#,
+        );
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "openai");
+    }
+
+    #[test]
     fn parses_subagent_profile_name_as_stable_agent_label() {
         let dir = TempDir::new().unwrap();
         let wire = write_wire_for_agent(
@@ -584,22 +763,40 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn rejects_usage_when_config_mapping_is_missing() {
+    fn keeps_raw_usage_when_config_mapping_is_missing() {
         let dir = TempDir::new().unwrap();
         let wire = write_wire(
             dir.path(),
-            r#"{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}"#,
+            r#"{"type":"metadata","protocol_version":"1.4"}
+{"type":"usage.record","time":1780942009099,"model":"kimi-k2.7-code","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}"#,
         );
         std::fs::write(dir.path().join("config.toml"), "[models]\n").unwrap();
 
         let scanned = super::parse_kimi_file(&wire).unwrap();
 
-        assert!(scanned.messages.is_empty());
-        assert_eq!(scanned.rejections.total(), 1);
-        assert_eq!(
-            scanned.rejections.entries().next().unwrap().key,
-            "malformed-record"
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "kimi-k2.7-code");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "kimi");
+        assert_eq!(scanned.messages[0].tokens.total(), 10);
+        assert!(scanned.rejections.is_empty());
+    }
+
+    #[test]
+    fn malformed_current_config_does_not_block_historical_usage() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009099,"model":"private-alias","usage":{"inputOther":7,"output":2}}"#,
         );
+        std::fs::write(dir.path().join("config.toml"), "[models\nnot = toml").unwrap();
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "private-alias");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.total(), 9);
+        assert!(scanned.rejections.is_empty());
     }
 
     #[test]
@@ -713,7 +910,7 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn rejects_non_table_models_config() {
+    fn non_table_models_config_does_not_block_raw_usage() {
         let dir = TempDir::new().unwrap();
         let wire = write_wire(
             dir.path(),
@@ -721,29 +918,62 @@ model = "gpt-5.5"
         );
         std::fs::write(dir.path().join("config.toml"), "models = []\n").unwrap();
 
-        let error = super::parse_kimi_file(&wire).unwrap_err();
+        let scanned = super::parse_kimi_file(&wire).unwrap();
 
-        assert_eq!(error.operation(), "validate model config");
-        assert_eq!(error.path(), Some(dir.path().join("config.toml").as_path()));
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "openai-pro/gpt-5.5");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(scanned.messages[0].tokens.total(), 1);
     }
 
     #[test]
-    fn rejects_model_config_entry_missing_provider() {
+    fn model_config_entry_without_model_does_not_block_raw_usage() {
         let dir = TempDir::new().unwrap();
         let wire = write_wire(
             dir.path(),
-            r#"{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
+            r#"{"type":"usage.record","time":1780942009099,"model":"private-alias","usage":{"inputOther":1}}"#,
         );
         std::fs::write(
             dir.path().join("config.toml"),
-            "[models.\"openai-pro/gpt-5.5\"]\nmodel = \"gpt-5.5\"\n",
+            "[models.private-alias]\nprovider = \"private-provider\"\n",
         )
         .unwrap();
 
-        let error = super::parse_kimi_file(&wire).unwrap_err();
+        let scanned = super::parse_kimi_file(&wire).unwrap();
 
-        assert_eq!(error.operation(), "validate model config");
-        assert_eq!(error.path(), Some(dir.path().join("config.toml").as_path()));
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "private-alias");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.total(), 1);
+    }
+
+    #[test]
+    fn flat_model_config_resolves_model_without_provider() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009099,"model":"private-alias","usage":{"inputOther":1}}"#,
+        );
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"[models.private-alias]
+model = "gpt-5.5"
+base_url = "https://example.test/v1"
+protocol = "openai_responses"
+max_context_size = 128000
+"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(scanned.messages[0].tokens.total(), 1);
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub(crate) static OMP_ADAPTER: OmpAdapter = OmpAdapter;
 // Earlier OMP revisions emitted per-agent swarm labels, could bind a
 // precomputed parent digest to a newer source snapshot, or missed dynamic and
 // nested task-agent names.
-const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 8;
+const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 9;
 const OMP_PARENT_HEALTH_REVISION: u32 = 2;
 
 impl LocalSourceAdapter for OmpAdapter {
@@ -42,7 +42,7 @@ impl LocalSourceAdapter for OmpAdapter {
         .map(|unit| {
             let dependency_path = sessions::pi::omp_parent_candidate_path(&unit.path)
                 .expect("discovered OMP source must have a parent directory");
-            unit.with_dependency(dependency_path)
+            unit.with_optional_dependency(dependency_path)
                 .with_parser_version(ParserVersion::new(
                     ParserId::Omp,
                     OMP_RECORD_REJECTION_REVISION,
@@ -285,7 +285,9 @@ fn child_only_parent_health_candidates(
         .map(|parsed| &parsed.unit)
         .chain(miss_units.iter())
     {
-        let FingerprintPolicy::PrimaryWithDependency { dependency_path } = &unit.fingerprint_policy
+        let FingerprintPolicy::PrimaryWithDependency {
+            dependency_path, ..
+        } = &unit.fingerprint_policy
         else {
             continue;
         };
@@ -671,8 +673,11 @@ mod tests {
         assert!(units.iter().all(|unit| {
             matches!(
                 &unit.fingerprint_policy,
-                FingerprintPolicy::PrimaryWithDependency { dependency_path }
-                    if dependency_path == &unit.path.parent().unwrap().with_extension("jsonl")
+                FingerprintPolicy::PrimaryWithDependency {
+                    dependency_path,
+                    related_failure_policy:
+                        crate::message_cache::RelatedInputFailurePolicy::PreservePrimary,
+                } if dependency_path == &unit.path.parent().unwrap().with_extension("jsonl")
             )
         }));
         assert!(units.iter().all(|unit| {
@@ -822,7 +827,7 @@ mod tests {
             .into_iter()
             .map(|path| {
                 SourceUnit::plain_file(ClientId::Omp, path)
-                    .with_dependency(parent_path.clone())
+                    .with_optional_dependency(parent_path.clone())
                     .with_parser_version(parser_version)
             })
             .collect();
@@ -856,7 +861,7 @@ mod tests {
             &OMP_PARENT_CONTENT.replace(r#""agent":"reviewer""#, r#""agent":"new-reviewer""#),
         );
         let unit = SourceUnit::plain_file(ClientId::Omp, child_path)
-            .with_dependency(parent_path)
+            .with_optional_dependency(parent_path)
             .with_parser_version(ParserVersion::new(
                 ParserId::Omp,
                 OMP_RECORD_REJECTION_REVISION,
@@ -989,7 +994,7 @@ mod tests {
         write_file(&child_path, OMP_CHILD_CONTENT);
 
         let unit = SourceUnit::plain_file(ClientId::Omp, child_path)
-            .with_dependency(parent_path)
+            .with_optional_dependency(parent_path)
             .with_parser_version(ParserVersion::new(
                 ParserId::Omp,
                 OMP_RECORD_REJECTION_REVISION,
@@ -1290,7 +1295,7 @@ mod tests {
 
         let make_unit = || {
             SourceUnit::plain_file(ClientId::Omp, child_path.clone())
-                .with_dependency(parent_path.clone())
+                .with_optional_dependency(parent_path.clone())
                 .with_parser_version(ParserVersion::new(
                     ParserId::Omp,
                     OMP_RECORD_REJECTION_REVISION,
@@ -1416,7 +1421,7 @@ mod tests {
             .map(|path| {
                 let dependency_path = sessions::pi::omp_parent_candidate_path(&path).unwrap();
                 SourceUnit::plain_file(ClientId::Omp, path)
-                    .with_dependency(dependency_path)
+                    .with_optional_dependency(dependency_path)
                     .with_parser_version(parser_version)
             })
             .collect()
@@ -1471,7 +1476,7 @@ mod tests {
             .into_iter()
             .map(|path| {
                 SourceUnit::plain_file(ClientId::Omp, path)
-                    .with_dependency(parent_path.clone())
+                    .with_optional_dependency(parent_path.clone())
                     .with_parser_version(parser_version)
             })
             .collect();
@@ -1498,7 +1503,7 @@ mod tests {
         let parser_version = ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION);
         let dependency_path = path.parent().unwrap().with_extension("jsonl");
         let unit = SourceUnit::plain_file(ClientId::Omp, path.clone())
-            .with_dependency(dependency_path)
+            .with_optional_dependency(dependency_path)
             .with_parser_version(parser_version)
             .prepare_snapshot()
             .unwrap();

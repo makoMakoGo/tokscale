@@ -11,7 +11,7 @@ use crate::local_clients;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
-const WARP_RECORD_REJECTION_REVISION: u32 = 4;
+const WARP_RECORD_REJECTION_REVISION: u32 = 5;
 
 pub(crate) struct WarpAdapter;
 

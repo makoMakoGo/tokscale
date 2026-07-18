@@ -2,8 +2,8 @@
 
 Status: Accepted
 
-ADR 0020 supersedes the cache-format and maintenance details below while
-preserving this ADR's current-format-only storage boundary.
+This ADR owns only the current-format storage boundary. ADR 0020 owns usage
+eligibility, failure containment, and cache correctness.
 
 ## Context
 
@@ -38,16 +38,19 @@ For OpenCode:
 - deduplicate messages across every discovered current-format database and
   across bounded parse batches;
 - treat `NotFound` during OpenCode discovery as an absent source, but surface
-  every other directory-discovery I/O failure through the report error path;
+  every other directory-discovery I/O failure as an unavailable source in
+  report health;
 - borrow raw message TEXT, stream-validate a required role envelope, and fully
   decode only assistant payloads in Rust, filtering only non-assistant
   messages, explicit `tokens: null`, and zero positive usage;
 - surface database open, current-schema preparation, query, contextual row-read,
-  payload decoding, and semantic-validation failures through the report error
-  path; require role, model, provider, timestamp, token, and cache-token fields;
-  reject blank model, provider, or session identifiers and non-finite or
-  non-positive creation timestamps, including values that cannot convert to an
-  `i64` exactly; never cache those failures as an empty successful source; and
+  payload decoding, and semantic-validation failures as unavailable or degraded
+  OpenCode input in report health without aborting unrelated clients; require
+  role, model, timestamp, token, and cache-token fields; resolve an optional
+  provider according to ADR 0020; reject blank model or session identifiers and
+  non-finite or non-positive creation timestamps, including values that cannot
+  convert to an `i64` exactly; never cache those failures as an empty successful
+  source; and
 - reject the former SQL query without the current `session` join rather than
   falling back to it.
 
@@ -59,20 +62,6 @@ For Gemini CLI:
 - prune SHA-256 project directories before walking their chat histories; and
 - do not reconstruct retired project identities from path hashes, auxiliary
   indexes, or transcript heuristics.
-
-The TUI aggregate cache schema advances from 25 to 26. The first run after the
-change rebuilds cached aggregates so values previously sourced from retired
-OpenCode JSON cannot remain visible. The OpenCode SQLite parser revision also
-advances so source-message shards produced under the former schema fallback are
-not reused.
-
-The source-message shard envelope advances to v3 and encodes parser identity
-with explicit stable keys. Retired OpenCode parser variants are removed rather
-than retained as enum tombstones or legacy locators. Consequently, some real v2
-shard paths have no current key. Ordinary scans write current v3 shards and do
-not traverse, migrate, or delete the old v2 files. Only the explicit
-`tokscale cache prune` maintenance command walks the shard store and removes
-classified v2 shards.
 
 ## Consequences
 

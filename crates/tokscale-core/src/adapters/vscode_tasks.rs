@@ -10,13 +10,13 @@ use crate::adapters::{
     MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
 use crate::sessions;
 use crate::sessions::error::SessionParseResult;
 use crate::source_health::ScannedSource;
 
 const ROO_FAMILY_SIBLINGS: &[&str] = &["api_conversation_history.json"];
-const ROO_FAMILY_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
+const ROO_FAMILY_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 3;
 
 pub(crate) struct VscodeTaskAdapter {
     client: ClientId,
@@ -65,6 +65,7 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
             adapter_discover::scan_roots(self.client, roots, def.pattern)?,
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names: ROO_FAMILY_SIBLINGS,
+                related_failure_policy: RelatedInputFailurePolicy::FailSource,
             },
         )?
         .into_iter()
@@ -223,7 +224,8 @@ mod tests {
         assert_eq!(
             units[0].fingerprint_policy,
             FingerprintPolicy::PrimaryWithSiblings {
-                sibling_names: ROO_FAMILY_SIBLINGS
+                sibling_names: ROO_FAMILY_SIBLINGS,
+                related_failure_policy: RelatedInputFailurePolicy::FailSource,
             }
         );
         assert_eq!(

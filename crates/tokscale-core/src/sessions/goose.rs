@@ -35,29 +35,8 @@ fn parse_model_config(path: &Path, json: &str) -> SessionParseResult<String> {
         })
 }
 
-fn resolved_provider(
-    path: &Path,
-    provider_name: Option<String>,
-    model_id: &str,
-) -> SessionParseResult<String> {
-    if let Some(provider) = provider_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty())
-    {
-        return Ok(
-            provider_identity::canonical_provider(provider).unwrap_or_else(|| provider.to_string())
-        );
-    }
-    provider_identity::inferred_provider_from_model(model_id)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            invalid_at_path(
-                path,
-                "validate Goose provider",
-                format!("model `{model_id}` has no explicit or inferable provider"),
-            )
-        })
+fn resolved_provider(provider_name: Option<String>, model_id: &str) -> String {
+    provider_identity::source_provider_id(provider_name.as_deref().unwrap_or_default(), model_id)
 }
 
 fn parse_created_at(s: &str) -> Option<i64> {
@@ -205,15 +184,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
-        let provider = match resolved_provider(db_path, provider_name, &model_id) {
-            Ok(provider) => provider,
-            Err(_error) => {
-                scanned
-                    .rejections
-                    .record(RecordRejectionReason::MissingProvider);
-                continue;
-            }
-        };
+        let provider = resolved_provider(provider_name, &model_id);
         let Some(non_reasoning_tokens) = input.checked_add(output) else {
             scanned
                 .rejections
@@ -366,6 +337,53 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 20);
         assert_eq!(messages[0].tokens.output, 5);
         assert_eq!(messages[0].tokens.reasoning, 5);
+    }
+
+    #[test]
+    fn parse_goose_sqlite_preserves_explicit_provider_over_model_inference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_goose_db(&path);
+        conn.execute(
+            "INSERT INTO sessions VALUES (?1, ?2, ?3, ?4, 1, 1, 0, NULL, NULL, NULL)",
+            params![
+                "session-route",
+                r#"{"model_name":"gpt-5"}"#,
+                "Private.Route",
+                "2026-04-14T16:18:53Z"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_goose_sqlite(&path).unwrap().messages;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5");
+        assert_eq!(messages[0].provider_id.as_ref(), "Private.Route");
+    }
+
+    #[test]
+    fn parse_goose_sqlite_keeps_usage_with_unknown_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_goose_db(&path);
+        conn.execute(
+            "INSERT INTO sessions VALUES (?1, ?2, NULL, ?3, 1, 1, 0, NULL, NULL, NULL)",
+            params![
+                "session-private",
+                r#"{"model_name":"private-model"}"#,
+                "2026-04-14T16:18:53Z"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_goose_sqlite(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert!(scanned.rejections.is_empty());
     }
 
     #[test]

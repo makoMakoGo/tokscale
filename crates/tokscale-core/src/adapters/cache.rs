@@ -32,7 +32,14 @@ pub(crate) fn plan_cache_hit(
             detail: "cache planner lost its freshly validated snapshot".to_string(),
         }
     })?;
-    let stamp = unit.source_input_policy().stamp_from_snapshot(snapshot)?;
+    let stamp = match unit.source_input_policy().stamp_from_snapshot(snapshot) {
+        Ok(stamp) => stamp,
+        Err(source) if preserves_primary_on_related_failure(&unit, &source) => {
+            unit.mark_cache_lookup_completed_no_hit();
+            return Ok(CacheHitPlan::Miss(unit));
+        }
+        Err(source) => return Err(source.into()),
+    };
     if cached.fingerprint.stamp != stamp {
         unit.mark_cache_lookup_completed_no_hit();
         return Ok(CacheHitPlan::Miss(unit));
@@ -74,29 +81,6 @@ where
     load_or_scan_unit_cacheable(unit, ctx, ScanCacheOptions::default(), scan)
 }
 
-/// Scan a primary source whose related fingerprint inputs only provide
-/// optional metadata. If hashing one of those inputs fails, the primary scan
-/// still runs, the failure is exposed as partial health when the parser did
-/// not report a more specific interruption, and no cache shard is written.
-pub(crate) fn load_or_scan_unit_with_optional_related_inputs<F>(
-    unit: SourceUnit,
-    ctx: &ParseContext<'_>,
-    scan: F,
-) -> ParsedUnit
-where
-    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
-{
-    load_or_scan_unit_cacheable(
-        unit,
-        ctx,
-        ScanCacheOptions {
-            preserve_primary_on_fingerprint_failure: true,
-            ..ScanCacheOptions::default()
-        },
-        |path| scan(path).map(|scanned| (scanned, true)),
-    )
-}
-
 pub(crate) fn load_or_scan_empty_sentinel_with_primary_hash<F>(
     unit: SourceUnit,
     ctx: &ParseContext<'_>,
@@ -116,7 +100,6 @@ where
                 hash: primary_hash,
                 snapshot: primary_snapshot,
             }),
-            ..ScanCacheOptions::default()
         },
         |path| scan(path).map(|scanned| (scanned, true)),
     )
@@ -136,11 +119,11 @@ where
         unit,
         ctx,
         ScanCacheOptions {
+            cache_clean_empty: false,
             precomputed_content_hash: Some(PrecomputedContentHash::Dependency {
                 hash: dependency_hash,
                 snapshot: dependency_snapshot,
             }),
-            ..ScanCacheOptions::default()
         },
         |path| scan(path).map(|scanned| (scanned, true)),
     )
@@ -159,7 +142,6 @@ enum PrecomputedContentHash {
 
 #[derive(Default)]
 struct ScanCacheOptions {
-    preserve_primary_on_fingerprint_failure: bool,
     cache_clean_empty: bool,
     precomputed_content_hash: Option<PrecomputedContentHash>,
 }
@@ -174,7 +156,6 @@ where
     F: Fn(&Path) -> crate::sessions::error::SessionParseResult<(ScannedSource, bool)>,
 {
     let ScanCacheOptions {
-        preserve_primary_on_fingerprint_failure,
         cache_clean_empty,
         precomputed_content_hash,
     } = options;
@@ -222,7 +203,7 @@ where
     };
     let (fingerprint, fingerprint_failure) = match fingerprint_result {
         Some(Ok(fingerprint)) => (Some(fingerprint), None),
-        Some(Err(source)) if preserve_primary_on_fingerprint_failure => {
+        Some(Err(source)) if preserves_primary_on_related_failure(&unit, &source) => {
             (None, Some(snapshot_failure(source)))
         }
         Some(Err(source)) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
@@ -338,6 +319,13 @@ fn finalize_uncached_scan(
 
 fn snapshot_failure(source: message_cache::SourceSnapshotError) -> SourceFailure {
     SourceFailure::new("snapshot source metadata and content", source.to_string())
+}
+
+fn preserves_primary_on_related_failure(
+    unit: &SourceUnit,
+    source: &message_cache::SourceSnapshotError,
+) -> bool {
+    unit.preserves_primary_on_related_failure() && source.is_optional_related_input_unavailable()
 }
 
 pub(crate) fn fold_units(
@@ -530,6 +518,21 @@ mod tests {
             "session",
             1,
             TokenBreakdown::default(),
+            0.0,
+        )
+    }
+
+    fn scanned_message() -> UnifiedMessage {
+        UnifiedMessage::new(
+            "test",
+            "gpt-5",
+            "openai",
+            "session",
+            1,
+            TokenBreakdown {
+                input: 1,
+                ..Default::default()
+            },
             0.0,
         )
     }
@@ -972,6 +975,105 @@ mod tests {
             &parsed.health.status,
             SourceStatus::Partial { .. }
         ));
+    }
+
+    #[test]
+    fn optional_related_failure_scans_primary_and_invalidates_warm_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let primary = dir.path().join("session.json");
+        let related = dir.path().join("metadata.jsonl");
+        std::fs::write(&primary, b"primary contents").unwrap();
+        std::fs::write(&related, b"related contents").unwrap();
+        let unit = SourceUnit::plain_file(ClientId::Kiro, primary.clone())
+            .with_optional_dependency(related.clone());
+        let parser_version = unit.parser_version;
+        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
+        let mut cache = message_cache::SourceMessageCache::default();
+        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+            &primary,
+            unit.parser_version,
+            fingerprint,
+            vec![cached_message()],
+            None,
+        ));
+
+        std::fs::remove_file(&related).unwrap();
+        std::fs::create_dir(&related).unwrap();
+        let miss = expect_cache_miss(
+            plan_cache_hit(unit, &cache),
+            "an unavailable optional related input must force a cache miss",
+        );
+        let scan_called = std::cell::Cell::new(false);
+        let parsed = load_or_scan_unit_with(miss, &ParseContext { pricing: None }, |_| {
+            scan_called.set(true);
+            Ok(ScannedSource::complete(vec![scanned_message()]))
+        });
+
+        assert!(
+            scan_called.get(),
+            "the readable primary must still be scanned"
+        );
+        assert!(parsed.cache_write.is_none());
+        assert!(parsed.invalidate_cache);
+        assert!(matches!(parsed.health.status, SourceStatus::Partial { .. }));
+        assert!(matches!(
+            parsed.messages,
+            UnitMessageSource::Fresh(ref messages) if messages.len() == 1
+        ));
+        let messages = fold_planned_unit(parsed, &mut cache);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            cache.get_meta(&primary, parser_version).unwrap().is_none(),
+            "the stale shard must be invalidated instead of surviving the partial scan"
+        );
+    }
+
+    #[test]
+    fn required_related_fingerprint_failure_keeps_source_unavailable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let primary = dir.path().join("child.jsonl");
+        let dependency = dir.path().join("parent.jsonl");
+        std::fs::write(&primary, b"child contents").unwrap();
+        std::fs::create_dir(&dependency).unwrap();
+        let unit =
+            SourceUnit::plain_file(ClientId::CommandCode, primary).with_dependency(dependency);
+        let scan_called = std::cell::Cell::new(false);
+
+        let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
+            scan_called.set(true);
+            Ok(ScannedSource::complete(vec![cached_message()]))
+        });
+
+        assert!(!scan_called.get());
+        assert!(matches!(
+            parsed.health.status,
+            SourceStatus::Unavailable { .. }
+        ));
+        assert!(parsed.cache_write.is_none());
+    }
+
+    #[test]
+    fn primary_fingerprint_failure_is_not_preserved_by_optional_contract() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let primary = dir.path().join("session.json");
+        let related = dir.path().join("metadata.jsonl");
+        std::fs::create_dir(&primary).unwrap();
+        std::fs::write(&related, b"related contents").unwrap();
+        let unit =
+            SourceUnit::plain_file(ClientId::Kiro, primary).with_optional_dependency(related);
+        let scan_called = std::cell::Cell::new(false);
+
+        let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
+            scan_called.set(true);
+            Ok(ScannedSource::complete(vec![cached_message()]))
+        });
+
+        assert!(!scan_called.get());
+        assert!(matches!(
+            parsed.health.status,
+            SourceStatus::Unavailable { .. }
+        ));
+        assert!(parsed.cache_write.is_none());
     }
 
     #[test]

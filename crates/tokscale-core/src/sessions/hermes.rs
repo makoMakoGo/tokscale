@@ -16,17 +16,8 @@ use std::path::Path;
 
 const HERMES_AGENT_NAME: &str = "Hermes Agent";
 
-fn resolved_provider(billing_provider: Option<String>, model_id: &str) -> Option<String> {
-    billing_provider
-        .filter(|provider| !provider.trim().is_empty())
-        .and_then(|provider| {
-            let provider = provider.trim();
-            provider_identity::canonical_provider(provider).or_else(|| {
-                let normalized = provider_identity::normalize_provider_for_grouping(provider);
-                (normalized != "unknown").then_some(normalized)
-            })
-        })
-        .or_else(|| provider_identity::inferred_provider_from_model(model_id).map(str::to_string))
+fn resolved_provider(billing_provider: Option<String>, model_id: &str) -> String {
+    provider_identity::source_provider_id(billing_provider.as_deref().unwrap_or_default(), model_id)
 }
 
 pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
@@ -152,12 +143,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> 
                 .record(RecordRejectionReason::MissingTimestamp);
             continue;
         };
-        let Some(provider) = resolved_provider(billing_provider, &model_id) else {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        };
+        let provider = resolved_provider(billing_provider, &model_id);
         let mut msg = UnifiedMessage::new_with_agent(
             "hermes",
             model_id,
@@ -257,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn token_bearing_row_without_resolvable_provider_is_reported() {
+    fn token_bearing_row_without_resolvable_provider_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         let conn = Connection::open(&path).unwrap();
@@ -270,7 +256,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sessions VALUES ('missing-provider', 'private-model', NULL, 1700000000, 1, 1, 0, 0, 0, 0)",
+            "INSERT INTO sessions VALUES ('unknown-provider', 'private-model', NULL, 1700000000, 1, 1, 0, 0, 0, 0)",
             [],
         )
         .unwrap();
@@ -278,10 +264,36 @@ mod tests {
 
         let scanned = parse_hermes_sqlite(&path).unwrap();
 
-        assert!(scanned.messages.is_empty());
-        let rejection = scanned.rejections.entries().next().unwrap();
-        assert_eq!(rejection.key, "missing-provider");
-        assert_eq!(rejection.count, 1);
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert!(scanned.rejections.is_empty());
+    }
+
+    #[test]
+    fn explicit_billing_provider_wins_over_model_inference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT, model TEXT, billing_provider TEXT, started_at REAL,
+                message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES ('explicit-route', 'claude-sonnet-4', 'OpenRouter.Route', 1700000000, 1, 1, 0, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_hermes_sqlite(&path).unwrap().messages;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4");
+        assert_eq!(messages[0].provider_id.as_ref(), "OpenRouter.Route");
     }
 
     #[test]

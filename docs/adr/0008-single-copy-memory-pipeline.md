@@ -2,9 +2,9 @@
 
 Status: Accepted
 
-Partially superseded by ADR 0020 for persisted file identity, snapshot
-revalidation, cache format and pruning, TUI schema, Codex fallback state, and
-structured-key collision behavior.
+ADR 0020 refines source failure containment, input-dependency completeness,
+snapshot revalidation, and usage identity. This ADR continues to own the
+single-copy pipeline and cache-envelope/pruning contract.
 
 ## Context
 
@@ -138,16 +138,16 @@ The parse pipeline must hold at most one owned copy of any message.
   any unrelated workspace or session field, and create public Strings only when
   a bucket is materialized. Distinct identity collections keep empty and
   singleton states inline and allocate a hash table only after a second value.
-  As superseded by ADR 0020, distinct structured buckets are never coalesced
-  through legacy delimiter-based public keys. Persisted DTO maps use a
+  Distinct structured buckets are never coalesced through legacy
+  delimiter-based public keys. Persisted DTO maps use a
   versioned, variant-tagged, byte-length-prefixed storage key, including a
   distinct tag for unknown workspace identity.
 - Serialization layout changes bump `CACHE_FORMAT_VERSION`; parser-only
   changes bump the relevant parser revision. The shard envelope stores a
-  fixed magic and format version before the bincode header. As superseded by
-  ADR 0020, ordinary reads accept only v4; explicit pruning recognizes the
-  frozen v1, v2, and v3 envelopes only for deletion. Unknown, future, or
-  malformed-current envelopes stop classification before deletion.
+  fixed magic and format version before the bincode header. Ordinary reads
+  accept only v4; explicit pruning recognizes the frozen v1, v2, and v3
+  envelopes only for deletion. Unknown, future, or malformed-current envelopes
+  stop classification before deletion.
 
 ADR 0018 implements the planned streaming follow-up with a bounded ordered
 source-fold pipeline. Aggregation paths no longer retain adapter-wide parsed
@@ -167,9 +167,9 @@ that final output.
   reparse instead of silently suppressing usage. Normal exact hits still read
   no source bytes and do not eagerly materialize adapter-wide cache bodies.
 - TUI cache schema 26 requires `sourceInventorySignature`; schema 25 and cache
-  documents missing the field are explicit misses and rebuild once. ADR 0019
-  advances the marker so retired OpenCode JSON-derived aggregates cannot remain
-  visible.
+  documents missing the field are explicit misses and rebuild once. The marker
+  advanced with the OpenCode current-format transition so retired JSON-derived
+  aggregates cannot remain visible.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go
   through the new accessors; new parsers must intern identity fields.
 - High-cardinality scans no longer leave the interner strongly retaining every

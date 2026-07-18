@@ -162,13 +162,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             };
             let model_id = model_aliases::canonicalize_source_model_id(raw_model_id)
                 .unwrap_or_else(|| raw_model_id.to_string());
-            let Some(provider_id) = provider_identity::inferred_provider_from_model(&model_id)
-            else {
-                scanned
-                    .rejections
-                    .record(RecordRejectionReason::MissingProvider);
-                continue;
-            };
+            let provider_id = provider_identity::source_provider_id("", &model_id);
             let dedup_key =
                 super::dedup_hash_str(&format!("warp:{conversation_id}:{index}:{model_id}"));
             let Some(next_row_total) = row_total.checked_add(total) else {
@@ -182,7 +176,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             row_pending_messages.push(PendingWarpMessage {
                 conversation_id: conversation_id.to_string(),
                 model_id,
-                provider_id: provider_id.to_string(),
+                provider_id,
                 timestamp,
                 workspace_key: meta.and_then(|meta| meta.workspace_key.clone()),
                 workspace_label: meta.and_then(|meta| meta.workspace_label.clone()),
@@ -527,6 +521,44 @@ mod tests {
             aggregate,
             token_imputation::impute_total_only_token_breakdown(1250)
         );
+    }
+
+    #[test]
+    fn parse_warp_sqlite_keeps_usage_for_unknown_model_family() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("warp.sqlite");
+        let conn = create_warp_db(&db_path);
+        let conversation_data = serde_json::json!({
+            "conversation_usage_metadata": {
+                "token_usage": [{
+                    "model_id": "Warp Private Preview",
+                    "warp_tokens": 321,
+                    "byok_tokens": 0
+                }]
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO agent_conversations (conversation_id, conversation_data, last_modified_at)
+             VALUES (?1, ?2, ?3)",
+            params![
+                "conversation-private",
+                conversation_data,
+                "2026-07-04T10:20:30Z"
+            ],
+        )
+        .unwrap();
+
+        let scanned = parse_warp_sqlite(&db_path).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(
+            scanned.messages[0].model_id.as_ref(),
+            "Warp Private Preview"
+        );
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.total(), 321);
     }
 
     #[test]

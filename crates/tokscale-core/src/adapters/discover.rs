@@ -183,14 +183,29 @@ fn source_unit_for_policy(
                 },
             );
         }
-        FingerprintPolicy::PrimaryWithSiblings { sibling_names } => {
+        FingerprintPolicy::PrimaryWithSiblings {
+            sibling_names,
+            related_failure_policy,
+        } => {
             let mut unit = SourceUnit::plain_file(client, path);
-            unit.fingerprint_policy = FingerprintPolicy::PrimaryWithSiblings { sibling_names };
+            unit.fingerprint_policy = FingerprintPolicy::PrimaryWithSiblings {
+                sibling_names,
+                related_failure_policy: *related_failure_policy,
+            };
             unit
         }
-        FingerprintPolicy::PrimaryWithDependency { dependency_path } => {
-            SourceUnit::plain_file(client, path).with_dependency(dependency_path.clone())
-        }
+        FingerprintPolicy::PrimaryWithDependency {
+            dependency_path,
+            related_failure_policy,
+        } => match related_failure_policy {
+            crate::message_cache::RelatedInputFailurePolicy::FailSource => {
+                SourceUnit::plain_file(client, path).with_dependency(dependency_path.clone())
+            }
+            crate::message_cache::RelatedInputFailurePolicy::PreservePrimary => {
+                SourceUnit::plain_file(client, path)
+                    .with_optional_dependency(dependency_path.clone())
+            }
+        },
         FingerprintPolicy::NoMessageCache => SourceUnit::no_message_cache(client, path),
     };
     Ok(unit)

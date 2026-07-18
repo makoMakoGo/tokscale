@@ -20,7 +20,7 @@ Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing,
 
 ## Coding Style & Naming Conventions
 
-Use Rust 2021 conventions and keep code `rustfmt`-clean. Prefer explicit, domain-oriented names such as `model_id`, `provider`, `source`, and `session`; preserve raw model IDs for pricing while normalizing only display/grouping labels. TypeScript packages are ESM and should keep source under `src/` and build output under `dist/`.
+Use Rust 2021 conventions and keep code `rustfmt`-clean. Prefer explicit, domain-oriented names such as `model_id`, `provider`, `source`, and `session`; preserve raw model observations for diagnostics, then use the canonical model ID for grouping and pricing. TypeScript packages are ESM and should keep source under `src/` and build output under `dist/`.
 
 ## Testing Guidelines
 
@@ -50,6 +50,10 @@ matching the split documented in `docs/development.md`.
 - A behavior change justified by ADR 0001 must include a focused regression
   case. If an established domain rule is changing, update its ADR and tests
   deliberately rather than treating the change as generic cleanup.
+- Provider attribution is optional usage metadata: retain valid model/token
+  records, infer centrally, and use `unknown` when inference fails. Only an
+  explicitly documented ownership/filter/dedup field may gate eligibility; see
+  ADR 0020 and the Zed source boundary.
 
 ## Git Identity & Merge Discipline
 

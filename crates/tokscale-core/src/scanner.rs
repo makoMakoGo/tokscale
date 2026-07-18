@@ -324,6 +324,9 @@ pub fn scan_directory(
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "gemini-session" => crate::sessions::gemini::is_current_project_session(path),
+                "commandcode-session" => {
+                    crate::sessions::commandcode::is_usage_transcript_file(path)
+                }
                 "*.jsonl" => file_name.ends_with(".jsonl"),
                 "*.log" => file_name.ends_with(".log"),
                 // OpenClaw: also match archived transcripts
@@ -920,7 +923,8 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Kimi) {
-        // Kimi Code: ~/.kimi-code/sessions/**/wire.jsonl (supports KIMI_CODE_HOME)
+        // Kimi Code: ~/.kimi-code/sessions/**/agents/*/wire.jsonl
+        // (the parser rejects the legacy root-level wire layout)
         let kimi_path =
             local_def(ClientId::Kimi).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Kimi, kimi_path);
@@ -1421,6 +1425,19 @@ mod tests {
         assert!(jsonl_files
             .iter()
             .all(|p| p.extension().unwrap() == "jsonl"));
+    }
+
+    #[test]
+    fn test_scan_directory_commandcode_session_excludes_checkpoints() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("session.jsonl")).unwrap();
+        File::create(path.join("session.checkpoints.jsonl")).unwrap();
+        File::create(path.join("session.json")).unwrap();
+
+        let session_files = scan_directory(path, "commandcode-session").unwrap();
+        assert_eq!(session_files, vec![path.join("session.jsonl")]);
     }
 
     #[test]
