@@ -412,7 +412,7 @@ pub struct App {
     /// Group By changes can re-project in memory.
     pub accumulator: Option<tokscale_core::TuiAcc>,
     /// The grouping the currently loaded `data` was projected with. It stays
-    /// paired with `data` for exports while a fallback reload is pending.
+    /// paired with `data` for exports while a cache bootstrap full load is pending.
     pub data_group_by: tokscale_core::GroupBy,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
@@ -464,7 +464,7 @@ pub struct App {
     /// (manual refresh and filter changes must always re-aggregate).
     pub reload_force: bool,
 
-    /// Marks the no-accumulator Group By fallback so it reloads usage without
+    /// Marks a cache bootstrap full load so it rebuilds the accumulator without
     /// forcing the group-agnostic Sessions projection when health is clean.
     pub reload_group_only: bool,
 
@@ -674,7 +674,7 @@ impl App {
         self.blocking_loading = true;
     }
 
-    pub(crate) fn clear_pending_group_only_reload(&mut self) {
+    pub(crate) fn clear_pending_cache_bootstrap(&mut self) {
         if self.needs_reload && self.reload_group_only {
             self.needs_reload = false;
             self.reload_force = false;

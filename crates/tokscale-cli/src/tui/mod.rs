@@ -229,7 +229,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
                 app.data_group_by = selected_group_by;
             }
             app.accumulator = Some(accumulator);
-            app.clear_pending_group_only_reload();
+            app.clear_pending_cache_bootstrap();
             app.last_source_digest = Some(digest);
             app.set_cache_persistence_warning(cache_persistence_warning);
             app.set_pricing_diagnostics(&pricing_diagnostics);
@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn session_reload_force_preserves_group_only_fallback_semantics() {
+    fn session_reload_force_preserves_cache_bootstrap_session_scope() {
         let healthy = tokscale_core::source_health::HealthReport::default();
         let degraded = tokscale_core::source_health::HealthReport {
             failed_sources: 1,
@@ -877,7 +877,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn pending_group_only_fallback_is_consumed_by_successful_background_load() {
+    fn pending_cache_bootstrap_is_consumed_by_successful_background_load() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_model_source(home.path(), "race-model", 10);
@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_group_only_fallback_survives_failed_background_load() {
+    fn pending_cache_bootstrap_survives_failed_background_load() {
         let mut app = app_on(Tab::Models);
         app.background_loading = true;
         app.blocking_loading = true;

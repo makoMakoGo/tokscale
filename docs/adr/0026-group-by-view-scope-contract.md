@@ -31,7 +31,8 @@ authoritative number. The TUI retains the canonical fine-grained accumulator
 after each successful source load and projects a new grouping in memory;
 source scans, session refreshes, and disk-cache writes occur only on real
 refreshes. Until that accumulator is available (for example, while rendering a
-startup cache hit), a grouping change falls back to the full reload path.
+startup cache hit), a grouping change performs a cache bootstrap full load to
+build the in-memory accumulator from authoritative sources.
 
 **Projection classification.** Every projection of `UsageData` is either:
 
