@@ -1299,6 +1299,7 @@ impl App {
             return;
         }
 
+        let entering_stats = target == Tab::Stats && self.current_tab != Tab::Stats;
         let was_daily_detail = self.current_tab == Tab::Daily && self.is_daily_detail_active();
         let was_period_detail = self.is_period_detail_active();
         self.persist_current_sort();
@@ -1314,7 +1315,11 @@ impl App {
             self.clear_detail_sort_context(DetailSortContextKind::Period);
         }
         if target == Tab::Stats {
-            self.request_stats_today_selection();
+            // Re-clicking the already-active Stats tab must not discard a
+            // manually chosen day; auto-select today only on tab entry.
+            if entering_stats {
+                self.request_stats_today_selection();
+            }
         } else {
             self.selected_graph_cell = None;
             self.stats_auto_select_today_pending = false;
@@ -4043,6 +4048,23 @@ mod tests {
                 .and_then(|cell| app.graph_date_for_cell(cell)),
             Some(today)
         );
+    }
+
+    #[test]
+    fn test_stats_tab_reclick_keeps_manual_day_selection() {
+        let today = chrono::Local::now().date_naive();
+        let activity_date = today - chrono::Duration::days(3);
+        let mut app = make_app();
+        app.update_data(usage_data_with_graph_for_today(today, activity_date));
+        app.switch_tab(Tab::Stats);
+        let activity_cell = app.graph_cell_for_date(activity_date).unwrap();
+        app.selected_graph_cell = Some(activity_cell);
+
+        // Clicking the already-active Stats tab header must not reset the
+        // manually chosen day back to today.
+        app.switch_tab(Tab::Stats);
+
+        assert_eq!(app.selected_graph_cell, Some(activity_cell));
     }
 
     #[test]
