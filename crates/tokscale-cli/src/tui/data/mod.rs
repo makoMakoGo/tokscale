@@ -642,7 +642,7 @@ after"#,
         fs::create_dir_all(&data_dir).unwrap();
         let conn = rusqlite::Connection::open(data_dir.join("opencode.db")).unwrap();
         conn.execute_batch(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL);
              CREATE TABLE message (
                  id TEXT PRIMARY KEY,
                  session_id TEXT NOT NULL,

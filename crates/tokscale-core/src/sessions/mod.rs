@@ -46,6 +46,10 @@ pub struct UnifiedMessage {
     pub provider_id: std::sync::Arc<str>,
     #[serde(deserialize_with = "intern::de_intern")]
     pub session_id: std::sync::Arc<str>,
+    /// Whether the source directly identifies this usage as belonging to a
+    /// top-level session. `session_id` remains the legacy Total grouping key.
+    #[serde(default = "default_true")]
+    pub is_main_session: bool,
     #[serde(default, deserialize_with = "intern::de_intern_opt")]
     pub workspace_key: Option<std::sync::Arc<str>>,
     #[serde(default, deserialize_with = "intern::de_intern_opt")]
@@ -70,6 +74,10 @@ pub struct UnifiedMessage {
 
 const fn default_message_count() -> i32 {
     1
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// Stable FNV-1a over a dedup key string. The value is persisted in the
@@ -333,6 +341,7 @@ impl UnifiedMessage {
             model_id: intern::intern(model_id.as_ref()),
             provider_id: intern::intern(provider_id.as_ref()),
             session_id: intern::intern(session_id.as_ref()),
+            is_main_session: true,
             workspace_key: None,
             workspace_label: None,
             timestamp,

@@ -301,6 +301,7 @@ mod tests {
             model_id: Arc::from("model"),
             provider_id: Arc::from("provider"),
             session_id: Arc::from("session"),
+            is_main_session: true,
             workspace_key: Some(Arc::from("workspace")),
             workspace_label: Some(Arc::from("Workspace")),
             timestamp: 0,
