@@ -25,7 +25,7 @@ pub use aggregate::{
     aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
     build_contribution_graph_for_today, build_period_usage, calculate_streaks,
     calculate_streaks_for_today, calculate_summary, calculate_years, find_peak_hour, AgentUsage,
-    AggregatedViews, AggregationConfig, DateRange, PeriodBucket, ViewSet, WeekdayBucket,
+    AggregatedViews, AggregationConfig, DateRange, PeriodBucket, TuiAcc, ViewSet, WeekdayBucket,
     UNKNOWN_WORKSPACE_LABEL,
 };
 pub use clients::{
@@ -262,6 +262,17 @@ impl ModelPerformance {
         };
         performance.finalize(timed_tokens);
         performance
+    }
+
+    /// Merge another partially-filled accumulator. Only the raw counters are
+    /// combined; `finalize` recomputes the derived ratios afterwards, so a
+    /// re-folded bucket finalizes exactly like a directly-folded one.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.total_duration_ms = self
+            .total_duration_ms
+            .saturating_add(other.total_duration_ms);
+        self.timed_tokens = checked_token_add(self.timed_tokens, other.timed_tokens);
+        self.sample_count = self.sample_count.saturating_add(other.sample_count);
     }
 }
 
@@ -1614,6 +1625,64 @@ pub async fn load_usage_data(
     let prepared = prepare_local_sources(options)?;
     let pricing = load_pricing_for_local_parse().await;
     load_prepared_usage_data_with_pricing(prepared, group_by, pricing.as_deref())
+}
+
+/// The canonical TUI usage accumulator (finest-granularity, group-independent
+/// fold state) plus the load diagnostics the single-shot entry points
+/// surface. Group-by views are projected from it in memory via
+/// [`TuiAcc::project`], so switching the TUI grouping does not rescan,
+/// reparse, or reprice local sources (issue #161).
+pub struct UsageAccumulatorWithDiagnostics {
+    pub accumulator: TuiAcc,
+    pub pricing_diagnostics: pricing::PricingDiagnostics,
+    pub source_inventory_signature: SourceInventorySignature,
+    pub health: DataHealth,
+}
+
+pub async fn load_usage_accumulator_with_diagnostics(
+    options: LocalParseOptions,
+) -> Result<UsageAccumulatorWithDiagnostics, LocalReportError> {
+    let prepared = prepare_local_sources(options)?;
+    load_prepared_usage_accumulator_with_diagnostics(prepared).await
+}
+
+pub async fn load_prepared_usage_accumulator_with_diagnostics(
+    prepared: PreparedLocalSources,
+) -> Result<UsageAccumulatorWithDiagnostics, LocalReportError> {
+    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
+    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
+    let date_range = DateRange {
+        since: prepared.options.since.clone(),
+        until: prepared.options.until.clone(),
+        year: prepared.options.year.clone(),
+    };
+    let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
+        // The fold is group-independent; the grouping only enters through
+        // `TuiAcc::project`, which the accumulator's caller drives.
+        group_by: GroupBy::default(),
+        date_range,
+        views: ViewSet::TUI,
+    });
+    let (source_inventory_signature, health) =
+        match stream_local_sources_into_engine(prepared, pricing.as_deref(), &mut engine) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                drop(engine);
+                sessions::intern::prune_dead();
+                return Err(error);
+            }
+        };
+    let accumulator = engine.into_tui_accumulator().expect("tui view requested");
+    // Same lifecycle seam as `load_prepared_aggregated_views`: the stream has
+    // dropped every source message, and the accumulator holds strong refs to
+    // the identities it still needs, so dead weak indices can be reclaimed.
+    sessions::intern::prune_dead();
+    Ok(UsageAccumulatorWithDiagnostics {
+        accumulator,
+        pricing_diagnostics,
+        source_inventory_signature,
+        health,
+    })
 }
 
 fn should_keep_deduped_message(seen_keys: &mut HashSet<u64>, message: &UnifiedMessage) -> bool {

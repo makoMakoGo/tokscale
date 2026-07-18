@@ -38,9 +38,7 @@ impl AggregationEngine {
             model_entries: views
                 .contains(ViewSet::MODEL)
                 .then(|| ModelEntries::new(config.group_by.clone())),
-            tui: views
-                .contains(ViewSet::TUI)
-                .then(|| TuiAcc::new(config.group_by.clone())),
+            tui: views.contains(ViewSet::TUI).then(TuiAcc::new),
             month_map: views.contains(ViewSet::MONTHLY).then(HashMap::new),
             hour_map: views.contains(ViewSet::HOURLY).then(HashMap::new),
             daily_map: views.contains(ViewSet::GRAPH).then(HashMap::new),
@@ -102,6 +100,14 @@ impl AggregationEngine {
         }
     }
 
+    /// Consume the engine and return the canonical TUI accumulator when the
+    /// TUI view was requested. Callers that switch groupings keep it and
+    /// re-project via [`TuiAcc::project`] instead of re-running the fold
+    /// (issue #161); any other requested views are discarded.
+    pub(crate) fn into_tui_accumulator(self) -> Option<TuiAcc> {
+        self.tui
+    }
+
     pub fn finish(self) -> AggregatedViews {
         let Self {
             config,
@@ -119,7 +125,7 @@ impl AggregationEngine {
             let list = entries.finish();
             wrap_model_report(list)
         });
-        let tui_usage = tui.map(TuiAcc::finish);
+        let tui_usage = tui.map(|tui| tui.project(&config.group_by));
 
         let monthly_report = month_map.map(|map| {
             let entries = finish_month_map(map);
