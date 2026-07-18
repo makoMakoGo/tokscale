@@ -1036,14 +1036,7 @@ impl App {
                 };
                 self.reset_hourly_view_interaction();
             }
-            // Group By only reshapes the group-keyed projections (ADR 0026):
-            // Models plus the Daily/Monthly/Weekly tables built from them.
-            KeyCode::Char('g')
-                if matches!(
-                    self.current_tab,
-                    Tab::Models | Tab::Daily | Tab::Monthly | Tab::Weekly
-                ) =>
-            {
+            KeyCode::Char('g') if self.group_by_applies_to_current_tab() => {
                 self.open_group_by_picker();
             }
             KeyCode::Char('u') if self.current_tab == Tab::Usage => {
@@ -1698,6 +1691,16 @@ impl App {
         // the canonical ordering used elsewhere.
         out.sort_by_key(|c| *c as usize);
         out
+    }
+
+    /// Group By only reshapes the group-keyed projections (ADR 0026):
+    /// Models plus the Daily/Monthly/Weekly tables built from them. The
+    /// picker and its footer hint apply only on those tabs.
+    pub fn group_by_applies_to_current_tab(&self) -> bool {
+        matches!(
+            self.current_tab,
+            Tab::Models | Tab::Daily | Tab::Monthly | Tab::Weekly
+        )
     }
 
     fn open_group_by_picker(&mut self) {
