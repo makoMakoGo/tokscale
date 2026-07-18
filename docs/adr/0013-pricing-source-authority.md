@@ -27,6 +27,18 @@ as a separate dimension.
 
 ## Decision
 
+- Model identity and token buckets are the primary local-accounting facts.
+  Cost is a secondary derived projection and never controls whether usage is
+  retained.
+- Local parsers ignore app/vendor fields such as `cost`, `credits`,
+  `cost_usd`, `dollar_float`, `spendCents`, `estimated_cost_usd`,
+  `actual_cost_usd`, and `usage.cost.total`. Those values mix subscriptions,
+  credits, markup, rounding, and incomparable billing scopes.
+- Finalization clears any parser- or cache-provided cost, then derives local
+  cost only from the canonical model and token buckets. If no pricing match
+  exists, tokens remain intact and cost is `0.0`.
+- Cost-only or credits-only rows are not local usage. Total-only token sources
+  may contribute only through the fixed allocation contract in ADR 0017.
 - Custom pricing is the highest-priority source. In local reports, it matches
   the final canonical model key exactly, case-insensitively.
 - Built-in private price overrides are not allowed. Models such as `model1`,
@@ -65,6 +77,10 @@ as a separate dimension.
 
 ## Consequences
 
+- Local cost means "what these tokens map to in Tokscale's pricing catalog",
+  not "what the app said it charged". It may differ from invoices, bundled
+  plans, reseller totals, or subscription credits without affecting the model
+  and token report.
 - Wrong or missing model-price coverage is visible as `$0.00` until parser/core
   model canonicalization produces a priceable canonical id, a public catalog
   gains the model, or the user adds an exact custom price.

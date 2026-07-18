@@ -27,7 +27,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `openclaw` | OpenClaw | `~/.openclaw/agents/` plus legacy `.clawdbot`, `.moltbot`, `.moldbot` roots | Reads agent session indexes and JSONL session files. |
 | `pi` | Pi | `~/.pi/agent/sessions/**/*.jsonl` | Separate from OMP by design. |
 | `omp` | OMP | `~/.omp/agent/sessions/**/*.jsonl` | Separate from Pi by design. |
-| `kimi` | Kimi | `$KIMI_CODE_HOME/sessions/**/wire.jsonl`, fallback `~/.kimi-code/sessions/` | Reads `usage.record` rows. |
+| `kimi` | Kimi | `$KIMI_CODE_HOME/sessions/**/agents/*/wire.jsonl` (`KIMI_CODE_HOME` defaults to `~/.kimi-code`) | Reads current-layout per-agent request and usage records. |
 | `qwen` | Qwen CLI | `~/.qwen/projects/**/*.jsonl` | Reads Qwen chat JSONL files. |
 | `roocode` | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/**/ui_messages.json` | Also scans VS Code server globalStorage where supported. |
 | `kilocode` | KiloCode | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/**/ui_messages.json` | Same task-log family as Roo Code. |
@@ -92,13 +92,16 @@ not recursive scan roots:
 `scanner.opencodeDbPaths` is the only persistent custom OpenCode input.
 `scanner.extraScanPaths.opencode` and `TOKSCALE_EXTRA_DIRS` entries for
 OpenCode are ignored. Its configured file paths are authoritative, so missing
-or unreadable paths fail explicitly. Legacy `storage/message/**/*.json` data is
-not read. `NotFound` during automatic discovery is treated as absent; every
-other discovery I/O failure is an explicit error. Databases without the current
-session schema, or with malformed current message payloads, likewise produce an
-explicit error rather than an empty report. Current payloads must include role,
-model, provider, timestamp, token, and cache-token fields. Blank model, provider,
-or session identifiers and timestamps that are non-positive, non-finite, or not
+or unreadable paths appear as `source-unavailable` in report health. Legacy
+`storage/message/**/*.json` data is not read. `NotFound` during automatic
+discovery is treated as absent; every other discovery I/O failure remains
+visible in health. Databases without the current session schema, or with
+malformed current message payloads, likewise produce incomplete/degraded input
+rather than a clean empty source, without aborting unrelated clients. Current
+payloads must include role, model, timestamp, token, and cache-token fields.
+Provider is optional identity metadata: a missing or blank value is inferred
+from the model when possible and otherwise becomes `unknown`. Blank model or
+session identifiers and timestamps that are non-positive, non-finite, or not
 exactly representable as `i64` are rejected. Explicit `tokens: null`,
 non-assistant messages, and zero positive usage are filtered.
 
@@ -110,6 +113,17 @@ TOKSCALE_EXTRA_DIRS='codex:/abs/path/.codex/sessions,gemini:/abs/path/gemini/tmp
 ```
 
 ## Integration data boundaries
+
+### Kimi model identity
+
+Kimi Code stores an alias on each `usage.record`. When the same agent wire has a
+preceding `llm.request`, Tokscale uses that request's physical model for the
+alias; otherwise an exact current-config entry may enrich it. If neither exists,
+Tokscale retains the alias and all valid token buckets, then infers a provider
+or records `unknown`. Request transport is not treated as model ownership. The
+older root-level Kimi CLI session format is not supported. See
+[the verified Kimi storage facts](facts/kimi-code.md) and
+[ADR 0020](adr/0020-strict-source-identity-and-error-contract.md).
 
 Antigravity is not a cache-backed integration. Reports and the TUI read current
 AGY CLI databases directly; there is no sync command. Historical

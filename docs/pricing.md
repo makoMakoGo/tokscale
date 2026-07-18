@@ -27,7 +27,7 @@ allocation from [ADR 0017](adr/0017-fixed-token-bucket-imputation.md). Their
 derived cost is approximate because the source total is projected into buckets
 before pricing.
 
-See [ADR 0011](adr/0011-token-derived-local-cost.md).
+See [ADR 0013](adr/0013-pricing-source-authority.md).
 
 ## Pricing source authority
 

@@ -39,6 +39,12 @@ The following are not fallbacks merely because they select or transform data:
 - bounded reconciliation of non-authoritative detail against an authoritative
   total when the rule is documented and preserves that exact total.
 
+Retaining a valid source model label and token breakdown when optional provider
+attribution cannot be resolved is also not a prohibited fallback. The record's
+quantitative facts remain authoritative; provider inference or `unknown` is a
+documented identity projection. Kimi Code's alias-only historical wire format
+is the concrete case captured by ADR 0020.
+
 Names such as `fallback_timestamp` are not evidence by themselves. Review the
 authority contract and user-visible behavior, not the identifier.
 
@@ -51,7 +57,7 @@ Required boundary behavior should be visible:
 Visibility does not imply a global failure domain. "No silent fallback" is
 satisfied by recording and surfacing the failure where it happened; it does
 not require aborting unrelated work, and it never justifies discarding data
-that other sources produced correctly. ADR 0021 defines the failure-domain
+that other sources produced correctly. ADR 0020 defines the failure-domain
 boundaries for local source ingestion.
 
 Before removing existing behavior under this ADR, a change must identify the
