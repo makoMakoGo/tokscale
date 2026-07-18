@@ -2078,7 +2078,7 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         let json = format!(
             r#"{{
-  "schemaVersion": 38,
+  "schemaVersion": {CACHE_SCHEMA_VERSION},
   "timestamp": 9999999999999,
   "enabledClients": ["claude"],
   "groupBy": "model",
