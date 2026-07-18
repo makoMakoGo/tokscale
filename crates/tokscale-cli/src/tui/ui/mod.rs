@@ -12,6 +12,7 @@ mod models;
 mod overview;
 mod overview_snapshot;
 mod period;
+mod radar;
 mod sessions;
 pub mod spinner;
 mod stats;
