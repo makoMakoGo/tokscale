@@ -49,9 +49,13 @@ fn percentage_from_limit(limit: &Limit) -> Option<f64> {
 }
 
 /// The API reports reset points as epoch milliseconds; the renderer expects
-/// RFC 3339.
+/// RFC 3339. Non-positive values are sentinel "no reset" markers.
 fn reset_time_rfc3339(epoch_ms: Option<i64>) -> Option<String> {
-    chrono::DateTime::from_timestamp_millis(epoch_ms?).map(|dt| dt.to_rfc3339())
+    let ms = epoch_ms?;
+    if ms <= 0 {
+        return None;
+    }
+    chrono::DateTime::from_timestamp_millis(ms).map(|dt| dt.to_rfc3339())
 }
 
 fn usage_output_from_parts(quota: QuotaResp, sub: Option<SubResp>) -> UsageOutput {
@@ -241,6 +245,14 @@ mod tests {
 
         assert_eq!(output.metrics.len(), 1);
         assert_eq!(output.metrics[0].label, "5 Hour");
+    }
+
+    #[test]
+    fn non_positive_reset_time_is_treated_as_no_reset() {
+        assert_eq!(reset_time_rfc3339(Some(0)), None);
+        assert_eq!(reset_time_rfc3339(Some(-5)), None);
+        assert_eq!(reset_time_rfc3339(None), None);
+        assert!(reset_time_rfc3339(Some(1784241382278)).is_some());
     }
 
     #[test]

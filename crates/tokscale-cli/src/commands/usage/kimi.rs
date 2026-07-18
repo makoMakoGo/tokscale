@@ -242,13 +242,14 @@ fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> 
         limit - remaining
     }
     .clamp(0, limit);
-    let remaining = limit - used;
     let used_pct = (used as f64 / limit as f64 * 100.0).clamp(0.0, 100.0);
     Some(UsageMetric {
         label: detail_label(detail).unwrap_or(label).into(),
         used_percent: used_pct,
         remaining_percent: 100.0 - used_pct,
-        remaining_label: Some(format!("{remaining}/{limit} left")),
+        // Renderers fall back to a percentage when no label is set, matching
+        // the other providers.
+        remaining_label: None,
         resets_at: detail.reset_at.clone(),
     })
 }
@@ -288,27 +289,27 @@ fn duration_label(duration: Option<&IntLike>, time_unit: Option<&String>) -> Opt
     }
 
     // The API sends enum-style units ("TIME_UNIT_MINUTE"); normalize before
-    // matching so they don't fall through to the seconds arm.
-    let unit = time_unit
-        .map(|unit| {
-            let normalized = unit.trim().to_ascii_uppercase();
-            normalized
-                .strip_prefix("TIME_UNIT_")
-                .unwrap_or(&normalized)
-                .to_string()
-        })
-        .unwrap_or_else(|| "SECOND".to_string());
-    match unit.as_str() {
-        "MINUTE" | "MINUTES" => {
+    // matching. Unknown units yield no label rather than a misleading seconds
+    // reading (limit_label then falls back to a generic name).
+    let unit = time_unit.map(|unit| {
+        let normalized = unit.trim().to_ascii_uppercase();
+        normalized
+            .strip_prefix("TIME_UNIT_")
+            .unwrap_or(&normalized)
+            .to_string()
+    });
+    match unit.as_deref() {
+        Some("MINUTE") | Some("MINUTES") => {
             if duration >= 60 && duration % 60 == 0 {
                 Some(format!("{} Hour", duration / 60))
             } else {
                 Some(format!("{duration}m limit"))
             }
         }
-        "HOUR" | "HOURS" => Some(format!("{duration} Hour")),
-        "DAY" | "DAYS" => Some(format!("{duration}d limit")),
-        _ => Some(format!("{duration}s limit")),
+        Some("HOUR") | Some("HOURS") => Some(format!("{duration} Hour")),
+        Some("DAY") | Some("DAYS") => Some(format!("{duration}d limit")),
+        Some("SECOND") | Some("SECONDS") | None => Some(format!("{duration}s limit")),
+        _ => None,
     }
 }
 
@@ -484,6 +485,23 @@ mod tests {
     }
 
     #[test]
+    fn duration_label_unknown_unit_yields_none() {
+        let one = IntLike::Integer(1);
+        assert_eq!(
+            duration_label(Some(&one), Some(&"TIME_UNIT_WEEK".to_string())),
+            None
+        );
+        assert_eq!(
+            duration_label(Some(&one), Some(&"TIME_UNIT_SECOND".to_string())),
+            Some("1s limit".to_string())
+        );
+        assert_eq!(
+            duration_label(Some(&one), None),
+            Some("1s limit".to_string())
+        );
+    }
+
+    #[test]
     fn metric_dedup_key_includes_reset_window() {
         let first = UsageMetric {
             label: "Weekly".to_string(),
@@ -555,16 +573,10 @@ mod tests {
 
         assert_eq!(output.metrics.len(), 2);
         assert_eq!(output.metrics[0].label, "5 Hour");
-        assert_eq!(
-            output.metrics[0].remaining_label.as_deref(),
-            Some("99/100 left")
-        );
+        assert_eq!(output.metrics[0].remaining_label.as_deref(), None);
         assert!((output.metrics[0].used_percent - 1.0).abs() < f64::EPSILON);
         assert_eq!(output.metrics[1].label, "Weekly limit");
-        assert_eq!(
-            output.metrics[1].remaining_label.as_deref(),
-            Some("960/1000 left")
-        );
+        assert_eq!(output.metrics[1].remaining_label.as_deref(), None);
         assert!((output.metrics[1].used_percent - 4.0).abs() < f64::EPSILON);
         assert_eq!(
             output.metrics[1].resets_at.as_deref(),
@@ -595,19 +607,13 @@ mod tests {
         assert_eq!(output.plan.as_deref(), Some("ADVANCED"));
         assert_eq!(output.metrics.len(), 2);
         assert_eq!(output.metrics[0].label, "5 Hour");
-        assert_eq!(
-            output.metrics[0].remaining_label.as_deref(),
-            Some("97/100 left")
-        );
+        assert_eq!(output.metrics[0].remaining_label.as_deref(), None);
         assert_eq!(
             output.metrics[0].resets_at.as_deref(),
             Some("2026-07-16T23:51:48.104954Z")
         );
         assert_eq!(output.metrics[1].label, "Weekly");
-        assert_eq!(
-            output.metrics[1].remaining_label.as_deref(),
-            Some("40/100 left")
-        );
+        assert_eq!(output.metrics[1].remaining_label.as_deref(), None);
         Ok(())
     }
 
@@ -634,10 +640,7 @@ mod tests {
 
         assert_eq!(output.metrics.len(), 1);
         assert_eq!(output.metrics[0].label, "24 Hour");
-        assert_eq!(
-            output.metrics[0].remaining_label.as_deref(),
-            Some("200/1000 left")
-        );
+        assert_eq!(output.metrics[0].remaining_label.as_deref(), None);
         assert!((output.metrics[0].used_percent - 80.0).abs() < f64::EPSILON);
         Ok(())
     }
@@ -658,10 +661,7 @@ mod tests {
 
         assert_eq!(output.metrics.len(), 1);
         assert_eq!(output.metrics[0].label, "Weekly cap");
-        assert_eq!(
-            output.metrics[0].remaining_label.as_deref(),
-            Some("0/100 left")
-        );
+        assert_eq!(output.metrics[0].remaining_label.as_deref(), None);
         assert!((output.metrics[0].used_percent - 100.0).abs() < f64::EPSILON);
         Ok(())
     }
