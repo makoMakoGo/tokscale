@@ -111,9 +111,28 @@ suffix with them.
 
 ## Alias configuration and environment-only models
 
-An alias is the key under `[models.<alias>]`; there is no separate required
-`name` field. Current schema requires `provider`, `model`, and positive
-`max_context_size` values for each configured alias. `display_name` is optional.
+An alias is the key under `[models.<alias>]`. The default v1 engine requires
+`provider`, `model`, and positive `max_context_size` values for each configured
+alias; `display_name` is optional.
+
+The current source also contains the v2 engine. In addition to named providers,
+v2 accepts a flat model with an inline endpoint and no `provider`:
+
+```toml
+[models.private-alias]
+model = "private-model-id"
+base_url = "https://example.test/v1"
+protocol = "openai_responses"
+max_context_size = 128000
+```
+
+For a normal v2 request, `llm.request` is dispatched before the provider attempt
+and `usage.record` only after a successful response. The request therefore
+supplies the physical model ID without consulting `config.toml`. A providerless
+current config can affect Tokscale's config enrichment only when the same alias
+appears in an older wire prefix that has no preceding request trace. This mixed
+history is valid but was not present in the verified local corpus: all 21
+current model entries had a provider.
 
 OAuth login provisions a `managed:kimi-code` provider, managed model aliases,
 and `default_model` in `config.toml`. The environment-only path instead creates
@@ -190,6 +209,11 @@ The primary upstream evidence is:
   boundaries;
 - `packages/agent-core/src/config/schema.ts` and `config/env-model.ts` — alias
   schema and environment-only runtime entries;
+- `packages/agent-core-v2/src/app/model/model.ts` and
+  `modelResolverService.ts` — v2 named-provider and providerless flat-model
+  contracts;
+- `packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts` — v2
+  request-before-usage ordering;
 - `packages/kosong/src/providers/` — transport names.
 
 Facts about upstream behavior must be reverified when these contracts change;

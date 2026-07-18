@@ -117,10 +117,11 @@ TOKSCALE_EXTRA_DIRS='codex:/abs/path/.codex/sessions,gemini:/abs/path/gemini/tmp
 ### Kimi model identity
 
 Kimi Code stores an alias on each `usage.record`. When the same agent wire has a
-preceding `llm.request`, Tokscale uses that request's physical model for the
-alias; otherwise an exact current-config entry may enrich it. If neither exists,
-Tokscale retains the alias and all valid token buckets, then infers a provider
-or records `unknown`. Request transport is not treated as model ownership. The
+valid preceding `llm.request` for that alias, Tokscale uses the physical model
+from its latest such request; otherwise an exact current-config entry may enrich
+it. If neither exists, Tokscale retains the alias and all valid token buckets,
+then infers a provider or records `unknown`. Request transport is not treated as
+model ownership. The
 older root-level Kimi CLI session format is not supported. See
 [the verified Kimi storage facts](facts/kimi-code.md) and
 [ADR 0020](adr/0020-strict-source-identity-and-error-contract.md).

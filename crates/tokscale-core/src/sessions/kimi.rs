@@ -298,14 +298,6 @@ fn read_model_aliases(home: &Path) -> HashMap<String, ModelIdentity> {
         let Some(table) = value.as_table() else {
             continue;
         };
-        let Some(provider) = table
-            .get("provider")
-            .and_then(toml::Value::as_str)
-            .map(str::trim)
-            .filter(|provider| !provider.is_empty())
-        else {
-            continue;
-        };
         let Some(model) = table
             .get("model")
             .and_then(toml::Value::as_str)
@@ -314,10 +306,14 @@ fn read_model_aliases(home: &Path) -> HashMap<String, ModelIdentity> {
         else {
             continue;
         };
+        let raw_provider = table
+            .get("provider")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
         aliases.insert(
             alias.clone(),
             ModelIdentity {
-                provider: provider.to_string(),
+                provider: provider_identity::source_provider_id(raw_provider, model),
                 model: model.to_string(),
             },
         );
@@ -932,15 +928,15 @@ model = "gpt-5.5"
     }
 
     #[test]
-    fn incomplete_model_config_entry_does_not_block_raw_usage() {
+    fn model_config_entry_without_model_does_not_block_raw_usage() {
         let dir = TempDir::new().unwrap();
         let wire = write_wire(
             dir.path(),
-            r#"{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
+            r#"{"type":"usage.record","time":1780942009099,"model":"private-alias","usage":{"inputOther":1}}"#,
         );
         std::fs::write(
             dir.path().join("config.toml"),
-            "[models.\"openai-pro/gpt-5.5\"]\nmodel = \"gpt-5.5\"\n",
+            "[models.private-alias]\nprovider = \"private-provider\"\n",
         )
         .unwrap();
 
@@ -948,7 +944,34 @@ model = "gpt-5.5"
 
         assert!(scanned.rejections.is_empty());
         assert_eq!(scanned.messages.len(), 1);
-        assert_eq!(scanned.messages[0].model_id.as_ref(), "openai-pro/gpt-5.5");
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "private-alias");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.total(), 1);
+    }
+
+    #[test]
+    fn flat_model_config_resolves_model_without_provider() {
+        let dir = TempDir::new().unwrap();
+        let wire = write_wire(
+            dir.path(),
+            r#"{"type":"usage.record","time":1780942009099,"model":"private-alias","usage":{"inputOther":1}}"#,
+        );
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"[models.private-alias]
+model = "gpt-5.5"
+base_url = "https://example.test/v1"
+protocol = "openai_responses"
+max_context_size = 128000
+"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_kimi_file(&wire).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(scanned.messages[0].provider_id.as_ref(), "openai");
         assert_eq!(scanned.messages[0].tokens.total(), 1);
     }
