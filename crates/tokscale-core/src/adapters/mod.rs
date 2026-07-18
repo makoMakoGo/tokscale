@@ -41,10 +41,10 @@ pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 3;
 // Record-level rejection changes the cached scan outcome even when the
 // accepted messages are unchanged, so old OpenCode shards must be rebuilt.
 pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
-    MODEL_ID_CANONICALIZATION_REVISION + 3;
+    MODEL_ID_CANONICALIZATION_REVISION + 4;
 pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
-pub(crate) const ZED_RECORD_FILTER_REVISION: ParserRevision = EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
+pub(crate) const ZED_RECORD_FILTER_REVISION: ParserRevision = EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
 pub(crate) const CODEX_EXEC_IDENTITY_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 2;
 

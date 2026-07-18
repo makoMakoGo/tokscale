@@ -228,14 +228,8 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             .as_deref()
             .map(str::trim)
             .filter(|provider| !provider.is_empty())
-            .or_else(|| provider_identity::inferred_provider_from_model(&model_id))
-            .map(str::to_string);
-        let Some(provider) = provider else {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        };
+            .map(str::to_string)
+            .unwrap_or_else(|| provider_identity::source_provider_id("", &model_id));
 
         let mut unified = UnifiedMessage::new_with_agent(
             "kilo",
@@ -489,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn token_bearing_row_without_resolvable_provider_is_rejected() {
+    fn token_bearing_row_without_resolvable_provider_is_kept() {
         let dir = TempDir::new().unwrap();
         let db_path = create_kilo_sqlite_db(&dir);
         let conn = Connection::open(&db_path).unwrap();
@@ -508,10 +502,9 @@ mod tests {
 
         let scanned = parse_kilo_sqlite(&db_path).unwrap();
 
-        assert!(scanned.messages.is_empty());
-        let rejection = scanned.rejections.entries().next().unwrap();
-        assert_eq!(rejection.key, "missing-provider");
-        assert_eq!(rejection.count, 1);
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert!(scanned.rejections.is_empty());
     }
 
     #[test]

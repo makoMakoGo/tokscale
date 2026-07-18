@@ -12,7 +12,7 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
-const GOOSE_RECORD_REJECTION_REVISION: u32 = 4;
+const GOOSE_RECORD_REJECTION_REVISION: u32 = 5;
 
 pub(crate) struct GooseAdapter;
 

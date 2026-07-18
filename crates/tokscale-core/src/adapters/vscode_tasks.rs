@@ -16,7 +16,7 @@ use crate::sessions::error::SessionParseResult;
 use crate::source_health::ScannedSource;
 
 const ROO_FAMILY_SIBLINGS: &[&str] = &["api_conversation_history.json"];
-const ROO_FAMILY_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
+const ROO_FAMILY_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 3;
 
 pub(crate) struct VscodeTaskAdapter {
     client: ClientId,

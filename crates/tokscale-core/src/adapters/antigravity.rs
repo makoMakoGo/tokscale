@@ -14,7 +14,7 @@ use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
 const ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION: u32 =
-    crate::adapters::EXPLICIT_TOKEN_OVERFLOW_REVISION + 1;
+    crate::adapters::EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
 
 pub(crate) struct AntigravityAdapter;
 

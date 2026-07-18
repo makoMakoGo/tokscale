@@ -287,13 +287,7 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Scan
             continue;
         };
         let model_id = model_id.to_string();
-        let Some(provider_id) = provider_identity::inferred_provider_from_model(&model_id) else {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        };
-        let provider_id = provider_id.to_string();
+        let provider_id = provider_identity::source_provider_id("", &model_id);
         let Some(session_id) = item
             .session_id
             .filter(|session_id| !session_id.trim().is_empty())
@@ -444,13 +438,7 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseRes
                 .record(RecordRejectionReason::MissingModel);
             continue;
         };
-        let Some(provider_id) = provider_identity::inferred_provider_from_model(&model_id) else {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        };
-        let provider_id = provider_id.to_string();
+        let provider_id = provider_identity::source_provider_id("", &model_id);
         let mut message = UnifiedMessage::new_with_dedup(
             CLIENT_ID,
             model_id,
@@ -647,6 +635,35 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "minimax-m3-pay");
         assert_eq!(messages[0].provider_id.as_ref(), "minimax");
         assert_eq!(messages[0].tokens.total(), 15);
+    }
+
+    #[test]
+    fn provider_inference_failure_keeps_jsonl_and_extension_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl_path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &jsonl_path,
+            r#"{"id":"assistant-1","timestamp":1780000000100,"type":"message","role":"assistant","status":"completed","sessionId":"session-1","providerData":{"model":"private-model"},"message":{"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+        )
+        .unwrap();
+
+        let jsonl = super::parse_codebuddy_jsonl_file(&jsonl_path).unwrap();
+        assert_eq!(jsonl.messages.len(), 1);
+        assert_eq!(jsonl.messages[0].provider_id.as_ref(), "unknown");
+        assert!(jsonl.rejections.is_empty());
+
+        let log_path = dir.path().join("session.log");
+        std::fs::write(
+            &log_path,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: Private Model (private-model)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2}"#,
+        )
+        .unwrap();
+
+        let extension = super::parse_codebuddy_extension_log_file(&log_path).unwrap();
+        assert_eq!(extension.messages.len(), 1);
+        assert_eq!(extension.messages[0].provider_id.as_ref(), "unknown");
+        assert!(extension.rejections.is_empty());
     }
 
     #[test]

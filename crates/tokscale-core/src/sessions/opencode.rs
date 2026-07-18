@@ -4,9 +4,9 @@ use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
 };
-use crate::model_aliases;
 use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
+use crate::{model_aliases, provider_identity};
 use rusqlite::{Connection, OpenFlags};
 use serde::de::{self, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -230,10 +230,6 @@ pub enum OpenCodeMessageSemanticError {
     MissingModelId,
     #[error("modelID must not be empty or whitespace")]
     EmptyModelId,
-    #[error("providerID is missing or null")]
-    MissingProviderId,
-    #[error("providerID must not be empty or whitespace")]
-    EmptyProviderId,
     #[error("tokens is missing")]
     MissingTokens,
     #[error("time is missing or null")]
@@ -538,18 +534,6 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
                 .record(RecordRejectionReason::MissingModel);
             continue;
         }
-        let Some(provider_id) = provider_id else {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        };
-        if provider_id.trim().is_empty() {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        }
         let Some(time) = time else {
             scanned
                 .rejections
@@ -572,6 +556,10 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
             }
         };
         let model_id = canonicalize_opencode_model_id(model_id);
+        let provider_id = provider_identity::source_provider_id(
+            provider_id.as_deref().unwrap_or_default(),
+            &model_id,
+        );
         let agent = mode
             .or(agent)
             .map(|value| normalize_opencode_agent_name(&value));
@@ -778,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn all_bad_rows_complete_with_structured_rejection_reasons() {
+    fn valid_identity_incomplete_rows_do_not_hide_structured_rejections() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = create_current_db(&path);
@@ -808,7 +796,10 @@ mod tests {
 
         let scanned = parse_opencode_sqlite(&path).unwrap();
 
-        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(scanned.messages[0].tokens.total(), 15);
         assert!(scanned.interrupted.is_none());
         let reasons: std::collections::BTreeMap<_, _> = scanned
             .rejections
@@ -820,7 +811,6 @@ mod tests {
             std::collections::BTreeMap::from([
                 ("malformed-record", 1),
                 ("missing-model", 1),
-                ("missing-provider", 1),
                 ("missing-timestamp", 1),
             ])
         );
@@ -1001,11 +991,6 @@ mod tests {
                 "missing-model",
             ),
             (
-                "missing-provider",
-                r#"{"role":"assistant","modelID":"gpt-5.5","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
-                "missing-provider",
-            ),
-            (
                 "missing-tokens",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","time":{"created":1766000000000}}"#,
                 "malformed-record",
@@ -1083,20 +1068,6 @@ mod tests {
                 "missing-model",
             ),
             (
-                "empty-provider",
-                "ses_1",
-                r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
-                "providerID",
-                "missing-provider",
-            ),
-            (
-                "whitespace-provider",
-                "ses_1",
-                r#"{"role":"assistant","modelID":"gpt-5.5","providerID":" ","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
-                "providerID",
-                "missing-provider",
-            ),
-            (
                 "empty-session",
                 "",
                 r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
@@ -1149,6 +1120,49 @@ mod tests {
             let rejection = scanned.rejections.entries().next().unwrap();
             assert_eq!(rejection.key, expected_reason, "row {row_id}");
         }
+    }
+
+    #[test]
+    fn missing_or_blank_provider_keeps_valid_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = create_current_db(&path);
+        for (row_id, payload) in [
+            (
+                "missing-provider",
+                r#"{"role":"assistant","modelID":"gpt-5.5","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
+            ),
+            (
+                "blank-provider",
+                r#"{"role":"assistant","modelID":"private-preview","providerID":" ","tokens":{"input":7,"output":2,"cache":{"read":0,"write":0}},"time":{"created":1766000000001}}"#,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_id, "ses_1", payload],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 2);
+        let gpt = scanned
+            .messages
+            .iter()
+            .find(|message| message.model_id.as_ref() == "gpt-5.5")
+            .unwrap();
+        assert_eq!(gpt.provider_id.as_ref(), "openai");
+        assert_eq!(gpt.tokens.total(), 15);
+        let private = scanned
+            .messages
+            .iter()
+            .find(|message| message.model_id.as_ref() == "private-preview")
+            .unwrap();
+        assert_eq!(private.provider_id.as_ref(), "unknown");
+        assert_eq!(private.tokens.total(), 9);
     }
 
     #[test]

@@ -147,30 +147,19 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
         let dedup_key = crate::sessions::dedup_hash_str(&format!("mux:{session_id}:{model_key}"));
 
-        let Some((raw_provider, raw_model_id)) = model_key.split_once(':') else {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MalformedRecord);
-            continue;
+        let (raw_provider, raw_model_id) = match model_key.split_once(':') {
+            Some((provider, model_id)) => (provider.trim(), model_id.trim()),
+            None => ("", model_key.trim()),
         };
-        let raw_provider = raw_provider.trim();
-        let raw_model_id = raw_model_id.trim();
-        if raw_provider.is_empty() {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        }
         if raw_model_id.is_empty() {
             scanned
                 .rejections
                 .record(RecordRejectionReason::MissingModel);
             continue;
         }
-        let provider = provider_identity::canonical_provider(raw_provider)
-            .unwrap_or_else(|| raw_provider.to_string());
         let model_id = model_aliases::canonicalize_source_model_id(raw_model_id)
             .unwrap_or_else(|| raw_model_id.to_string());
+        let provider = provider_identity::source_provider_id(raw_provider, &model_id);
 
         scanned.messages.push(UnifiedMessage::new_with_dedup(
             "mux",
@@ -359,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn test_model_without_provider_prefix_is_rejected() {
+    fn test_model_without_provider_prefix_is_kept() {
         let json = r#"{
             "version": 1,
             "byModel": {
@@ -372,12 +361,34 @@ mod tests {
         }"#;
         let f = write_temp_json(json);
         let scanned = super::parse_mux_file(f.path()).unwrap();
-        assert!(scanned.messages.is_empty());
-        assert_eq!(scanned.rejections.total(), 1);
-        assert_eq!(
-            scanned.rejections.entries().next().unwrap().key,
-            "malformed-record"
-        );
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "claude-opus-4.6");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(scanned.messages[0].tokens.total(), 300);
+    }
+
+    #[test]
+    fn test_empty_provider_prefix_keeps_unknown_model_family() {
+        let json = r#"{
+            "version": 1,
+            "byModel": {
+                ":private-preview": {
+                    "input": { "tokens": 11 },
+                    "output": { "tokens": 3 }
+                }
+            },
+            "lastRequest": { "timestamp": 1700000000000 }
+        }"#;
+        let f = write_temp_json(json);
+
+        let scanned = super::parse_mux_file(f.path()).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "private-preview");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.total(), 14);
     }
 
     #[test]

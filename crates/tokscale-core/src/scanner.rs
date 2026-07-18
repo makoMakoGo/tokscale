@@ -920,7 +920,8 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Kimi) {
-        // Kimi Code: ~/.kimi-code/sessions/**/wire.jsonl (supports KIMI_CODE_HOME)
+        // Kimi Code: ~/.kimi-code/sessions/**/agents/*/wire.jsonl
+        // (the parser rejects the legacy root-level wire layout)
         let kimi_path =
             local_def(ClientId::Kimi).resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Kimi, kimi_path);

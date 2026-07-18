@@ -4,7 +4,7 @@
 //! contract here is isolation without silence: a bad record is rejected and
 //! counted, a broken source is skipped and reported, and neither may erase
 //! data that other records or sources produced. Only tokscale's own pipeline
-//! invariants remain hard errors. See ADR 0021.
+//! invariants remain hard errors. See ADR 0020.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,12 +17,12 @@ use crate::UnifiedMessage;
 
 /// Why a single record inside an otherwise readable source was rejected.
 ///
-/// Reasons intentionally stay coarse: the Issues surface needs the kind and
+/// Reasons intentionally stay coarse: integrity projections need the kind and
 /// frequency of damage, not a per-record forensic log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordRejectionReason {
     MissingModel,
-    MissingProvider,
+    UnverifiedUsageOwner,
     MissingTimestamp,
     MalformedRecord,
 }
@@ -33,7 +33,7 @@ impl RecordRejectionReason {
     pub const fn key(self) -> &'static str {
         match self {
             Self::MissingModel => "missing-model",
-            Self::MissingProvider => "missing-provider",
+            Self::UnverifiedUsageOwner => "unverified-usage-owner",
             Self::MissingTimestamp => "missing-timestamp",
             Self::MalformedRecord => "malformed-record",
         }
@@ -44,7 +44,10 @@ impl RecordRejectionReason {
     pub fn label_for_key(key: &str) -> &str {
         match key {
             "missing-model" => "Missing model",
+            // Retained only to render older persisted summaries. New parsers
+            // cannot classify missing provider metadata as record rejection.
             "missing-provider" => "Missing provider",
+            "unverified-usage-owner" => "Unverified usage owner",
             "missing-timestamp" => "Missing timestamp",
             "malformed-record" => "Malformed record",
             other => other,
@@ -553,7 +556,7 @@ mod tests {
 
         let mut rejections = RejectionSummary::default();
         rejections.record(RecordRejectionReason::MissingModel);
-        rejections.record(RecordRejectionReason::MissingProvider);
+        rejections.record(RecordRejectionReason::UnverifiedUsageOwner);
         data_health.record(health(SourceStatus::Complete, rejections));
         data_health.record(health(
             SourceStatus::Unavailable {

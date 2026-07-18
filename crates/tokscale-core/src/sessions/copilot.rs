@@ -6,7 +6,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
-use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
+use crate::provider_identity::source_provider_id;
 use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde_json::{Map, Value};
@@ -245,7 +245,6 @@ fn record_copilot_rejection(
 ) {
     let reason = match error.operation() {
         "validate Copilot usage model" => RecordRejectionReason::MissingModel,
-        "validate Copilot usage provider" => RecordRejectionReason::MissingProvider,
         "validate Copilot usage timestamp" => RecordRejectionReason::MissingTimestamp,
         _ => RecordRejectionReason::MalformedRecord,
     };
@@ -607,22 +606,10 @@ fn candidate_from_attributes(
             )
         })?
         .to_string();
-    let provider_id = if let Some(provider) = inferred_provider_from_model(&model) {
-        provider.to_string()
-    } else {
-        let raw_provider = first_non_empty_attr(attributes, PROVIDER_ATTRS)
-            .or_else(|| trace_context.and_then(|context| context.provider.as_deref()))
-            .ok_or_else(|| {
-                invalid_at_path(
-                    path,
-                    "validate Copilot usage provider",
-                    format!(
-                        "usage record {index} has model `{model}` with no inferable or explicit provider"
-                    ),
-                )
-            })?;
-        canonical_provider(raw_provider).unwrap_or_else(|| raw_provider.to_string())
-    };
+    let raw_provider = first_non_empty_attr(attributes, PROVIDER_ATTRS)
+        .or_else(|| trace_context.and_then(|context| context.provider.as_deref()))
+        .unwrap_or_default();
+    let provider_id = source_provider_id(raw_provider, &model);
     let session_id = best_session_attr(attributes)
         .map(|(session_id, _)| session_id)
         .or_else(|| trace_context.and_then(|context| context.session_id.as_deref()))
@@ -1402,18 +1389,16 @@ not-json
     }
 
     #[test]
-    fn test_parse_copilot_rejects_model_without_provider_identity() {
+    fn test_parse_copilot_keeps_model_without_provider_identity() {
         let content = r#"{"type":"span","traceId":"trace-provider","spanId":"span-provider","name":"chat custom-model","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"custom-model","gen_ai.usage.input_tokens":7,"gen_ai.usage.output_tokens":9}}"#;
         let file = create_test_file(content);
 
         let scanned = super::parse_copilot_file(file.path()).unwrap();
 
-        assert!(scanned.messages.is_empty());
-        assert_eq!(scanned.rejections.total(), 1);
-        assert_eq!(
-            scanned.rejections.entries().next().unwrap().key,
-            "missing-provider"
-        );
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "custom-model");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert!(scanned.rejections.is_empty());
     }
 
     #[test]
@@ -1566,7 +1551,7 @@ not-json
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.5");
-        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(messages[0].provider_id.as_ref(), "github");
         assert_eq!(messages[0].session_id.as_ref(), "conv-vscode");
         assert_eq!(messages[0].tokens.input, 800);
         assert_eq!(messages[0].tokens.output, 50);

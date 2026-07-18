@@ -1000,18 +1000,10 @@ fn parse_pi_format_file(
         let model = model_aliases::canonicalize_source_model_id(&raw_model)
             .unwrap_or_else(|| raw_model.trim().to_string());
 
-        let Some(provider) = message
-            .provider
-            .filter(|provider| !provider.trim().is_empty())
-            .or_else(|| {
-                provider_identity::inferred_provider_from_model(&model).map(str::to_string)
-            })
-        else {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        };
+        let provider = provider_identity::source_provider_id(
+            message.provider.as_deref().unwrap_or_default(),
+            &model,
+        );
 
         let Some(timestamp_text) = entry.timestamp else {
             scanned
@@ -1134,6 +1126,21 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id.as_ref(), "openai");
+    }
+
+    #[test]
+    fn test_parse_pi_keeps_unknown_model_without_provider() {
+        let content = r#"{"type":"session","id":"pi_ses_private","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"private-preview","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
+        let file = create_test_file(content);
+
+        let scanned = parse_pi_file(file.path()).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].model_id.as_ref(), "private-preview");
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.total(), 15);
     }
 
     #[test]

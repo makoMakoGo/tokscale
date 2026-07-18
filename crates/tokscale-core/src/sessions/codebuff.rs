@@ -81,12 +81,7 @@ pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedSource> {
                 .record(RecordRejectionReason::MissingModel);
             continue;
         };
-        let Some(provider) = provider_identity::inferred_provider_from_model(&model) else {
-            scanned
-                .rejections
-                .record(RecordRejectionReason::MissingProvider);
-            continue;
-        };
+        let provider = provider_identity::source_provider_id("", &model);
 
         let dedup_key = upstream_message_id(msg)
             .unwrap_or_else(|| derive_dedup_key(&session_id, ts, &model, &usage, ordinal));
@@ -678,6 +673,40 @@ mod tests {
         assert!(only.session_id.ends_with("/proj/2025-12-20T12-00-00.000Z"));
         assert_eq!(only.tokens.input, 10);
         assert_eq!(only.tokens.output, 5);
+    }
+
+    #[test]
+    fn test_parse_codebuff_file_keeps_usage_for_unknown_model_family() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let chat_dir = dir
+            .path()
+            .join("manicode/projects/proj/chats/2025-12-20T12-00-00.000Z");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        let path = chat_dir.join("chat-messages.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "variant":"ai",
+                "timestamp":"2025-12-20T12:00:05.000Z",
+                "metadata":{
+                    "model":"private-preview-vnext",
+                    "usage":{"inputTokens":17,"outputTokens":5}
+                }
+            }]"#,
+        )
+        .unwrap();
+
+        let scanned = super::parse_codebuff_file(&path).unwrap();
+
+        assert!(scanned.rejections.is_empty());
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(
+            scanned.messages[0].model_id.as_ref(),
+            "private-preview-vnext"
+        );
+        assert_eq!(scanned.messages[0].provider_id.as_ref(), "unknown");
+        assert_eq!(scanned.messages[0].tokens.input, 17);
+        assert_eq!(scanned.messages[0].tokens.output, 5);
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub(crate) static PI_ADAPTER: PiAdapter = PiAdapter;
 
 // Earlier revisions were emitted before malformed inclusive-reasoning
 // breakdowns were clamped to their authoritative output bucket.
-const PI_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 4;
+const PI_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 5;
 
 impl LocalSourceAdapter for PiAdapter {
     fn client(&self) -> ClientId {

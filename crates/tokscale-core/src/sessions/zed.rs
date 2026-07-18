@@ -147,11 +147,12 @@ fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
     }
 
     let model = thread.get("model").filter(|model| !model.is_null());
-    if model
+    let usage_owner = model
         .and_then(|model| model.get("provider"))
         .and_then(Value::as_str)
-        .is_some_and(|provider| !provider.trim().eq_ignore_ascii_case(ZED_HOSTED_PROVIDER))
-    {
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
+    if usage_owner.is_some_and(|provider| !provider.eq_ignore_ascii_case(ZED_HOSTED_PROVIDER)) {
         return ThreadOutcome::Filtered;
     }
 
@@ -165,10 +166,13 @@ fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
             format!("thread `{}`: thread is missing model", row.id),
         );
     };
-    let Some(provider) = model.get("provider").and_then(Value::as_str) else {
+    let Some(provider) = usage_owner else {
         return ThreadOutcome::Rejected(
-            RecordRejectionReason::MissingProvider,
-            format!("thread `{}`: model is missing provider", row.id),
+            RecordRejectionReason::UnverifiedUsageOwner,
+            format!(
+                "thread `{}`: Zed-hosted usage ownership is not verifiable",
+                row.id
+            ),
         );
     };
     debug_assert!(provider.trim().eq_ignore_ascii_case(ZED_HOSTED_PROVIDER));
@@ -749,20 +753,31 @@ mod tests {
             None,
             None,
         );
+        let blank_provider = r#"{"version":"0.3.0","updated_at":"2026-05-01T12:30:00Z","model":{"provider":" ","model":"claude-sonnet-4-5"},"request_token_usage":{"user-1":{"input_tokens":4,"output_tokens":1}},"imported":false}"#;
+        insert_thread(
+            &conn,
+            "thread-blank-provider",
+            blank_provider,
+            "json",
+            "2026-05-01T12:30:00Z",
+            None,
+            None,
+            None,
+        );
         drop(conn);
 
         let scanned = super::parse_zed_sqlite(&db_path).unwrap();
 
         assert!(scanned.interrupted.is_none());
         assert!(scanned.messages.is_empty());
-        assert_eq!(scanned.rejections.total(), 2);
-        let keys: Vec<_> = scanned
+        assert_eq!(scanned.rejections.total(), 3);
+        let entries: Vec<_> = scanned
             .rejections
             .entries()
-            .map(|entry| entry.key.to_string())
+            .map(|entry| (entry.key.to_string(), entry.count))
             .collect();
-        assert!(keys.contains(&"malformed-record".to_string()));
-        assert!(keys.contains(&"missing-provider".to_string()));
+        assert!(entries.contains(&("malformed-record".to_string(), 1)));
+        assert!(entries.contains(&("unverified-usage-owner".to_string(), 2)));
     }
 
     #[test]

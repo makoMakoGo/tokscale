@@ -29,6 +29,7 @@
 //!     - `#9`: output text tokens
 //!     - `#10`: reasoning tokens
 //!     - `#11`: response id used for deduplication
+//!   - `#19`: backend model label
 //!   - `#21`: user-visible model label, for example `Gemini 3.5 Flash (Medium)`
 //! - `trajectory_metadata_blob.data #1 #1`: workspace file URI
 //! - `trajectory_metadata_blob.data #2`: created timestamp
@@ -36,12 +37,11 @@
 //! Boundary behavior: rows with all usage buckets equal to zero are ignored, so
 //! failed generations with no billable usage do not create usage rows. Failed
 //! generations with non-zero usage are still counted, because providers can
-//! bill failed requests. Rows without a parseable display model are preserved as
-//! unpriced `unknown` model rows instead of falling back to backend route
-//! aliases such as `gemini-pro-c`; a missing or unrecognized display model is
-//! a current-format error. Rows without `response_id` still parse, but only the
-//! per-file adapter path can distinguish them; cross-file duplicate protection
-//! depends on `response_id`.
+//! bill failed requests. Known display labels are canonicalized. An unknown
+//! non-empty display label, or field `#19` when `#21` is absent, is retained as
+//! the raw model identity instead of discarding otherwise valid usage. Rows
+//! without `response_id` still parse, but only the per-file adapter path can
+//! distinguish them; cross-file duplicate protection depends on `response_id`.
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
@@ -110,7 +110,7 @@ pub fn parse_antigravity_cli_file(path: &Path) -> SessionParseResult<ScannedSour
             }
             Ok(None) => {}
             Err(error) => {
-                let reason = if error.to_string().contains("missing display model") {
+                let reason = if error.operation() == "validate Antigravity CLI usage row" {
                     RecordRejectionReason::MissingModel
                 } else {
                     RecordRejectionReason::MalformedRecord
@@ -197,26 +197,27 @@ fn parse_gen_metadata(
         return Ok(None);
     }
 
-    let display_model = fields.display_model.ok_or_else(|| {
-        SessionParseError::invalid(
-            "validate Antigravity CLI usage row",
-            "usage row is missing display model field 21",
-        )
-    })?;
-    let model_id = canonical_antigravity_display_model(display_model).ok_or_else(|| {
-        SessionParseError::invalid(
-            "validate Antigravity CLI usage row",
-            format!("unrecognized display model `{display_model}`"),
-        )
-    })?;
-    let provider_id = provider_identity::inferred_provider_from_model(&model_id)
+    let raw_model = fields
+        .display_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            fields
+                .response_model
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+        })
         .ok_or_else(|| {
             SessionParseError::invalid(
                 "validate Antigravity CLI usage row",
-                format!("cannot infer provider for model `{model_id}`"),
+                "usage row has no non-empty display or backend model label",
             )
-        })?
-        .to_string();
+        })?;
+    let model_id = fields
+        .display_model
+        .and_then(canonical_antigravity_display_model)
+        .unwrap_or_else(|| raw_model.to_string());
+    let provider_id = provider_identity::source_provider_id("", &model_id);
 
     if let Some(response_id) = &response_id {
         seen_response_ids.insert(response_id.clone());
@@ -350,6 +351,7 @@ fn valid_size_b(size: &str) -> bool {
 struct ChatModelFields<'a> {
     usage: Option<&'a [u8]>,
     generation: Option<&'a [u8]>,
+    response_model: Option<&'a str>,
     display_model: Option<&'a str>,
 }
 
@@ -360,6 +362,11 @@ fn chat_model_fields(chat_model: &[u8]) -> ChatModelFields<'_> {
         match (field, wire) {
             (4, Wire::Len(bytes)) => fields.usage = Some(bytes),
             (9, Wire::Len(bytes)) => fields.generation = Some(bytes),
+            (19, Wire::Len(bytes)) => {
+                if let Ok(response_model) = std::str::from_utf8(bytes) {
+                    fields.response_model = Some(response_model);
+                }
+            }
             (21, Wire::Len(bytes)) => {
                 if let Ok(display_model) = std::str::from_utf8(bytes) {
                     fields.display_model = Some(display_model);
@@ -368,7 +375,11 @@ fn chat_model_fields(chat_model: &[u8]) -> ChatModelFields<'_> {
             _ => {}
         }
 
-        if fields.usage.is_some() && fields.generation.is_some() && fields.display_model.is_some() {
+        if fields.usage.is_some()
+            && fields.generation.is_some()
+            && fields.response_model.is_some()
+            && fields.display_model.is_some()
+        {
             break;
         }
     }
@@ -918,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_without_parseable_display_model_is_rejected() {
+    fn usage_keeps_backend_or_raw_display_model_when_display_is_not_canonical() {
         let mut seen_without_display = HashSet::new();
         let missing_display = super::parse_gen_metadata(
             &gen_metadata_with_model(b"resp-missing", None, b"gemini-pro-c", None),
@@ -926,11 +937,10 @@ mod tests {
             1_000,
             &mut seen_without_display,
         )
-        .unwrap_err();
-        assert_eq!(
-            missing_display.operation(),
-            "validate Antigravity CLI usage row"
-        );
+        .unwrap()
+        .unwrap();
+        assert_eq!(missing_display.model_id.as_ref(), "gemini-pro-c");
+        assert_eq!(missing_display.provider_id.as_ref(), "google");
 
         let mut seen_unknown_display = HashSet::new();
         let unknown_display = super::parse_gen_metadata(
@@ -944,11 +954,27 @@ mod tests {
             1_000,
             &mut seen_unknown_display,
         )
-        .unwrap_err();
-        assert_eq!(
-            unknown_display.operation(),
-            "validate Antigravity CLI usage row"
-        );
+        .unwrap()
+        .unwrap();
+        assert_eq!(unknown_display.model_id.as_ref(), "Gemini Pro C");
+        assert_eq!(unknown_display.provider_id.as_ref(), "google");
+
+        let mut seen_private_display = HashSet::new();
+        let private_display = super::parse_gen_metadata(
+            &gen_metadata_with_model(
+                b"resp-private",
+                None,
+                b"backend-route-v7",
+                Some(b"Internal Preview"),
+            ),
+            "session",
+            1_000,
+            &mut seen_private_display,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(private_display.model_id.as_ref(), "Internal Preview");
+        assert_eq!(private_display.provider_id.as_ref(), "unknown");
     }
 
     #[test]
@@ -981,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_usage_row_is_rejected_without_hiding_later_rows() {
+    fn backend_only_model_row_is_kept_with_surrounding_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mixed.db");
         let conn = Connection::open(&path).unwrap();
@@ -1013,8 +1039,10 @@ mod tests {
 
         let scanned = super::parse_antigravity_cli_file(&path).unwrap();
 
-        assert_eq!(scanned.messages.len(), 2);
-        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(scanned.messages.len(), 3);
+        assert_eq!(scanned.messages[1].model_id.as_ref(), "gemini-pro-c");
+        assert_eq!(scanned.messages[1].provider_id.as_ref(), "google");
+        assert!(scanned.rejections.is_empty());
         assert!(scanned.interrupted.is_none());
     }
 
