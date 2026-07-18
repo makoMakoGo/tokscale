@@ -71,13 +71,17 @@ pub fn render_radar(
     if chart_w < CHART_MIN_W {
         return;
     }
+    // Cap the height as well so the braille dot grid stays square even when
+    // the caption flanks bind the width; center the square in the area.
+    let chart_h = (chart_w / 2).min(area.height);
     let chart_x = area.x + (area.width - chart_w) / 2;
-    let chart = Rect::new(chart_x, area.y, chart_w, area.height);
+    let chart_y = area.y + (area.height - chart_h) / 2;
+    let chart = Rect::new(chart_x, chart_y, chart_w, chart_h);
 
     // Axis tips stop just inside the square, clear of the captions. Both
     // arms share one length so the cross stays square in braille dots.
     let x_arm = (CENTER - 1.5 / f64::from(chart_w) * BOUNDS).clamp(15.0, 42.0);
-    let y_arm = (CENTER - 2.5 / f64::from(area.height) * BOUNDS).clamp(15.0, 42.0);
+    let y_arm = (CENTER - 2.5 / f64::from(chart_h) * BOUNDS).clamp(15.0, 42.0);
     let arm = x_arm.min(y_arm);
     let (x_arm, y_arm) = (arm, arm);
 
@@ -166,7 +170,7 @@ pub fn render_radar(
     };
     let tip_x = |logical_x: f64| chart.x + (logical_x / BOUNDS * f64::from(chart.width)) as u16;
     let center_x = chart.x + chart.width / 2;
-    let mid_y = area.y + area.height / 2;
+    let mid_y = chart.y + chart.height / 2;
     let centered = |text: &str| {
         center_x
             .saturating_sub(text.chars().count() as u16 / 2)
@@ -176,20 +180,20 @@ pub fn render_radar(
     // Top: pct over name, both centered above the tip. Bottom: pct under the
     // tip, name at the very bottom. Axes without a name are skipped.
     if !names[0].is_empty() {
-        print(frame, centered(&pcts[0]), area.y, &pcts[0]);
-        print(frame, centered(&names[0]), area.y + 1, &names[0]);
+        print(frame, centered(&pcts[0]), chart.y, &pcts[0]);
+        print(frame, centered(&names[0]), chart.y + 1, &names[0]);
     }
     if !names[2].is_empty() {
         print(
             frame,
             centered(&pcts[2]),
-            area.y + area.height - 2,
+            chart.y + chart.height - 2,
             &pcts[2],
         );
         print(
             frame,
             centered(&names[2]),
-            area.y + area.height - 1,
+            chart.y + chart.height - 1,
             &names[2],
         );
     }
@@ -197,7 +201,7 @@ pub fn render_radar(
     // Sides: pct and name straddle the horizontal axis row (pct above, name
     // below), centered as a block one cell outside the tip.
     let pct_y = mid_y.saturating_sub(1);
-    let name_y = (mid_y + 1).min(area.y + area.height - 1);
+    let name_y = (mid_y + 1).min(chart.y + chart.height - 1);
     let print_side = |frame: &mut Frame, block_x: u16, name: &str, pct: &str| {
         if name.is_empty() {
             return;
@@ -224,6 +228,93 @@ pub fn render_radar(
     print_side(frame, left_x, &names[3], &pcts[3]);
 
     let right_w = block_w(&names[1], &pcts[1]);
-    let right_x = (tip_x(CENTER + x_arm) + 1).min(area.x + area.width - right_w);
+    let right_x = (tip_x(CENTER + x_arm) + 1).min(area.x + area.width.saturating_sub(right_w));
     print_side(frame, right_x, &names[1], &pcts[1]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn sample_axes() -> [RadarAxis; 4] {
+        [
+            RadarAxis {
+                label: "alpha".into(),
+                share: 0.5,
+            },
+            RadarAxis {
+                label: "beta".into(),
+                share: 0.3,
+            },
+            RadarAxis {
+                label: "gamma".into(),
+                share: 0.15,
+            },
+            RadarAxis {
+                label: "Others".into(),
+                share: 0.05,
+            },
+        ]
+    }
+
+    fn find_row(buf: &ratatui::buffer::Buffer, area: Rect, needle: &str) -> Option<u16> {
+        (area.y..area.y + area.height).find(|&y| {
+            (area.x..area.x + area.width)
+                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+    }
+
+    #[test]
+    fn chart_height_is_capped_to_stay_square_when_width_binds() {
+        // 26x24 area: side flanks take 7 columns each, so chart_w = 12 and
+        // the square chart is 12x6, vertically centered (chart_y = 9) instead
+        // of stretched to the full 24 rows.
+        let area = Rect::new(0, 0, 26, 24);
+        let axes = sample_axes();
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let frame = terminal
+            .draw(|f| {
+                render_radar(
+                    f,
+                    area,
+                    &axes,
+                    Color::Cyan,
+                    Color::DarkGray,
+                    Color::Green,
+                    Color::Black,
+                )
+            })
+            .unwrap();
+        let buf = frame.buffer;
+
+        // Top pct at chart.y, top name at chart.y + 1.
+        assert_eq!(find_row(buf, area, "alpha"), Some(10));
+        // Bottom pct at chart.y + chart_h - 2, bottom name one row lower.
+        assert_eq!(find_row(buf, area, "gamma"), Some(14));
+        // Side names straddle the horizontal axis row.
+        assert_eq!(find_row(buf, area, "beta"), Some(13));
+        assert_eq!(find_row(buf, area, "Others"), Some(13));
+    }
+
+    #[test]
+    fn tiny_area_is_skipped_without_panicking() {
+        let axes = sample_axes();
+        let mut terminal = Terminal::new(TestBackend::new(19, 8)).unwrap();
+        terminal
+            .draw(|f| {
+                render_radar(
+                    f,
+                    Rect::new(0, 0, 19, 8),
+                    &axes,
+                    Color::Cyan,
+                    Color::DarkGray,
+                    Color::Green,
+                    Color::Black,
+                )
+            })
+            .unwrap();
+    }
 }

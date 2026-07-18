@@ -630,7 +630,12 @@ fn radar_axes(ranked_models: &[RankedModel]) -> [RadarAxis; 4] {
         .skip(3)
         .fold(0u64, |sum, model| sum.saturating_add(model.tokens));
     axes.push(RadarAxis {
-        label: "Others".to_string(),
+        // Hide the Others axis entirely when nothing folds into it.
+        label: if others == 0 {
+            String::new()
+        } else {
+            "Others".to_string()
+        },
         share: others as f64 / denominator,
     });
     axes.try_into().expect("radar requires exactly four axes")
@@ -1237,6 +1242,31 @@ mod tests {
         assert_eq!(axes[3].label, "Others");
         assert!((axes[0].share - 0.5).abs() < f64::EPSILON);
         assert!((axes[3].share - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn radar_hides_others_axis_when_nothing_folds_in() {
+        let ranked = vec![
+            RankedModel {
+                canonical_id: "alpha".to_string(),
+                tokens: 50,
+                cost: 0.0,
+            },
+            RankedModel {
+                canonical_id: "beta".to_string(),
+                tokens: 30,
+                cost: 0.0,
+            },
+            RankedModel {
+                canonical_id: "gamma".to_string(),
+                tokens: 20,
+                cost: 0.0,
+            },
+        ];
+        let axes = radar_axes(&ranked);
+
+        assert_eq!(axes[3].label, "");
+        assert!((axes[3].share - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
