@@ -330,7 +330,7 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         def: LocalClientDef {
             root: PathRoot::Home,
             relative_path: ".commandcode/projects",
-            pattern: "*.jsonl",
+            pattern: "commandcode-session",
         },
     },
     LocalClientEntry {

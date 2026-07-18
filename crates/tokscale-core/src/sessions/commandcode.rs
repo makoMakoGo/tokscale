@@ -37,12 +37,21 @@ struct CommandCodeConfig {
     model: String,
 }
 
-pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
-    if path
-        .file_name()
+fn is_checkpoint_file(path: &Path) -> bool {
+    path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".checkpoints.jsonl"))
-    {
+}
+
+pub(crate) fn is_usage_transcript_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl"))
+        && !is_checkpoint_file(path)
+}
+
+pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
+    if is_checkpoint_file(path) {
         return Ok(ScannedSource::default());
     }
 

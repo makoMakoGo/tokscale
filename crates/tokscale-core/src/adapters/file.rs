@@ -641,6 +641,25 @@ model = "claude-sonnet-4"
     }
 
     #[test]
+    fn commandcode_checkpoint_sidecars_are_not_discovered_as_usage_sources() {
+        let home = tempfile::TempDir::new().unwrap();
+        let checkpoint_path = home
+            .path()
+            .join(".commandcode/projects/project/session.checkpoints.jsonl");
+        write_file(
+            &checkpoint_path,
+            r#"{"type":"file-history-snapshot","messageId":"message","snapshot":{"messageId":"message","trackedFileBackups":{},"timestamp":1784371763},"isSnapshotUpdate":false}"#,
+        );
+        assert!(!home.path().join(".commandcode/config.json").exists());
+
+        let settings = crate::scanner::ScannerSettings::default();
+        let ctx = scan_context(home.path(), &settings);
+        let units = COMMANDCODE_ADAPTER.discover_checked(&ctx).unwrap();
+
+        assert!(units.is_empty());
+    }
+
+    #[test]
     fn commandcode_directory_config_remains_a_required_input() {
         let home = tempfile::TempDir::new().unwrap();
         let session_path = home
