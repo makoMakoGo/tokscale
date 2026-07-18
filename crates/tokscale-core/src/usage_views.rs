@@ -94,8 +94,16 @@ pub struct DailyModelInfo {
     /// provider was seen first and is **not** authoritative. Only treat it as
     /// exact when `group_by == GroupBy::ClientProviderModel`.
     pub provider: String,
+    /// Bare canonical model ID: the authoritative model identity (ADR 0026).
+    pub model_id: String,
+    /// Pure display label; never carries the workspace dimension. Session
+    /// groupings still prefix the session id ("session / model").
     pub display_name: String,
+    /// Pure color key for the color path; not a semantic identity.
     pub color_key: String,
+    /// Workspace dimension, populated only under `GroupBy::WorkspaceModel`.
+    pub workspace_key: Option<String>,
+    pub workspace_label: Option<String>,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
     pub messages: u64,
@@ -121,6 +129,8 @@ pub struct DailyUsage {
 #[derive(Debug, Clone)]
 pub struct HourlyModelInfo {
     pub provider: String,
+    /// Bare canonical model ID: the authoritative model identity (ADR 0026).
+    pub model_id: String,
     pub display_name: String,
     pub color_key: String,
     pub tokens: UsageTokenBreakdown,

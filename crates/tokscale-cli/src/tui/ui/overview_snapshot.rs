@@ -98,15 +98,8 @@ fn collect_snapshot(app: &App) -> SnapshotData {
                 harness_entry.cost += source.cost.max(0.0);
             }
 
-            for (model_key, model) in &source.models {
-                let key = if !model.color_key.is_empty() {
-                    model.color_key.clone()
-                } else if !model.display_name.is_empty() {
-                    model.display_name.clone()
-                } else {
-                    model_key.clone()
-                };
-                let model_entry = data.models.entry(key).or_default();
+            for model in source.models.values() {
+                let model_entry = data.models.entry(model.model_id.clone()).or_default();
                 model_entry.tokens = model_entry.tokens.saturating_add(model.tokens.total());
                 if model.cost.is_finite() {
                     model_entry.cost += model.cost.max(0.0);

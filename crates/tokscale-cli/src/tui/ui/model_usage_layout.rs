@@ -5,7 +5,10 @@ use super::widgets::MODEL_DISPLAY_MAX_WIDTH;
 
 pub(crate) const MODEL_MIN_WIDTH: u16 = 5;
 pub(crate) const MODEL_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
-pub(crate) const WORKSPACE_MODEL_MAX_WIDTH: u16 = 56;
+
+// Matches the Sessions tab workspace column bounds.
+pub(crate) const WORKSPACE_MIN_WIDTH: u16 = 12;
+pub(crate) const WORKSPACE_MAX_WIDTH: u16 = 20;
 
 pub(crate) const SOURCE_MIN_WIDTH: u16 = 8;
 pub(crate) const SOURCE_MAX_WIDTH: u16 = 40;
@@ -33,6 +36,7 @@ pub(crate) enum ModelUsageTableDensity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelUsageColumn {
+    Workspace,
     Model,
     Source,
     Provider,
@@ -53,6 +57,7 @@ pub(crate) enum ModelUsageLayoutSchema {
     Models,
     WorkspaceModels,
     Detail,
+    WorkspaceDetail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,19 +76,20 @@ impl ModelUsageTableLayout {
 
 fn column_order(column: ModelUsageColumn) -> u16 {
     match column {
-        ModelUsageColumn::Model => 0,
-        ModelUsageColumn::Source => 10,
-        ModelUsageColumn::Provider => 20,
-        ModelUsageColumn::Messages => 30,
-        ModelUsageColumn::Input => 40,
-        ModelUsageColumn::Output => 50,
-        ModelUsageColumn::CacheRate => 60,
-        ModelUsageColumn::CacheRead => 70,
-        ModelUsageColumn::CacheWrite => 80,
-        ModelUsageColumn::Total => 90,
-        ModelUsageColumn::Cost => 100,
-        ModelUsageColumn::CostPerMillion => 110,
-        ModelUsageColumn::Performance => 120,
+        ModelUsageColumn::Workspace => 0,
+        ModelUsageColumn::Model => 10,
+        ModelUsageColumn::Source => 20,
+        ModelUsageColumn::Provider => 30,
+        ModelUsageColumn::Messages => 40,
+        ModelUsageColumn::Input => 50,
+        ModelUsageColumn::Output => 60,
+        ModelUsageColumn::CacheRate => 70,
+        ModelUsageColumn::CacheRead => 80,
+        ModelUsageColumn::CacheWrite => 90,
+        ModelUsageColumn::Total => 100,
+        ModelUsageColumn::Cost => 110,
+        ModelUsageColumn::CostPerMillion => 120,
+        ModelUsageColumn::Performance => 130,
     }
 }
 
@@ -92,31 +98,46 @@ fn model_usage_columns(
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
+    workspace_content_width: u16,
 ) -> Vec<ResponsiveColumn<ModelUsageColumn>> {
-    let model_max_width = match schema {
-        ModelUsageLayoutSchema::WorkspaceModels => WORKSPACE_MODEL_MAX_WIDTH,
-        ModelUsageLayoutSchema::Models | ModelUsageLayoutSchema::Detail => MODEL_MAX_WIDTH,
-    };
+    let has_workspace = matches!(
+        schema,
+        ModelUsageLayoutSchema::WorkspaceModels | ModelUsageLayoutSchema::WorkspaceDetail
+    );
     let source_max_width = match schema {
-        ModelUsageLayoutSchema::Detail => DETAIL_SOURCE_MAX_WIDTH,
+        ModelUsageLayoutSchema::Detail | ModelUsageLayoutSchema::WorkspaceDetail => {
+            DETAIL_SOURCE_MAX_WIDTH
+        }
         ModelUsageLayoutSchema::Models | ModelUsageLayoutSchema::WorkspaceModels => {
             SOURCE_MAX_WIDTH
         }
     };
     let provider_max_width = match schema {
-        ModelUsageLayoutSchema::Detail => DETAIL_PROVIDER_MAX_WIDTH,
+        ModelUsageLayoutSchema::Detail | ModelUsageLayoutSchema::WorkspaceDetail => {
+            DETAIL_PROVIDER_MAX_WIDTH
+        }
         ModelUsageLayoutSchema::Models | ModelUsageLayoutSchema::WorkspaceModels => {
             PROVIDER_MAX_WIDTH
         }
     };
 
-    let mut columns = vec![
+    let mut columns = Vec::new();
+    if has_workspace {
+        columns.push(ResponsiveColumn::measured_required(
+            ModelUsageColumn::Workspace,
+            column_order(ModelUsageColumn::Workspace),
+            WORKSPACE_MIN_WIDTH,
+            workspace_content_width,
+            WORKSPACE_MAX_WIDTH,
+        ));
+    }
+    columns.extend([
         ResponsiveColumn::measured_required(
             ModelUsageColumn::Model,
             column_order(ModelUsageColumn::Model),
             MODEL_MIN_WIDTH,
             model_content_width,
-            model_max_width,
+            MODEL_MAX_WIDTH,
         ),
         ResponsiveColumn::fixed_required(
             ModelUsageColumn::Total,
@@ -145,10 +166,10 @@ fn model_usage_columns(
             provider_content_width,
             provider_max_width,
         ),
-    ];
+    ]);
 
     match schema {
-        ModelUsageLayoutSchema::Detail => {
+        ModelUsageLayoutSchema::Detail | ModelUsageLayoutSchema::WorkspaceDetail => {
             columns.push(ResponsiveColumn::fixed_optional(
                 ModelUsageColumn::Messages,
                 40,
@@ -272,6 +293,7 @@ pub(crate) fn model_usage_table_layout(
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
+    workspace_content_width: u16,
     schema: ModelUsageLayoutSchema,
 ) -> ModelUsageTableLayout {
     let specs = model_usage_columns(
@@ -279,6 +301,7 @@ pub(crate) fn model_usage_table_layout(
         model_content_width,
         provider_content_width,
         source_content_width,
+        workspace_content_width,
     );
     let layout = responsive_table_layout(table_width, &specs);
     let model_width = layout.width_for(ModelUsageColumn::Model);
@@ -308,6 +331,7 @@ mod tests {
             model_content_width,
             provider_content_width,
             source_content_width,
+            0,
             schema,
         )
     }
@@ -545,9 +569,16 @@ mod tests {
     }
 
     #[test]
-    fn workspace_schema_uses_workspace_model_cap() {
-        let layout = layout(200, 80, 8, 8, ModelUsageLayoutSchema::WorkspaceModels);
+    fn workspace_schema_splits_workspace_and_model_columns() {
+        let layout =
+            model_usage_table_layout(200, 80, 8, 8, 80, ModelUsageLayoutSchema::WorkspaceModels);
 
-        assert_eq!(layout.model_width, WORKSPACE_MODEL_MAX_WIDTH as usize);
+        assert_eq!(layout.columns[0], ModelUsageColumn::Workspace);
+        assert_eq!(layout.columns[1], ModelUsageColumn::Model);
+        assert_eq!(
+            layout.width_for(ModelUsageColumn::Workspace),
+            WORKSPACE_MAX_WIDTH as usize
+        );
+        assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
     }
 }

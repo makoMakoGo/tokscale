@@ -9,7 +9,7 @@ use super::model_usage_layout::{
     model_usage_table_layout, ModelUsageColumn as DailyDetailColumn, ModelUsageLayoutSchema,
     ModelUsageTableDensity as DailyDetailTableDensity,
     ModelUsageTableLayout as DailyDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
-    MODEL_MIN_WIDTH,
+    MODEL_MIN_WIDTH, WORKSPACE_MIN_WIDTH,
 };
 use super::table_layout::{
     display_width, distributed_table_area, responsive_table_layout, width_for_column,
@@ -18,10 +18,12 @@ use super::table_layout::{
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
     get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
-    truncate_model_display_name_to, viewport_scrollbar_state, MODEL_DISPLAY_MAX_WIDTH,
+    truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
+    MODEL_DISPLAY_MAX_WIDTH,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::DailyUsage;
+use tokscale_core::GroupBy;
 
 const DATE_WIDTH: u16 = 7;
 const TURN_WIDTH: u16 = 6;
@@ -255,13 +257,21 @@ fn daily_detail_table_layout(
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
+    workspace_content_width: u16,
+    group_by: &GroupBy,
 ) -> DailyDetailTableLayout {
+    let schema = if *group_by == GroupBy::WorkspaceModel {
+        ModelUsageLayoutSchema::WorkspaceDetail
+    } else {
+        ModelUsageLayoutSchema::Detail
+    };
     model_usage_table_layout(
         table_width,
         model_content_width,
         provider_content_width,
         source_content_width,
-        ModelUsageLayoutSchema::Detail,
+        workspace_content_width,
+        schema,
     )
 }
 
@@ -270,6 +280,7 @@ fn daily_detail_column_header(
     density: DailyDetailTableDensity,
 ) -> &'static str {
     match column {
+        DailyDetailColumn::Workspace => "Workspace",
         DailyDetailColumn::Model => "Model",
         DailyDetailColumn::Provider => "Provider",
         DailyDetailColumn::Source => "Source",
@@ -382,19 +393,17 @@ fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
     let mut models: BTreeMap<String, TopDailyModel> = BTreeMap::new();
 
     for source in day.source_breakdown.values() {
-        for (model_key, model) in &source.models {
+        for model in source.models.values() {
             let tokens = model.tokens.total();
-            if tokens == 0 {
+            // Rank by the bare canonical id (ADR 0026): grouping must not
+            // split one model into several candidates, and the storage map
+            // key is never a user-visible identity.
+            if tokens == 0 || model.model_id.is_empty() {
                 continue;
             }
 
-            let label = if model.display_name.is_empty() {
-                model_key.clone()
-            } else {
-                model.display_name.clone()
-            };
             models
-                .entry(model_key.clone())
+                .entry(model.model_id.clone())
                 .and_modify(|entry| {
                     entry.tokens = entry
                         .tokens
@@ -403,8 +412,8 @@ fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
                     entry.cost += model.cost;
                 })
                 .or_insert_with(|| TopDailyModel {
-                    key: model_key.clone(),
-                    label,
+                    key: model.model_id.clone(),
+                    label: model.model_id.clone(),
                     provider: model.provider.clone(),
                     color_key: model.color_key.clone(),
                     tokens,
@@ -755,11 +764,23 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|row| display_width(&get_client_display_name(&row.source)))
         .max()
         .unwrap_or(DETAIL_SOURCE_WIDTH);
+    let group_by = app.group_by.borrow().clone();
+    let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
+        rows_data
+            .iter()
+            .map(|row| display_width(workspace_label_or_unknown(row.workspace.as_deref())))
+            .max()
+            .unwrap_or(WORKSPACE_MIN_WIDTH)
+    } else {
+        0
+    };
     let table_layout = daily_detail_table_layout(
         table_area.width,
         model_content_width,
         provider_content_width,
         source_content_width,
+        workspace_content_width,
+        &group_by,
     );
     let columns = table_layout.columns.clone();
 
@@ -801,6 +822,11 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let cell_for_column = |column: DailyDetailColumn| -> Cell {
                 match column {
+                    DailyDetailColumn::Workspace => Cell::from(truncate_display_width(
+                        workspace_label_or_unknown(row.workspace.as_deref()),
+                        table_layout.width_for(DailyDetailColumn::Workspace),
+                    ))
+                    .style(Style::default().fg(theme_muted)),
                     DailyDetailColumn::Model => Cell::from(truncate_model_display_name_to(
                         &row.model,
                         table_layout.model_width,
@@ -926,8 +952,11 @@ mod tests {
     ) -> DailyModelInfo {
         DailyModelInfo {
             provider: provider.to_string(),
+            model_id: color_key.to_string(),
             display_name: display_name.to_string(),
             color_key: color_key.to_string(),
+            workspace_key: None,
+            workspace_label: None,
             tokens: token_breakdown(tokens),
             cost,
             messages: 1,
@@ -1178,9 +1207,141 @@ mod tests {
         assert_eq!(model.tokens, 210);
     }
 
+    fn workspace_daily_model(
+        provider: &str,
+        model_id: &str,
+        workspace: &str,
+        tokens: u64,
+        cost: f64,
+    ) -> DailyModelInfo {
+        DailyModelInfo {
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            display_name: model_id.to_string(),
+            color_key: model_id.to_string(),
+            workspace_key: Some(format!("/work/{workspace}")),
+            workspace_label: Some(workspace.to_string()),
+            tokens: token_breakdown(tokens),
+            cost,
+            messages: 1,
+        }
+    }
+
+    #[test]
+    fn top_daily_model_ranking_is_grouping_invariant() {
+        // The same messages projected by each GroupBy: the winner must be the
+        // canonical merge with the bare model label in every projection
+        // (ADR 0026). With per-bucket keys, kimi-k2.5 (200) would beat each
+        // gpt-5 fragment; canonically gpt-5 wins with 210.
+        let mut model_projection = day("2026-06-09", 0.0);
+        model_projection.source_breakdown.insert(
+            "codex".to_string(),
+            daily_source(
+                410,
+                3.0,
+                vec![
+                    ("gpt-5", daily_model("gpt-5", "openai", "gpt-5", 210, 2.0)),
+                    (
+                        "kimi-k2.5",
+                        daily_model("kimi-k2.5", "moonshot", "kimi-k2.5", 200, 1.0),
+                    ),
+                ],
+            ),
+        );
+
+        let mut client_model_projection = day("2026-06-09", 0.0);
+        client_model_projection.source_breakdown.insert(
+            "codex".to_string(),
+            daily_source(
+                120,
+                1.0,
+                vec![(
+                    "v1|codex|gpt-5",
+                    daily_model("gpt-5", "openai", "gpt-5", 120, 1.0),
+                )],
+            ),
+        );
+        client_model_projection.source_breakdown.insert(
+            "kimi".to_string(),
+            daily_source(
+                290,
+                2.0,
+                vec![
+                    (
+                        "v1|kimi|gpt-5",
+                        daily_model("gpt-5", "openai", "gpt-5", 90, 1.0),
+                    ),
+                    (
+                        "v1|kimi|kimi-k2.5",
+                        daily_model("kimi-k2.5", "moonshot", "kimi-k2.5", 200, 1.0),
+                    ),
+                ],
+            ),
+        );
+
+        let mut client_provider_projection = day("2026-06-09", 0.0);
+        client_provider_projection.source_breakdown.insert(
+            "codex".to_string(),
+            daily_source(
+                410,
+                3.0,
+                vec![
+                    (
+                        "v1|codex|openai|gpt-5",
+                        daily_model("gpt-5", "openai", "gpt-5", 120, 1.0),
+                    ),
+                    (
+                        "v1|codex|azure|gpt-5",
+                        daily_model("gpt-5", "azure", "gpt-5", 90, 1.0),
+                    ),
+                    (
+                        "v1|codex|moonshot|kimi-k2.5",
+                        daily_model("kimi-k2.5", "moonshot", "kimi-k2.5", 200, 1.0),
+                    ),
+                ],
+            ),
+        );
+
+        let mut workspace_projection = day("2026-06-09", 0.0);
+        workspace_projection.source_breakdown.insert(
+            "codex".to_string(),
+            daily_source(
+                410,
+                3.0,
+                vec![
+                    (
+                        "v1|codex|ws-a|gpt-5",
+                        workspace_daily_model("openai", "gpt-5", "ws-a", 120, 1.0),
+                    ),
+                    (
+                        "v1|codex|ws-b|gpt-5",
+                        workspace_daily_model("openai", "gpt-5", "ws-b", 90, 1.0),
+                    ),
+                    (
+                        "v1|codex|ws-a|kimi-k2.5",
+                        workspace_daily_model("moonshot", "kimi-k2.5", "ws-a", 200, 1.0),
+                    ),
+                ],
+            ),
+        );
+
+        for projection in [
+            &model_projection,
+            &client_model_projection,
+            &client_provider_projection,
+            &workspace_projection,
+        ] {
+            let model = top_daily_model(projection).expect("top model should be selected");
+            assert_eq!(model.key, "gpt-5");
+            assert_eq!(model.label, "gpt-5", "label must be the bare model");
+            assert!(!model.label.contains(" / "), "no workspace prefix");
+            assert_eq!(model.tokens, 210);
+        }
+    }
+
     #[test]
     fn narrow_daily_detail_layout_keeps_model_and_tokens_before_cost() {
-        let layout = daily_detail_table_layout(30, 80, 56, 40);
+        let layout = daily_detail_table_layout(30, 80, 56, 40, 0, &GroupBy::Model);
 
         assert_eq!(layout.density, DailyDetailTableDensity::VeryCompact);
         assert_eq!(
@@ -1193,7 +1354,7 @@ mod tests {
 
     #[test]
     fn daily_detail_layout_stops_before_context_columns_that_do_not_fit() {
-        let layout = daily_detail_table_layout(74, 80, 56, 40);
+        let layout = daily_detail_table_layout(74, 80, 56, 40, 0, &GroupBy::Model);
 
         assert_eq!(layout.density, DailyDetailTableDensity::Core);
         assert_eq!(
@@ -1212,7 +1373,7 @@ mod tests {
 
     #[test]
     fn daily_detail_layout_does_not_skip_source_to_show_messages() {
-        let layout = daily_detail_table_layout(56, 80, 56, 40);
+        let layout = daily_detail_table_layout(56, 80, 56, 40, 0, &GroupBy::Model);
 
         assert_eq!(
             layout.columns,
@@ -1230,7 +1391,7 @@ mod tests {
 
     #[test]
     fn daily_detail_drops_context_columns_before_sacrificing_model() {
-        let layout = daily_detail_table_layout(80, 29, 40, 40);
+        let layout = daily_detail_table_layout(80, 29, 40, 40, 0, &GroupBy::Model);
 
         assert_eq!(layout.model_width, 29);
         assert!(layout.columns.contains(&DailyDetailColumn::Total));
@@ -1240,7 +1401,7 @@ mod tests {
 
     #[test]
     fn wide_daily_detail_layout_adds_cache_columns_before_total() {
-        let layout = daily_detail_table_layout(199, 80, 56, 40);
+        let layout = daily_detail_table_layout(199, 80, 56, 40, 0, &GroupBy::Model);
 
         assert_eq!(layout.density, DailyDetailTableDensity::Full);
         assert_eq!(
@@ -1343,5 +1504,66 @@ mod tests {
         assert_eq!(body.lines().count(), height as usize);
         assert!(app.max_visible_items >= 1);
         assert!(app.max_visible_items <= (height as usize).saturating_sub(3));
+    }
+
+    fn make_workspace_detail_app(width: u16) -> App {
+        let mut app = make_daily_app(width);
+        *app.group_by.borrow_mut() = GroupBy::WorkspaceModel;
+        let mut usage = day("2026-06-09", 30.0);
+        usage.source_breakdown.insert(
+            "codex".to_string(),
+            daily_source(
+                300,
+                3.0,
+                vec![
+                    (
+                        "v1|codex|ws-a|gpt-5",
+                        workspace_daily_model("openai", "gpt-5", "ws-alpha", 200, 2.0),
+                    ),
+                    (
+                        "v1|codex|ws-b|gpt-5",
+                        workspace_daily_model("openai", "gpt-5", "ws-beta", 100, 1.0),
+                    ),
+                ],
+            ),
+        );
+        app.data.daily = vec![usage];
+        app.selected_daily_detail_date =
+            Some(NaiveDate::parse_from_str("2026-06-09", "%Y-%m-%d").unwrap());
+        app
+    }
+
+    #[test]
+    fn daily_detail_shows_workspace_column_under_workspace_grouping() {
+        let mut app = make_workspace_detail_app(140);
+        let body = render_body(&mut app, 140, 8);
+
+        assert!(
+            body.contains("Workspace"),
+            "expected Workspace header\n{body}"
+        );
+        assert!(
+            body.contains("ws-alpha"),
+            "expected workspace label\n{body}"
+        );
+        assert!(body.contains("ws-beta"), "expected workspace label\n{body}");
+        assert!(body.contains("gpt-5"), "expected bare model name\n{body}");
+        assert!(
+            !body.contains("ws-alpha / gpt-5"),
+            "model cell must not carry the workspace prefix\n{body}"
+        );
+    }
+
+    #[test]
+    fn daily_detail_omits_workspace_column_outside_workspace_grouping() {
+        let mut app = make_workspace_detail_app(140);
+        *app.group_by.borrow_mut() = GroupBy::Model;
+        let body = render_body(&mut app, 140, 8);
+
+        assert!(
+            !body.contains("Workspace"),
+            "Workspace column must not render under GroupBy::Model\n{body}"
+        );
+        assert!(body.contains("gpt-5"), "expected bare model name\n{body}");
     }
 }

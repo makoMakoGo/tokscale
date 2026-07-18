@@ -228,12 +228,8 @@ fn current_count_label(app: &App) -> String {
             for day in &app.data.daily {
                 for (harness, source) in &day.source_breakdown {
                     harnesses.insert(harness.as_str());
-                    for (key, model) in &source.models {
-                        models.insert(if model.color_key.is_empty() {
-                            key.as_str()
-                        } else {
-                            model.color_key.as_str()
-                        });
+                    for model in source.models.values() {
+                        models.insert(model.model_id.as_str());
                     }
                 }
             }

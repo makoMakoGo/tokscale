@@ -108,11 +108,19 @@ fn refresh_session_data(
     }
 }
 
+/// Sessions are group-agnostic (ADR 0026): a grouping-triggered reload
+/// re-aggregates the usage projection but must not force a Sessions rescan;
+/// session refresh follows source-digest changes instead.
+fn session_reload_force(force: bool, group_only_reload: bool) -> bool {
+    force && !group_only_reload
+}
+
 fn load_background_data(
     loader: &DataLoader,
     clients: &[ClientId],
     group_by: &tokscale_core::GroupBy,
     force: bool,
+    session_force: bool,
     last_digest: Option<u64>,
 ) -> Result<BackgroundLoad> {
     let mut prepared = loader.prepare(clients)?;
@@ -120,7 +128,7 @@ fn load_background_data(
         .refresh_source_inventory_signature()?
         .process_digest();
     if !force && last_digest == Some(digest) {
-        let pricing_diagnostics = refresh_session_data(loader, clients, digest, force);
+        let pricing_diagnostics = refresh_session_data(loader, clients, digest, session_force);
         return Ok(BackgroundLoad::Unchanged {
             pricing_diagnostics,
         });
@@ -130,7 +138,7 @@ fn load_background_data(
     let session_digest = result
         .as_ref()
         .map_or(digest, |result| result.source_digest);
-    let _ = refresh_session_data(loader, clients, session_digest, force);
+    let _ = refresh_session_data(loader, clients, session_digest, session_force);
     result.map(|result| BackgroundLoad::Loaded {
         data: Box::new(result.data),
         digest: result.source_digest,
@@ -345,7 +353,14 @@ pub fn run(
         thread::spawn(move || {
             let loader = background_data_loader(bg_home_dir, bg_since, bg_until, bg_year);
             let result = persist_background_load(
-                load_background_data(&loader, &bg_clients, &bg_group_by, bg_force, bg_last_digest),
+                load_background_data(
+                    &loader,
+                    &bg_clients,
+                    &bg_group_by,
+                    bg_force,
+                    bg_force,
+                    bg_last_digest,
+                ),
                 &bg_enabled_clients,
                 &bg_group_by,
                 &bg_report_scope,
@@ -448,6 +463,8 @@ fn run_loop_with_background(
 
             let force =
                 should_force_source_reload(std::mem::take(&mut app.reload_force), &app.data.health);
+            let session_force =
+                session_reload_force(force, std::mem::take(&mut app.reload_group_only));
             let last_digest = app.last_source_digest;
             let tx = bg_tx.clone();
             let clients = app.scan_clients();
@@ -466,7 +483,14 @@ fn run_loop_with_background(
             thread::spawn(move || {
                 let loader = background_data_loader(home_dir, since, until, year);
                 let result = persist_background_load(
-                    load_background_data(&loader, &clients, &group_by, force, last_digest),
+                    load_background_data(
+                        &loader,
+                        &clients,
+                        &group_by,
+                        force,
+                        session_force,
+                        last_digest,
+                    ),
                     &enabled_clients,
                     &group_by,
                     &report_scope,
@@ -703,6 +727,16 @@ mod tests {
     }
 
     #[test]
+    fn session_reload_force_skips_grouping_triggered_reloads() {
+        // Grouping switches re-aggregate the usage projection but leave the
+        // Sessions snapshot to the source-digest probe (ADR 0026).
+        assert!(!session_reload_force(true, true));
+        assert!(session_reload_force(true, false));
+        assert!(!session_reload_force(false, true));
+        assert!(!session_reload_force(false, false));
+    }
+
+    #[test]
     #[serial]
     fn fresh_cache_baseline_skips_a_and_reloads_changed_b() {
         let home = TempDir::new().unwrap();
@@ -724,6 +758,7 @@ mod tests {
                 &clients,
                 &tokscale_core::GroupBy::Model,
                 false,
+                false,
                 baseline
             )
             .unwrap(),
@@ -735,6 +770,7 @@ mod tests {
             &loader,
             &clients,
             &tokscale_core::GroupBy::Model,
+            false,
             false,
             baseline,
         )
@@ -772,6 +808,7 @@ mod tests {
                     &loader,
                     &clients,
                     &tokscale_core::GroupBy::Model,
+                    true,
                     true,
                     last_digest,
                 )

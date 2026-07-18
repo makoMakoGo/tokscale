@@ -893,8 +893,14 @@ fn contract_tui_workspace_provider_daily_and_streaks() {
     let daily_model = claude_source
         .models
         .values()
-        .find(|model| model.display_name == "repo-a / claude-sonnet-4")
-        .expect("workspace daily model display");
+        .find(|model| model.model_id == "claude-sonnet-4")
+        .expect("workspace daily model");
+    assert_eq!(daily_model.display_name, "claude-sonnet-4");
+    assert_eq!(
+        daily_model.workspace_key.as_deref(),
+        Some("/Users/alice/repo-a")
+    );
+    assert_eq!(daily_model.workspace_label.as_deref(), Some("repo-a"));
     assert_eq!(daily_model.provider, "anthropic");
     assert_eq!(daily_model.messages, 1);
 }

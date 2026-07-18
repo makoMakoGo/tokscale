@@ -306,10 +306,10 @@ fn rank_canonical_models(daily: &DailyUsage) -> Vec<RankedModel> {
     for source in daily.source_breakdown.values() {
         for model in source.models.values() {
             let tokens = model.tokens.total();
-            if model.color_key.is_empty() || tokens == 0 {
+            if model.model_id.is_empty() || tokens == 0 {
                 continue;
             }
-            let entry = totals.entry(model.color_key.clone()).or_default();
+            let entry = totals.entry(model.model_id.clone()).or_default();
             entry.0 = entry.0.saturating_add(tokens);
             entry.1 += model.cost;
         }
@@ -726,8 +726,11 @@ mod tests {
     ) -> DailyModelInfo {
         DailyModelInfo {
             provider: provider.to_string(),
+            model_id: color_key.to_string(),
             display_name: display_name.to_string(),
             color_key: color_key.to_string(),
+            workspace_key: None,
+            workspace_label: None,
             tokens: token_breakdown(tokens),
             cost,
             messages: 0,
@@ -1070,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_ranking_uses_color_key_instead_of_display_name() {
+    fn canonical_ranking_uses_model_id_instead_of_display_name() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
         let daily = day_usage(
             date,
@@ -1146,6 +1149,61 @@ mod tests {
         assert_eq!(
             rank_canonical_models(&model_projection),
             rank_canonical_models(&workspace_projection)
+        );
+    }
+
+    #[test]
+    fn model_and_client_provider_projection_rankings_are_identical() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        let model_projection = day_usage(
+            date,
+            100,
+            2.0,
+            vec![(
+                "harness",
+                source_info(
+                    100,
+                    2.0,
+                    vec![(
+                        "gpt-5.4",
+                        model_info("openai", "gpt-5.4", "gpt-5.4", 100, 2.0),
+                    )],
+                ),
+            )],
+        );
+        let client_provider_projection = day_usage(
+            date,
+            100,
+            2.0,
+            vec![
+                (
+                    "codex",
+                    source_info(
+                        60,
+                        1.2,
+                        vec![(
+                            "v1|codex|openai|gpt-5.4",
+                            model_info("openai", "gpt-5.4", "gpt-5.4", 60, 1.2),
+                        )],
+                    ),
+                ),
+                (
+                    "kimi",
+                    source_info(
+                        40,
+                        0.8,
+                        vec![(
+                            "v1|kimi|azure|gpt-5.4",
+                            model_info("azure", "gpt-5.4", "gpt-5.4", 40, 0.8),
+                        )],
+                    ),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            rank_canonical_models(&model_projection),
+            rank_canonical_models(&client_provider_projection)
         );
     }
 

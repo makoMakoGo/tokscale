@@ -6,7 +6,7 @@ use ratatui::widgets::{
 use super::model_usage_layout::{
     model_usage_table_layout, ModelUsageColumn as ModelsColumn, ModelUsageLayoutSchema,
     ModelUsageTableDensity as ModelsTableDensity, ModelUsageTableLayout as ModelsTableLayout,
-    DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH,
+    DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH, WORKSPACE_MIN_WIDTH,
 };
 use super::table_layout::{
     display_width, distributed_table_area, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
@@ -14,32 +14,36 @@ use super::table_layout::{
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
     get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
-    truncate_model_display_name_to, viewport_scrollbar_state,
+    truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
 
 fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
-    model
-        .workspace_label
-        .as_deref()
-        .unwrap_or("Unknown workspace")
+    workspace_label_or_unknown(model.workspace_label.as_deref())
 }
 
-fn model_display_name(model: &crate::tui::data::ModelUsage, group_by: &GroupBy) -> String {
-    if *group_by == GroupBy::WorkspaceModel {
-        format!("{} / {}", workspace_label(model), model.model)
-    } else {
-        model.model.clone()
-    }
+/// The Model column always shows the bare canonical model; under
+/// `GroupBy::WorkspaceModel` the workspace dimension lives in its own column
+/// instead of a "workspace / model" prefix (ADR 0026).
+fn model_display_name(model: &crate::tui::data::ModelUsage) -> &str {
+    &model.model
 }
 
-fn model_content_width(models: &[&crate::tui::data::ModelUsage], group_by: &GroupBy) -> u16 {
+fn model_content_width(models: &[&crate::tui::data::ModelUsage]) -> u16 {
     models
         .iter()
-        .map(|model| display_width(&model_display_name(model, group_by)))
+        .map(|model| display_width(model_display_name(model)))
         .max()
         .unwrap_or(MODEL_MIN_WIDTH)
+}
+
+fn workspace_content_width(models: &[&crate::tui::data::ModelUsage]) -> u16 {
+    models
+        .iter()
+        .map(|model| display_width(workspace_label(model)))
+        .max()
+        .unwrap_or(WORKSPACE_MIN_WIDTH)
 }
 
 fn models_table_layout(
@@ -47,6 +51,7 @@ fn models_table_layout(
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
+    workspace_content_width: u16,
     group_by: &GroupBy,
 ) -> ModelsTableLayout {
     let schema = if *group_by == GroupBy::WorkspaceModel {
@@ -60,6 +65,7 @@ fn models_table_layout(
         model_content_width,
         provider_content_width,
         source_content_width,
+        workspace_content_width,
         schema,
     )
 }
@@ -70,6 +76,7 @@ fn model_column_header(
     density: ModelsTableDensity,
 ) -> &'static str {
     match column {
+        ModelsColumn::Workspace => "Workspace",
         ModelsColumn::Model => "Model",
         ModelsColumn::Messages => "Msgs",
         ModelsColumn::Provider => "Provider",
@@ -161,7 +168,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let model_content_width = model_content_width(&models, &group_by);
+    let model_content_width = model_content_width(&models);
     let provider_content_width = models
         .iter()
         .map(|model| display_width(&get_provider_display_name(&model.provider)))
@@ -172,12 +179,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|model| display_width(&get_client_display_name(&model.client)))
         .max()
         .unwrap_or(DETAIL_SOURCE_WIDTH);
+    let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
+        workspace_content_width(&models)
+    } else {
+        0
+    };
     let visible_models = &models[start..end];
     let table_layout = models_table_layout(
         table_area.width,
         model_content_width,
         provider_content_width,
         source_content_width,
+        workspace_content_width,
         &group_by,
     );
     let columns = table_layout.columns.clone();
@@ -209,11 +222,16 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_striped = idx % 2 == 1;
 
             let model_color = app.model_color_for(&model.provider, &model.model);
-            let display_name = model_display_name(model, &group_by);
+            let display_name = model_display_name(model);
             let cell_for_column = |column: ModelsColumn| -> Cell {
                 match column {
+                    ModelsColumn::Workspace => Cell::from(truncate_display_width(
+                        workspace_label(model),
+                        table_layout.width_for(ModelsColumn::Workspace),
+                    ))
+                    .style(Style::default().fg(theme_muted)),
                     ModelsColumn::Model => Cell::from(truncate_model_display_name_to(
-                        &display_name,
+                        display_name,
                         table_layout.model_width,
                     ))
                     .style(
@@ -312,7 +330,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::super::model_usage_layout::{
-        MODEL_MAX_WIDTH, PROVIDER_MAX_WIDTH, SOURCE_MAX_WIDTH, WORKSPACE_MODEL_MAX_WIDTH,
+        MODEL_MAX_WIDTH, PROVIDER_MAX_WIDTH, SOURCE_MAX_WIDTH, WORKSPACE_MAX_WIDTH,
     };
     use super::*;
 
@@ -324,7 +342,7 @@ mod tests {
     }
 
     fn model_layout(table_width: u16, model: u16, provider: u16, source: u16) -> ModelsTableLayout {
-        models_table_layout(table_width, model, provider, source, &GroupBy::Model)
+        models_table_layout(table_width, model, provider, source, 0, &GroupBy::Model)
     }
 
     fn workspace_model_layout(
@@ -338,6 +356,7 @@ mod tests {
             model,
             provider,
             source,
+            22,
             &GroupBy::WorkspaceModel,
         )
     }
@@ -364,7 +383,7 @@ mod tests {
 
     #[test]
     fn narrow_model_layout_stops_before_context_columns_before_truncating_model() {
-        let layout = models_table_layout(74, 80, 56, 40, &GroupBy::Model);
+        let layout = models_table_layout(74, 80, 56, 40, 0, &GroupBy::Model);
 
         assert_eq!(
             layout.columns,
@@ -378,7 +397,7 @@ mod tests {
 
     #[test]
     fn very_narrow_model_layout_keeps_tokens_before_optional_detail_columns() {
-        let layout = models_table_layout(54, 80, 56, 40, &GroupBy::Model);
+        let layout = models_table_layout(54, 80, 56, 40, 0, &GroupBy::Model);
 
         assert_eq!(layout.density, ModelsTableDensity::Core);
         assert_eq!(
@@ -421,14 +440,14 @@ mod tests {
         let base = workspace_model_layout(160, 28, 42, 34);
         let wide = workspace_model_layout(200, 28, 42, 34);
 
-        assert_eq!(length_at(&wide.widths, 0) as usize, wide.model_width);
-        assert!(wide.model_width <= WORKSPACE_MODEL_MAX_WIDTH as usize);
+        assert_eq!(length_at(&wide.widths, 1) as usize, wide.model_width);
+        assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
         assert!(wide.columns.contains(&ModelsColumn::Source));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
-        assert_eq!(length_at(&base.widths, 1), 34);
-        assert_eq!(length_at(&base.widths, 2), PROVIDER_MAX_WIDTH);
-        assert_eq!(length_at(&wide.widths, 1), 34);
-        assert_eq!(length_at(&wide.widths, 2), PROVIDER_MAX_WIDTH);
+        assert_eq!(length_at(&base.widths, 2), 34);
+        assert_eq!(length_at(&base.widths, 3), PROVIDER_MAX_WIDTH);
+        assert_eq!(length_at(&wide.widths, 2), 34);
+        assert_eq!(length_at(&wide.widths, 3), PROVIDER_MAX_WIDTH);
     }
 
     #[test]
@@ -462,11 +481,12 @@ mod tests {
     }
 
     #[test]
-    fn workspace_model_column_uses_workspace_cap_on_wide_tables() {
+    fn workspace_and_model_columns_stay_capped_on_very_wide_tables() {
         let layout = workspace_model_layout(400, 80, 120, 120);
 
-        assert_eq!(length_at(&layout.widths, 0), WORKSPACE_MODEL_MAX_WIDTH);
-        assert_eq!(layout.model_width, WORKSPACE_MODEL_MAX_WIDTH as usize);
+        assert_eq!(length_at(&layout.widths, 0), WORKSPACE_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 1), MODEL_MAX_WIDTH);
+        assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
     }
 
     #[test]
@@ -480,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_model_content_width_includes_workspace_prefix() {
+    fn workspace_model_widths_split_workspace_from_bare_model() {
         let model = crate::tui::data::ModelUsage {
             model: "gpt-5".to_string(),
             provider: "openai".to_string(),
@@ -500,11 +520,12 @@ mod tests {
         };
         let models = vec![&model];
 
+        assert_eq!(model_content_width(&models), 5);
         assert_eq!(
-            model_content_width(&models, &GroupBy::WorkspaceModel),
-            display_width("project-with-long-name / gpt-5")
+            workspace_content_width(&models),
+            display_width("project-with-long-name")
         );
-        assert_eq!(model_content_width(&models, &GroupBy::Model), 5);
+        assert_eq!(model_display_name(&model), "gpt-5");
     }
 
     #[test]
@@ -521,5 +542,106 @@ mod tests {
                 .map(|index| length_at(&fit.widths, index))
                 .collect::<Vec<_>>()
         );
+    }
+
+    use crate::tui::app::Tab;
+    use crate::tui::app::TuiConfig;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn make_models_app(width: u16, group_by: GroupBy) -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.terminal_width = width;
+        app.current_tab = Tab::Models;
+        *app.group_by.borrow_mut() = group_by;
+        app
+    }
+
+    fn workspace_model_usage(
+        model: &str,
+        workspace: &str,
+        cost: f64,
+    ) -> crate::tui::data::ModelUsage {
+        crate::tui::data::ModelUsage {
+            model: model.to_string(),
+            provider: "openai".to_string(),
+            client: "opencode".to_string(),
+            workspace_key: Some(format!("/work/{workspace}")),
+            workspace_label: Some(workspace.to_string()),
+            tokens: crate::tui::data::TokenBreakdown::default(),
+            cost,
+            performance: Default::default(),
+            session_count: 1,
+        }
+    }
+
+    fn render_body(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn models_table_shows_workspace_column_under_workspace_grouping() {
+        let mut app = make_models_app(140, GroupBy::WorkspaceModel);
+        app.data.models = vec![
+            workspace_model_usage("gpt-5", "ws-alpha", 3.0),
+            workspace_model_usage("gpt-5", "ws-beta", 1.0),
+        ];
+
+        let body = render_body(&mut app, 140, 8);
+
+        assert!(
+            body.contains("Workspace"),
+            "expected Workspace header\n{body}"
+        );
+        assert!(
+            body.contains("ws-alpha"),
+            "expected workspace label\n{body}"
+        );
+        assert!(body.contains("ws-beta"), "expected workspace label\n{body}");
+        assert!(body.contains("gpt-5"), "expected bare model name\n{body}");
+        assert!(
+            !body.contains("ws-alpha / gpt-5"),
+            "model cell must not carry the workspace prefix\n{body}"
+        );
+    }
+
+    #[test]
+    fn models_table_omits_workspace_column_outside_workspace_grouping() {
+        let mut app = make_models_app(140, GroupBy::Model);
+        app.data.models = vec![workspace_model_usage("gpt-5", "ws-alpha", 3.0)];
+
+        let body = render_body(&mut app, 140, 8);
+
+        assert!(
+            !body.contains("Workspace"),
+            "Workspace column must not render under GroupBy::Model\n{body}"
+        );
+        assert!(body.contains("gpt-5"), "expected bare model name\n{body}");
     }
 }

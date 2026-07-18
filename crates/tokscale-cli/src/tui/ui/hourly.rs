@@ -434,7 +434,7 @@ fn hourly_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
-    use crate::tui::data::{HourlyUsage, TokenBreakdown};
+    use crate::tui::data::{HourlyModelInfo, HourlyUsage, TokenBreakdown};
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -653,5 +653,90 @@ mod tests {
         assert_eq!(lines.len(), height as usize);
         assert!(app.max_visible_items >= 1);
         assert!(app.max_visible_items <= (height as usize).saturating_sub(3));
+    }
+
+    fn hourly_model(provider: &str, model_id: &str, tokens: u64) -> HourlyModelInfo {
+        HourlyModelInfo {
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            display_name: model_id.to_string(),
+            color_key: model_id.to_string(),
+            tokens: TokenBreakdown {
+                input: tokens,
+                ..TokenBreakdown::default()
+            },
+            cost: 1.0,
+        }
+    }
+
+    fn grouped_hour(models: Vec<(&str, HourlyModelInfo)>) -> HourlyUsage {
+        let mut entry = hour(NaiveDate::from_ymd_opt(2026, 5, 29).unwrap(), 14);
+        entry.tokens = TokenBreakdown {
+            input: 100,
+            ..TokenBreakdown::default()
+        };
+        entry.models = models
+            .into_iter()
+            .map(|(key, model)| (key.to_string(), model))
+            .collect();
+        entry
+    }
+
+    #[test]
+    fn hourly_table_and_profile_are_grouping_invariant() {
+        // The Hourly table and Profile read only hour-level totals (ADR
+        // 0026): re-keying the per-group model buckets must not change the
+        // rendered output.
+        let projections = [
+            // GroupBy::Model: one merged bucket per model.
+            grouped_hour(vec![("gpt-5", hourly_model("openai", "gpt-5", 100))]),
+            // GroupBy::ClientModel: bucketed per client.
+            grouped_hour(vec![
+                ("v1|claude|gpt-5", hourly_model("openai", "gpt-5", 60)),
+                ("v1|codex|gpt-5", hourly_model("openai", "gpt-5", 40)),
+            ]),
+            // GroupBy::ClientProviderModel: bucketed per client+provider.
+            grouped_hour(vec![
+                (
+                    "v1|claude|openai|gpt-5",
+                    hourly_model("openai", "gpt-5", 60),
+                ),
+                ("v1|claude|azure|gpt-5", hourly_model("azure", "gpt-5", 40)),
+            ]),
+            // GroupBy::WorkspaceModel: bucketed per workspace.
+            grouped_hour(vec![
+                ("v1|claude|ws-a|gpt-5", hourly_model("openai", "gpt-5", 60)),
+                ("v1|claude|ws-b|gpt-5", hourly_model("openai", "gpt-5", 40)),
+            ]),
+        ];
+
+        let mut table_outputs = Vec::new();
+        let mut profile_outputs = Vec::new();
+        for projection in projections {
+            let mut app = make_hourly_app(120);
+            app.data.hourly = vec![projection];
+            app.data.total_tokens = 100;
+            app.data.total_cost = 1.0;
+            table_outputs.push(render_lines(&mut app, 120, 20).join("\n"));
+            profile_outputs.push(
+                hourly_profile::build_hourly_profile_lines(&app, 120)
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+
+        for output in &table_outputs {
+            assert_eq!(output, &table_outputs[0]);
+        }
+        for output in &profile_outputs {
+            assert_eq!(output, &profile_outputs[0]);
+        }
     }
 }

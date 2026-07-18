@@ -169,6 +169,12 @@ pub(crate) fn get_client_display_name(client: &str) -> String {
     display_comma_list(client, get_single_client_display_name)
 }
 
+/// Fallback label for the Workspace column when a row carries no workspace
+/// dimension. Shared by the Models table and the Daily/Period detail tables.
+pub(crate) fn workspace_label_or_unknown(workspace: Option<&str>) -> &str {
+    workspace.unwrap_or("Unknown workspace")
+}
+
 fn get_single_client_display_name(client: &str) -> String {
     let config = TokscaleConfig::initialized();
     if let Some(name) = config.get_client_display_name(client) {

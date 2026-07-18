@@ -59,10 +59,8 @@ fn collect_overview_data(app: &App) -> OverviewData {
 
     for day in &app.data.daily {
         for source in day.source_breakdown.values() {
-            for (model_key, model) in &source.models {
-                let canonical =
-                    canonical_model_key(model_key, &model.display_name, &model.color_key);
-                let entry = overview.models.entry(canonical).or_default();
+            for model in source.models.values() {
+                let entry = overview.models.entry(model.model_id.clone()).or_default();
                 if entry.provider.is_empty() && !model.provider.is_empty() {
                     entry.provider = model.provider.clone();
                 }
@@ -76,16 +74,6 @@ fn collect_overview_data(app: &App) -> OverviewData {
     }
 
     overview
-}
-
-fn canonical_model_key(model_key: &str, display_name: &str, color_key: &str) -> String {
-    if !color_key.is_empty() {
-        color_key.to_string()
-    } else if !display_name.is_empty() {
-        display_name.to_string()
-    } else {
-        model_key.to_string()
-    }
 }
 
 fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
@@ -105,10 +93,8 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             .map(|day| {
                 let mut models = BTreeMap::<String, ModelAggregate>::new();
                 for source in day.source_breakdown.values() {
-                    for (model_key, model) in &source.models {
-                        let canonical =
-                            canonical_model_key(model_key, &model.display_name, &model.color_key);
-                        let entry = models.entry(canonical).or_default();
+                    for model in source.models.values() {
+                        let entry = models.entry(model.model_id.clone()).or_default();
                         if entry.provider.is_empty() && !model.provider.is_empty() {
                             entry.provider = model.provider.clone();
                         }
@@ -143,10 +129,8 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             .rev()
             .map(|hour| {
                 let mut models = BTreeMap::<String, ModelAggregate>::new();
-                for (model_key, model) in &hour.models {
-                    let canonical =
-                        canonical_model_key(model_key, &model.display_name, &model.color_key);
-                    let entry = models.entry(canonical).or_default();
+                for model in hour.models.values() {
+                    let entry = models.entry(model.model_id.clone()).or_default();
                     if entry.provider.is_empty() && !model.provider.is_empty() {
                         entry.provider = model.provider.clone();
                     }
@@ -268,18 +252,6 @@ fn truncate_string(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn canonical_model_prefers_color_key_over_grouped_label() {
-        assert_eq!(
-            canonical_model_key(
-                "workspace-a / claude-sonnet-4",
-                "workspace-a / claude-sonnet-4",
-                "claude-sonnet-4",
-            ),
-            "claude-sonnet-4"
-        );
-    }
 
     #[test]
     fn legend_only_includes_complete_items_that_fit() {

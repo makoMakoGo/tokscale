@@ -23,7 +23,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 37;
+const CACHE_SCHEMA_VERSION: u32 = 38;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,8 +181,14 @@ struct CachedAgentUsage {
 #[serde(rename_all = "camelCase")]
 struct CachedDailyModelInfo {
     provider: String,
+    #[serde(default)]
+    model_id: String,
     display_name: String,
     color_key: String,
+    #[serde(default)]
+    workspace_key: Option<String>,
+    #[serde(default)]
+    workspace_label: Option<String>,
     tokens: CachedTokenBreakdown,
     cost: f64,
     messages: u64,
@@ -211,6 +217,8 @@ struct CachedDailyUsage {
 #[serde(rename_all = "camelCase")]
 struct CachedHourlyModelInfo {
     provider: String,
+    #[serde(default)]
+    model_id: String,
     display_name: String,
     color_key: String,
     tokens: CachedTokenBreakdown,
@@ -405,8 +413,11 @@ impl<'a> From<&'a AgentUsage> for CachedAgentUsageRef<'a> {
 #[serde(rename_all = "camelCase")]
 struct CachedDailyModelInfoRef<'a> {
     provider: &'a str,
+    model_id: &'a str,
     display_name: &'a str,
     color_key: &'a str,
+    workspace_key: Option<&'a str>,
+    workspace_label: Option<&'a str>,
     tokens: CachedTokenBreakdownRef,
     cost: f64,
     messages: u64,
@@ -416,8 +427,11 @@ impl<'a> From<&'a DailyModelInfo> for CachedDailyModelInfoRef<'a> {
     fn from(model: &'a DailyModelInfo) -> Self {
         Self {
             provider: &model.provider,
+            model_id: &model.model_id,
             display_name: &model.display_name,
             color_key: &model.color_key,
+            workspace_key: model.workspace_key.as_deref(),
+            workspace_label: model.workspace_label.as_deref(),
             tokens: (&model.tokens).into(),
             cost: model.cost,
             messages: model.messages,
@@ -523,6 +537,7 @@ impl Serialize for CachedDailyEntriesRef<'_> {
 #[serde(rename_all = "camelCase")]
 struct CachedHourlyModelInfoRef<'a> {
     provider: &'a str,
+    model_id: &'a str,
     display_name: &'a str,
     color_key: &'a str,
     tokens: CachedTokenBreakdownRef,
@@ -533,6 +548,7 @@ impl<'a> From<&'a HourlyModelInfo> for CachedHourlyModelInfoRef<'a> {
     fn from(model: &'a HourlyModelInfo) -> Self {
         Self {
             provider: &model.provider,
+            model_id: &model.model_id,
             display_name: &model.display_name,
             color_key: &model.color_key,
             tokens: (&model.tokens).into(),
@@ -709,8 +725,11 @@ impl From<CachedAgentUsage> for AgentUsage {
 fn daily_model_info_from_cached(value: CachedDailyModelInfo) -> DailyModelInfo {
     DailyModelInfo {
         provider: value.provider,
+        model_id: value.model_id,
         display_name: value.display_name,
         color_key: value.color_key,
+        workspace_key: value.workspace_key,
+        workspace_label: value.workspace_label,
         tokens: value.tokens.into(),
         cost: value.cost,
         messages: value.messages,
@@ -737,6 +756,7 @@ impl From<CachedDailySourceInfo> for DailySourceInfo {
 fn hourly_model_info_from_cached(value: CachedHourlyModelInfo) -> HourlyModelInfo {
     HourlyModelInfo {
         provider: value.provider,
+        model_id: value.model_id,
         display_name: value.display_name,
         color_key: value.color_key,
         tokens: value.tokens.into(),
@@ -1278,8 +1298,11 @@ mod tests {
             "zeta-model".to_string(),
             DailyModelInfo {
                 provider: "anthropic".to_string(),
+                model_id: "zeta-model".to_string(),
                 display_name: "Zeta Model".to_string(),
                 color_key: "zeta-model".to_string(),
+                workspace_key: None,
+                workspace_label: None,
                 tokens: token_breakdown(31),
                 cost: 3.1,
                 messages: 7,
@@ -1289,8 +1312,11 @@ mod tests {
             "alpha-model".to_string(),
             DailyModelInfo {
                 provider: "openai".to_string(),
+                model_id: "alpha-model".to_string(),
                 display_name: "Alpha Model".to_string(),
                 color_key: "alpha-model".to_string(),
+                workspace_key: Some("/repo-alpha".to_string()),
+                workspace_label: Some("repo-alpha".to_string()),
                 tokens: token_breakdown(32),
                 cost: 3.2,
                 messages: 8,
@@ -1302,8 +1328,11 @@ mod tests {
             "gemini-model".to_string(),
             DailyModelInfo {
                 provider: "google".to_string(),
+                model_id: "gemini-model".to_string(),
                 display_name: "Gemini Model".to_string(),
                 color_key: "gemini-model".to_string(),
+                workspace_key: None,
+                workspace_label: None,
                 tokens: token_breakdown(33),
                 cost: 3.3,
                 messages: 9,
@@ -1332,6 +1361,7 @@ mod tests {
             "zeta-model".to_string(),
             HourlyModelInfo {
                 provider: "anthropic".to_string(),
+                model_id: "zeta-model".to_string(),
                 display_name: "Zeta Model".to_string(),
                 color_key: "zeta-model".to_string(),
                 tokens: token_breakdown(51),
@@ -1342,6 +1372,7 @@ mod tests {
             "alpha-model".to_string(),
             HourlyModelInfo {
                 provider: "openai".to_string(),
+                model_id: "alpha-model".to_string(),
                 display_name: "Alpha Model".to_string(),
                 color_key: "alpha-model".to_string(),
                 tokens: token_breakdown(52),
@@ -1585,8 +1616,11 @@ mod tests {
                 .keys(),
             vec![
                 "provider",
+                "modelId",
                 "displayName",
                 "colorKey",
+                "workspaceKey",
+                "workspaceLabel",
                 "tokens",
                 "cost",
                 "messages",
@@ -1608,7 +1642,14 @@ mod tests {
         );
         assert_eq!(
             ordered_hourly.field("models").element(0).element(1).keys(),
-            vec!["provider", "displayName", "colorKey", "tokens", "cost"]
+            vec![
+                "provider",
+                "modelId",
+                "displayName",
+                "colorKey",
+                "tokens",
+                "cost"
+            ]
         );
 
         let ordered_graph = ordered_data.field("graph");
@@ -1918,6 +1959,86 @@ mod tests {
                 &GroupBy::WorkspaceModel,
                 &CacheReportScope::default()
             ),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_misses_for_pre_identity_schema() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        // Schema 37 predates the model identity fields (modelId,
+        // workspaceKey, workspaceLabel on daily/hourly models). The file must
+        // still deserialize, then miss on the schema version check — no parse
+        // error, no partial data (ADR 0026).
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{
+  "schemaVersion": 37,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "groupBy": "model",
+  "reportScope": {
+    "resolvedHomeDir": "",
+    "useEnvRoots": false,
+    "since": null,
+    "until": null,
+    "year": null
+  },
+  "sourceInventorySignature": [90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90],
+  "data": {
+    "models": [],
+    "agents": [],
+    "daily": [{
+      "date": "2026-07-11",
+      "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+      "cost": 0.1,
+      "sourceBreakdown": [["claude", {
+        "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+        "cost": 0.1,
+        "models": [["v1|m|5:model", {
+          "provider": "anthropic",
+          "displayName": "model",
+          "colorKey": "model",
+          "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+          "cost": 0.1,
+          "messages": 1
+        }]]
+      }]],
+      "messageCount": 1,
+      "turnCount": 1
+    }],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 1,
+    "totalCost": 0.1,
+    "currentStreak": 1,
+    "longestStreak": 1
+  }
+}"#,
+        )
+        .unwrap();
+
+        let raw = fs::read(&cache_path).unwrap();
+        let parsed: CachedTUIData =
+            serde_json::from_slice(&raw).expect("legacy schema file must still deserialize");
+        assert_eq!(parsed.schema_version, 37);
+
+        let clients = make_filters(&[ClientId::Claude]);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
             CacheResult::Miss
         ));
 

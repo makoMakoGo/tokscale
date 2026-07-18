@@ -9,7 +9,7 @@ use super::model_usage_layout::{
     model_usage_table_layout, ModelUsageColumn as PeriodDetailColumn, ModelUsageLayoutSchema,
     ModelUsageTableDensity as PeriodDetailTableDensity,
     ModelUsageTableLayout as PeriodDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
-    MODEL_MIN_WIDTH,
+    MODEL_MIN_WIDTH, WORKSPACE_MIN_WIDTH,
 };
 use super::table_layout::{
     display_width, distributed_table_area, responsive_table_layout, width_for_column,
@@ -18,10 +18,12 @@ use super::table_layout::{
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
     get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
-    truncate_model_display_name_to, viewport_scrollbar_state, MODEL_DISPLAY_MAX_WIDTH,
+    truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
+    MODEL_DISPLAY_MAX_WIDTH,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{PeriodKind, PeriodUsage};
+use tokscale_core::GroupBy;
 
 const PERIOD_MIN_WIDTH: u16 = 6;
 const PERIOD_MAX_WIDTH: u16 = 20;
@@ -307,13 +309,21 @@ fn period_detail_table_layout(
     model_content_width: u16,
     provider_content_width: u16,
     source_content_width: u16,
+    workspace_content_width: u16,
+    group_by: &GroupBy,
 ) -> PeriodDetailTableLayout {
+    let schema = if *group_by == GroupBy::WorkspaceModel {
+        ModelUsageLayoutSchema::WorkspaceDetail
+    } else {
+        ModelUsageLayoutSchema::Detail
+    };
     model_usage_table_layout(
         table_width,
         model_content_width,
         provider_content_width,
         source_content_width,
-        ModelUsageLayoutSchema::Detail,
+        workspace_content_width,
+        schema,
     )
 }
 
@@ -342,6 +352,7 @@ fn period_detail_column_header(
     density: PeriodDetailTableDensity,
 ) -> &'static str {
     match column {
+        PeriodDetailColumn::Workspace => "Workspace",
         PeriodDetailColumn::Model => "Model",
         PeriodDetailColumn::Provider => "Provider",
         PeriodDetailColumn::Source => "Source",
@@ -408,19 +419,17 @@ fn top_period_model(period: &PeriodUsage) -> Option<TopPeriodModel> {
     let mut models: BTreeMap<String, TopPeriodModel> = BTreeMap::new();
 
     for source in period.source_breakdown.values() {
-        for (model_key, model) in &source.models {
+        for model in source.models.values() {
             let tokens = model.tokens.total();
-            if tokens == 0 {
+            // Rank by the bare canonical id (ADR 0026): grouping must not
+            // split one model into several candidates, and the storage map
+            // key is never a user-visible identity.
+            if tokens == 0 || model.model_id.is_empty() {
                 continue;
             }
 
-            let label = if model.display_name.is_empty() {
-                model_key.clone()
-            } else {
-                model.display_name.clone()
-            };
             models
-                .entry(model_key.clone())
+                .entry(model.model_id.clone())
                 .and_modify(|entry| {
                     entry.tokens = entry
                         .tokens
@@ -429,8 +438,8 @@ fn top_period_model(period: &PeriodUsage) -> Option<TopPeriodModel> {
                     entry.cost += model.cost;
                 })
                 .or_insert_with(|| TopPeriodModel {
-                    key: model_key.clone(),
-                    label,
+                    key: model.model_id.clone(),
+                    label: model.model_id.clone(),
                     provider: model.provider.clone(),
                     color_key: model.color_key.clone(),
                     tokens,
@@ -540,11 +549,23 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|row| display_width(&get_client_display_name(&row.source)))
         .max()
         .unwrap_or(DETAIL_SOURCE_WIDTH);
+    let group_by = app.group_by.borrow().clone();
+    let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
+        rows_data
+            .iter()
+            .map(|row| display_width(workspace_label_or_unknown(row.workspace.as_deref())))
+            .max()
+            .unwrap_or(WORKSPACE_MIN_WIDTH)
+    } else {
+        0
+    };
     let table_layout = period_detail_table_layout(
         table_area.width,
         model_content_width,
         provider_content_width,
         source_content_width,
+        workspace_content_width,
+        &group_by,
     );
     let columns = table_layout.columns.clone();
 
@@ -582,6 +603,11 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let cell_for_column = |column: PeriodDetailColumn| -> Cell {
                 match column {
+                    PeriodDetailColumn::Workspace => Cell::from(truncate_display_width(
+                        workspace_label_or_unknown(row.workspace.as_deref()),
+                        table_layout.width_for(PeriodDetailColumn::Workspace),
+                    ))
+                    .style(Style::default().fg(theme_muted)),
                     PeriodDetailColumn::Model => Cell::from(truncate_model_display_name_to(
                         &row.model,
                         table_layout.model_width,
@@ -1018,5 +1044,253 @@ mod tests {
     #[test]
     fn period_start_clamps_stale_scroll_to_last_period() {
         assert_eq!(clamped_period_start(100, 8), 7);
+    }
+
+    use crate::tui::app::{PeriodDetailSelection, Tab, TuiConfig};
+    use crate::tui::data::{DailyModelInfo, DailySourceInfo, DailyUsage, TokenBreakdown};
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn token_breakdown(input: u64) -> TokenBreakdown {
+        TokenBreakdown {
+            input,
+            ..TokenBreakdown::default()
+        }
+    }
+
+    fn daily_model(provider: &str, model_id: &str, tokens: u64, cost: f64) -> DailyModelInfo {
+        DailyModelInfo {
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            display_name: model_id.to_string(),
+            color_key: model_id.to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            tokens: token_breakdown(tokens),
+            cost,
+            messages: 1,
+        }
+    }
+
+    fn workspace_daily_model(
+        provider: &str,
+        model_id: &str,
+        workspace: &str,
+        tokens: u64,
+        cost: f64,
+    ) -> DailyModelInfo {
+        DailyModelInfo {
+            workspace_key: Some(format!("/work/{workspace}")),
+            workspace_label: Some(workspace.to_string()),
+            ..daily_model(provider, model_id, tokens, cost)
+        }
+    }
+
+    fn period_with_models(models: Vec<(&str, DailyModelInfo)>) -> PeriodUsage {
+        let tokens = models
+            .iter()
+            .map(|(_, model)| model.tokens.total())
+            .fold(0_u64, u64::saturating_add);
+        PeriodUsage {
+            section_year: 2026,
+            section_label: "2026".to_string(),
+            label: "2026-06".to_string(),
+            short_label: "06".to_string(),
+            start_date: NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+            tokens: token_breakdown(tokens),
+            cost: 0.0,
+            source_breakdown: BTreeMap::from([(
+                "codex".to_string(),
+                DailySourceInfo {
+                    tokens: token_breakdown(tokens),
+                    cost: 0.0,
+                    models: models
+                        .into_iter()
+                        .map(|(key, model)| (key.to_string(), model))
+                        .collect(),
+                },
+            )]),
+            message_count: 0,
+            turn_count: 0,
+            active_days: 1,
+        }
+    }
+
+    #[test]
+    fn top_period_model_ranking_is_grouping_invariant() {
+        // Same messages projected by each GroupBy: the winner must be the
+        // canonical merge with the bare model label in every projection
+        // (ADR 0026). Per-bucket, kimi-k2.5 (200) beats each gpt-5 fragment;
+        // canonically gpt-5 wins with 210.
+        let model_projection = period_with_models(vec![
+            ("gpt-5", daily_model("openai", "gpt-5", 210, 2.0)),
+            ("kimi-k2.5", daily_model("moonshot", "kimi-k2.5", 200, 1.0)),
+        ]);
+        let client_model_projection = period_with_models(vec![
+            ("v1|codex|gpt-5", daily_model("openai", "gpt-5", 120, 1.0)),
+            ("v1|kimi|gpt-5", daily_model("openai", "gpt-5", 90, 1.0)),
+            (
+                "v1|kimi|kimi-k2.5",
+                daily_model("moonshot", "kimi-k2.5", 200, 1.0),
+            ),
+        ]);
+        let client_provider_projection = period_with_models(vec![
+            (
+                "v1|codex|openai|gpt-5",
+                daily_model("openai", "gpt-5", 120, 1.0),
+            ),
+            (
+                "v1|codex|azure|gpt-5",
+                daily_model("azure", "gpt-5", 90, 1.0),
+            ),
+            (
+                "v1|codex|moonshot|kimi-k2.5",
+                daily_model("moonshot", "kimi-k2.5", 200, 1.0),
+            ),
+        ]);
+        let workspace_projection = period_with_models(vec![
+            (
+                "v1|codex|ws-a|gpt-5",
+                workspace_daily_model("openai", "gpt-5", "ws-a", 120, 1.0),
+            ),
+            (
+                "v1|codex|ws-b|gpt-5",
+                workspace_daily_model("openai", "gpt-5", "ws-b", 90, 1.0),
+            ),
+            (
+                "v1|codex|ws-a|kimi-k2.5",
+                workspace_daily_model("moonshot", "kimi-k2.5", "ws-a", 200, 1.0),
+            ),
+        ]);
+
+        for projection in [
+            &model_projection,
+            &client_model_projection,
+            &client_provider_projection,
+            &workspace_projection,
+        ] {
+            let model = top_period_model(projection).expect("top model should be selected");
+            assert_eq!(model.key, "gpt-5");
+            assert_eq!(model.label, "gpt-5", "label must be the bare model");
+            assert!(!model.label.contains(" / "), "no workspace prefix");
+            assert_eq!(model.tokens, 210);
+        }
+    }
+
+    fn make_period_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.terminal_width = width;
+        app.current_tab = Tab::Monthly;
+        app.sort_field = SortField::Date;
+        app.sort_direction = SortDirection::Descending;
+        app
+    }
+
+    fn workspace_detail_day() -> DailyUsage {
+        DailyUsage {
+            date: NaiveDate::from_ymd_opt(2026, 6, 9).unwrap(),
+            tokens: token_breakdown(300),
+            cost: 3.0,
+            source_breakdown: BTreeMap::from([(
+                "codex".to_string(),
+                DailySourceInfo {
+                    tokens: token_breakdown(300),
+                    cost: 3.0,
+                    models: BTreeMap::from([
+                        (
+                            "v1|codex|ws-a|gpt-5".to_string(),
+                            workspace_daily_model("openai", "gpt-5", "ws-alpha", 200, 2.0),
+                        ),
+                        (
+                            "v1|codex|ws-b|gpt-5".to_string(),
+                            workspace_daily_model("openai", "gpt-5", "ws-beta", 100, 1.0),
+                        ),
+                    ]),
+                },
+            )]),
+            message_count: 10,
+            turn_count: 3,
+        }
+    }
+
+    fn select_monthly_period(app: &mut App) {
+        let periods = crate::tui::data::build_period_usage(&app.data.daily, PeriodKind::Monthly);
+        let period = periods.first().expect("one monthly period");
+        app.selected_period_detail = Some(PeriodDetailSelection {
+            kind: PeriodKind::Monthly,
+            start_date: period.start_date,
+            end_date: period.end_date,
+        });
+    }
+
+    fn render_monthly_body(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_monthly(frame, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn period_detail_shows_workspace_column_under_workspace_grouping() {
+        let mut app = make_period_app(140);
+        *app.group_by.borrow_mut() = GroupBy::WorkspaceModel;
+        app.data.daily = vec![workspace_detail_day()];
+        select_monthly_period(&mut app);
+
+        let body = render_monthly_body(&mut app, 140, 8);
+
+        assert!(
+            body.contains("Workspace"),
+            "expected Workspace header\n{body}"
+        );
+        assert!(
+            body.contains("ws-alpha"),
+            "expected workspace label\n{body}"
+        );
+        assert!(body.contains("gpt-5"), "expected bare model name\n{body}");
+        assert!(
+            !body.contains("ws-alpha / gpt-5"),
+            "model cell must not carry the workspace prefix\n{body}"
+        );
+    }
+
+    #[test]
+    fn period_detail_omits_workspace_column_outside_workspace_grouping() {
+        let mut app = make_period_app(140);
+        app.data.daily = vec![workspace_detail_day()];
+        select_monthly_period(&mut app);
+
+        let body = render_monthly_body(&mut app, 140, 8);
+
+        assert!(
+            !body.contains("Workspace"),
+            "Workspace column must not render under GroupBy::Model\n{body}"
+        );
+        assert!(body.contains("gpt-5"), "expected bare model name\n{body}");
     }
 }

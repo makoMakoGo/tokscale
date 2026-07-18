@@ -16,7 +16,7 @@ use tokscale_core::{
 
 use ratatui::style::Color;
 
-use super::colors::{get_model_color, get_provider_shade, provider_color_key};
+use super::colors::{get_provider_shade, provider_color_key};
 use super::data::{
     build_period_usage, AgentUsage, DailySourceInfo, DailyUsage, DataLoader, HourlyUsage,
     ModelUsage, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
@@ -239,6 +239,9 @@ pub struct DetailRow {
     pub provider: String,
     pub model: String,
     pub color_key: String,
+    /// Workspace dimension for the Workspace column; populated only from
+    /// `DailyModelInfo` workspace fields (i.e. under `GroupBy::WorkspaceModel`).
+    pub workspace: Option<String>,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     pub messages: u64,
@@ -267,6 +270,7 @@ struct DetailRowAccumulator {
     provider: String,
     model: String,
     color_key: String,
+    workspace: Option<String>,
     tokens: TokenBreakdown,
     cost: f64,
     messages: u64,
@@ -320,6 +324,10 @@ fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Ve
                         },
                         // Merged detail buckets share a model-derived color key.
                         color_key: model_info.color_key.clone(),
+                        workspace: model_info
+                            .workspace_label
+                            .clone()
+                            .or_else(|| model_info.workspace_key.clone()),
                         tokens: TokenBreakdown::default(),
                         cost: 0.0,
                         messages: 0,
@@ -351,6 +359,7 @@ fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Ve
             provider: row.provider,
             model: row.model,
             color_key: row.color_key,
+            workspace: row.workspace,
             tokens: row.tokens,
             cost: row.cost,
             messages: row.messages,
@@ -449,6 +458,11 @@ pub struct App {
     /// (manual refresh and filter changes must always re-aggregate).
     pub reload_force: bool,
 
+    /// Marks the pending reload as grouping-triggered. Grouping is a
+    /// view-scope projection (ADR 0026), so such reloads re-aggregate but
+    /// must not force a Sessions rescan; only source-digest changes may.
+    pub reload_group_only: bool,
+
     /// Digest of the scanned sources at the last completed load; auto-refresh
     /// skips the parse when a fresh probe matches (ADR 0008).
     pub last_source_digest: Option<u64>,
@@ -457,9 +471,19 @@ pub struct App {
 
     pub dialog_needs_reload: Rc<RefCell<bool>>,
 
+    /// Reload channel for the Group By picker, kept separate from
+    /// `dialog_needs_reload` so grouping reloads stay distinguishable from
+    /// source-filter reloads.
+    pub dialog_group_reload: Rc<RefCell<bool>>,
+
     pub hourly_view_mode: HourlyViewMode,
 
     pub model_shade_map: HashMap<String, Color>,
+
+    /// Canonical model -> resolved provider key. Color lookups resolve the
+    /// provider through this map so one canonical model gets the same shade
+    /// under every `GroupBy` projection (ADR 0026).
+    pub model_provider_map: HashMap<String, String>,
 
     pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
     pub subscription_usage_errors: Vec<crate::commands::usage::UsageProviderError>,
@@ -537,6 +561,7 @@ impl App {
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_needs_reload = Rc::new(RefCell::new(false));
+        let dialog_group_reload = Rc::new(RefCell::new(false));
         let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
         if !Self::tab_visible(&settings, requested_tab) {
             anyhow::bail!(
@@ -599,11 +624,14 @@ impl App {
             blocking_loading: false,
             needs_reload: false,
             reload_force: false,
+            reload_group_only: false,
             last_source_digest: None,
             dialog_stack,
             dialog_needs_reload,
+            dialog_group_reload,
             hourly_view_mode: HourlyViewMode::default(),
             model_shade_map: HashMap::new(),
+            model_provider_map: HashMap::new(),
             subscription_usage: if usage_tab_enabled {
                 #[cfg(not(test))]
                 {
@@ -655,22 +683,22 @@ impl App {
 
     pub fn is_blocking_loading(&self) -> bool {
         self.blocking_loading
-            || (!self.dialog_stack.is_active() && *self.dialog_needs_reload.borrow())
+            || (!self.dialog_stack.is_active()
+                && (*self.dialog_needs_reload.borrow() || *self.dialog_group_reload.borrow()))
     }
 
     fn consume_dialog_reload_if_ready(&mut self) {
-        let needs_blocking_reload = {
-            let mut needs_reload = self.dialog_needs_reload.borrow_mut();
-            if !self.dialog_stack.is_active() && *needs_reload {
-                *needs_reload = false;
-                true
-            } else {
-                false
-            }
-        };
+        if self.dialog_stack.is_active() {
+            return;
+        }
+        let source_reload = std::mem::take(&mut *self.dialog_needs_reload.borrow_mut());
+        let group_reload = std::mem::take(&mut *self.dialog_group_reload.borrow_mut());
 
-        if needs_blocking_reload {
+        if source_reload || group_reload {
             self.request_blocking_reload();
+            // Grouping is a view-scope projection (ADR 0026): a reload it
+            // triggers must not force a Sessions rescan.
+            self.reload_group_only = group_reload && !source_reload;
         }
     }
 
@@ -761,11 +789,23 @@ impl App {
     }
 
     pub fn build_model_shade_map(&mut self) {
-        self.model_shade_map = super::colors::build_model_shade_map(&self.data.models);
+        let built = super::colors::build_model_shade_map(&self.data.models);
+        self.model_shade_map = built.shades;
+        self.model_provider_map = built.providers;
+    }
+
+    /// Resolves the provider for color lookups to the canonical per-model
+    /// provider, falling back to the caller-supplied provider's first segment
+    /// for models outside the current data set.
+    fn resolve_color_provider<'a>(&'a self, provider: &'a str, model: &str) -> &'a str {
+        self.model_provider_map
+            .get(model)
+            .map(String::as_str)
+            .unwrap_or_else(|| provider_color_key(provider))
     }
 
     pub fn model_color_for(&self, provider: &str, model: &str) -> Color {
-        let provider = provider_color_key(provider);
+        let provider = self.resolve_color_provider(provider, model);
         let lookup_key = super::colors::model_shade_key(provider, model);
         let color = self
             .model_shade_map
@@ -776,14 +816,7 @@ impl App {
     }
 
     pub fn model_color(&self, model: &str) -> Color {
-        let provider = provider_color_key("");
-        let lookup_key = super::colors::model_shade_key(provider, model);
-        let color = self
-            .model_shade_map
-            .get(&lookup_key)
-            .copied()
-            .unwrap_or_else(|| get_model_color(model));
-        self.theme.color(color)
+        self.model_color_for("", model)
     }
 
     pub fn has_visible_data(&self) -> bool {
@@ -1003,7 +1036,14 @@ impl App {
                 };
                 self.reset_hourly_view_interaction();
             }
-            KeyCode::Char('g') => {
+            // Group By only reshapes the group-keyed projections (ADR 0026):
+            // Models plus the Daily/Monthly/Weekly tables built from them.
+            KeyCode::Char('g')
+                if matches!(
+                    self.current_tab,
+                    Tab::Models | Tab::Daily | Tab::Monthly | Tab::Weekly
+                ) =>
+            {
                 self.open_group_by_picker();
             }
             KeyCode::Char('u') if self.current_tab == Tab::Usage => {
@@ -1663,7 +1703,7 @@ impl App {
     fn open_group_by_picker(&mut self) {
         use super::ui::dialog::GroupByPickerDialog;
         let dialog =
-            GroupByPickerDialog::new(self.group_by.clone(), self.dialog_needs_reload.clone());
+            GroupByPickerDialog::new(self.group_by.clone(), self.dialog_group_reload.clone());
         self.dialog_stack.show(Box::new(dialog));
     }
 
@@ -1938,8 +1978,9 @@ impl App {
         );
         let export_dir = crate::paths::get_config_dir().join("exports");
         let path = export_dir.join(filename);
+        let group_by = self.group_by.borrow().clone();
 
-        match super::export::build_export_json(&self.data) {
+        match super::export::build_export_json(&self.data, &group_by) {
             Ok(json) => match std::fs::create_dir_all(&export_dir)
                 .and_then(|_| std::fs::write(&path, json))
             {
@@ -2668,8 +2709,11 @@ mod tests {
                     model.to_string(),
                     DailyModelInfo {
                         provider: provider.to_string(),
+                        model_id: model.to_string(),
                         display_name: model.to_string(),
                         color_key: model.to_string(),
+                        workspace_key: None,
+                        workspace_label: None,
                         tokens,
                         cost: model_cost,
                         messages: 1,
@@ -3927,6 +3971,7 @@ mod tests {
     #[test]
     fn test_group_by_change_requests_blocking_reload() {
         let mut app = make_app();
+        app.current_tab = Tab::Models;
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
 
         app.handle_key_event(key(KeyCode::Char('g')));
@@ -3942,6 +3987,55 @@ mod tests {
         assert!(app.needs_reload);
         assert!(app.blocking_loading);
         assert!(app.is_blocking_loading());
+        // Grouping reloads re-aggregate but must not force a Sessions rescan.
+        assert!(app.reload_group_only);
+    }
+
+    #[test]
+    fn test_source_picker_reload_is_not_marked_group_only() {
+        let mut app = make_app();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(app.needs_reload);
+        assert!(app.reload_force);
+        assert!(!app.reload_group_only);
+    }
+
+    #[test]
+    fn test_g_opens_group_picker_only_on_group_keyed_tabs() {
+        for tab in [Tab::Models, Tab::Daily, Tab::Monthly, Tab::Weekly] {
+            let mut app = make_app();
+            app.current_tab = tab;
+
+            app.handle_key_event(key(KeyCode::Char('g')));
+
+            assert!(
+                app.dialog_stack.is_active(),
+                "g should open the Group By picker on {tab:?}"
+            );
+        }
+
+        for tab in [
+            Tab::Overview,
+            Tab::Usage,
+            Tab::Hourly,
+            Tab::Stats,
+            Tab::Agents,
+            Tab::Sessions,
+        ] {
+            let mut app = make_app();
+            app.current_tab = tab;
+
+            app.handle_key_event(key(KeyCode::Char('g')));
+
+            assert!(
+                !app.dialog_stack.is_active(),
+                "g should be a no-op on {tab:?}"
+            );
+        }
     }
 
     #[test]
@@ -4891,7 +4985,10 @@ mod tests {
     }
 
     #[test]
-    fn test_same_model_name_keeps_distinct_provider_colors() {
+    fn test_same_canonical_model_resolves_one_color_across_providers() {
+        // A canonical model seen at several providers resolves to one
+        // deterministic provider, so every grouping projection renders it
+        // with the same shade (ADR 0026).
         let mut app = make_app();
         app.data.models = vec![
             ModelUsage {
@@ -4919,17 +5016,64 @@ mod tests {
         ];
         app.build_model_shade_map();
 
+        let canonical = app.theme.color(get_provider_shade("anthropic", 0));
+        assert_eq!(app.model_color_for("anthropic", "sonnet-shared"), canonical);
+        assert_eq!(app.model_color_for("openai", "sonnet-shared"), canonical);
+        assert_eq!(app.model_color("sonnet-shared"), canonical);
+    }
+
+    #[test]
+    fn test_model_color_is_identical_for_merged_and_split_projections() {
+        // GroupBy::Model merges providers into one entry; the other groupings
+        // split the same messages into per-bucket entries. Both projections
+        // must yield the same color for a canonical model.
+        let merged_entry = ModelUsage {
+            model: "sonnet-shared".to_string(),
+            provider: "anthropic, openai".to_string(),
+            client: "claude, codex".to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            tokens: TokenBreakdown::default(),
+            cost: 15.0,
+            performance: Default::default(),
+            session_count: 2,
+        };
+        let mut merged = make_app();
+        merged.data.models = vec![merged_entry];
+        merged.build_model_shade_map();
+
+        let mut split = make_app();
+        split.data.models = vec![
+            ModelUsage {
+                model: "sonnet-shared".to_string(),
+                provider: "anthropic".to_string(),
+                client: "claude".to_string(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: TokenBreakdown::default(),
+                cost: 10.0,
+                performance: Default::default(),
+                session_count: 1,
+            },
+            ModelUsage {
+                model: "sonnet-shared".to_string(),
+                provider: "openai".to_string(),
+                client: "codex".to_string(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: TokenBreakdown::default(),
+                cost: 5.0,
+                performance: Default::default(),
+                session_count: 1,
+            },
+        ];
+        split.build_model_shade_map();
+
+        assert_eq!(merged.model_shade_map, split.model_shade_map);
+        assert_eq!(merged.model_provider_map, split.model_provider_map);
         assert_eq!(
-            app.model_color_for("anthropic", "sonnet-shared"),
-            app.theme.color(get_provider_shade("anthropic", 0))
-        );
-        assert_eq!(
-            app.model_color_for("openai", "sonnet-shared"),
-            app.theme.color(get_provider_shade("openai", 0))
-        );
-        assert_ne!(
-            app.model_color_for("anthropic", "sonnet-shared"),
-            app.model_color_for("openai", "sonnet-shared")
+            merged.model_color("sonnet-shared"),
+            split.model_color("sonnet-shared")
         );
     }
 }
