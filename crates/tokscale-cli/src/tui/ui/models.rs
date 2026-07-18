@@ -20,7 +20,12 @@ use crate::tui::app::{App, SortDirection, SortField};
 use tokscale_core::GroupBy;
 
 fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
-    workspace_label_or_unknown(model.workspace_label.as_deref())
+    workspace_label_or_unknown(
+        model
+            .workspace_label
+            .as_deref()
+            .or(model.workspace_key.as_deref()),
+    )
 }
 
 /// The Model column always shows the bare canonical model; under
@@ -526,6 +531,23 @@ mod tests {
             display_width("project-with-long-name")
         );
         assert_eq!(model_display_name(&model), "gpt-5");
+    }
+
+    #[test]
+    fn workspace_column_falls_back_to_key_when_label_missing() {
+        let model = crate::tui::data::ModelUsage {
+            model: "gpt-5".to_string(),
+            provider: "openai".to_string(),
+            client: "opencode".to_string(),
+            workspace_key: Some("/work/project".to_string()),
+            workspace_label: None,
+            tokens: crate::tui::data::TokenBreakdown::default(),
+            cost: 0.0,
+            performance: Default::default(),
+            session_count: 0,
+        };
+
+        assert_eq!(workspace_label(&model), "/work/project");
     }
 
     #[test]

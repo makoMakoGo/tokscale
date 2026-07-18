@@ -1009,6 +1009,10 @@ pub fn load_cache(
         Err(_) => return CacheResult::Miss,
     };
 
+    if cached_models_missing_identity(&data) {
+        return CacheResult::Miss;
+    }
+
     // Preserve the degraded report for immediate rendering, but force the
     // caller to rescan. A locked database or interrupted read can recover
     // without changing the source inventory fingerprint. Completed scans
@@ -1029,6 +1033,23 @@ pub fn load_cache(
     } else {
         CacheResult::Fresh(data, cached.source_inventory_signature)
     }
+}
+
+/// Since schema 38, `modelId` is the authoritative model identity (ADR 0026),
+/// but the cached field still deserializes with `#[serde(default)]`. A cache
+/// written without it would load with an empty id and merge unrelated entries
+/// under the empty key downstream, so treat it as a miss and rescan.
+fn cached_models_missing_identity(data: &UsageData) -> bool {
+    data.daily
+        .iter()
+        .flat_map(|day| day.source_breakdown.values())
+        .flat_map(|source| source.models.values())
+        .any(|model| model.model_id.is_empty())
+        || data
+            .hourly
+            .iter()
+            .flat_map(|hour| hour.models.values())
+            .any(|model| model.model_id.is_empty())
 }
 
 /// Determine whether the cached client key exactly matches the current TUI request.
@@ -2048,6 +2069,135 @@ mod tests {
         }
     }
 
+    /// Schema 38 made `modelId` the authoritative identity, but the cached
+    /// field is `#[serde(default)]`, so a file missing it would load with an
+    /// empty id and merge unrelated entries under the empty key. Such a cache
+    /// must miss instead (ADR 0026).
+    fn write_identity_cache_without_model_id(data: &str) {
+        let cache_path = cache_file().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let json = format!(
+            r#"{{
+  "schemaVersion": 38,
+  "timestamp": 9999999999999,
+  "enabledClients": ["claude"],
+  "groupBy": "model",
+  "reportScope": {{
+    "resolvedHomeDir": "",
+    "useEnvRoots": false,
+    "since": null,
+    "until": null,
+    "year": null
+  }},
+  "sourceInventorySignature": [90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90],
+  "data": {data}
+}}"#
+        );
+        fs::write(&cache_path, json).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_misses_when_daily_model_lacks_model_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        write_identity_cache_without_model_id(
+            r#"{
+    "models": [],
+    "agents": [],
+    "daily": [{
+      "date": "2026-07-11",
+      "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+      "cost": 0.1,
+      "sourceBreakdown": [["claude", {
+        "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+        "cost": 0.1,
+        "models": [["v1|m|5:model", {
+          "provider": "anthropic",
+          "displayName": "model",
+          "colorKey": "model",
+          "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+          "cost": 0.1,
+          "messages": 1
+        }]]
+      }]],
+      "messageCount": 1,
+      "turnCount": 1
+    }],
+    "hourly": [],
+    "graph": null,
+    "totalTokens": 1,
+    "totalCost": 0.1,
+    "currentStreak": 1,
+    "longestStreak": 1
+  }"#,
+        );
+
+        let clients = make_filters(&[ClientId::Claude]);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_cache_misses_when_hourly_model_lacks_model_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let previous_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp_dir.path());
+        }
+
+        write_identity_cache_without_model_id(
+            r#"{
+    "models": [],
+    "agents": [],
+    "daily": [],
+    "hourly": [{
+      "datetime": "2026-07-11 10:00:00",
+      "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+      "cost": 0.1,
+      "clients": ["claude"],
+      "models": [["v1|m|5:model", {
+        "provider": "anthropic",
+        "displayName": "model",
+        "colorKey": "model",
+        "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+        "cost": 0.1
+      }]],
+      "messageCount": 1,
+      "turnCount": 1
+    }],
+    "graph": null,
+    "totalTokens": 1,
+    "totalCost": 0.1,
+    "currentStreak": 1,
+    "longestStreak": 1
+  }"#,
+        );
+
+        let clients = make_filters(&[ClientId::Claude]);
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
+            CacheResult::Miss
+        ));
+
+        match previous_home {
+            Some(home) => unsafe { env::set_var("HOME", home) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
     #[test]
     #[serial]
     fn test_load_cache_misses_when_report_scope_differs() {
@@ -2548,6 +2698,7 @@ mod tests {
             "claude-sonnet-4",
             {
               "provider": "anthropic",
+              "modelId": "claude-sonnet-4",
               "displayName": "claude-sonnet-4",
               "colorKey": "claude-sonnet-4",
 	              "tokens": {
@@ -2577,6 +2728,7 @@ mod tests {
             "claude-sonnet-4",
             {
               "provider": "anthropic",
+              "modelId": "claude-sonnet-4",
               "displayName": "claude-sonnet-4",
               "colorKey": "claude-sonnet-4",
 	              "tokens": {

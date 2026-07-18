@@ -84,6 +84,10 @@ enum BackgroundLoad {
     Loaded {
         data: Box<UsageData>,
         digest: u64,
+        /// The grouping this `data` projection was aggregated with; the App
+        /// records it so exports describe the loaded rows, not a pending
+        /// picker selection.
+        group_by: tokscale_core::GroupBy,
         source_inventory_signature: tokscale_core::SourceInventorySignature,
         pricing_diagnostics: Vec<String>,
         cache_persistence_warning: Option<String>,
@@ -110,9 +114,16 @@ fn refresh_session_data(
 
 /// Sessions are group-agnostic (ADR 0026): a grouping-triggered reload
 /// re-aggregates the usage projection but must not force a Sessions rescan;
-/// session refresh follows source-digest changes instead.
-fn session_reload_force(force: bool, group_only_reload: bool) -> bool {
-    force && !group_only_reload
+/// session refresh follows source-digest changes instead. When health still
+/// requires a source retry, the source gets rescanned anyway, so the Sessions
+/// snapshot must not miss that recovery attempt — a session-only change does
+/// not move the inventory digest.
+fn session_reload_force(
+    force: bool,
+    group_only_reload: bool,
+    health: &tokscale_core::source_health::HealthReport,
+) -> bool {
+    force && (!group_only_reload || health.requires_source_retry())
 }
 
 fn load_background_data(
@@ -142,6 +153,7 @@ fn load_background_data(
     result.map(|result| BackgroundLoad::Loaded {
         data: Box::new(result.data),
         digest: result.source_digest,
+        group_by: group_by.clone(),
         source_inventory_signature: result.source_inventory_signature,
         pricing_diagnostics: result.pricing_diagnostics,
         cache_persistence_warning: None,
@@ -199,11 +211,13 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
         Ok(BackgroundLoad::Loaded {
             data,
             digest,
+            group_by,
             source_inventory_signature: _,
             pricing_diagnostics,
             cache_persistence_warning,
         }) => {
             app.update_data(*data);
+            app.data_group_by = group_by;
             app.last_source_digest = Some(digest);
             app.set_cache_persistence_warning(cache_persistence_warning);
             app.set_pricing_diagnostics(&pricing_diagnostics);
@@ -463,8 +477,11 @@ fn run_loop_with_background(
 
             let force =
                 should_force_source_reload(std::mem::take(&mut app.reload_force), &app.data.health);
-            let session_force =
-                session_reload_force(force, std::mem::take(&mut app.reload_group_only));
+            let session_force = session_reload_force(
+                force,
+                std::mem::take(&mut app.reload_group_only),
+                &app.data.health,
+            );
             let last_digest = app.last_source_digest;
             let tx = bg_tx.clone();
             let clients = app.scan_clients();
@@ -730,10 +747,27 @@ mod tests {
     fn session_reload_force_skips_grouping_triggered_reloads() {
         // Grouping switches re-aggregate the usage projection but leave the
         // Sessions snapshot to the source-digest probe (ADR 0026).
-        assert!(!session_reload_force(true, true));
-        assert!(session_reload_force(true, false));
-        assert!(!session_reload_force(false, true));
-        assert!(!session_reload_force(false, false));
+        let healthy = tokscale_core::source_health::HealthReport::default();
+        assert!(!session_reload_force(true, true, &healthy));
+        assert!(session_reload_force(true, false, &healthy));
+        assert!(!session_reload_force(false, true, &healthy));
+        assert!(!session_reload_force(false, false, &healthy));
+    }
+
+    #[test]
+    fn session_reload_force_retries_sessions_when_health_requires_source_retry() {
+        // A degraded report forces the source rescan even on a grouping-only
+        // reload; the Sessions snapshot must join that retry because session
+        // edits do not move the inventory digest.
+        let degraded = tokscale_core::source_health::HealthReport {
+            failed_sources: 1,
+            complete: false,
+            ..Default::default()
+        };
+
+        assert!(session_reload_force(true, true, &degraded));
+        assert!(session_reload_force(true, false, &degraded));
+        assert!(!session_reload_force(false, true, &degraded));
     }
 
     #[test]
@@ -863,6 +897,7 @@ mod tests {
                 ..UsageData::default()
             }),
             digest,
+            group_by: tokscale_core::GroupBy::Model,
             source_inventory_signature: signature,
             pricing_diagnostics: Vec::new(),
             cache_persistence_warning: None,
@@ -928,6 +963,7 @@ mod tests {
                     ..UsageData::default()
                 }),
                 digest,
+                group_by: tokscale_core::GroupBy::Model,
                 source_inventory_signature: signature,
                 pricing_diagnostics: Vec::new(),
                 cache_persistence_warning: Some(

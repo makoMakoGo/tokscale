@@ -408,6 +408,11 @@ pub struct App {
     /// Set of clients currently selected in the source picker.
     pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
+    /// The grouping the currently loaded `data` was projected with. The
+    /// picker writes `group_by` immediately, but `data` only switches to the
+    /// new projection once the background reload lands, so exports must use
+    /// this value to stay consistent with the rows they contain.
+    pub data_group_by: tokscale_core::GroupBy,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
     tab_sort_state: HashMap<Tab, (SortField, SortDirection)>,
@@ -580,6 +585,7 @@ impl App {
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
             group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
+            data_group_by: super::cache::TUI_DEFAULT_GROUP_BY,
             sort_field,
             sort_direction,
             tab_sort_state: HashMap::new(),
@@ -1974,6 +1980,12 @@ impl App {
         }
     }
 
+    /// The grouping that matches the currently loaded `data` projection —
+    /// not a pending picker selection whose reload has not landed yet.
+    fn export_group_by(&self) -> tokscale_core::GroupBy {
+        self.data_group_by.clone()
+    }
+
     fn export_to_json(&mut self) {
         let filename = format!(
             "tokscale-export-{}.json",
@@ -1981,7 +1993,7 @@ impl App {
         );
         let export_dir = crate::paths::get_config_dir().join("exports");
         let path = export_dir.join(filename);
-        let group_by = self.group_by.borrow().clone();
+        let group_by = self.export_group_by();
 
         match super::export::build_export_json(&self.data, &group_by) {
             Ok(json) => match std::fs::create_dir_all(&export_dir)
@@ -3992,6 +4004,26 @@ mod tests {
         assert!(app.is_blocking_loading());
         // Grouping reloads re-aggregate but must not force a Sessions rescan.
         assert!(app.reload_group_only);
+    }
+
+    #[test]
+    fn export_group_by_tracks_loaded_data_not_pending_picker_selection() {
+        let mut app = make_app();
+        // The picker writes `group_by` immediately, but `data` still holds the
+        // previous projection until the background reload lands; exports must
+        // describe the loaded rows.
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
+
+        assert_eq!(
+            app.export_group_by(),
+            crate::tui::cache::TUI_DEFAULT_GROUP_BY
+        );
+
+        app.data_group_by = tokscale_core::GroupBy::WorkspaceModel;
+        assert_eq!(
+            app.export_group_by(),
+            tokscale_core::GroupBy::WorkspaceModel
+        );
     }
 
     #[test]
