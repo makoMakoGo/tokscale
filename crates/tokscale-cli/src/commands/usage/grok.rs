@@ -621,7 +621,7 @@ fn fetch_network_usage(credentials: &Credentials) -> Result<UsageOutput> {
     }
 
     Ok(UsageOutput {
-        provider: "Grok Build".into(),
+        provider: "Grok".into(),
         account: None,
         plan,
         email: credentials.email.clone(),
@@ -635,7 +635,7 @@ fn usage_output(
     metrics: Vec<UsageMetric>,
 ) -> UsageOutput {
     UsageOutput {
-        provider: "Grok Build".into(),
+        provider: "Grok".into(),
         account: None,
         plan,
         email,
@@ -706,6 +706,13 @@ pub fn fetch() -> Result<UsageOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_output_uses_the_short_brand_name() {
+        let output = usage_output(None, None, Vec::new());
+
+        assert_eq!(output.provider, "Grok");
+    }
 
     fn push_varint(mut value: u64, out: &mut Vec<u8>) {
         while value >= 0x80 {

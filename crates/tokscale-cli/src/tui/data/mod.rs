@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(ClientId::short_name(ClientId::KiloCode), "KiloCode");
         assert_eq!(ClientId::short_name(ClientId::Mux), "Mux");
         assert_eq!(ClientId::short_name(ClientId::Kilo), "Kilo CLI");
-        assert_eq!(ClientId::short_name(ClientId::Hermes), "Hermes Agent");
+        assert_eq!(ClientId::short_name(ClientId::Hermes), "Hermes");
         assert_eq!(ClientId::short_name(ClientId::Codebuff), "Codebuff");
         assert_eq!(ClientId::short_name(ClientId::CodeBuddy), "CodeBuddy");
         assert_eq!(ClientId::short_name(ClientId::Antigravity), "Antigravity");

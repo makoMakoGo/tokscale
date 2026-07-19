@@ -87,6 +87,18 @@ mod tests {
     }
 
     #[test]
+    fn grok_uses_the_short_brand_name_for_display() {
+        assert_eq!(ClientId::Grok.display_name(), "Grok");
+        assert_eq!(ClientId::Grok.short_name(), "Grok");
+    }
+
+    #[test]
+    fn hermes_uses_the_short_brand_name_for_display() {
+        assert_eq!(ClientId::Hermes.display_name(), "Hermes");
+        assert_eq!(ClientId::Hermes.short_name(), "Hermes");
+    }
+
+    #[test]
     fn client_counts_get_set_add_work() {
         let mut counts = ClientCounts::new();
 

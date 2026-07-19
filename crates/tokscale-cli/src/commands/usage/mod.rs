@@ -290,7 +290,7 @@ fn all_providers() -> Vec<UsageProvider> {
         },
         UsageProvider {
             id: UsageProviderId::Grok,
-            label: "Grok Build",
+            label: "Grok",
             is_available: grok::has_credentials,
             unavailable_message: "enabled in usageProviders but no Grok Build credentials were found",
             fetch: Fetch::Single(grok::fetch),
@@ -519,6 +519,16 @@ pub fn run(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_provider_uses_the_short_brand_name() {
+        let provider = all_providers()
+            .into_iter()
+            .find(|provider| provider.id == UsageProviderId::Grok)
+            .expect("Grok provider");
+
+        assert_eq!(provider.label, "Grok");
+    }
 
     #[test]
     fn usage_output_display_name_includes_account_label() {

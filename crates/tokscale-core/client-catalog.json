@@ -138,8 +138,8 @@
   {
     "variant": "Hermes",
     "id": "hermes",
-    "displayName": "Hermes Agent",
-    "shortName": "Hermes Agent",
+    "displayName": "Hermes",
+    "shortName": "Hermes",
     "hotkey": "e",
     "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-hermes.png",
     "color": "#FFD700"
@@ -256,8 +256,8 @@
   {
     "variant": "Grok",
     "id": "grok",
-    "displayName": "Grok Build",
-    "shortName": "Grok Build",
+    "displayName": "Grok",
+    "shortName": "Grok",
     "hotkey": "u",
     "logo": "https://github.com/xai-org.png",
     "color": "#171717"
