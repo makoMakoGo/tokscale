@@ -7,6 +7,7 @@ mod engine;
 mod graph_result;
 pub(crate) mod keys;
 pub(crate) mod tui;
+mod tui_sessions;
 mod views;
 
 pub use config::{AggregationConfig, DateRange, ViewSet};
@@ -19,6 +20,7 @@ pub use tui::{
     build_contribution_graph_for_today, build_period_usage, calculate_streaks,
     calculate_streaks_for_today, find_peak_hour, PeriodBucket, TuiAcc, WeekdayBucket,
 };
+pub use tui_sessions::{TuiSessionEntry, TuiSessionTokens};
 pub use views::{AgentUsage, AggregatedViews};
 
 #[cfg(test)]

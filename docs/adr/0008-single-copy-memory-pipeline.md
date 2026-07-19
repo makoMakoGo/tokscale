@@ -4,7 +4,8 @@ Status: Accepted
 
 ADR 0020 refines source failure containment, input-dependency completeness,
 snapshot revalidation, and usage identity. This ADR continues to own the
-single-copy pipeline and cache-envelope/pruning contract.
+single-copy pipeline, cache-envelope/pruning contract, and the schema 39 TUI
+snapshot-bundle lifecycle.
 
 ## Context
 
@@ -63,10 +64,39 @@ The parse pipeline must hold at most one owned copy of any message.
   TUI data, drop the previous aggregate before trimming again. Steady-state RSS
   tracks the current live aggregate, not the parse or prior-aggregate
   high-water mark.
-- TUI aggregate cache writes serialize borrowed views directly through a
-  buffered atomic-file writer. They neither clone the aggregate into an owned
-  cache DTO nor materialize the complete JSON payload in a byte vector; schema
-  25 field order, tuple arrays, and date formatting remain unchanged.
+- A production TUI load folds one `PreparedLocalSources` inventory once. The
+  same bounded message stream constructs the fine-grained usage accumulator
+  and the session projection; a full `Vec<UnifiedMessage>` is not part of this
+  path. APIs whose explicit public contract returns all messages remain
+  unchanged.
+- Schema 39 stores one immutable TUI generation containing its manifest,
+  session projection, and every exposed Group By usage projection in one atomic
+  JSON bundle. The writer serializes borrowed views through a buffered temporary
+  file and publishes the complete generation with one rename. A reader pins the
+  opened bundle inode, so a grouping switch cannot mix data from different
+  refreshes even while a newer generation is being published.
+- Startup treats that generation as one logical bundle. A fresh bundle serves
+  every tab, including Sessions, without scanning sources. A stale bundle
+  remains wholly visible while one background fold prepares its replacement.
+  A cold miss keeps the UI responsive while one background fold builds usage,
+  sessions, and all grouping projections together.
+- A successful automatic or manual refresh atomically replaces usage,
+  sessions, and every Group By projection with one generation. A failed
+  refresh preserves the prior complete generation and reports an explicit
+  degraded state; it never publishes a partially refreshed mix.
+- The normal steady-state TUI retains the pinned on-disk projections, not the
+  fine-grained `TuiAcc`. If generation persistence fails, the TUI reports that
+  failure and may explicitly retain the in-memory accumulator as a degraded
+  projection backend so Group By remains usable.
+- On Linux/glibc the TUI bounds the allocator to one arena before it starts
+  worker threads, then trims after transient fold state is dropped and after a
+  snapshot is replaced. This prevents short-lived background folds from
+  leaving detached arenas resident at their high-water mark. Other platforms
+  retain their native allocator behavior.
+- Session source-space accounting is the total byte size of source inputs from
+  the snapshots confirmed at the final cache-decision/fold boundary, grouped by
+  client. It is derived from those same confirmed snapshots as Usage, Sessions,
+  health, and the inventory signature rather than by a second filesystem scan.
 - Every cacheable source has one input policy that enumerates the primary
   file and all parser-relevant related files. Related inputs include SQLite
   WAL files, Claude `.meta.json` and cc-mirror variant metadata, and declared
@@ -170,6 +200,12 @@ that final output.
   documents missing the field are explicit misses and rebuild once. The marker
   advanced with the OpenCode current-format transition so retired JSON-derived
   aggregates cannot remain visible.
+- TUI cache schema 39 replaces the earlier single-projection cache with one
+  atomic multi-projection bundle. Older schemas are explicit misses and rebuild once;
+  a fresh schema 39 hit no longer causes a Sessions-only background scan.
+- Group By normally reads one projection from the already pinned generation,
+  while steady-state memory holds only the active view and session snapshot.
+  Refresh failure leaves the previous cross-tab snapshot coherent and visible.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go
   through the new accessors; new parsers must intern identity fields.
 - High-cardinality scans no longer leave the interner strongly retaining every

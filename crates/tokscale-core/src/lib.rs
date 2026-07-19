@@ -25,8 +25,8 @@ pub use aggregate::{
     aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
     build_contribution_graph_for_today, build_period_usage, calculate_streaks,
     calculate_streaks_for_today, calculate_summary, calculate_years, find_peak_hour, AgentUsage,
-    AggregatedViews, AggregationConfig, DateRange, PeriodBucket, TuiAcc, ViewSet, WeekdayBucket,
-    UNKNOWN_WORKSPACE_LABEL,
+    AggregatedViews, AggregationConfig, DateRange, PeriodBucket, TuiAcc, TuiSessionEntry,
+    TuiSessionTokens, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
 };
 pub use clients::{
     warp_sqlite_roots_with_env_strategy, ClientCounts, ClientId, ClientIdentity, LocalClientDef,
@@ -45,7 +45,7 @@ pub use source_health::{
     SourceFailure, SourceHealth, SourceStatus,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::Instant;
@@ -430,6 +430,40 @@ fn source_data_bytes<'a>(units: impl IntoIterator<Item = &'a adapters::SourceUni
     total
 }
 
+fn confirmed_source_data_bytes(
+    clients: &[String],
+    groups: &[adapters::ConfirmedAdapterSources],
+) -> (BTreeMap<String, u64>, u64) {
+    let mut totals = clients
+        .iter()
+        .cloned()
+        .map(|client| (client, 0_u64))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen_by_client = HashMap::<String, HashSet<_>>::new();
+    let mut seen_globally = HashSet::new();
+    let mut global_total = 0_u64;
+
+    for group in groups {
+        let client = group.client.as_str().to_string();
+        let seen = seen_by_client.entry(client.clone()).or_default();
+        let total = totals.entry(client).or_default();
+        for &(identity, size) in &group.present_files {
+            if seen.insert(identity) {
+                *total = total
+                    .checked_add(size)
+                    .expect("per-client source data size must fit in u64");
+            }
+            if seen_globally.insert(identity) {
+                global_total = global_total
+                    .checked_add(size)
+                    .expect("source data size must fit in u64");
+            }
+        }
+    }
+
+    (totals, global_total)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DailyTotals {
     pub tokens: i64,
@@ -685,16 +719,21 @@ fn parse_all_messages_with_health_with_env_strategy(
         ..LocalParseOptions::default()
     })?;
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
-    let (_, health) =
-        fold_prepared_local_sources_with_pricing(prepared, pricing, &mut all_messages)?;
-    Ok((all_messages, health))
+    let outcome = fold_prepared_local_sources_with_pricing(prepared, pricing, &mut all_messages)?;
+    Ok((all_messages, outcome.health))
+}
+
+struct FoldOutcome {
+    source_inventory_signature: SourceInventorySignature,
+    source_space: BTreeMap<String, u64>,
+    health: DataHealth,
 }
 
 fn fold_prepared_local_sources_with_pricing(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn adapters::MessageSink,
-) -> Result<(SourceInventorySignature, DataHealth), LocalReportError> {
+) -> Result<FoldOutcome, LocalReportError> {
     let PreparedLocalSources {
         clients,
         groups,
@@ -739,10 +778,16 @@ fn fold_prepared_local_sources_with_pricing(
     };
     result
         .map(|confirmed| {
-            (
-                confirmed_source_inventory_signature(&clients, &confirmed),
+            let source_inventory_signature =
+                confirmed_source_inventory_signature(&clients, &confirmed);
+            let (source_space, source_data_bytes) =
+                confirmed_source_data_bytes(&clients, &confirmed);
+            health.set_source_data_bytes(source_data_bytes);
+            FoldOutcome {
+                source_inventory_signature,
+                source_space,
                 health,
-            )
+            }
         })
         .map_err(LocalReportError::operational)
 }
@@ -804,7 +849,7 @@ fn stream_local_sources_into_engine(
     prepared: PreparedLocalSources,
     pricing: Option<&pricing::PricingService>,
     engine: &mut crate::aggregate::AggregationEngine,
-) -> Result<(SourceInventorySignature, DataHealth), LocalReportError> {
+) -> Result<FoldOutcome, LocalReportError> {
     let mut sink = AggregationSink(engine);
     fold_prepared_local_sources_with_pricing(prepared, pricing, &mut sink)
 }
@@ -1111,15 +1156,18 @@ fn load_prepared_aggregated_views(
         date_range,
         views,
     });
-    let (source_inventory_signature, health) =
-        match stream_local_sources_into_engine(prepared, pricing, &mut engine) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                drop(engine);
-                sessions::intern::prune_dead();
-                return Err(error);
-            }
-        };
+    let FoldOutcome {
+        source_inventory_signature,
+        health,
+        ..
+    } = match stream_local_sources_into_engine(prepared, pricing, &mut engine) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            drop(engine);
+            sessions::intern::prune_dead();
+            return Err(error);
+        }
+    };
     let mut views = engine.finish();
     views.health = health;
     // The streaming sink has dropped every source message and `finish` has
@@ -1502,8 +1550,11 @@ fn parse_prepared_local_unified_messages(
 ) -> Result<LocalReport<Vec<UnifiedMessage>>, LocalReportError> {
     let filters = prepared.options.clone();
     let mut messages = Vec::new();
-    let (source_inventory_signature, health) =
-        fold_prepared_local_sources_with_pricing(prepared, pricing, &mut messages)?;
+    let FoldOutcome {
+        source_inventory_signature,
+        health,
+        ..
+    } = fold_prepared_local_sources_with_pricing(prepared, pricing, &mut messages)?;
     Ok(LocalReport {
         data: filter_unified_messages(messages, &filters),
         health: health.to_report(),
@@ -1523,7 +1574,7 @@ pub fn count_local_client_messages(
         until: prepared.options.until.clone(),
         year: prepared.options.year.clone(),
     });
-    let (_, health) = fold_prepared_local_sources_with_pricing(prepared, None, &mut sink)?;
+    let health = fold_prepared_local_sources_with_pricing(prepared, None, &mut sink)?.health;
     Ok(LocalClientMessageCounts {
         counts: sink.counts,
         processing_time_ms: start.elapsed().as_millis() as u32,
@@ -1654,6 +1705,20 @@ pub struct UsageAccumulatorWithDiagnostics {
     pub health: DataHealth,
 }
 
+/// The complete TUI-local projection produced by one source fold. Usage
+/// groupings are projected lazily from `accumulator`; Sessions data and source
+/// sizes are materialized alongside it without retaining raw messages or
+/// running a second scanner.
+pub struct TuiBundleWithDiagnostics {
+    pub accumulator: TuiAcc,
+    pub sessions: Vec<TuiSessionEntry>,
+    /// Confirmed source bytes keyed by canonical local client id.
+    pub source_space: BTreeMap<String, u64>,
+    pub pricing_diagnostics: pricing::PricingDiagnostics,
+    pub source_inventory_signature: SourceInventorySignature,
+    pub health: DataHealth,
+}
+
 pub async fn load_usage_accumulator_with_diagnostics(
     options: LocalParseOptions,
 ) -> Result<UsageAccumulatorWithDiagnostics, LocalReportError> {
@@ -1678,15 +1743,18 @@ pub async fn load_prepared_usage_accumulator_with_diagnostics(
         date_range,
         views: ViewSet::TUI,
     });
-    let (source_inventory_signature, health) =
-        match stream_local_sources_into_engine(prepared, pricing.as_deref(), &mut engine) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                drop(engine);
-                sessions::intern::prune_dead();
-                return Err(error);
-            }
-        };
+    let FoldOutcome {
+        source_inventory_signature,
+        health,
+        ..
+    } = match stream_local_sources_into_engine(prepared, pricing.as_deref(), &mut engine) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            drop(engine);
+            sessions::intern::prune_dead();
+            return Err(error);
+        }
+    };
     let accumulator = engine.into_tui_accumulator().expect("tui view requested");
     // Same lifecycle seam as `load_prepared_aggregated_views`: the stream has
     // dropped every source message, and the accumulator holds strong refs to
@@ -1694,6 +1762,47 @@ pub async fn load_prepared_usage_accumulator_with_diagnostics(
     sessions::intern::prune_dead();
     Ok(UsageAccumulatorWithDiagnostics {
         accumulator,
+        pricing_diagnostics,
+        source_inventory_signature,
+        health,
+    })
+}
+
+pub async fn load_prepared_tui_bundle_with_diagnostics(
+    prepared: PreparedLocalSources,
+) -> Result<TuiBundleWithDiagnostics, LocalReportError> {
+    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
+    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
+    let date_range = DateRange {
+        since: prepared.options.since.clone(),
+        until: prepared.options.until.clone(),
+        year: prepared.options.year.clone(),
+    };
+    let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
+        // Both projections consume the same filtered, finalized message
+        // stream. Grouping remains a later TuiAcc projection concern.
+        group_by: GroupBy::default(),
+        date_range,
+        views: ViewSet::TUI | ViewSet::TUI_SESSIONS,
+    });
+    let FoldOutcome {
+        source_inventory_signature,
+        source_space,
+        health,
+    } = match stream_local_sources_into_engine(prepared, pricing.as_deref(), &mut engine) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            drop(engine);
+            sessions::intern::prune_dead();
+            return Err(error);
+        }
+    };
+    let (accumulator, sessions) = engine.into_tui_bundle();
+    sessions::intern::prune_dead();
+    Ok(TuiBundleWithDiagnostics {
+        accumulator: accumulator.expect("tui usage view requested"),
+        sessions: sessions.expect("tui sessions view requested"),
+        source_space,
         pricing_diagnostics,
         source_inventory_signature,
         health,

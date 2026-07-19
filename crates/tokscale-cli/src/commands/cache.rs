@@ -15,7 +15,7 @@ pub(crate) fn run_warm_tui_cache(
     home_dir: Option<String>,
     clients: Option<Vec<String>>,
 ) -> Result<()> {
-    use crate::tui::{save_cached_data, CacheReportScope, DataLoader, TUI_DEFAULT_GROUP_BY};
+    use crate::tui::{save_tui_bundle_cache, CacheReportScope, DataLoader};
 
     let enabled_set: std::collections::HashSet<ClientId> = clients
         .as_ref()
@@ -30,11 +30,15 @@ pub(crate) fn run_warm_tui_cache(
         None,
         None,
     );
-    let result = loader.load_with_diagnostics(&scan_clients, &TUI_DEFAULT_GROUP_BY)?;
-    save_cached_data(
-        &result.data,
+    let prepared = loader.prepare(&scan_clients)?;
+    let result = loader.execute_tui_bundle_with_diagnostics(prepared)?;
+    let health = result.health.to_report();
+    let _ = save_tui_bundle_cache(
+        &result.accumulator,
+        &result.sessions,
+        &result.source_space,
+        &health,
         &enabled_set,
-        &TUI_DEFAULT_GROUP_BY,
         &report_scope,
         result.source_inventory_signature,
     )?;

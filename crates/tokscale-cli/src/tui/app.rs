@@ -16,6 +16,7 @@ use tokscale_core::{
 
 use ratatui::style::Color;
 
+use super::cache::ProjectionStore;
 use super::colors::{get_provider_shade, provider_color_key};
 use super::data::{
     build_period_usage, AgentUsage, DailySourceInfo, DailyUsage, DataLoader, HourlyUsage,
@@ -24,6 +25,7 @@ use super::data::{
 use super::interaction::{
     InteractionOutcome, ListInteraction, MoveCommand, TextViewport, WrapMode,
 };
+use super::session_data::{SessionProjectionStatus, SessionSnapshot};
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogStack};
@@ -51,6 +53,23 @@ pub enum TuiExit {
 pub(crate) enum KeyEventOutcome {
     Continue,
     Exit(TuiExit),
+}
+
+/// Source for near-instant Group By projections of the currently installed
+/// TUI snapshot. The normal path reads from the pinned cache bundle; the
+/// in-memory accumulator is retained only when cache persistence failed.
+pub(crate) enum ProjectionBackend {
+    Cache(ProjectionStore),
+    Memory(tokscale_core::TuiAcc),
+}
+
+impl ProjectionBackend {
+    pub(crate) fn project(&mut self, group_by: &tokscale_core::GroupBy) -> Result<UsageData> {
+        match self {
+            Self::Cache(store) => store.project(group_by),
+            Self::Memory(accumulator) => Ok(accumulator.project(group_by)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -408,11 +427,12 @@ pub struct App {
     /// Set of clients currently selected in the source picker.
     pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
-    /// Canonical source fold retained after a successful background load so
-    /// Group By changes can re-project in memory.
-    pub accumulator: Option<tokscale_core::TuiAcc>,
+    /// Projections and Sessions are installed as one immutable generation.
+    pub(crate) projection_backend: Option<ProjectionBackend>,
+    pub(crate) session_snapshot: SessionSnapshot,
+    pub(crate) session_projection_status: SessionProjectionStatus,
     /// The grouping the currently loaded `data` was projected with. It stays
-    /// paired with `data` for exports while a cache bootstrap full load is pending.
+    /// paired with `data` for exports while a replacement snapshot is pending.
     pub data_group_by: tokscale_core::GroupBy,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
@@ -463,10 +483,6 @@ pub struct App {
     /// Forces the next background reload to skip the source-digest probe
     /// (manual refresh and filter changes must always re-aggregate).
     pub reload_force: bool,
-
-    /// Marks a cache bootstrap full load so it rebuilds the accumulator without
-    /// forcing the group-agnostic Sessions projection when health is clean.
-    pub reload_group_only: bool,
 
     /// Digest of the scanned sources at the last completed load; auto-refresh
     /// skips the parse when a fresh probe matches (ADR 0008).
@@ -581,7 +597,9 @@ impl App {
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
             group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
-            accumulator: None,
+            projection_backend: None,
+            session_snapshot: SessionSnapshot::default(),
+            session_projection_status: SessionProjectionStatus::Pending,
             data_group_by: super::cache::TUI_DEFAULT_GROUP_BY,
             sort_field,
             sort_direction,
@@ -627,7 +645,6 @@ impl App {
             blocking_loading: false,
             needs_reload: false,
             reload_force: false,
-            reload_group_only: false,
             last_source_digest: None,
             dialog_stack,
             dialog_needs_reload,
@@ -670,16 +687,7 @@ impl App {
     pub fn request_blocking_reload(&mut self) {
         self.needs_reload = true;
         self.reload_force = true;
-        self.reload_group_only = false;
         self.blocking_loading = true;
-    }
-
-    pub(crate) fn clear_pending_cache_bootstrap(&mut self) {
-        if self.needs_reload && self.reload_group_only {
-            self.needs_reload = false;
-            self.reload_force = false;
-            self.reload_group_only = false;
-        }
     }
 
     pub fn has_enabled_subscription_providers(&self) -> bool {
@@ -716,13 +724,25 @@ impl App {
 
     fn apply_selected_group_by(&mut self) {
         let group_by = self.group_by.borrow().clone();
-        let Some(accumulator) = self.accumulator.as_ref() else {
+        let Some(backend) = self.projection_backend.as_mut() else {
+            if self.background_loading {
+                self.set_status("Group By will apply when data finishes loading");
+                return;
+            }
             self.request_blocking_reload();
-            self.reload_group_only = true;
             return;
         };
 
-        let mut data = accumulator.project(&group_by);
+        let mut data = match backend.project(&group_by) {
+            Ok(data) => data,
+            Err(error) => {
+                let diagnostic = format!("Group By projection failed: {error:#}");
+                self.set_error(Some(diagnostic.clone()));
+                self.set_status(&diagnostic);
+                self.request_blocking_reload();
+                return;
+            }
+        };
         data.health = self.data.health.clone();
         data.error = self.data.error.clone();
         self.update_data(data);
@@ -773,6 +793,11 @@ impl App {
     }
 
     pub fn update_data(&mut self, data: UsageData) {
+        self.replace_usage_data(data);
+        super::data::trim_allocator();
+    }
+
+    fn replace_usage_data(&mut self, data: UsageData) {
         let had_graph_selection = self.selected_graph_cell.is_some();
         let selected_graph_date = self
             .selected_graph_cell
@@ -813,7 +838,36 @@ impl App {
         }
 
         self.clamp_selection();
+    }
+
+    pub(crate) fn install_tui_snapshot(
+        &mut self,
+        data: UsageData,
+        sessions: Vec<tokscale_core::TuiSessionEntry>,
+        source_space: BTreeMap<String, u64>,
+        projection_backend: ProjectionBackend,
+        group_by: tokscale_core::GroupBy,
+    ) {
+        self.replace_usage_data(data);
+        drop(std::mem::replace(
+            &mut self.session_snapshot,
+            SessionSnapshot::new(sessions, source_space),
+        ));
+        drop(self.projection_backend.replace(projection_backend));
+        self.session_projection_status = SessionProjectionStatus::Ready;
+        self.data_group_by = group_by;
         super::data::trim_allocator();
+    }
+
+    pub(crate) fn mark_snapshot_refresh_failed(&mut self, diagnostic: String) {
+        self.session_projection_status = if matches!(
+            self.session_projection_status,
+            SessionProjectionStatus::Ready | SessionProjectionStatus::Degraded { .. }
+        ) {
+            SessionProjectionStatus::Degraded { diagnostic }
+        } else {
+            SessionProjectionStatus::Unavailable { diagnostic }
+        };
     }
 
     pub fn build_model_shade_map(&mut self) {
@@ -887,7 +941,6 @@ impl App {
             && !self.background_loading
         {
             self.last_refresh = now;
-            self.reload_group_only = false;
             self.needs_reload = true;
         }
     }
@@ -1032,7 +1085,6 @@ impl App {
                 } else {
                     self.needs_reload = true;
                     self.reload_force = true;
-                    self.reload_group_only = false;
                 }
             }
             KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -2691,7 +2743,7 @@ mod tests {
         let loader = DataLoader::with_filters(None, None, None, None);
         let prepared = loader.prepare(&[ClientId::Claude]).unwrap();
         let result = loader
-            .execute_accumulator_with_diagnostics(prepared)
+            .execute_tui_bundle_with_diagnostics(prepared)
             .unwrap();
         (home, result.accumulator)
     }
@@ -4048,12 +4100,10 @@ mod tests {
     #[ignore] // triggers load_data() which requires network + filesystem I/O
     fn test_handle_key_refresh() {
         let mut app = make_app();
-        app.reload_group_only = true;
         std::thread::sleep(Duration::from_millis(5));
         app.handle_key_event(key(KeyCode::Char('r')));
         assert!(app.needs_reload);
         assert!(app.reload_force);
-        assert!(!app.reload_group_only);
     }
 
     #[test]
@@ -4072,7 +4122,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_group_by_change_reprojects_immediately_with_accumulator() {
+    fn test_group_by_change_reprojects_immediately_with_memory_backend() {
         let (_home, accumulator) = load_test_accumulator();
         let mut app = make_app();
         app.current_tab = Tab::Models;
@@ -4085,7 +4135,7 @@ mod tests {
             tokscale_core::pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
         )]);
         app.set_cache_persistence_warning(Some("retained cache warning".to_string()));
-        app.accumulator = Some(accumulator);
+        app.projection_backend = Some(ProjectionBackend::Memory(accumulator));
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
         app.data_group_by = tokscale_core::GroupBy::ClientModel;
 
@@ -4104,7 +4154,6 @@ mod tests {
         assert!(!app.needs_reload);
         assert!(!app.background_loading);
         assert!(!app.blocking_loading);
-        assert!(!app.reload_group_only);
         assert!(!app.is_blocking_loading());
         assert!(!app.data.health.complete);
         assert_eq!(app.data.health.failed_sources, 1);
@@ -4134,7 +4183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_group_by_change_without_accumulator_requests_blocking_reload() {
+    fn test_group_by_change_without_projection_backend_requests_blocking_reload() {
         let mut app = make_app();
         app.current_tab = Tab::Models;
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
@@ -4151,9 +4200,33 @@ mod tests {
         assert!(!app.dialog_stack.is_active());
         assert!(app.needs_reload);
         assert!(app.reload_force);
-        assert!(app.reload_group_only);
         assert!(app.blocking_loading);
         assert!(app.is_blocking_loading());
+    }
+
+    #[test]
+    fn test_group_by_change_during_cold_load_does_not_queue_a_second_scan() {
+        let mut app = make_app();
+        app.current_tab = Tab::Models;
+        app.background_loading = true;
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
+
+        app.handle_key_event(key(KeyCode::Char('g')));
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(
+            *app.group_by.borrow(),
+            tokscale_core::GroupBy::WorkspaceModel
+        );
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert!(!app.blocking_loading);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Group By will apply when data finishes loading")
+        );
     }
 
     #[test]
@@ -4179,7 +4252,6 @@ mod tests {
     #[test]
     fn test_source_picker_still_requests_forced_reload() {
         let mut app = make_app();
-        app.reload_group_only = true;
 
         app.handle_key_event(key(KeyCode::Char('s')));
         app.handle_key_event(key(KeyCode::Enter));
@@ -4187,7 +4259,6 @@ mod tests {
 
         assert!(app.needs_reload);
         assert!(app.reload_force);
-        assert!(!app.reload_group_only);
     }
 
     #[test]
@@ -4474,14 +4545,12 @@ mod tests {
         let mut app = make_app();
         app.current_tab = Tab::Overview;
         app.auto_refresh = true;
-        app.reload_group_only = true;
         app.auto_refresh_interval = Duration::from_millis(1);
         app.last_refresh = Instant::now() - Duration::from_secs(1);
 
         app.on_tick();
 
         assert!(app.needs_reload);
-        assert!(!app.reload_group_only);
         assert!(!app.usage_fetch_attempted);
         assert!(!app.is_fetching_usage());
     }

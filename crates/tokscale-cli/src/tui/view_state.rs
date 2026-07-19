@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 
 use super::app::{App, SortDirection, SortField, Tab};
 use super::interaction::{ListInteraction, MoveCommand, TextViewport, WrapMode};
-use super::session_data::{self, SessionEntry, SourceSummary};
+use super::session_data::{SessionEntry, SourceSummary};
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewState {
@@ -45,7 +45,7 @@ impl ViewState {
         }
 
         if let Some(command) = move_command(key.code) {
-            self.move_session_selection(command);
+            self.move_session_selection(app, command);
             return true;
         }
 
@@ -87,16 +87,16 @@ impl ViewState {
             return false;
         }
 
-        self.move_session_selection(command);
+        self.move_session_selection(app, command);
         true
     }
 
-    fn move_session_selection(&mut self, command: MoveCommand) {
+    fn move_session_selection(&mut self, app: &App, command: MoveCommand) {
         let detail_active = self.session_detail_active();
         let len = if detail_active {
-            self.session_count()
+            self.session_count(app)
         } else {
-            self.source_count()
+            self.source_count(app)
         };
         let interaction = if detail_active {
             &mut self.session_details
@@ -143,12 +143,12 @@ impl ViewState {
         self.selected_session_source = Some(source.to_string());
     }
 
-    pub(crate) fn source_count(&self) -> usize {
-        session_data::snapshot().source_count()
+    pub(crate) fn source_count(&self, app: &App) -> usize {
+        app.session_snapshot.source_count()
     }
 
-    pub(crate) fn session_count(&self) -> usize {
-        let snapshot = session_data::snapshot();
+    pub(crate) fn session_count(&self, app: &App) -> usize {
+        let snapshot = &app.session_snapshot;
         self.selected_session_source.as_deref().map_or_else(
             || snapshot.session_count(),
             |source| snapshot.session_count_for_source(source),
@@ -156,8 +156,7 @@ impl ViewState {
     }
 
     pub(crate) fn source_rows(&self, app: &App) -> Vec<SourceSummary> {
-        let snapshot = session_data::snapshot();
-        let mut rows = snapshot.source_summaries().to_vec();
+        let mut rows = app.session_snapshot.source_summaries().to_vec();
         rows.sort_by(|left, right| {
             let ordering = match app.sort_field {
                 SortField::Date => left.last_seen.cmp(&right.last_seen),
@@ -170,12 +169,14 @@ impl ViewState {
         rows
     }
 
-    pub(crate) fn session_rows(&self, app: &App) -> Vec<SessionEntry> {
+    pub(crate) fn session_rows<'a>(&self, app: &'a App) -> Vec<&'a SessionEntry> {
         let Some(source) = self.selected_session_source.as_deref() else {
             return Vec::new();
         };
-        let snapshot = session_data::snapshot();
-        let mut rows = snapshot.sessions_for_source(source);
+        let mut rows = app
+            .session_snapshot
+            .session_refs_for_source(source)
+            .collect::<Vec<_>>();
         rows.sort_by(|left, right| {
             let ordering = match app.sort_field {
                 SortField::Date => left.last_seen.cmp(&right.last_seen),
@@ -186,6 +187,25 @@ impl ViewState {
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
         rows
+    }
+
+    pub(crate) fn reconcile_session_snapshot(&mut self, app: &App) {
+        if self
+            .selected_session_source
+            .as_deref()
+            .is_some_and(|selected| {
+                !app.session_snapshot
+                    .source_summaries()
+                    .iter()
+                    .any(|summary| summary.source == selected)
+            })
+        {
+            self.selected_session_source = None;
+            self.session_details = ListInteraction::default();
+        }
+
+        self.session_sources.clamp(self.source_count(app));
+        self.session_details.clamp(self.session_count(app));
     }
 
     pub(crate) fn set_source_viewport(&mut self, visible: usize, len: usize) {
