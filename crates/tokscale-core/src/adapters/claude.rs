@@ -16,7 +16,7 @@ use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{cc_mirror, sessions};
 
-const CLAUDE_PARSER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 8;
+const CLAUDE_PARSER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 9;
 
 static CLAUDE_PROJECT_RESOLVERS: LazyLock<
     Mutex<HashMap<PathBuf, Arc<sessions::claudecode::ClaudeProjectResolver>>>,

@@ -32,7 +32,7 @@ const GROK_RECORD_REJECTION_REVISION: u32 = GROK_TOTAL_ONLY_IMPUTATION_REVISION 
 const GROK_RELATED_METADATA_REVISION: u32 = GROK_RECORD_REJECTION_REVISION + 1;
 const GEMINI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const DROID_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-const DROID_AGENT_ATTRIBUTION_REVISION: u32 = DROID_RECORD_REJECTION_REVISION + 2;
+const DROID_AGENT_ATTRIBUTION_REVISION: u32 = DROID_RECORD_REJECTION_REVISION + 3;
 const GROK_RELATED_METADATA_SIBLINGS: &[&str] = &["summary.json", "events.jsonl"];
 
 pub(crate) struct CachedFileAdapter {
@@ -203,8 +203,9 @@ fn apply_workspace(messages: &mut [UnifiedMessage], workspace: Option<WorkspaceM
     }
 }
 
-fn enrich_droid_workspace(path: &Path, messages: &mut [UnifiedMessage]) {
+fn enrich_droid_metadata(path: &Path, messages: &mut [UnifiedMessage]) {
     apply_workspace(messages, sessions::droid::droid_workspace_metadata(path));
+    sessions::droid::classify_droid_main_session(path, messages);
 }
 
 fn enrich_kimi_workspace(path: &Path, messages: &mut [UnifiedMessage]) {
@@ -324,7 +325,7 @@ pub(crate) static DROID_ADAPTER: CachedFileAdapter =
         sessions::droid::droid_agent_dependency_path,
         sessions::droid::parse_droid_file,
     )
-    .with_workspace_enrichment(enrich_droid_workspace);
+    .with_workspace_enrichment(enrich_droid_metadata);
 pub(crate) static KIMI_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new_with_optional_dependency(
         ClientId::Kimi,

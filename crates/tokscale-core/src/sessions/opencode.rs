@@ -380,12 +380,43 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
         source,
     })?;
 
-    let query = r#"
+    let has_parent_id = conn
+        .query_row(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM pragma_table_info('session')
+                WHERE name = 'parent_id'
+            )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|source| OpenCodeSqliteError::CurrentSessionSchema {
+            db_path: db_path.to_path_buf(),
+            source,
+        })?;
+
+    let parent_query = r#"
+        SELECT
+            m.id,
+            m.session_id,
+            m.data,
+            NULLIF(s.directory, '') AS workspace_root,
+            NULLIF(TRIM(s.parent_id), '') AS parent_session_id
+        FROM message m
+        LEFT JOIN session s ON s.id = m.session_id
+        ORDER BY m.id
+    "#;
+    let directory_query = r#"
         SELECT m.id, m.session_id, m.data, NULLIF(s.directory, '') AS workspace_root
         FROM message m
         LEFT JOIN session s ON s.id = m.session_id
         ORDER BY m.id
     "#;
+    let query = if has_parent_id {
+        parent_query
+    } else {
+        directory_query
+    };
 
     let mut stmt =
         conn.prepare(query)
@@ -514,6 +545,19 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
                 continue;
             }
         };
+        let parent_session_id: Option<String> = if has_parent_id {
+            match row.get(4) {
+                Ok(parent_session_id) => parent_session_id,
+                Err(_) => {
+                    scanned
+                        .rejections
+                        .record(RecordRejectionReason::MalformedRecord);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
 
         if session_id.trim().is_empty() {
             scanned
@@ -581,7 +625,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
             "opencode",
             model_id,
             provider_id,
-            session_id,
+            session_id.clone(),
             created_timestamp,
             token_breakdown,
             0.0,
@@ -590,6 +634,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
         unified.duration_ms = opencode_duration_ms(&time);
         unified.dedup_key = Some(crate::sessions::dedup_hash_str(&dedup_key));
         set_workspace_from_root(&mut unified, workspace_root.as_deref());
+        unified.is_main_session = parent_session_id.is_none();
 
         if let Some(index) = fingerprint_indices.get(&fingerprint).copied() {
             let state = &mut dedup_states[index];
@@ -714,6 +759,24 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE session (
                 id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                directory TEXT NOT NULL
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn create_directory_only_current_db(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
                 directory TEXT NOT NULL
             );
             CREATE TABLE message (
@@ -820,7 +883,7 @@ mod tests {
     fn parses_current_schema_and_uses_session_directory() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
-        let conn = create_current_db(&path);
+        let conn = create_directory_only_current_db(&path);
         conn.execute(
             "INSERT INTO session (id, directory) VALUES (?1, ?2)",
             rusqlite::params!["ses_1", "/Users/alice/current-project"],
@@ -859,6 +922,54 @@ mod tests {
             messages[0].dedup_key,
             Some(crate::sessions::dedup_hash_str("row_1"))
         );
+        assert!(messages[0].is_main_session);
+    }
+
+    #[test]
+    fn current_schema_classifies_direct_main_and_child_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = create_current_db(&path);
+        for (id, parent_id) in [
+            ("ses_root", None),
+            ("ses_child", Some("ses_root")),
+            ("ses_grandchild", Some("ses_child")),
+        ] {
+            conn.execute(
+                "INSERT INTO session (id, parent_id, directory) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, parent_id, "/repo"],
+            )
+            .unwrap();
+        }
+        for (row_id, session_id, created) in [
+            ("row_root", "ses_root", 1766000000000_i64),
+            ("row_child", "ses_child", 1766000000001_i64),
+            ("row_grandchild", "ses_grandchild", 1766000000002_i64),
+        ] {
+            let payload = format!(
+                r#"{{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{{"input":10,"output":5,"cache":{{"read":0,"write":0}}}},"time":{{"created":{created}}}}}"#
+            );
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_id, session_id, payload],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&path).unwrap().messages;
+
+        assert_eq!(messages.len(), 3);
+        let is_main = |session_id: &str| {
+            messages
+                .iter()
+                .find(|message| message.session_id.as_ref() == session_id)
+                .map(|message| message.is_main_session)
+                .unwrap()
+        };
+        assert!(is_main("ses_root"));
+        assert!(!is_main("ses_child"));
+        assert!(!is_main("ses_grandchild"));
     }
 
     #[test]
@@ -903,7 +1014,11 @@ mod tests {
         let path = dir.path().join("opencode.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                directory TEXT NOT NULL
+             );
              CREATE TABLE message (id, session_id TEXT NOT NULL, data TEXT NOT NULL);
              INSERT INTO message VALUES (42, 'ses_1', '{\"role\":\"assistant\"}');
              INSERT INTO message VALUES ('01-good', 'ses_1', '{\"role\":\"assistant\",\"modelID\":\"gpt-5.5\",\"providerID\":\"openai\",\"tokens\":{\"input\":10,\"output\":5,\"cache\":{\"read\":0,\"write\":0}},\"time\":{\"created\":1766000000000}}');

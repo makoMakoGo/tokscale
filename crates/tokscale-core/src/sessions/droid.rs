@@ -200,6 +200,16 @@ fn read_session_start(path: &Path) -> Option<DroidSessionStart> {
     (start.record_type == "session_start").then_some(start)
 }
 
+/// Factory records direct delegation on the settings file's transcript header.
+/// Missing legacy transcripts retain the constructor default of top-level.
+pub(crate) fn classify_droid_main_session(path: &Path, messages: &mut [UnifiedMessage]) {
+    let is_main_session =
+        read_session_start(path).is_none_or(|start| start.parent_session_id().is_none());
+    for message in messages {
+        message.is_main_session = is_main_session;
+    }
+}
+
 /// Factory records the authoritative session working directory on the first
 /// transcript row, next to the settings file that owns the usage totals.
 pub(crate) fn droid_workspace_metadata(path: &Path) -> Option<WorkspaceMetadata> {
@@ -464,9 +474,11 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
         return Ok(scanned);
     }
 
-    scanned.messages.push(UnifiedMessage::new_with_agent(
+    let message = UnifiedMessage::new_with_agent(
         "droid", model, provider, session_id, timestamp, tokens, 0.0, agent,
-    ));
+    );
+    scanned.messages.push(message);
+    classify_droid_main_session(path, &mut scanned.messages);
     Ok(scanned)
 }
 
@@ -681,6 +693,27 @@ mod tests {
 
         assert_eq!(agent_for(&worker), None);
         assert_eq!(droid_agent_dependency_path(&worker), None);
+    }
+
+    #[test]
+    fn test_parse_droid_file_classifies_direct_main_and_child_sessions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions = temp_dir.path().join(".factory/sessions/project");
+
+        let root = sessions.join("root.settings.json");
+        write_settings(&root, json!([]));
+        write_session_start(&sessions.join("root.jsonl"), "Root", None);
+
+        let child = sessions.join("child.settings.json");
+        write_settings(&child, json!([{"name": "subagent"}]));
+        write_session_start(
+            &sessions.join("child.jsonl"),
+            "Worker: delegated task",
+            Some("root"),
+        );
+
+        assert!(parse_droid_file(&root)[0].is_main_session);
+        assert!(!parse_droid_file(&child)[0].is_main_session);
     }
 
     #[test]

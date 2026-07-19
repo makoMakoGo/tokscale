@@ -670,6 +670,7 @@ mod tests {
             model_id: "test-model".into(),
             provider_id: "test-provider".into(),
             session_id: session_id.into(),
+            is_main_session: true,
             workspace_key: None,
             workspace_label: None,
             timestamp,

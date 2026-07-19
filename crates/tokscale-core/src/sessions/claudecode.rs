@@ -794,7 +794,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
             )
         })?
         .to_string();
-
     let file = std::fs::File::open(path)
         .map_err(|source| SessionParseError::at_path(path, "open Claude session", source))?;
 
@@ -821,6 +820,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
     let mut sidechain_agent: Option<String> = None;
     let mut sidechain_agent_instance: Option<String> = None;
     let mut sidechain_detected = false;
+    let mut is_main_session = true;
 
     for (line_index, line) in reader.lines().enumerate() {
         let line = match line {
@@ -899,7 +899,13 @@ fn parse_claude_file_with_cache_home_and_resolver(
             // Detect sidechain on the first parseable entry (any type).
             // All lines in a subagent file carry isSidechain: true.
             if !sidechain_detected {
-                if entry.is_sidechain {
+                if entry.entry_type == "fork-context-ref" {
+                    is_main_session = false;
+                    // Preserve the legacy Total key for independent fork-context
+                    // transcripts instead of folding later sidechain rows into
+                    // the parent session ID.
+                    sidechain_detected = true;
+                } else if entry.is_sidechain {
                     let parent_id = match entry
                         .session_id
                         .as_deref()
@@ -927,6 +933,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                         }
                     };
                     sidechain_detected = true;
+                    is_main_session = false;
                     session_id = parent_id.to_string();
                     parent_session_id = Some(parent_id.to_string());
                     let stem_agent_id = path
@@ -1273,6 +1280,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     0.0,
                     dedup_key,
                 );
+                unified.is_main_session = is_main_session;
                 unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent
                     .as_deref()
@@ -3792,6 +3800,22 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 80);
         assert_eq!(messages[0].tokens.cache_read, 50);
+        assert!(!messages[0].is_main_session);
+    }
+
+    #[test]
+    fn test_fork_context_sidechain_is_child_and_keeps_legacy_session_id() {
+        let jsonl = r#"{"type":"fork-context-ref","uuid":"fork-ref-001"}
+{"type":"user","isSidechain":true,"sessionId":"parent-fork-001","agentId":"fork1","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Continue delegated work"}}
+{"type":"assistant","isSidechain":true,"sessionId":"parent-fork-001","agentId":"fork1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_fork_01","message":{"id":"msg_fork_01","model":"claude-sonnet-4.6","usage":{"input_tokens":120,"output_tokens":40}}}"#;
+        let (_dir, path) =
+            create_sidechain_files("myproject", "parent-fork-001", "agent-fork1", jsonl, None);
+
+        let messages = parse_claude_file(&path).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "agent-fork1");
+        assert!(!messages[0].is_main_session);
     }
 
     #[test]

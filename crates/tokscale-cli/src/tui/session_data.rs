@@ -31,6 +31,7 @@ impl SessionTokens {
 pub(crate) struct SessionEntry {
     pub source: String,
     pub session_id: String,
+    pub is_main_session: bool,
     pub workspace_key: Option<String>,
     pub workspace_label: Option<String>,
     pub models: BTreeSet<String>,
@@ -45,6 +46,7 @@ pub(crate) struct SessionEntry {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SourceSummary {
     pub source: String,
+    pub main_session_count: usize,
     pub session_count: usize,
     pub workspace_count: usize,
     pub last_seen: i64,
@@ -129,7 +131,7 @@ impl SessionProjection {
 
 impl SessionSnapshot {
     fn new(sessions: Vec<SessionEntry>, source_space: BTreeMap<String, u64>) -> Self {
-        let mut summaries = BTreeMap::<String, (usize, BTreeSet<String>, i64)>::new();
+        let mut summaries = BTreeMap::<String, (usize, usize, BTreeSet<String>, i64)>::new();
         let mut session_indices_by_source = BTreeMap::<String, Vec<usize>>::new();
 
         for (index, session) in sessions.iter().enumerate() {
@@ -139,8 +141,11 @@ impl SessionSnapshot {
                 .push(index);
             let entry = summaries
                 .entry(session.source.clone())
-                .or_insert_with(|| (0, BTreeSet::new(), 0));
+                .or_insert_with(|| (0, 0, BTreeSet::new(), 0));
             entry.0 = entry.0.saturating_add(1);
+            if session.is_main_session {
+                entry.1 = entry.1.saturating_add(1);
+            }
             if let Some(workspace) = session
                 .workspace_key
                 .as_deref()
@@ -152,26 +157,29 @@ impl SessionSnapshot {
                         .filter(|workspace| !workspace.is_empty())
                 })
             {
-                entry.1.insert(workspace.to_string());
+                entry.2.insert(workspace.to_string());
             }
-            entry.2 = entry.2.max(session.last_seen);
+            entry.3 = entry.3.max(session.last_seen);
         }
 
         for source in source_space.keys() {
             summaries
                 .entry(source.clone())
-                .or_insert_with(|| (0, BTreeSet::new(), 0));
+                .or_insert_with(|| (0, 0, BTreeSet::new(), 0));
         }
 
         let source_summaries = summaries
             .into_iter()
             .map(
-                |(source, (session_count, workspaces, last_seen))| SourceSummary {
-                    space_bytes: source_space.get(&source).copied().unwrap_or(0),
-                    source,
-                    session_count,
-                    workspace_count: workspaces.len(),
-                    last_seen,
+                |(source, (session_count, main_session_count, workspaces, last_seen))| {
+                    SourceSummary {
+                        space_bytes: source_space.get(&source).copied().unwrap_or(0),
+                        source,
+                        main_session_count,
+                        session_count,
+                        workspace_count: workspaces.len(),
+                        last_seen,
+                    }
                 },
             )
             .collect();
@@ -358,6 +366,7 @@ fn aggregate_sessions(messages: Vec<tokscale_core::UnifiedMessage>) -> Vec<Sessi
                 last_seen: timestamp,
                 ..SessionEntry::default()
             });
+        entry.is_main_session |= message.is_main_session;
 
         if entry.workspace_key.is_none() {
             entry.workspace_key = message.workspace_key.as_deref().map(str::to_string);
@@ -503,6 +512,7 @@ mod tests {
                 vec![SessionEntry {
                     source: "codex".to_string(),
                     session_id: session_id.to_string(),
+                    is_main_session: true,
                     ..SessionEntry::default()
                 }],
                 BTreeMap::new(),
@@ -531,10 +541,79 @@ mod tests {
         SessionEntry {
             source: source.to_string(),
             session_id: session_id.to_string(),
+            is_main_session: true,
             workspace_key: workspace.map(str::to_string),
             last_seen,
             ..SessionEntry::default()
         }
+    }
+
+    fn message(
+        client: &str,
+        session_id: &str,
+        is_main_session: bool,
+        timestamp: i64,
+    ) -> tokscale_core::UnifiedMessage {
+        let mut message = tokscale_core::UnifiedMessage::new(
+            client,
+            "gpt-5.6",
+            "openai",
+            session_id,
+            timestamp,
+            tokscale_core::TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+        message.is_main_session = is_main_session;
+        message
+    }
+
+    #[test]
+    fn main_count_only_counts_present_sessions_marked_main() {
+        let timestamp = 1_767_225_600_000;
+        let mut messages = (0..2)
+            .map(|index| {
+                let id = format!("root-{index}");
+                message("droid", &id, true, timestamp)
+            })
+            .collect::<Vec<_>>();
+
+        messages.extend((0..3).map(|index| {
+            let id = format!("child-{index}");
+            message("droid", &id, false, timestamp)
+        }));
+
+        let sessions = aggregate_sessions(messages);
+        let snapshot = SessionSnapshot::new(sessions, BTreeMap::new());
+        let droid = snapshot
+            .source_summaries()
+            .iter()
+            .find(|summary| summary.source == "droid")
+            .unwrap();
+
+        assert_eq!(droid.main_session_count, 2);
+        assert_eq!(droid.session_count, 5);
+    }
+
+    #[test]
+    fn claude_parent_stays_main_when_a_sidechain_folds_into_the_same_session() {
+        let timestamp = 1_767_225_600_000;
+        let first = message("claude", "parent-session", false, timestamp);
+        let second = message("claude", "parent-session", true, timestamp);
+
+        let sessions = aggregate_sessions(vec![first, second]);
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].is_main_session);
+        let snapshot = SessionSnapshot::new(sessions, BTreeMap::new());
+        let claude = snapshot.source_summaries().first().unwrap();
+
+        assert_eq!(claude.main_session_count, 1);
+        assert_eq!(claude.session_count, 1);
     }
 
     #[test]
@@ -675,6 +754,7 @@ mod tests {
             .find(|summary| summary.source == "codex")
             .expect("codex summary should be precomputed");
         assert_eq!(codex.session_count, 2);
+        assert_eq!(codex.main_session_count, 2);
         assert_eq!(codex.workspace_count, 1);
         assert_eq!(codex.last_seen, 30);
         assert_eq!(codex.space_bytes, 42);

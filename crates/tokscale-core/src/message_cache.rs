@@ -19,10 +19,10 @@ compile_error!("source-message cache requires stable Unix or Windows file identi
 // Source-message cache shards split serialization layout from parser/source
 // semantics. Bump this only when the shard bincode layout changes; parser-only
 // fixes should bump the relevant SourceUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 6;
+const CACHE_FORMAT_VERSION: u32 = 7;
 #[cfg(test)]
-const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 5;
-const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 4] = [2, 3, 4, 5];
+const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 6;
+const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 5] = [2, 3, 4, 5, 6];
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const SHARD_KEY_FORMAT_VERSION: u32 = 1;
 const SHARDS_DIRNAME: &str = "shards";

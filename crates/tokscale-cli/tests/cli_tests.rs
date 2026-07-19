@@ -44,7 +44,7 @@ fn create_opencode_sqlite_at(db_path: &Path) -> Connection {
     fs::create_dir_all(db_path.parent().unwrap()).unwrap();
     let conn = Connection::open(db_path).unwrap();
     conn.execute_batch(
-        "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+        "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL);
          CREATE TABLE message (
              id TEXT PRIMARY KEY,
              session_id TEXT NOT NULL,

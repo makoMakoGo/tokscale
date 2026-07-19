@@ -16,7 +16,7 @@ use crate::tui::app::App;
 use crate::tui::session_data::{self, SessionProjectionStatus};
 use crate::tui::view_state::ViewState;
 
-const SOURCE_MIN_WIDTH: u16 = 12;
+const SOURCE_MIN_WIDTH: u16 = 10;
 const SOURCE_MAX_WIDTH: u16 = 32;
 const SESSION_MIN_WIDTH: u16 = 12;
 const SESSION_MAX_WIDTH: u16 = 28;
@@ -28,7 +28,8 @@ const MODELS_MAX_WIDTH: u16 = 34;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceColumn {
     Source,
-    Sessions,
+    Main,
+    Total,
     Workspaces,
     Active,
     Space,
@@ -60,7 +61,8 @@ fn source_table_layout(
                 source_content_width.saturating_add(2),
                 SOURCE_MAX_WIDTH,
             ),
-            ResponsiveColumn::fixed_required(SourceColumn::Sessions, 10, 10),
+            ResponsiveColumn::fixed_required(SourceColumn::Main, 10, 6),
+            ResponsiveColumn::fixed_required(SourceColumn::Total, 20, 6),
             ResponsiveColumn::fixed_optional(SourceColumn::Space, 10, 40, 10),
             ResponsiveColumn::fixed_optional(SourceColumn::Active, 20, 30, 12),
             ResponsiveColumn::fixed_optional(SourceColumn::Workspaces, 30, 20, 10),
@@ -116,7 +118,8 @@ fn right_aligned_cell(value: impl AsRef<str>, width: usize) -> Cell<'static> {
 fn source_column_label(column: SourceColumn) -> &'static str {
     match column {
         SourceColumn::Source => "Source",
-        SourceColumn::Sessions => "Sessions",
+        SourceColumn::Main => "Main",
+        SourceColumn::Total => "Total",
         SourceColumn::Workspaces => "Workspaces",
         SourceColumn::Active => "Active",
         SourceColumn::Space => "Space",
@@ -217,7 +220,10 @@ fn render_sources(
                             );
                             Cell::from(format!("{marker} {source}"))
                         }
-                        SourceColumn::Sessions => {
+                        SourceColumn::Main => {
+                            right_aligned_cell(row.main_session_count.to_string(), width)
+                        }
+                        SourceColumn::Total => {
                             right_aligned_cell(row.session_count.to_string(), width)
                         }
                         SourceColumn::Workspaces => {
@@ -600,15 +606,20 @@ mod tests {
     }
 
     #[test]
-    fn narrow_source_table_keeps_identity_and_session_count_aligned() {
+    fn narrow_source_table_keeps_identity_and_session_counts_aligned() {
         let layout = source_table_layout(24, 20);
 
         assert_eq!(
             layout.columns,
-            vec![SourceColumn::Source, SourceColumn::Sessions]
+            vec![
+                SourceColumn::Source,
+                SourceColumn::Main,
+                SourceColumn::Total
+            ]
         );
         assert!(layout_width(&layout) <= 24);
-        assert_eq!(layout.width_for(SourceColumn::Sessions), 10);
+        assert_eq!(layout.width_for(SourceColumn::Main), 6);
+        assert_eq!(layout.width_for(SourceColumn::Total), 6);
     }
 
     #[test]
@@ -619,7 +630,8 @@ mod tests {
             layout.columns,
             vec![
                 SourceColumn::Source,
-                SourceColumn::Sessions,
+                SourceColumn::Main,
+                SourceColumn::Total,
                 SourceColumn::Workspaces,
                 SourceColumn::Active,
                 SourceColumn::Space,

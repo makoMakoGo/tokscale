@@ -896,6 +896,8 @@ fn parse_pi_format_file(
     } else {
         None
     };
+    let is_main_session =
+        client != "omp" || (omp_parent_scan.is_none() && omp_subagent_label.is_none());
 
     let mut session_id: Option<String> = None;
     let mut workspace_key: Option<String> = None;
@@ -1032,6 +1034,7 @@ fn parse_pi_format_file(
             tokens,
             0.0,
         );
+        unified.is_main_session = is_main_session;
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         unified.agent = omp_subagent_label
             .as_deref()
@@ -1266,6 +1269,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].agent.as_deref(), Some("OMP Advisor"));
         assert_eq!(messages[0].agent_instance.as_deref(), Some("__advisor"));
+        assert!(!messages[0].is_main_session);
     }
 
     #[test]
@@ -1299,6 +1303,24 @@ mod tests {
             messages[0].agent_instance.as_deref(),
             Some("0-ReviewFindings")
         );
+    }
+
+    #[test]
+    fn test_parse_omp_classifies_top_level_and_direct_child() {
+        let root_content = r#"{"type":"session","id":"root-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}"#;
+        let child_content = r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":25}}}"#;
+        let (_dir, child_path) = create_omp_task_files(root_content, "0-child", child_content);
+        let root_path = child_path.parent().unwrap().with_extension("jsonl");
+
+        let root_messages = parse_omp_file(&root_path).unwrap().messages;
+        let child_messages = parse_omp_file(&child_path).unwrap().messages;
+
+        assert_eq!(root_messages[0].session_id.as_ref(), "root-session");
+        assert_eq!(child_messages[0].session_id.as_ref(), "child-session");
+        assert!(root_messages[0].is_main_session);
+        assert!(!child_messages[0].is_main_session);
     }
 
     #[test]
@@ -1613,7 +1635,8 @@ mod tests {
     #[test]
     fn test_parse_omp_swarm_artifact_uses_shared_agent_identity() {
         let dir = TempDir::new().unwrap();
-        let context = dir.path().join(".swarm_docs-factcheck").join("context");
+        let swarm_group = dir.path().join(".swarm_docs-factcheck");
+        let context = swarm_group.join("context");
         std::fs::create_dir_all(&context).unwrap();
         let path = context.join("swarm-docs-factcheck-architecture-reviewer-2.jsonl");
         let second_path = context.join("swarm-docs-factcheck-implementation-reviewer-3.jsonl");
@@ -1637,6 +1660,8 @@ mod tests {
             second_messages[0].agent_instance.as_deref(),
             Some("swarm-docs-factcheck-implementation-reviewer-3")
         );
+        assert!(!messages[0].is_main_session);
+        assert!(!second_messages[0].is_main_session);
     }
 
     #[test]

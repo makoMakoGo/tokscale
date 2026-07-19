@@ -166,6 +166,9 @@ pub(crate) struct CodexParseState {
     pub previous_totals: Option<CodexTotals>,
     pub session_is_exec: bool,
     pub session_id_from_meta: Option<String>,
+    /// Only an explicit `source.subagent.thread_spawn` marks delegated usage.
+    #[serde(default)]
+    pub session_is_child: bool,
     pub session_forked_from_id: Option<String>,
     pub forked_child_session_id: Option<String>,
     pub forked_child_replay_session_id: Option<String>,
@@ -210,6 +213,7 @@ struct PendingCodexMessage {
     total_usage: CodexTotals,
     workspace_key: Option<String>,
     workspace_label: Option<String>,
+    is_main_session: bool,
 }
 
 impl PendingCodexMessage {
@@ -227,6 +231,7 @@ impl PendingCodexMessage {
         message.duration_ms = self.duration_ms;
         message.set_agent_instance(self.agent_instance);
         message.is_turn_start = self.is_turn_start;
+        message.is_main_session = self.is_main_session;
         set_codex_dedup_key(&mut message, model, &self.dedup_scope_id, self.total_usage);
         message.set_workspace(self.workspace_key, self.workspace_label);
         message
@@ -479,6 +484,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                     if let Some(ref id) = payload.id {
                         state.session_id_from_meta = Some(id.clone());
                     }
+                    state.session_is_child |= codex_source_is_thread_spawn(payload.source.as_ref());
                     let forked_from_id = payload
                         .forked_from_id
                         .as_deref()
@@ -676,6 +682,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                         total_usage,
                         workspace_key: state.session_workspace_key.clone(),
                         workspace_label: state.session_workspace_label.clone(),
+                        is_main_session: !state.session_is_child,
                     };
                     if let Some(model) = model.as_deref() {
                         messages.push(pending.into_message(model));
@@ -804,6 +811,13 @@ fn forked_from_id_from_source(source: Option<&Value>) -> Option<&str> {
         .get("parent_thread_id")?
         .as_str()
         .filter(|id| !id.is_empty())
+}
+
+fn codex_source_is_thread_spawn(source: Option<&Value>) -> bool {
+    source
+        .and_then(|source| source.get("subagent"))
+        .and_then(|subagent| subagent.get("thread_spawn"))
+        .is_some()
 }
 
 fn forked_child_turn_starts_own_session(state: &CodexParseState, turn_id: Option<&str>) -> bool {
@@ -1812,6 +1826,38 @@ mod tests {
             Some("/Users/alice/codex-fork")
         );
         assert!(messages[0].dedup_key.is_some());
+        assert!(!messages[0].is_main_session);
+    }
+
+    #[test]
+    fn test_human_fork_remains_a_main_session() {
+        let file = create_test_file(concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"human-fork","forked_from_id":"parent-session","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2},"last_token_usage":{"input_tokens":10,"output_tokens":2}}}}"#,
+            "\n"
+        ));
+
+        let messages = parse_codex_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_main_session);
+    }
+
+    #[test]
+    fn test_only_thread_spawn_source_marks_a_child() {
+        let thread_spawn = serde_json::json!({
+            "subagent": {"thread_spawn": {"parent_thread_id": "thread-parent"}}
+        });
+        assert!(codex_source_is_thread_spawn(Some(&thread_spawn)));
+        assert!(!codex_source_is_thread_spawn(Some(&serde_json::json!({
+            "subagent": {"review": {}}
+        }))));
+        assert!(!codex_source_is_thread_spawn(Some(&serde_json::json!(
+            "vscode"
+        ))));
     }
 
     #[test]
@@ -1919,6 +1965,7 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 2);
+        assert!(!messages[0].is_main_session);
     }
 
     #[test]
