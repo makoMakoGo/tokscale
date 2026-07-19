@@ -499,6 +499,37 @@ impl<T> OneOrMany<T> {
     }
 }
 
+#[cfg(test)]
+mod one_or_many_tests {
+    use super::OneOrMany;
+
+    #[test]
+    fn iterates_singleton() {
+        let values = OneOrMany::One((2, "second"));
+
+        assert_eq!(
+            values
+                .into_stable_iter_by_key(|(key, _)| *key)
+                .collect::<Vec<_>>(),
+            vec![(2, "second")]
+        );
+    }
+
+    #[test]
+    fn promotes_to_many_and_sorts_stably() {
+        let mut values = OneOrMany::One((2, "second"));
+        values.push((1, "first"));
+        values.push((2, "third"));
+
+        assert_eq!(
+            values
+                .into_stable_iter_by_key(|(key, _)| *key)
+                .collect::<Vec<_>>(),
+            vec![(1, "first"), (2, "second"), (2, "third")]
+        );
+    }
+}
+
 /// Canonical `(client, provider, workspace, session, model)` bucket. Keeps
 /// the additive counters plus the two creation-time attributes every
 /// grouping re-derives materialized fields from: `first_seen` (arrival order
