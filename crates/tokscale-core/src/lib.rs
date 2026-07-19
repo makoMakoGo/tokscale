@@ -74,6 +74,21 @@ pub fn aggregate_unified_messages(
     engine.finish()
 }
 
+#[doc(hidden)]
+pub fn build_tui_accumulator(messages: &[UnifiedMessage], date_range: DateRange) -> TuiAcc {
+    let mut engine = aggregate::AggregationEngine::new(AggregationConfig {
+        group_by: GroupBy::default(),
+        date_range,
+        views: ViewSet::TUI,
+    });
+    for message in messages {
+        engine.push(message);
+    }
+    engine
+        .into_tui_accumulator()
+        .expect("TUI view must create a TUI accumulator")
+}
+
 fn retain_for_requested_clients(
     client: &str,
     _model_id: &str,

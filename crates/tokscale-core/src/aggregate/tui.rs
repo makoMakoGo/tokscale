@@ -461,6 +461,75 @@ pub struct TuiAcc {
     next_sequence: usize,
 }
 
+/// Stores singleton groups inline and allocates only when a second value joins.
+enum OneOrMany<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
+impl<T> OneOrMany<T> {
+    fn push(&mut self, value: T) {
+        if let Self::Many(values) = self {
+            values.push(value);
+            return;
+        }
+
+        let first = match std::mem::replace(self, Self::Many(Vec::with_capacity(2))) {
+            Self::One(first) => first,
+            Self::Many(_) => unreachable!("singleton branch contains multiple values"),
+        };
+        let Self::Many(values) = self else {
+            unreachable!("singleton replacement did not create a vector")
+        };
+        values.push(first);
+        values.push(value);
+    }
+
+    fn into_stable_iter_by_key<K: Ord>(
+        self,
+        by_key: impl FnMut(&T) -> K,
+    ) -> std::iter::Chain<std::option::IntoIter<T>, std::vec::IntoIter<T>> {
+        match self {
+            Self::One(value) => Some(value).into_iter().chain(Vec::new()),
+            Self::Many(mut values) => {
+                values.sort_by_key(by_key);
+                None.into_iter().chain(values)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod one_or_many_tests {
+    use super::OneOrMany;
+
+    #[test]
+    fn iterates_singleton() {
+        let values = OneOrMany::One((2, "second"));
+
+        assert_eq!(
+            values
+                .into_stable_iter_by_key(|(key, _)| *key)
+                .collect::<Vec<_>>(),
+            vec![(2, "second")]
+        );
+    }
+
+    #[test]
+    fn promotes_to_many_and_sorts_stably() {
+        let mut values = OneOrMany::One((2, "second"));
+        values.push((1, "first"));
+        values.push((2, "third"));
+
+        assert_eq!(
+            values
+                .into_stable_iter_by_key(|(key, _)| *key)
+                .collect::<Vec<_>>(),
+            vec![(1, "first"), (2, "second"), (2, "third")]
+        );
+    }
+}
+
 /// Canonical `(client, provider, workspace, session, model)` bucket. Keeps
 /// the additive counters plus the two creation-time attributes every
 /// grouping re-derives materialized fields from: `first_seen` (arrival order
@@ -627,47 +696,69 @@ fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> Daily
 }
 
 /// Re-fold one day's fine-grained source models into `group_by`'s daily
-/// breakdown. Fine buckets fold in creation order so merged floating-point
-/// sums stay deterministic; the first-created bucket in each merged group
+/// breakdown. Within each merged group, fine buckets fold in creation order so
+/// floating-point sums stay deterministic; the first-created bucket in the group
 /// attributes the provider and workspace label (its first message is the
 /// group's first message, matching a direct grouped fold).
 fn materialize_daily(bucket: &DailyBucket, group_by: &GroupBy) -> DailyUsage {
     let mut source_breakdown = BTreeMap::new();
     for (client, source) in &bucket.sources {
-        let mut fine_models: Vec<_> = source.models.iter().collect();
-        fine_models.sort_by_key(|(_, model)| model.first_seen);
-        let mut grouped_models: HashMap<GroupedModelKey, DailyModelBucket> = HashMap::new();
-        for (fine_key, fine_model) in fine_models {
-            let grouped_model = grouped_models
+        let mut grouped_fine_models: HashMap<
+            GroupedModelKey,
+            OneOrMany<(&FineModelKey, &FineDailyModelBucket)>,
+        > = HashMap::new();
+        for (fine_key, fine_model) in &source.models {
+            let fine_bucket = (fine_key, fine_model);
+            grouped_fine_models
                 .entry(fine_key.grouped(group_by))
-                .or_insert_with(|| {
-                    let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
-                        (
-                            fine_key.workspace.to_key(),
-                            Some(Arc::clone(&fine_model.workspace_label)),
-                        )
-                    } else {
-                        (None, None)
-                    };
-                    DailyModelBucket {
-                        provider: Arc::clone(&fine_key.provider),
-                        workspace_key,
-                        workspace_label,
-                        session_id: matches!(group_by, GroupBy::Session | GroupBy::ClientSession)
-                            .then(|| Arc::clone(&fine_key.session)),
-                        model: Arc::clone(&fine_key.model),
-                        tokens: UsageTokenBreakdown::default(),
-                        cost: 0.0,
-                        messages: 0,
-                    }
-                });
-            add_tokens(&mut grouped_model.tokens, &fine_model.tokens);
-            grouped_model.cost += fine_model.cost;
-            grouped_model.messages = grouped_model.messages.saturating_add(fine_model.messages);
+                .and_modify(|models| models.push(fine_bucket))
+                .or_insert(OneOrMany::One(fine_bucket));
         }
-        let models = grouped_models
+
+        let models: BTreeMap<_, _> = grouped_fine_models
             .into_iter()
-            .map(|(key, model)| (key.map_key(), materialize_daily_model(model, group_by)))
+            .map(|(key, fine_models)| {
+                let mut grouped_model: Option<DailyModelBucket> = None;
+                for (fine_key, fine_model) in
+                    fine_models.into_stable_iter_by_key(|(_, model)| model.first_seen)
+                {
+                    let grouped_model = grouped_model.get_or_insert_with(|| {
+                        let (workspace_key, workspace_label) =
+                            if *group_by == GroupBy::WorkspaceModel {
+                                (
+                                    fine_key.workspace.to_key(),
+                                    Some(Arc::clone(&fine_model.workspace_label)),
+                                )
+                            } else {
+                                (None, None)
+                            };
+                        DailyModelBucket {
+                            provider: Arc::clone(&fine_key.provider),
+                            workspace_key,
+                            workspace_label,
+                            session_id: matches!(
+                                group_by,
+                                GroupBy::Session | GroupBy::ClientSession
+                            )
+                            .then(|| Arc::clone(&fine_key.session)),
+                            model: Arc::clone(&fine_key.model),
+                            tokens: UsageTokenBreakdown::default(),
+                            cost: 0.0,
+                            messages: 0,
+                        }
+                    });
+                    add_tokens(&mut grouped_model.tokens, &fine_model.tokens);
+                    grouped_model.cost += fine_model.cost;
+                    grouped_model.messages =
+                        grouped_model.messages.saturating_add(fine_model.messages);
+                }
+                let grouped_model = grouped_model
+                    .expect("daily target group contains at least one fine model bucket");
+                (
+                    key.map_key(),
+                    materialize_daily_model(grouped_model, group_by),
+                )
+            })
             .collect();
         source_breakdown.insert(
             client.to_string(),
@@ -887,78 +978,95 @@ impl TuiAcc {
         }
     }
 
-    /// Re-fold the canonical model buckets into `group_by`'s grouping. Fine
-    /// buckets fold in creation order so merged floating-point sums stay
-    /// deterministic across runs and repeated projections; the first-created
-    /// bucket in each merged group attributes the single-client field,
+    /// Re-fold the canonical model buckets into `group_by`'s grouping. Within
+    /// each merged group, fine buckets fold in creation order so floating-point
+    /// sums stay deterministic across runs and repeated projections; the
+    /// first-created bucket in the group attributes the single-client field,
     /// workspace label, and client first-seen (its first message is the
     /// group's first message, matching a direct grouped fold).
-    fn refold_models(&self, group_by: &GroupBy) -> HashMap<GroupedModelKey, TuiModelBucket> {
-        let mut fine_models: Vec<_> = self.model_map.iter().collect();
-        fine_models.sort_by_key(|(_, model)| model.first_seen);
-        let mut model_map: HashMap<GroupedModelKey, TuiModelBucket> = HashMap::new();
-        for (fine_key, fine_model) in fine_models {
-            let key = fine_key.grouped(group_by);
-            let merge_clients = key.merges_clients();
-            let model_entry = model_map.entry(key).or_insert_with(|| {
-                let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
-                    (
-                        fine_key.workspace.to_key(),
-                        Some(Arc::clone(&fine_model.workspace_label)),
-                    )
-                } else {
-                    (None, None)
-                };
-                TuiModelBucket {
-                    model: Arc::clone(&fine_key.model),
-                    providers: IdentitySet::default(),
-                    client: Arc::clone(&fine_key.client),
-                    workspace_key,
-                    workspace_label,
-                    tokens: UsageTokenBreakdown::default(),
-                    cost: 0.0,
-                    performance: ModelPerformance::default(),
-                    sessions: IdentitySet::default(),
-                    client_totals: merge_clients.then(|| Box::new(HashMap::new())),
-                }
-            });
-
-            if merge_clients {
-                let totals = model_entry
-                    .client_totals
-                    .as_mut()
-                    .expect("merge-client TUI grouping has client totals")
-                    .entry(Arc::clone(&fine_key.client))
-                    .or_insert_with(|| ClientContributionOrder {
-                        first_seen: fine_model.first_seen,
-                        total_tokens: 0,
-                    });
-                totals.total_tokens = totals
-                    .total_tokens
-                    .checked_add(fine_model.contribution_tokens)
-                    .expect("client token contribution exceeds u64::MAX");
-            }
-
-            model_entry.providers.insert(Arc::clone(&fine_key.provider));
-
-            add_tokens(&mut model_entry.tokens, &fine_model.tokens);
-            model_entry.cost += fine_model.cost;
-            model_entry.performance.merge(&fine_model.performance);
-
-            model_entry
-                .sessions
-                .insert((Arc::clone(&fine_key.client), Arc::clone(&fine_key.session)));
+    fn refold_models(&self, group_by: &GroupBy) -> Vec<(GroupedModelKey, TuiModelBucket)> {
+        let mut grouped_fine_models: HashMap<
+            GroupedModelKey,
+            OneOrMany<(&FineModelKey, &FineModelBucket)>,
+        > = HashMap::new();
+        for (fine_key, fine_model) in &self.model_map {
+            let fine_bucket = (fine_key, fine_model);
+            grouped_fine_models
+                .entry(fine_key.grouped(group_by))
+                .and_modify(|models| models.push(fine_bucket))
+                .or_insert(OneOrMany::One(fine_bucket));
         }
-        model_map
+
+        let mut model_buckets = Vec::with_capacity(grouped_fine_models.len());
+        for (key, fine_models) in grouped_fine_models {
+            let merge_clients = key.merges_clients();
+            let mut model_entry: Option<TuiModelBucket> = None;
+            for (fine_key, fine_model) in
+                fine_models.into_stable_iter_by_key(|(_, model)| model.first_seen)
+            {
+                let model_entry = model_entry.get_or_insert_with(|| {
+                    let (workspace_key, workspace_label) = if *group_by == GroupBy::WorkspaceModel {
+                        (
+                            fine_key.workspace.to_key(),
+                            Some(Arc::clone(&fine_model.workspace_label)),
+                        )
+                    } else {
+                        (None, None)
+                    };
+                    TuiModelBucket {
+                        model: Arc::clone(&fine_key.model),
+                        providers: IdentitySet::default(),
+                        client: Arc::clone(&fine_key.client),
+                        workspace_key,
+                        workspace_label,
+                        tokens: UsageTokenBreakdown::default(),
+                        cost: 0.0,
+                        performance: ModelPerformance::default(),
+                        sessions: IdentitySet::default(),
+                        client_totals: merge_clients.then(|| Box::new(HashMap::new())),
+                    }
+                });
+
+                if merge_clients {
+                    let totals = model_entry
+                        .client_totals
+                        .as_mut()
+                        .expect("merge-client TUI grouping has client totals")
+                        .entry(Arc::clone(&fine_key.client))
+                        .or_insert_with(|| ClientContributionOrder {
+                            first_seen: fine_model.first_seen,
+                            total_tokens: 0,
+                        });
+                    totals.total_tokens = totals
+                        .total_tokens
+                        .checked_add(fine_model.contribution_tokens)
+                        .expect("client token contribution exceeds u64::MAX");
+                }
+
+                model_entry.providers.insert(Arc::clone(&fine_key.provider));
+
+                add_tokens(&mut model_entry.tokens, &fine_model.tokens);
+                model_entry.cost += fine_model.cost;
+                model_entry.performance.merge(&fine_model.performance);
+
+                model_entry
+                    .sessions
+                    .insert((Arc::clone(&fine_key.client), Arc::clone(&fine_key.session)));
+            }
+            model_buckets.push((
+                key,
+                model_entry.expect("target group contains at least one fine model bucket"),
+            ));
+        }
+        model_buckets
     }
 
     /// Materialize one grouping's [`UsageData`] from the canonical fold
     /// state. Borrowing, so the same accumulator can be projected repeatedly
     /// with different groupings without rescanning local sources.
     pub fn project(&self, group_by: &GroupBy) -> UsageData {
-        let model_map = self.refold_models(group_by);
-
-        let mut keyed_models: Vec<_> = model_map
+        let mut keyed_models: Vec<_> = self
+            .refold_models(group_by)
             .into_iter()
             .map(|(key, bucket)| (key, materialize_tui_model(bucket)))
             .collect();
@@ -2575,6 +2683,23 @@ mod tests {
             let first = acc.project(&group_by);
             let second = acc.project(&group_by);
             assert_usage_data_eq(&first, &second);
+        }
+    }
+
+    #[test]
+    fn independently_built_accumulators_project_identically_across_hash_seeds() {
+        // Separate accumulators create independently seeded HashMaps.
+        let first = reprojection_accumulator();
+        let second = reprojection_accumulator();
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
+        ] {
+            assert_usage_data_eq(&first.project(&group_by), &second.project(&group_by));
         }
     }
 
