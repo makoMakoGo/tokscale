@@ -1,6 +1,6 @@
 {
   "name": "@juya-ai/tokscale",
-  "version": "4.6.0",
+  "version": "4.7.0",
   "description": "Wrapper for @juya-ai/tokscale-cli — a local CLI and TUI for tracking AI coding assistant token usage and costs.",
   "type": "module",
   "main": "index.js",
@@ -26,7 +26,7 @@
     "cli"
   ],
   "dependencies": {
-    "@juya-ai/tokscale-cli": "4.6.0"
+    "@juya-ai/tokscale-cli": "4.7.0"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
