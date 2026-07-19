@@ -28,12 +28,12 @@ fn sessions_content(app: &App, state: &ViewState) -> FooterContent {
 
 fn sessions_summary_line(app: &App, state: &ViewState) -> Line<'static> {
     let count = if state.session_detail_active() {
-        format!(" ({} sessions)", state.session_count())
+        format!(" ({} sessions)", state.session_count(app))
     } else {
         format!(
             " ({} sources · {} sessions)",
-            state.source_count(),
-            state.session_count()
+            state.source_count(app),
+            state.session_count(app)
         )
     };
     Line::from(vec![

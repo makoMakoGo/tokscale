@@ -6,10 +6,11 @@ use tokio::runtime::{Handle, Runtime};
 #[cfg(test)]
 use chrono::NaiveDate;
 
+#[cfg(test)]
+use tokscale_core::GroupBy;
 use tokscale_core::{
-    load_prepared_usage_accumulator_with_diagnostics, load_prepared_usage_data_with_diagnostics,
-    prepare_local_sources, ClientId, DataHealth, GroupBy, LocalParseOptions, PreparedLocalSources,
-    SourceInventorySignature, TuiAcc,
+    load_prepared_tui_bundle_with_diagnostics, prepare_local_sources, ClientId, DataHealth,
+    LocalParseOptions, PreparedLocalSources, SourceInventorySignature, TuiAcc, TuiSessionEntry,
 };
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
@@ -55,6 +56,19 @@ pub(super) fn trim_allocator() {
     }
 }
 
+/// Bound glibc's process-wide arena count before the TUI starts worker threads.
+/// The TUI explicitly trims after snapshot replacement, and one arena prevents
+/// short-lived background folds from leaving otherwise unreachable arenas at
+/// their high-water RSS (ADR 0008).
+pub(super) fn configure_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, 1);
+        }
+    }
+}
+
 pub struct DataLoader {
     pub home_dir: Option<PathBuf>,
     pub since: Option<String>,
@@ -62,17 +76,10 @@ pub struct DataLoader {
     pub year: Option<String>,
 }
 
-pub struct DataLoadResult {
-    pub data: UsageData,
-    #[allow(dead_code)]
-    pub pricing_diagnostics: Vec<String>,
-    pub source_inventory_signature: SourceInventorySignature,
-    #[allow(dead_code)]
-    pub source_digest: u64,
-}
-
-pub struct AccumulatorLoadResult {
+pub struct TuiBundleLoadResult {
     pub accumulator: TuiAcc,
+    pub sessions: Vec<TuiSessionEntry>,
+    pub source_space: std::collections::BTreeMap<String, u64>,
     pub pricing_diagnostics: Vec<String>,
     pub source_inventory_signature: SourceInventorySignature,
     pub source_digest: u64,
@@ -104,15 +111,6 @@ impl DataLoader {
             until,
             year,
         }
-    }
-
-    pub fn load_with_diagnostics(
-        &self,
-        enabled_clients: &[ClientId],
-        group_by: &GroupBy,
-    ) -> Result<DataLoadResult> {
-        let prepared = self.prepare(enabled_clients)?;
-        self.execute_with_diagnostics(prepared, group_by)
     }
 
     pub fn prepare(&self, enabled_clients: &[ClientId]) -> Result<PreparedDataLoad> {
@@ -147,71 +145,31 @@ impl DataLoader {
             .map_err(anyhow::Error::new)
     }
 
-    pub fn execute_with_diagnostics(
+    pub fn execute_tui_bundle_with_diagnostics(
         &self,
         prepared: PreparedDataLoad,
-        group_by: &GroupBy,
-    ) -> Result<DataLoadResult> {
-        let group_by = group_by.clone();
-
-        let usage_data: Result<_> = if Handle::try_current().is_ok() {
+    ) -> Result<TuiBundleLoadResult> {
+        let bundle: Result<_> = if Handle::try_current().is_ok() {
             std::thread::scope(|s| {
                 s.spawn(move || -> Result<_> {
                     let rt = Runtime::new()?;
-                    rt.block_on(load_prepared_usage_data_with_diagnostics(
-                        prepared.sources,
-                        group_by,
-                    ))
-                    .map_err(anyhow::Error::new)
+                    rt.block_on(load_prepared_tui_bundle_with_diagnostics(prepared.sources))
+                        .map_err(anyhow::Error::new)
                 })
                 .join()
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("data loader thread panicked")))
             })
         } else {
             Runtime::new()?
-                .block_on(load_prepared_usage_data_with_diagnostics(
-                    prepared.sources,
-                    group_by,
-                ))
+                .block_on(load_prepared_tui_bundle_with_diagnostics(prepared.sources))
                 .map_err(anyhow::Error::new)
         };
 
         trim_allocator();
-        usage_data.map(|result| DataLoadResult {
-            data: result.data,
-            pricing_diagnostics: result.pricing_diagnostics,
-            source_inventory_signature: result.source_inventory_signature,
-            source_digest: result.source_inventory_signature.process_digest(),
-        })
-    }
-
-    pub fn execute_accumulator_with_diagnostics(
-        &self,
-        prepared: PreparedDataLoad,
-    ) -> Result<AccumulatorLoadResult> {
-        let accumulator: Result<_> = if Handle::try_current().is_ok() {
-            std::thread::scope(|s| {
-                s.spawn(move || -> Result<_> {
-                    let rt = Runtime::new()?;
-                    rt.block_on(load_prepared_usage_accumulator_with_diagnostics(
-                        prepared.sources,
-                    ))
-                    .map_err(anyhow::Error::new)
-                })
-                .join()
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("data loader thread panicked")))
-            })
-        } else {
-            Runtime::new()?
-                .block_on(load_prepared_usage_accumulator_with_diagnostics(
-                    prepared.sources,
-                ))
-                .map_err(anyhow::Error::new)
-        };
-
-        trim_allocator();
-        accumulator.map(|result| AccumulatorLoadResult {
+        bundle.map(|result| TuiBundleLoadResult {
             accumulator: result.accumulator,
+            sessions: result.sessions,
+            source_space: result.source_space,
             pricing_diagnostics: result.pricing_diagnostics,
             source_inventory_signature: result.source_inventory_signature,
             source_digest: result.source_inventory_signature.process_digest(),

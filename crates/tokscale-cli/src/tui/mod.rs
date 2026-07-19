@@ -12,10 +12,11 @@ mod themes;
 mod ui;
 mod view_state;
 
-use app::KeyEventOutcome;
 pub use app::{App, Tab, TuiConfig, TuiExit};
+use app::{KeyEventOutcome, ProjectionBackend};
 pub use cache::{
-    load_cache, save_cached_data, CacheReportScope, CacheResult, TUI_DEFAULT_GROUP_BY,
+    load_cache, save_tui_bundle_cache, CacheReportScope, CacheResult, LoadedTuiCache,
+    TUI_DEFAULT_GROUP_BY,
 };
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
@@ -49,13 +50,13 @@ use crossterm::{
 use ratatui::prelude::*;
 use tokscale_core::ClientId;
 
-fn decide_initial_data(load_result: CacheResult) -> (Option<UsageData>, bool, Option<u64>) {
+fn decide_initial_data(load_result: CacheResult) -> (Option<LoadedTuiCache>, bool, Option<u64>) {
     match load_result {
-        // The cached TUI bundle does not persist the independent Sessions projection.
-        // Keep rendering it immediately, then run the inventory probe in the background
-        // so Sessions can be refreshed without forcing the main usage aggregation.
-        CacheResult::Fresh(data, signature) => (Some(data), true, Some(signature.process_digest())),
-        CacheResult::Stale(data) => (Some(data), true, None),
+        CacheResult::Fresh(snapshot) => {
+            let digest = snapshot.source_inventory_signature.process_digest();
+            (Some(snapshot), false, Some(digest))
+        }
+        CacheResult::Stale(snapshot) => (Some(snapshot), true, None),
         CacheResult::Miss => (None, true, None),
     }
 }
@@ -76,22 +77,20 @@ fn should_force_source_reload(
     explicitly_requested || health.requires_source_retry()
 }
 
-fn session_reload_force(
-    force: bool,
-    group_only_reload: bool,
-    health: &tokscale_core::source_health::HealthReport,
-) -> bool {
-    force && (!group_only_reload || health.requires_source_retry())
-}
-
 /// Background loader result: a full reload, or proof that no source changed.
 enum BackgroundLoad {
-    Unchanged {
-        pricing_diagnostics: Option<Vec<String>>,
+    Unchanged,
+    Persisted {
+        store: cache::ProjectionStore,
+        enabled_clients: HashSet<ClientId>,
+        report_scope: CacheReportScope,
+        pricing_diagnostics: Vec<String>,
     },
     Loaded {
         data: Box<UsageData>,
-        accumulator: Box<tokscale_core::TuiAcc>,
+        sessions: Vec<tokscale_core::TuiSessionEntry>,
+        source_space: std::collections::BTreeMap<String, u64>,
+        projection_backend: Box<ProjectionBackend>,
         digest: u64,
         /// The grouping this `data` projection was aggregated with; the App
         /// records it so exports describe the loaded rows, not a pending
@@ -103,30 +102,11 @@ enum BackgroundLoad {
     },
 }
 
-fn refresh_session_data(
-    loader: &DataLoader,
-    clients: &[ClientId],
-    source_digest: u64,
-    force: bool,
-) -> Option<Vec<String>> {
-    match session_data::refresh_if_needed(loader, clients, source_digest, force) {
-        Ok(session_data::SessionRefreshOutcome::Reused) => None,
-        Ok(session_data::SessionRefreshOutcome::Refreshed {
-            pricing_diagnostics,
-        }) => Some(pricing_diagnostics),
-        Err(error) => {
-            tracing::warn!(error = %error, "failed to refresh TUI Sessions projection");
-            None
-        }
-    }
-}
-
 fn load_background_data(
     loader: &DataLoader,
     clients: &[ClientId],
     group_by: &tokscale_core::GroupBy,
     force: bool,
-    session_force: bool,
     last_digest: Option<u64>,
 ) -> Result<BackgroundLoad> {
     let mut prepared = loader.prepare(clients)?;
@@ -134,23 +114,18 @@ fn load_background_data(
         .refresh_source_inventory_signature()?
         .process_digest();
     if !force && last_digest == Some(digest) {
-        let pricing_diagnostics = refresh_session_data(loader, clients, digest, session_force);
-        return Ok(BackgroundLoad::Unchanged {
-            pricing_diagnostics,
-        });
+        return Ok(BackgroundLoad::Unchanged);
     }
 
-    let result = loader.execute_accumulator_with_diagnostics(prepared);
-    let session_digest = result
-        .as_ref()
-        .map_or(digest, |result| result.source_digest);
-    let _ = refresh_session_data(loader, clients, session_digest, session_force);
+    let result = loader.execute_tui_bundle_with_diagnostics(prepared);
     result.map(|result| {
         let mut data = result.accumulator.project(group_by);
         data.health = result.health.to_report();
         BackgroundLoad::Loaded {
             data: Box::new(data),
-            accumulator: Box::new(result.accumulator),
+            sessions: result.sessions,
+            source_space: result.source_space,
+            projection_backend: Box::new(ProjectionBackend::Memory(result.accumulator)),
             digest: result.source_digest,
             group_by: group_by.clone(),
             source_inventory_signature: result.source_inventory_signature,
@@ -163,89 +138,169 @@ fn load_background_data(
 fn persist_background_load(
     result: Result<BackgroundLoad>,
     enabled_clients: &HashSet<ClientId>,
-    group_by: &tokscale_core::GroupBy,
     report_scope: &CacheReportScope,
 ) -> Result<BackgroundLoad> {
     let result = result?;
-    let persistence_result = match &result {
-        BackgroundLoad::Loaded {
-            data,
-            source_inventory_signature,
-            ..
-        } => save_cached_data(
-            data,
-            enabled_clients,
-            group_by,
-            report_scope,
-            *source_inventory_signature,
-        ),
-        BackgroundLoad::Unchanged { .. } => Ok(()),
+    let BackgroundLoad::Loaded {
+        data,
+        sessions,
+        source_space,
+        projection_backend,
+        digest,
+        group_by,
+        source_inventory_signature,
+        pricing_diagnostics,
+        cache_persistence_warning: _,
+    } = result
+    else {
+        return Ok(BackgroundLoad::Unchanged);
     };
-    Ok(record_cache_persistence_result(result, persistence_result))
-}
 
-fn record_cache_persistence_result(
-    mut result: BackgroundLoad,
-    persistence_result: Result<()>,
-) -> BackgroundLoad {
-    if let BackgroundLoad::Loaded {
-        cache_persistence_warning,
-        ..
-    } = &mut result
-    {
-        if let Err(error) = persistence_result {
+    let ProjectionBackend::Memory(accumulator) = *projection_backend else {
+        unreachable!("newly folded TUI data must start with the in-memory projection backend");
+    };
+    let health = data.health.clone();
+    let data_error = data.error.clone();
+    // The cache writer projects each grouping in turn. Do not retain the
+    // already projected screen data across that serialization peak; if
+    // persistence fails, reconstruct only the selected grouping below.
+    drop(data);
+
+    match save_tui_bundle_cache(
+        &accumulator,
+        &sessions,
+        &source_space,
+        &health,
+        enabled_clients,
+        report_scope,
+        source_inventory_signature,
+    ) {
+        Ok(store) => {
+            // The worker thread owns the parse accumulator and the temporary
+            // projections used to serialize the bundle. Release them and trim
+            // this thread's allocator arena before deserializing the compact
+            // snapshot that will be published to the UI thread.
+            drop(accumulator);
+            drop(sessions);
+            drop(source_space);
+            data::trim_allocator();
+
+            Ok(BackgroundLoad::Persisted {
+                store,
+                enabled_clients: enabled_clients.clone(),
+                report_scope: report_scope.clone(),
+                pricing_diagnostics,
+            })
+        }
+        Err(error) => {
             let diagnostic = format!("{error:#}");
             tracing::warn!(
                 error = %diagnostic,
                 "TUI background data loaded but cache persistence failed"
             );
-            *cache_persistence_warning = Some(format!("Cache persistence warning: {diagnostic}"));
+            let mut data = accumulator.project(&group_by);
+            data.health = health;
+            data.error = data_error;
+            Ok(BackgroundLoad::Loaded {
+                data: Box::new(data),
+                sessions,
+                source_space,
+                projection_backend: Box::new(ProjectionBackend::Memory(accumulator)),
+                digest,
+                group_by,
+                source_inventory_signature,
+                pricing_diagnostics,
+                cache_persistence_warning: Some(format!("Cache persistence warning: {diagnostic}")),
+            })
         }
     }
-    result
 }
 
 fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
     app.set_background_loading(false);
     match result {
+        Ok(BackgroundLoad::Persisted {
+            store,
+            enabled_clients,
+            report_scope,
+            pricing_diagnostics,
+        }) => {
+            let selected_group_by = { app.group_by.borrow().clone() };
+            let cached =
+                match store.load_snapshot(&enabled_clients, &selected_group_by, &report_scope) {
+                    Ok(cached) => cached,
+                    Err(error) => {
+                        let diagnostic =
+                            format!("Persisted TUI snapshot failed to load: {error:#}");
+                        app.mark_snapshot_refresh_failed(diagnostic.clone());
+                        app.set_error(Some(diagnostic.clone()));
+                        app.set_status(&diagnostic);
+                        return;
+                    }
+                };
+            let digest = cached.source_inventory_signature.process_digest();
+            app.install_tui_snapshot(
+                cached.data,
+                cached.sessions,
+                cached.source_space,
+                ProjectionBackend::Cache(cached.projection_store),
+                selected_group_by,
+            );
+            app.last_source_digest = Some(digest);
+            app.set_cache_persistence_warning(None);
+            app.set_pricing_diagnostics(&pricing_diagnostics);
+            app.set_status("Data loaded");
+        }
         Ok(BackgroundLoad::Loaded {
             data,
-            accumulator,
+            sessions,
+            source_space,
+            mut projection_backend,
             digest,
             group_by,
             source_inventory_signature: _,
             pricing_diagnostics,
             cache_persistence_warning,
         }) => {
-            let accumulator = *accumulator;
             let selected_group_by = { app.group_by.borrow().clone() };
-            if selected_group_by == group_by {
-                app.update_data(*data);
-                app.data_group_by = group_by;
+            let current_data = if selected_group_by == group_by {
+                *data
             } else {
-                let mut current_data = accumulator.project(&selected_group_by);
-                current_data.health = data.health.clone();
-                app.update_data(current_data);
-                app.data_group_by = selected_group_by;
-            }
-            app.accumulator = Some(accumulator);
-            app.clear_pending_cache_bootstrap();
+                match projection_backend.project(&selected_group_by) {
+                    Ok(mut current_data) => {
+                        current_data.health = data.health.clone();
+                        current_data.error = data.error.clone();
+                        current_data
+                    }
+                    Err(error) => {
+                        let diagnostic = format!("Group By projection failed: {error:#}");
+                        app.mark_snapshot_refresh_failed(diagnostic.clone());
+                        app.set_error(Some(diagnostic.clone()));
+                        app.set_status(&diagnostic);
+                        return;
+                    }
+                }
+            };
+            app.install_tui_snapshot(
+                current_data,
+                sessions,
+                source_space,
+                *projection_backend,
+                selected_group_by,
+            );
             app.last_source_digest = Some(digest);
             app.set_cache_persistence_warning(cache_persistence_warning);
             app.set_pricing_diagnostics(&pricing_diagnostics);
             app.set_status("Data loaded");
         }
-        Ok(BackgroundLoad::Unchanged {
-            pricing_diagnostics,
-        }) => {
-            if let Some(pricing_diagnostics) = pricing_diagnostics {
-                app.set_pricing_diagnostics(&pricing_diagnostics);
-            }
+        Ok(BackgroundLoad::Unchanged) => {
             app.mark_refresh_checked();
         }
         Err(error) => {
-            app.set_error(Some(error.to_string()));
-            app.set_status(&format!("Error: {error}"));
+            let diagnostic = format!("{error:#}");
+            app.mark_snapshot_refresh_failed(diagnostic.clone());
+            app.set_error(Some(diagnostic.clone()));
+            app.set_status(&format!("Error: {diagnostic}"));
         }
     }
 }
@@ -257,6 +312,21 @@ fn send_background_result(
     if tx.send(result).is_err() {
         tracing::warn!("dropped TUI background load result because receiver is closed");
     }
+}
+
+fn run_background_task(
+    tx: &mpsc::Sender<Result<BackgroundLoad>>,
+    task: impl FnOnce() -> Result<BackgroundLoad>,
+) {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(task)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic payload");
+        Err(anyhow::anyhow!("TUI background worker panicked: {message}"))
+    });
+    send_background_result(tx, result);
 }
 
 fn background_cache_scope(
@@ -281,6 +351,7 @@ pub fn run(
     year: Option<String>,
     initial_tab: Option<Tab>,
 ) -> Result<TuiExit> {
+    data::configure_allocator();
     if debug {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("debug")
@@ -317,13 +388,16 @@ pub fn run(
     // Single file read: load cache and check freshness in one pass.
     let initial_group_by = TUI_DEFAULT_GROUP_BY;
     let initial_report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
-    let (cached_data, needs_background_load, initial_source_digest) = decide_initial_data(
+    let (cached_snapshot, needs_background_load, initial_source_digest) = decide_initial_data(
         load_cache(&enabled_clients, &initial_group_by, &initial_report_scope),
     );
 
     let original_hook = panic::take_hook();
+    let tui_thread_id = thread::current().id();
     panic::set_hook(Box::new(move |info| {
-        restore_terminal_best_effort();
+        if thread::current().id() == tui_thread_id {
+            restore_terminal_best_effort();
+        }
         original_hook(info);
     }));
 
@@ -348,13 +422,23 @@ pub fn run(
         }
     };
 
-    let mut app = match App::new_with_cached_data(config, cached_data) {
+    let mut app = match App::new_with_cached_data(config, None) {
         Ok(a) => a,
         Err(e) => {
             restore_terminal(&mut terminal);
             return Err(e);
         }
     };
+    if let Some(cached) = cached_snapshot {
+        app.install_tui_snapshot(
+            cached.data,
+            cached.sessions,
+            cached.source_space,
+            ProjectionBackend::Cache(cached.projection_store),
+            initial_group_by,
+        );
+        app.set_status("Loaded from cache");
+    }
     app.last_source_digest = initial_source_digest;
     let mut view_state = view_state::ViewState::default();
 
@@ -377,22 +461,20 @@ pub fn run(
         let bg_force = bg_last_digest.is_none();
 
         thread::spawn(move || {
-            let loader = background_data_loader(bg_home_dir, bg_since, bg_until, bg_year);
-            let result = persist_background_load(
-                load_background_data(
-                    &loader,
-                    &bg_clients,
-                    &bg_group_by,
-                    bg_force,
-                    bg_force,
-                    bg_last_digest,
-                ),
-                &bg_enabled_clients,
-                &bg_group_by,
-                &bg_report_scope,
-            );
-
-            send_background_result(&tx, result);
+            run_background_task(&tx, || {
+                let loader = background_data_loader(bg_home_dir, bg_since, bg_until, bg_year);
+                persist_background_load(
+                    load_background_data(
+                        &loader,
+                        &bg_clients,
+                        &bg_group_by,
+                        bg_force,
+                        bg_last_digest,
+                    ),
+                    &bg_enabled_clients,
+                    &bg_report_scope,
+                )
+            });
         });
     }
 
@@ -472,11 +554,14 @@ fn run_loop_with_background(
         match bg_rx.try_recv() {
             Ok(result) => {
                 apply_background_result(app, result);
+                view_state.reconcile_session_snapshot(app);
             }
             Err(TryRecvError::Disconnected) => {
                 if app.background_loading {
                     app.set_background_loading(false);
-                    app.set_error(Some("Background thread disconnected".to_string()));
+                    let diagnostic = "Background thread disconnected".to_string();
+                    app.mark_snapshot_refresh_failed(diagnostic.clone());
+                    app.set_error(Some(diagnostic));
                     app.set_status("Error: Background thread disconnected");
                 }
             }
@@ -489,11 +574,6 @@ fn run_loop_with_background(
 
             let force =
                 should_force_source_reload(std::mem::take(&mut app.reload_force), &app.data.health);
-            let session_force = session_reload_force(
-                force,
-                std::mem::take(&mut app.reload_group_only),
-                &app.data.health,
-            );
             let last_digest = app.last_source_digest;
             let tx = bg_tx.clone();
             let clients = app.scan_clients();
@@ -510,21 +590,14 @@ fn run_loop_with_background(
             let report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
 
             thread::spawn(move || {
-                let loader = background_data_loader(home_dir, since, until, year);
-                let result = persist_background_load(
-                    load_background_data(
-                        &loader,
-                        &clients,
-                        &group_by,
-                        force,
-                        session_force,
-                        last_digest,
-                    ),
-                    &enabled_clients,
-                    &group_by,
-                    &report_scope,
-                );
-                send_background_result(&tx, result);
+                run_background_task(&tx, || {
+                    let loader = background_data_loader(home_dir, since, until, year);
+                    persist_background_load(
+                        load_background_data(&loader, &clients, &group_by, force, last_digest),
+                        &enabled_clients,
+                        &report_scope,
+                    )
+                });
             });
         }
 
@@ -566,6 +639,7 @@ mod tests {
 
     struct EnvGuard {
         home: Option<OsString>,
+        config_dir: Option<OsString>,
         pricing_cache_only: Option<OsString>,
     }
 
@@ -573,10 +647,12 @@ mod tests {
         fn set(home: &std::path::Path) -> Self {
             let guard = Self {
                 home: std::env::var_os("HOME"),
+                config_dir: std::env::var_os("TOKSCALE_CONFIG_DIR"),
                 pricing_cache_only: std::env::var_os("TOKSCALE_PRICING_CACHE_ONLY"),
             };
             unsafe {
                 std::env::set_var("HOME", home);
+                std::env::set_var("TOKSCALE_CONFIG_DIR", home);
                 std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", "1");
             }
             guard
@@ -589,6 +665,10 @@ mod tests {
                 match self.home.take() {
                     Some(value) => std::env::set_var("HOME", value),
                     None => std::env::remove_var("HOME"),
+                }
+                match self.config_dir.take() {
+                    Some(value) => std::env::set_var("TOKSCALE_CONFIG_DIR", value),
+                    None => std::env::remove_var("TOKSCALE_CONFIG_DIR"),
                 }
                 match self.pricing_cache_only.take() {
                     Some(value) => std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", value),
@@ -695,26 +775,110 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn launches_with_fresh_cache_refreshes_session_projection_in_background() {
-        let (cached_data, needs_background_load, digest) = decide_initial_data(CacheResult::Fresh(
-            UsageData::default(),
-            tokscale_core::SourceInventorySignature::from_bytes([1; 32]),
-        ));
+    fn cache_scope(home: &std::path::Path) -> CacheReportScope {
+        CacheReportScope {
+            resolved_home_dir: home.to_string_lossy().into_owned(),
+            use_env_roots: false,
+            since: None,
+            until: None,
+            year: None,
+        }
+    }
 
-        assert!(cached_data.is_some());
-        assert!(needs_background_load);
-        assert!(digest.is_some());
+    fn session(source: &str, session_id: &str) -> tokscale_core::TuiSessionEntry {
+        tokscale_core::TuiSessionEntry {
+            source: source.to_string(),
+            session_id: session_id.to_string(),
+            last_seen: 100,
+            ..Default::default()
+        }
+    }
+
+    fn source_space_for(app: &App, source: &str) -> Option<u64> {
+        app.session_snapshot
+            .source_summaries()
+            .iter()
+            .find(|summary| summary.source == source)
+            .map(|summary| summary.space_bytes)
+    }
+
+    fn save_test_snapshot(
+        home: &std::path::Path,
+        signature: tokscale_core::SourceInventorySignature,
+    ) -> LoadedTuiCache {
+        let clients = HashSet::from([ClientId::Amp]);
+        let scope = cache_scope(home);
+        let store = save_tui_bundle_cache(
+            &tokscale_core::TuiAcc::new(),
+            &[session("amp", "cached-session")],
+            &std::collections::BTreeMap::from([("amp".to_string(), 512)]),
+            &Default::default(),
+            &clients,
+            &scope,
+            signature,
+        )
+        .unwrap();
+        store
+            .load_snapshot(&clients, &tokscale_core::GroupBy::Model, &scope)
+            .unwrap()
+    }
+
+    fn loaded_snapshot(
+        data: UsageData,
+        sessions: Vec<tokscale_core::TuiSessionEntry>,
+        source_space: std::collections::BTreeMap<String, u64>,
+        accumulator: tokscale_core::TuiAcc,
+        group_by: tokscale_core::GroupBy,
+        signature: tokscale_core::SourceInventorySignature,
+    ) -> BackgroundLoad {
+        BackgroundLoad::Loaded {
+            data: Box::new(data),
+            sessions,
+            source_space,
+            projection_backend: Box::new(ProjectionBackend::Memory(accumulator)),
+            digest: signature.process_digest(),
+            group_by,
+            source_inventory_signature: signature,
+            pricing_diagnostics: Vec::new(),
+            cache_persistence_warning: None,
+        }
     }
 
     #[test]
-    fn launches_with_24h_old_cache_renders_immediately() {
-        let (cached_data, needs_background_load, digest) =
-            decide_initial_data(CacheResult::Stale(UsageData::default()));
+    #[serial]
+    fn fresh_unified_snapshot_renders_all_tabs_without_background_load() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(home.path());
+        let signature = tokscale_core::SourceInventorySignature::from_bytes([1; 32]);
+        let snapshot = save_test_snapshot(home.path(), signature);
 
-        assert!(cached_data.is_some());
+        let (cached_data, needs_background_load, digest) =
+            decide_initial_data(CacheResult::Fresh(snapshot));
+
+        let cached_data = cached_data.expect("fresh cache must remain immediately visible");
+        assert!(!needs_background_load);
+        assert_eq!(digest, Some(signature.process_digest()));
+        assert_eq!(cached_data.sessions[0].session_id, "cached-session");
+        assert_eq!(cached_data.source_space.get("amp"), Some(&512));
+    }
+
+    #[test]
+    #[serial]
+    fn stale_unified_snapshot_renders_immediately_and_refreshes_in_background() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(home.path());
+        let snapshot = save_test_snapshot(
+            home.path(),
+            tokscale_core::SourceInventorySignature::from_bytes([2; 32]),
+        );
+
+        let (cached_data, needs_background_load, digest) =
+            decide_initial_data(CacheResult::Stale(snapshot));
+
+        let cached_data = cached_data.expect("stale cache must remain immediately visible");
         assert!(needs_background_load);
         assert!(digest.is_none());
+        assert_eq!(cached_data.sessions[0].session_id, "cached-session");
     }
 
     #[test]
@@ -746,21 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn session_reload_force_preserves_cache_bootstrap_session_scope() {
-        let healthy = tokscale_core::source_health::HealthReport::default();
-        let degraded = tokscale_core::source_health::HealthReport {
-            failed_sources: 1,
-            complete: false,
-            ..Default::default()
-        };
-
-        assert!(!session_reload_force(true, true, &healthy));
-        assert!(session_reload_force(true, true, &degraded));
-        assert!(session_reload_force(true, false, &healthy));
-        assert!(!session_reload_force(false, false, &healthy));
-    }
-
-    #[test]
     fn background_loader_preserves_filters() {
         let loader = background_data_loader(
             None,
@@ -776,19 +925,17 @@ mod tests {
 
     #[test]
     #[serial]
-    fn fresh_cache_baseline_skips_a_and_reloads_changed_b() {
+    fn fresh_cache_digest_skips_unchanged_sources_and_reloads_changed_sources() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_source(home.path(), 10);
         let loader = background_data_loader(None, None, None, None);
         let clients = [ClientId::Amp];
-        let signature_a = loader
-            .load_with_diagnostics(&clients, &tokscale_core::GroupBy::Model)
-            .unwrap()
-            .source_inventory_signature;
-        let (_, needs_load, baseline) =
-            decide_initial_data(CacheResult::Fresh(UsageData::default(), signature_a));
-        assert!(needs_load);
+        let mut prepared = loader.prepare(&clients).unwrap();
+        let signature_a = prepared.refresh_source_inventory_signature().unwrap();
+        let cached = save_test_snapshot(home.path(), signature_a);
+        let (_, needs_load, baseline) = decide_initial_data(CacheResult::Fresh(cached));
+        assert!(!needs_load);
 
         assert!(matches!(
             load_background_data(
@@ -796,11 +943,10 @@ mod tests {
                 &clients,
                 &tokscale_core::GroupBy::Model,
                 false,
-                false,
                 baseline
             )
             .unwrap(),
-            BackgroundLoad::Unchanged { .. }
+            BackgroundLoad::Unchanged
         ));
 
         write_amp_source(home.path(), 1000);
@@ -808,7 +954,6 @@ mod tests {
             &loader,
             &clients,
             &tokscale_core::GroupBy::Model,
-            false,
             false,
             baseline,
         )
@@ -818,15 +963,18 @@ mod tests {
                 assert_ne!(Some(digest), baseline);
                 assert_eq!(data.total_tokens, 1002);
             }
-            BackgroundLoad::Unchanged { .. } => {
+            BackgroundLoad::Unchanged => {
                 panic!("changed source B must consume its inventory")
+            }
+            BackgroundLoad::Persisted { .. } => {
+                panic!("source loading must not persist before the persistence stage")
             }
         }
     }
 
     #[test]
     #[serial]
-    fn background_reload_replaces_accumulator_and_projects_selected_group() {
+    fn background_reload_reprojects_to_group_selected_while_loading() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_model_source(home.path(), "old-model", 10);
@@ -836,7 +984,6 @@ mod tests {
             &loader,
             &clients,
             &tokscale_core::GroupBy::Model,
-            true,
             true,
             None,
         )
@@ -850,8 +997,7 @@ mod tests {
         let loaded = load_background_data(
             &loader,
             &clients,
-            &tokscale_core::GroupBy::ClientProviderModel,
-            true,
+            &tokscale_core::GroupBy::Model,
             true,
             app.last_source_digest,
         )
@@ -864,105 +1010,155 @@ mod tests {
         );
         assert_eq!(app.data.models[0].model, "new-model");
         assert_eq!(app.data.models[0].client, "amp");
+        let model_projection = app
+            .projection_backend
+            .as_mut()
+            .expect("loaded snapshot must install a projection backend")
+            .project(&tokscale_core::GroupBy::Model)
+            .unwrap();
+        assert_eq!(model_projection.models[0].model, "new-model");
         assert_eq!(
-            app.accumulator
-                .as_ref()
-                .unwrap()
-                .project(&tokscale_core::GroupBy::Model)
-                .models[0]
-                .model,
-            "new-model"
+            app.session_projection_status,
+            session_data::SessionProjectionStatus::Ready
         );
     }
 
     #[test]
-    #[serial]
-    fn pending_cache_bootstrap_is_consumed_by_successful_background_load() {
-        let home = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(home.path());
-        write_amp_model_source(home.path(), "race-model", 10);
-        let loader = background_data_loader(None, None, None, None);
-        let loaded = load_background_data(
-            &loader,
-            &[ClientId::Amp],
-            &tokscale_core::GroupBy::Model,
-            true,
-            true,
-            None,
-        )
-        .unwrap();
+    fn loaded_result_replaces_usage_sessions_and_projection_backend_together() {
+        let old_signature = tokscale_core::SourceInventorySignature::from_bytes([3; 32]);
+        let new_signature = tokscale_core::SourceInventorySignature::from_bytes([4; 32]);
         let mut app = app_on(Tab::Models);
-        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientProviderModel;
+        apply_background_result(
+            &mut app,
+            Ok(loaded_snapshot(
+                UsageData {
+                    total_tokens: 11,
+                    ..UsageData::default()
+                },
+                vec![session("amp", "old-session")],
+                std::collections::BTreeMap::from([("amp".to_string(), 11)]),
+                tokscale_core::TuiAcc::new(),
+                tokscale_core::GroupBy::Model,
+                old_signature,
+            )),
+        );
         app.background_loading = true;
         app.blocking_loading = true;
-        app.needs_reload = true;
-        app.reload_force = true;
-        app.reload_group_only = true;
 
-        apply_background_result(&mut app, Ok(loaded));
+        apply_background_result(
+            &mut app,
+            Ok(loaded_snapshot(
+                UsageData {
+                    total_tokens: 99,
+                    ..UsageData::default()
+                },
+                vec![session("codex", "new-session")],
+                std::collections::BTreeMap::from([("codex".to_string(), 4096)]),
+                tokscale_core::TuiAcc::new(),
+                tokscale_core::GroupBy::Model,
+                new_signature,
+            )),
+        );
 
         assert!(!app.background_loading);
         assert!(!app.blocking_loading);
-        assert!(app.accumulator.is_some());
+        assert_eq!(app.data.total_tokens, 99);
+        assert_eq!(app.session_snapshot.sessions()[0].session_id, "new-session");
+        assert_eq!(source_space_for(&app, "codex"), Some(4096));
+        assert!(matches!(
+            app.projection_backend,
+            Some(ProjectionBackend::Memory(_))
+        ));
+        assert_eq!(app.last_source_digest, Some(new_signature.process_digest()));
         assert_eq!(
-            app.data_group_by,
-            tokscale_core::GroupBy::ClientProviderModel
+            app.session_projection_status,
+            session_data::SessionProjectionStatus::Ready
         );
-        assert_eq!(app.data.models[0].model, "race-model");
-        assert_eq!(app.data.models[0].client, "amp");
-        assert!(!app.needs_reload);
-        assert!(!app.reload_force);
-        assert!(!app.reload_group_only);
     }
 
     #[test]
-    fn pending_source_reload_survives_successful_background_load() {
+    fn unchanged_probe_does_not_replace_any_snapshot_component() {
         let signature = tokscale_core::SourceInventorySignature::from_bytes([9; 32]);
         let mut app = app_on(Tab::Models);
-        *app.group_by.borrow_mut() = tokscale_core::GroupBy::Model;
+        apply_background_result(
+            &mut app,
+            Ok(loaded_snapshot(
+                UsageData {
+                    total_tokens: 77,
+                    ..UsageData::default()
+                },
+                vec![session("amp", "retained-session")],
+                std::collections::BTreeMap::from([("amp".to_string(), 2048)]),
+                tokscale_core::TuiAcc::new(),
+                tokscale_core::GroupBy::Model,
+                signature,
+            )),
+        );
         app.background_loading = true;
         app.blocking_loading = true;
-        app.needs_reload = true;
-        app.reload_force = true;
-        app.reload_group_only = false;
-        let loaded = BackgroundLoad::Loaded {
-            data: Box::new(UsageData::default()),
-            accumulator: Box::new(tokscale_core::TuiAcc::new()),
-            digest: signature.process_digest(),
-            group_by: tokscale_core::GroupBy::Model,
-            source_inventory_signature: signature,
-            pricing_diagnostics: Vec::new(),
-            cache_persistence_warning: None,
-        };
 
-        apply_background_result(&mut app, Ok(loaded));
+        apply_background_result(&mut app, Ok(BackgroundLoad::Unchanged));
 
         assert!(!app.background_loading);
         assert!(!app.blocking_loading);
-        assert!(app.accumulator.is_some());
-        assert!(app.needs_reload);
-        assert!(app.reload_force);
-        assert!(!app.reload_group_only);
+        assert_eq!(app.data.total_tokens, 77);
+        assert_eq!(
+            app.session_snapshot.sessions()[0].session_id,
+            "retained-session"
+        );
+        assert_eq!(source_space_for(&app, "amp"), Some(2048));
+        assert!(app.projection_backend.is_some());
+        assert_eq!(app.last_source_digest, Some(signature.process_digest()));
+        assert_eq!(
+            app.session_projection_status,
+            session_data::SessionProjectionStatus::Ready
+        );
     }
 
     #[test]
-    fn pending_cache_bootstrap_survives_failed_background_load() {
+    fn failed_cold_load_marks_sessions_unavailable_without_inventing_snapshot() {
         let mut app = app_on(Tab::Models);
         app.background_loading = true;
         app.blocking_loading = true;
-        app.needs_reload = true;
-        app.reload_force = true;
-        app.reload_group_only = true;
 
         apply_background_result(&mut app, Err(anyhow::anyhow!("load failed")));
 
         assert!(!app.background_loading);
         assert!(!app.blocking_loading);
-        assert!(app.accumulator.is_none());
-        assert!(app.needs_reload);
-        assert!(app.reload_force);
-        assert!(app.reload_group_only);
+        assert!(app.projection_backend.is_none());
+        assert!(app.session_snapshot.sessions().is_empty());
+        assert!(matches!(
+            app.session_projection_status,
+            session_data::SessionProjectionStatus::Unavailable { .. }
+        ));
         assert_eq!(app.data.error.as_deref(), Some("load failed"));
+    }
+
+    #[test]
+    fn background_worker_panic_clears_loading_and_marks_snapshot_degraded() {
+        let mut app = app_on(Tab::Models);
+        app.background_loading = true;
+        app.blocking_loading = true;
+        app.session_projection_status = session_data::SessionProjectionStatus::Ready;
+        let (tx, rx) = mpsc::channel();
+
+        run_background_task(&tx, || -> Result<BackgroundLoad> {
+            panic!("injected worker panic")
+        });
+        apply_background_result(&mut app, rx.recv().unwrap());
+
+        assert!(!app.background_loading);
+        assert!(!app.blocking_loading);
+        assert!(matches!(
+            &app.session_projection_status,
+            session_data::SessionProjectionStatus::Degraded { diagnostic }
+                if diagnostic.contains("injected worker panic")
+        ));
+        assert!(app
+            .data
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("background worker panicked")));
     }
 
     #[test]
@@ -988,7 +1184,6 @@ mod tests {
                     &clients,
                     &tokscale_core::GroupBy::Model,
                     true,
-                    true,
                     last_digest,
                 )
                 .unwrap(),
@@ -999,7 +1194,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn failed_background_reload_keeps_existing_data_and_accumulator() {
+    fn failed_background_reload_keeps_existing_snapshot_and_marks_it_degraded() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_model_source(home.path(), "retained-model", 10);
@@ -1009,107 +1204,190 @@ mod tests {
             &[ClientId::Amp],
             &tokscale_core::GroupBy::Model,
             true,
-            true,
             None,
         )
         .unwrap();
         let mut app = app_on(Tab::Models);
         apply_background_result(&mut app, Ok(loaded));
         let old_tokens = app.data.total_tokens;
+        let old_sessions = app.session_snapshot.sessions().to_vec();
+        let old_source_space = source_space_for(&app, "amp");
 
         apply_background_result(&mut app, Err(anyhow::anyhow!("load failed")));
 
         assert_eq!(app.data.total_tokens, old_tokens);
         assert_eq!(app.data.models[0].model, "retained-model");
-        assert_eq!(
-            app.accumulator
-                .as_ref()
-                .unwrap()
-                .project(&tokscale_core::GroupBy::Model)
-                .total_tokens,
-            old_tokens
-        );
+        assert_eq!(app.session_snapshot.sessions(), old_sessions);
+        assert_eq!(source_space_for(&app, "amp"), old_source_space);
+        assert!(app.projection_backend.is_some());
+        assert!(matches!(
+            app.session_projection_status,
+            session_data::SessionProjectionStatus::Degraded { .. }
+        ));
         assert_eq!(app.status_message.as_deref(), Some("Error: load failed"));
     }
 
     #[test]
-    fn unchanged_cached_load_promotes_session_pricing_diagnostics_globally() {
-        let mut app = App::new_with_cached_data_and_settings(
-            TuiConfig {
-                theme: Some("blue".to_string()),
-                refresh: 0,
-                no_refresh: false,
-                home_dir: None,
-                clients: None,
-                since: None,
-                until: None,
-                year: None,
-                initial_tab: None,
-            },
-            Some(UsageData::default()),
-            settings::Settings::default(),
-        )
-        .unwrap();
-
-        apply_background_result(
-            &mut app,
-            Ok(BackgroundLoad::Unchanged {
-                pricing_diagnostics: Some(vec![format!(
-                    "{}: network error",
-                    tokscale_core::pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
-                )]),
-            }),
-        );
-
-        assert_eq!(
-            app.pricing_warning(),
-            Some("Pricing unavailable; costs may be missing")
-        );
-    }
-
-    #[test]
+    #[serial]
     fn cache_save_failure_keeps_successfully_loaded_background_data() {
+        let home = TempDir::new().unwrap();
+        let blocked_config = home.path().join("config-is-a-file");
+        std::fs::write(&blocked_config, b"not a directory").unwrap();
+        let _guard = EnvGuard::set(&blocked_config);
         let signature = tokscale_core::SourceInventorySignature::from_bytes([7; 32]);
         let digest = signature.process_digest();
-        let loaded = BackgroundLoad::Loaded {
-            data: Box::new(UsageData {
-                total_tokens: 42,
-                ..UsageData::default()
-            }),
-            accumulator: Box::new(tokscale_core::TuiAcc::new()),
-            digest,
-            group_by: tokscale_core::GroupBy::Model,
-            source_inventory_signature: signature,
-            pricing_diagnostics: Vec::new(),
-            cache_persistence_warning: None,
-        };
-
-        let persisted = record_cache_persistence_result(
-            loaded,
-            Err(anyhow::anyhow!(
-                "failed to persist TUI cache `/blocked/tui-data-cache.json`: Not a directory"
-            )),
+        let accumulator = tokscale_core::build_tui_accumulator(
+            &[tokscale_core::UnifiedMessage::new(
+                "amp",
+                "test-model",
+                "test-provider",
+                "loaded-despite-cache-error",
+                100,
+                tokscale_core::TokenBreakdown {
+                    input: 42,
+                    ..Default::default()
+                },
+                0.0,
+            )],
+            tokscale_core::DateRange::none(),
         );
+        let data = accumulator.project(&tokscale_core::GroupBy::Model);
+        let loaded = loaded_snapshot(
+            data,
+            vec![session("amp", "loaded-despite-cache-error")],
+            std::collections::BTreeMap::from([("amp".to_string(), 42)]),
+            accumulator,
+            tokscale_core::GroupBy::Model,
+            signature,
+        );
+
+        let persisted = persist_background_load(
+            Ok(loaded),
+            &HashSet::from([ClientId::Amp]),
+            &cache_scope(home.path()),
+        )
+        .unwrap();
 
         match persisted {
             BackgroundLoad::Loaded {
                 data,
+                sessions,
+                projection_backend,
                 digest: actual_digest,
                 cache_persistence_warning,
                 ..
             } => {
                 assert_eq!(data.total_tokens, 42);
+                assert_eq!(sessions[0].session_id, "loaded-despite-cache-error");
+                assert!(matches!(*projection_backend, ProjectionBackend::Memory(_)));
                 assert_eq!(actual_digest, digest);
                 let warning = cache_persistence_warning
                     .as_deref()
                     .expect("cache persistence warning must be retained");
                 assert!(warning.contains("failed to persist TUI cache"));
-                assert!(warning.contains("Not a directory"));
             }
-            BackgroundLoad::Unchanged { .. } => {
+            BackgroundLoad::Unchanged => {
                 panic!("loaded data must not become unchanged")
             }
+            BackgroundLoad::Persisted { .. } => {
+                panic!("a failed cache save cannot report a persisted snapshot")
+            }
         }
+    }
+
+    #[test]
+    #[serial]
+    fn persisted_cache_backend_reprojects_without_reloading_or_replacing_sessions() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(home.path());
+        write_amp_source(home.path(), 64);
+        let loader = background_data_loader(None, None, None, None);
+        let loaded = load_background_data(
+            &loader,
+            &[ClientId::Amp],
+            &tokscale_core::GroupBy::Model,
+            true,
+            None,
+        )
+        .unwrap();
+        let persisted = persist_background_load(
+            Ok(loaded),
+            &HashSet::from([ClientId::Amp]),
+            &cache_scope(home.path()),
+        )
+        .unwrap();
+
+        assert!(matches!(&persisted, BackgroundLoad::Persisted { .. }));
+        let mut app = app_on(Tab::Models);
+        apply_background_result(&mut app, Ok(persisted));
+        assert!(!app.session_snapshot.sessions().is_empty());
+        assert_eq!(app.data.total_tokens, 66);
+        assert!(matches!(
+            app.projection_backend,
+            Some(ProjectionBackend::Cache(_))
+        ));
+        assert!(app.cache_persistence_warning().is_none());
+
+        let digest_before = app.last_source_digest;
+        let sessions_before = app.session_snapshot.sessions().to_vec();
+        let source_summaries_before = app
+            .session_snapshot
+            .source_summaries()
+            .iter()
+            .map(|source| {
+                (
+                    source.source.clone(),
+                    source.main_session_count,
+                    source.session_count,
+                    source.workspace_count,
+                    source.last_seen,
+                    source.space_bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            app.data_group_by,
+            tokscale_core::GroupBy::ClientProviderModel
+        );
+        assert_eq!(app.data.models[0].client, "amp");
+        assert_eq!(app.data.total_tokens, 66);
+        assert!(matches!(
+            app.projection_backend,
+            Some(ProjectionBackend::Cache(_))
+        ));
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert!(!app.background_loading);
+        assert!(!app.blocking_loading);
+        assert_eq!(app.session_snapshot.sessions(), sessions_before);
+        assert_eq!(
+            app.session_snapshot
+                .source_summaries()
+                .iter()
+                .map(|source| {
+                    (
+                        source.source.clone(),
+                        source.main_session_count,
+                        source.session_count,
+                        source.workspace_count,
+                        source.last_seen,
+                        source.space_bytes,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            source_summaries_before
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Regrouped by client,provider,model")
+        );
+        assert_eq!(app.last_source_digest, digest_before);
     }
 
     #[test]
@@ -1143,7 +1421,11 @@ mod tests {
                     total_tokens: 99,
                     ..UsageData::default()
                 }),
-                accumulator: Box::new(tokscale_core::TuiAcc::new()),
+                sessions: vec![session("amp", "warning-session")],
+                source_space: std::collections::BTreeMap::from([("amp".to_string(), 99)]),
+                projection_backend: Box::new(ProjectionBackend::Memory(
+                    tokscale_core::TuiAcc::new(),
+                )),
                 digest,
                 group_by: tokscale_core::GroupBy::Model,
                 source_inventory_signature: signature,
@@ -1155,7 +1437,11 @@ mod tests {
         );
 
         assert_eq!(app.data.total_tokens, 99);
-        assert!(app.accumulator.is_some());
+        assert_eq!(
+            app.session_snapshot.sessions()[0].session_id,
+            "warning-session"
+        );
+        assert!(app.projection_backend.is_some());
         assert_eq!(app.last_source_digest, Some(digest));
         assert_eq!(
             app.cache_persistence_warning(),

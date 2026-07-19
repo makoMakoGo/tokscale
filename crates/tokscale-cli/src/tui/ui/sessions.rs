@@ -13,7 +13,7 @@ use super::widgets::{
     viewport_scrollbar_state,
 };
 use crate::tui::app::App;
-use crate::tui::session_data::{self, SessionProjectionStatus};
+use crate::tui::session_data::SessionProjectionStatus;
 use crate::tui::view_state::ViewState;
 
 const SOURCE_MIN_WIDTH: u16 = 10;
@@ -127,11 +127,11 @@ fn source_column_label(column: SourceColumn) -> &'static str {
 }
 
 pub(crate) fn render(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
-    let projection_status = session_data::projection_status();
+    let projection_status = &app.session_projection_status;
     if state.session_detail_active() {
-        render_session_details(frame, app, state, area, &projection_status);
+        render_session_details(frame, app, state, area, projection_status);
     } else {
-        render_sources(frame, app, state, area, &projection_status);
+        render_sources(frame, app, state, area, projection_status);
     }
 }
 

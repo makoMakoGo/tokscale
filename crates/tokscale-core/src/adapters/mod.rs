@@ -21,13 +21,13 @@ mod vscode_tasks;
 mod warp;
 mod zed;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use rayon::prelude::*;
 
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserRevision, ParserVersion};
+use crate::message_cache::{ParserId, ParserRevision, ParserVersion, SourceFileIdentity};
 use crate::source_health::{
     DataHealth, RejectionSummary, SourceFailure, SourceHealth, SourceStatus,
 };
@@ -746,6 +746,7 @@ pub(crate) struct PreparedAdapterSources {
 pub(crate) struct ConfirmedAdapterSources {
     pub client: ClientId,
     pub unit_digests: Vec<[u8; 32]>,
+    pub present_files: Vec<(SourceFileIdentity, u64)>,
 }
 
 pub(crate) struct ParsedBatchSource<'a> {
@@ -753,6 +754,7 @@ pub(crate) struct ParsedBatchSource<'a> {
     units: Option<Vec<SourceUnit>>,
     planned: VecDeque<PlannedSourceUnit>,
     confirmed_inventory_digests: Vec<[u8; 32]>,
+    confirmed_present_files: HashMap<SourceFileIdentity, u64>,
     failed_health: Vec<SourceHealth>,
     batch_width: usize,
 }
@@ -780,6 +782,7 @@ impl<'a> ParsedBatchSource<'a> {
             units: Some(units),
             planned: VecDeque::new(),
             confirmed_inventory_digests: Vec::new(),
+            confirmed_present_files: HashMap::new(),
             failed_health: Vec::new(),
             batch_width: rayon::current_num_threads().max(1),
         }
@@ -888,7 +891,7 @@ impl<'a> ParsedBatchSource<'a> {
         // third-party source data.
         #[allow(clippy::large_enum_variant)] // transient per-unit planning slot
         enum PlannedOrFailed {
-            Planned(PlannedSourceUnit, [u8; 32]),
+            Planned(PlannedSourceUnit, [u8; 32], Vec<(SourceFileIdentity, u64)>),
             Failed(SourceHealth),
             PipelineError(SourcePlanningError),
         }
@@ -911,13 +914,17 @@ impl<'a> ParsedBatchSource<'a> {
                     });
                 }
                 let inventory_digest = unit.inventory_signature_digest();
+                let mut present_files = Vec::new();
+                unit.prepared_source_input_snapshot()
+                    .expect("revalidated source unit must retain its confirmed snapshot")
+                    .visit_present_files(|identity, size| present_files.push((identity, size)));
                 match self.adapter.plan_cache_hit(unit, &*ctx.source_cache) {
                     Ok(plan) => {
                         let planned = match plan {
                             CacheHitPlan::Hit(parsed) => PlannedSourceUnit::Hit(parsed),
                             CacheHitPlan::Miss(unit) => PlannedSourceUnit::Miss(unit),
                         };
-                        PlannedOrFailed::Planned(planned, inventory_digest)
+                        PlannedOrFailed::Planned(planned, inventory_digest, present_files)
                     }
                     Err(error) => PlannedOrFailed::PipelineError(error),
                 }
@@ -925,8 +932,11 @@ impl<'a> ParsedBatchSource<'a> {
             .collect();
         for outcome in planned {
             match outcome {
-                PlannedOrFailed::Planned(planned, digest) => {
+                PlannedOrFailed::Planned(planned, digest, present_files) => {
                     self.confirmed_inventory_digests.push(digest);
+                    for (identity, size) in present_files {
+                        self.confirmed_present_files.entry(identity).or_insert(size);
+                    }
                     self.planned.push_back(planned);
                 }
                 PlannedOrFailed::Failed(health) => self.failed_health.push(health),
@@ -956,6 +966,7 @@ pub(crate) fn run_prepared_local_source_adapters(
         confirmed.push(ConfirmedAdapterSources {
             client: adapter.client(),
             unit_digests: batches.confirmed_inventory_digests,
+            present_files: batches.confirmed_present_files.into_iter().collect(),
         });
     }
     Ok(confirmed)

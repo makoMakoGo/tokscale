@@ -27,12 +27,26 @@ color concern and a storage encoding silently double as semantic identity.
 
 Group By is a display projection of the Models-class tables. Switching it
 changes how model rows are keyed and labeled; it must not change any
-authoritative number. The TUI retains the canonical fine-grained accumulator
-after each successful source load and projects a new grouping in memory;
-source scans, session refreshes, and disk-cache writes occur only on real
-refreshes. Until that accumulator is available (for example, while rendering a
-startup cache hit), a grouping change performs a cache bootstrap full load to
-build the in-memory accumulator from authoritative sources.
+authoritative number.
+
+The earlier accepted implementation strategy in this ADR retained the
+canonical fine-grained `TuiAcc` after each source load and allowed the first
+grouping change after a startup cache hit to trigger a bootstrap source load.
+Schema 39 supersedes that strategy. Each atomic TUI bundle contains every
+exposed grouping projection, and the running TUI pins the opened projection
+bundle from one immutable generation. A grouping change streams only the target
+projection from that pinned generation and should appear near-instantly; it
+does not scan sources, refresh sessions, write the cache, or retain `TuiAcc` in
+the normal path. An explicitly reported cache-persistence failure may retain
+`TuiAcc` as a degraded in-memory backend.
+
+Usage and Sessions share the same snapshot boundary. A fresh startup cache
+serves both without a scan; stale startup data remains one coherent generation
+while a single background fold builds its replacement; and a cold miss uses a
+single background fold to build usage, sessions, and all grouping projections.
+A successful automatic or manual refresh replaces the whole bundle atomically.
+Failure preserves the previous bundle and exposes a degraded status instead of
+mixing old and new tab data.
 
 **Projection classification.** Every projection of `UsageData` is either:
 
@@ -85,3 +99,11 @@ export) emit the grouping (`groupBy`) and the dimension fields
   separate, deliberate UI change that consumes the structured fields.
 - Any future grouping dimension follows the same rule: a structured field on
   the view entry plus an export field, never a label prefix.
+- Schema 39 cache hits can switch among all exposed groupings without a source
+  bootstrap load. The steady-state cost is the active usage projection, the
+  session snapshot, and pinned file handles rather than the fine-grained
+  accumulator.
+- Session projection and source-space values are generation-scoped even though
+  Group By does not reshape them. Source space means the source-input bytes
+  confirmed for the report's final fold, not an earlier prepared snapshot or
+  the result of an independent scan.

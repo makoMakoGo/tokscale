@@ -6,13 +6,17 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize, Serializer};
-use tokscale_core::{sessions, GroupBy, ModelPerformance, SourceInventorySignature};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use tokscale_core::{
+    sessions, GroupBy, ModelPerformance, SourceInventorySignature, TuiAcc, TuiSessionEntry,
+};
 
 use tokscale_core::ClientId;
 
@@ -23,7 +27,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 38;
+const CACHE_SCHEMA_VERSION: u32 = 39;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +37,414 @@ pub struct CacheReportScope {
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+    use serial_test::serial;
+    use std::ffi::{OsStr, OsString};
+    use std::{env, fs};
+    use tempfile::TempDir;
+    use tokscale_core::TuiSessionTokens;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &OsStr) -> Self {
+            let previous = env::var_os(key);
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => env::set_var(self.key, value),
+                    None => env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn fixture() -> (
+        TempDir,
+        EnvVarGuard,
+        HashSet<ClientId>,
+        CacheReportScope,
+        Vec<TuiSessionEntry>,
+        BTreeMap<String, u64>,
+    ) {
+        let temp = TempDir::new().unwrap();
+        let guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path().as_os_str());
+        let clients = HashSet::from([ClientId::Claude]);
+        let scope = CacheReportScope::new("/test/home".into(), false, None, None, None);
+        let sessions = vec![TuiSessionEntry {
+            source: "claude".into(),
+            session_id: "session-1".into(),
+            is_main_session: true,
+            workspace_key: Some("/workspace".into()),
+            workspace_label: Some("workspace".into()),
+            models: BTreeSet::from(["claude-sonnet".into()]),
+            tokens: TuiSessionTokens {
+                input: 10,
+                output: 5,
+                cache_read: 2,
+                cache_write: 1,
+                reasoning: 3,
+            },
+            cost: 0.25,
+            message_count: 4,
+            turn_count: 2,
+            first_seen: 100,
+            last_seen: 200,
+        }];
+        let source_space = BTreeMap::from([("claude".into(), 4096)]);
+        (temp, guard, clients, scope, sessions, source_space)
+    }
+
+    fn signature() -> SourceInventorySignature {
+        SourceInventorySignature::from_bytes([0x39; 32])
+    }
+
+    fn nonempty_accumulator(home: &std::path::Path) -> TuiAcc {
+        for (project, workspace, model, input_tokens, hour) in [
+            ("project-a", "/work/alpha", "claude-sonnet-4.6", 101, 10),
+            ("project-b", "/work/beta", "claude-haiku-4.5", 202, 12),
+        ] {
+            let project_dir = home.join(".claude/projects").join(project);
+            fs::create_dir_all(&project_dir).unwrap();
+            fs::write(
+                project_dir.join("session.jsonl"),
+                format!(
+                    r#"{{"type":"assistant","timestamp":"2026-05-27T{hour}:00:00.000Z","cwd":"{workspace}","requestId":"request-{project}","message":{{"id":"message-{project}","model":"{model}","usage":{{"input_tokens":{input_tokens},"output_tokens":11,"cache_read_input_tokens":7,"cache_creation_input_tokens":3}}}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let data_dir = home.join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        let connection = rusqlite::Connection::open(data_dir.join("opencode.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL);
+                 CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session (id, parent_id, directory) VALUES (?1, NULL, ?2)",
+                rusqlite::params!["open-session", "/work/gamma"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "open-message",
+                    "open-session",
+                    r#"{"id":"open-message","role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":303,"output":13,"reasoning":5,"cache":{"read":9,"write":4}},"time":{"created":1779879600000,"completed":1779879602500},"agent":"planner"}"#
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let loader =
+            crate::tui::data::DataLoader::with_filters(Some(home.to_path_buf()), None, None, None);
+        let prepared = loader
+            .prepare(&[ClientId::Claude, ClientId::OpenCode])
+            .unwrap();
+        loader
+            .execute_tui_bundle_with_diagnostics(prepared)
+            .unwrap()
+            .accumulator
+    }
+
+    fn assert_projection_eq(actual: &UsageData, expected: &UsageData) {
+        let actual = serde_json::to_value(CachedProjectionUsageDataRef::from(actual)).unwrap();
+        let expected = serde_json::to_value(CachedProjectionUsageDataRef::from(expected)).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[serial]
+    fn schema_39_bundle_round_trips_sessions_and_metadata() {
+        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        let accumulator = TuiAcc::new();
+        let expected_signature = signature();
+        let health = tokscale_core::source_health::HealthReport {
+            clean_sources: 1,
+            source_data_bytes: 4096,
+            ..Default::default()
+        };
+
+        let store = save_tui_bundle_cache(
+            &accumulator,
+            &sessions,
+            &source_space,
+            &health,
+            &clients,
+            &scope,
+            expected_signature,
+        )
+        .unwrap();
+        let saved = store
+            .load_snapshot(&clients, &GroupBy::Model, &scope)
+            .unwrap();
+        assert_eq!(saved.sessions, sessions);
+        assert_eq!(saved.source_space, source_space);
+        assert_eq!(saved.data.health, health);
+        assert_eq!(
+            saved.source_inventory_signature.process_digest(),
+            expected_signature.process_digest()
+        );
+        let raw: serde_json::Value =
+            serde_json::from_reader(File::open(cache_file().unwrap()).unwrap()).unwrap();
+        assert_eq!(raw["health"]["sourceDataBytes"], 4096);
+        assert!(raw["projections"]["model"].get("health").is_none());
+
+        let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
+            panic!("expected a fresh schema-39 bundle");
+        };
+        assert_eq!(loaded.sessions, sessions);
+        assert_eq!(loaded.source_space, source_space);
+        assert_eq!(loaded.data.health, health);
+        assert!(!loaded.data.loading);
+    }
+
+    #[test]
+    #[serial]
+    fn schema_39_nonempty_bundle_round_trips_all_four_public_groupings() {
+        let (temp, _guard, _clients, scope, _sessions, _source_space) = fixture();
+        let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
+        let accumulator = nonempty_accumulator(temp.path());
+        let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
+        let sessions = vec![
+            TuiSessionEntry {
+                source: "claude".into(),
+                session_id: "claude-session".into(),
+                workspace_key: Some("/work/alpha".into()),
+                workspace_label: Some("alpha".into()),
+                models: BTreeSet::from(["claude-sonnet-4.6".into()]),
+                message_count: 2,
+                ..Default::default()
+            },
+            TuiSessionEntry {
+                source: "opencode".into(),
+                session_id: "open-session".into(),
+                workspace_key: Some("/work/gamma".into()),
+                workspace_label: Some("gamma".into()),
+                models: BTreeSet::from(["gpt-5.5".into()]),
+                message_count: 1,
+                ..Default::default()
+            },
+        ];
+        let source_space =
+            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let mut health = tokscale_core::source_health::HealthReport {
+            clean_sources: 2,
+            source_data_bytes: 12_288,
+            ..Default::default()
+        };
+        health.record_unavailable_source("unrelated-test-source");
+
+        let model_projection = accumulator.project(&GroupBy::Model);
+        assert!(model_projection.models.len() >= 3);
+        assert!(!model_projection.daily.is_empty());
+        assert!(model_projection.hourly.len() >= 3);
+        assert!(model_projection
+            .graph
+            .as_ref()
+            .is_some_and(|graph| !graph.weeks.is_empty()));
+        let workspace_projection = accumulator.project(&GroupBy::WorkspaceModel);
+        let workspace_keys = workspace_projection
+            .models
+            .iter()
+            .filter_map(|model| model.workspace_key.as_deref())
+            .collect::<Vec<_>>();
+        assert!(
+            workspace_keys.len() >= 3,
+            "workspace keys: {workspace_keys:?}"
+        );
+        assert!(
+            workspace_projection
+                .models
+                .iter()
+                .any(|model| { model.workspace_key.as_deref() == Some("/work/gamma") }),
+            "workspace keys: {workspace_keys:?}"
+        );
+
+        let mut store = save_tui_bundle_cache(
+            &accumulator,
+            &sessions,
+            &source_space,
+            &health,
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+        ] {
+            let expected = accumulator.project(&group_by);
+            let loaded = match load_cache(&clients, &group_by, &scope) {
+                CacheResult::Fresh(loaded) | CacheResult::Stale(loaded) => loaded,
+                CacheResult::Miss => panic!("schema-39 bundle must load for {group_by}"),
+            };
+            assert_projection_eq(&loaded.data, &expected);
+            assert_eq!(loaded.data.health, health);
+            assert_eq!(loaded.sessions, sessions);
+            assert_eq!(loaded.source_space, source_space);
+            assert!(!loaded.data.loading);
+            assert!(loaded.data.error.is_none());
+        }
+        assert!(store.project(&GroupBy::Session).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn schema_38_is_an_explicit_miss() {
+        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &source_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["schemaVersion"] = serde_json::Value::from(38);
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn partial_or_foreign_source_membership_is_a_miss() {
+        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        let path = cache_file().unwrap();
+
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &source_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["sourceSpace"] = serde_json::json!({"codex": 4096});
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
+
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &source_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["sessions"][0]["source"] = serde_json::Value::from("codex");
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn writer_is_atomic_and_projection_store_pins_the_old_inode() {
+        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        let mut store = save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &source_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let parent = path.parent().unwrap();
+        assert!(path.is_file());
+        assert!(fs::read_dir(parent).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
+
+        tokscale_core::fs_atomic::write_atomic(&path, b"not-json").unwrap();
+        assert!(store.project(&GroupBy::WorkspaceModel).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn fresh_and_stale_are_derived_from_the_bundle_timestamp() {
+        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &source_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Fresh(_)
+        ));
+
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["timestamp"] = serde_json::Value::from(0_u64);
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Stale(_)
+        ));
+    }
 }
 
 impl CacheReportScope {
@@ -79,26 +491,14 @@ impl CacheReportScope {
     }
 }
 
-/// Single source of truth for the `group_by` value used to key the TUI
-/// cache. The cache file's `groupBy` field is compared verbatim against
-/// this on load (`cache.rs::load_cache`), so any code path that writes
-/// the cache — including the detached `warm-tui-cache` subprocess — must
-/// use this exact value, NOT `GroupBy::default()`.
-///
-/// Historical bug: the warm-tui-cache writer keyed on `GroupBy::default()`
-/// (= `ClientModel`) while the TUI loaded with the hard-coded
-/// `GroupBy::Model`, so every warm cache write silently invalidated the next TUI
-/// launch's cache and the "show cached data while refreshing" contract
-/// never triggered. Anchoring both ends on this constant prevents the
-/// two from drifting again — change here ⇒ change everywhere.
-///
-/// The value matches the TUI's runtime default (`App.group_by` in
-/// `app.rs`) so swapping `GroupBy::Model` → `TUI_DEFAULT_GROUP_BY` is
-/// purely a refactor with no user-visible presentation change.
+/// Default usage projection selected when the TUI starts. Schema 39 stores all
+/// four public projections, so this is presentation state rather than a cache
+/// key; startup and `App.group_by` must still agree on the initially displayed
+/// rows.
 pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
 
 /// Get the cache directory path
-/// Uses `~/.cache/tokscale/` to match TypeScript implementation for cache sharing
+/// Uses the canonical cache subdirectory resolved by `tokscale-core`.
 fn cache_dir() -> Result<PathBuf, tokscale_core::paths::ConfigDirUnavailable> {
     crate::paths::try_get_cache_dir()
 }
@@ -106,19 +506,6 @@ fn cache_dir() -> Result<PathBuf, tokscale_core::paths::ConfigDirUnavailable> {
 /// Get the cache file path
 fn cache_file() -> Result<PathBuf, tokscale_core::paths::ConfigDirUnavailable> {
     cache_dir().map(|directory| directory.join("tui-data-cache.json"))
-}
-
-/// Cached TUI data structure (serializable)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CachedTUIData {
-    schema_version: u32,
-    timestamp: u64,
-    enabled_clients: Vec<String>,
-    group_by: String,
-    report_scope: CacheReportScope,
-    source_inventory_signature: SourceInventorySignature,
-    data: CachedUsageData,
 }
 
 /// Serializable version of UsageData
@@ -134,8 +521,6 @@ struct CachedUsageData {
     total_cost: f64,
     current_streak: u32,
     longest_streak: u32,
-    #[serde(default)]
-    health: tokscale_core::source_health::HealthReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,61 +640,6 @@ struct CachedGraphData {
 }
 
 // Borrowed serialization views avoid allocating an owned copy of the aggregate.
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CachedTUIDataRef<'a> {
-    schema_version: u32,
-    timestamp: u64,
-    enabled_clients: &'a [&'a str],
-    group_by: CachedGroupByRef<'a>,
-    report_scope: &'a CacheReportScope,
-    source_inventory_signature: &'a SourceInventorySignature,
-    data: CachedUsageDataRef<'a>,
-}
-
-struct CachedGroupByRef<'a>(&'a GroupBy);
-
-impl Serialize for CachedGroupByRef<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_str(self.0)
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CachedUsageDataRef<'a> {
-    models: CachedModelsRef<'a>,
-    agents: CachedAgentsRef<'a>,
-    daily: CachedDailyEntriesRef<'a>,
-    hourly: CachedHourlyEntriesRef<'a>,
-    graph: Option<CachedGraphDataRef<'a>>,
-    total_tokens: u64,
-    total_cost: f64,
-    current_streak: u32,
-    longest_streak: u32,
-    health: &'a tokscale_core::source_health::HealthReport,
-}
-
-impl<'a> From<&'a UsageData> for CachedUsageDataRef<'a> {
-    fn from(data: &'a UsageData) -> Self {
-        Self {
-            models: CachedModelsRef(&data.models),
-            agents: CachedAgentsRef(&data.agents),
-            daily: CachedDailyEntriesRef(&data.daily),
-            hourly: CachedHourlyEntriesRef(&data.hourly),
-            graph: data.graph.as_ref().map(CachedGraphDataRef::from),
-            total_tokens: data.total_tokens,
-            total_cost: data.total_cost,
-            current_streak: data.current_streak,
-            longest_streak: data.longest_streak,
-            health: &data.health,
-        }
-    }
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -875,7 +1205,7 @@ impl TryFrom<CachedUsageData> for UsageData {
         let graph: Option<Result<GraphData, _>> = u.graph.map(|g| g.try_into());
 
         Ok(Self {
-            health: u.health,
+            health: Default::default(),
             models: u.models.into_iter().map(|m| m.into()).collect(),
             agents: normalize_cached_agents(u.agents)?,
             daily: daily?,
@@ -949,92 +1279,6 @@ fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
     }
 }
 
-/// Result of loading the TUI cache — combines staleness check with data loading
-/// to avoid double file I/O (previously is_cache_stale + load_cached_data both parsed the file).
-pub enum CacheResult {
-    /// Cache exists, is fresh (within TTL), and clients match exactly
-    Fresh(UsageData, SourceInventorySignature),
-    /// Cache exists and clients match exactly, but needs background refresh
-    Stale(UsageData),
-    /// Cache missing, unreadable, unparseable, or clients don't match
-    Miss,
-}
-
-/// Load cached TUI data from disk with a single read/parse.
-/// Returns Fresh/Stale/Miss so the caller can decide whether to
-/// display cached data immediately and/or trigger a background refresh.
-///
-/// `enabled_clients` is the unified `HashSet<ClientId>`. The cache key must
-/// match exactly; partial cache hits would show incomplete data before the
-/// background refresh.
-pub fn load_cache(
-    enabled_clients: &HashSet<ClientId>,
-    group_by: &GroupBy,
-    report_scope: &CacheReportScope,
-) -> CacheResult {
-    let cache_path = match cache_file() {
-        Ok(path) => path,
-        Err(_) => return CacheResult::Miss,
-    };
-    let cached: CachedTUIData = match File::open(&cache_path) {
-        Ok(file) => match serde_json::from_reader(BufReader::new(file)) {
-            Ok(cached) => cached,
-            Err(_) => return CacheResult::Miss,
-        },
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return CacheResult::Miss,
-        Err(_) => return CacheResult::Miss,
-    };
-
-    if cached.schema_version != CACHE_SCHEMA_VERSION {
-        return CacheResult::Miss;
-    }
-    let cached_group_by = match cached.group_by.parse::<GroupBy>() {
-        Ok(value) => value,
-        Err(_) => return CacheResult::Miss,
-    };
-    if &cached_group_by != group_by {
-        return CacheResult::Miss;
-    }
-    if &cached.report_scope != report_scope {
-        return CacheResult::Miss;
-    }
-
-    if !cache_clients_match_exact(enabled_clients, &cached.enabled_clients) {
-        return CacheResult::Miss;
-    }
-
-    // Convert cached data to UsageData
-    let data: UsageData = match cached.data.try_into() {
-        Ok(d) => d,
-        Err(_) => return CacheResult::Miss,
-    };
-
-    if cached_models_missing_identity(&data) {
-        return CacheResult::Miss;
-    }
-
-    // Preserve the degraded report for immediate rendering, but force the
-    // caller to rescan. A locked database or interrupted read can recover
-    // without changing the source inventory fingerprint. Completed scans
-    // with record rejections remain fresh because their result is stable.
-    if data.health.requires_source_retry() {
-        return CacheResult::Stale(data);
-    }
-
-    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_millis() as u64,
-        Err(_) => return CacheResult::Miss,
-    };
-    let Some(cache_age) = now.checked_sub(cached.timestamp) else {
-        return CacheResult::Stale(data);
-    };
-    if cache_age > CACHE_STALE_THRESHOLD_MS {
-        CacheResult::Stale(data)
-    } else {
-        CacheResult::Fresh(data, cached.source_inventory_signature)
-    }
-}
-
 /// Since schema 38, `modelId` is the authoritative model identity (ADR 0026),
 /// but the cached field still deserializes with `#[serde(default)]`. A cache
 /// written without it would load with an empty id and merge unrelated entries
@@ -1066,2162 +1310,594 @@ fn cache_clients_match_exact(
     cached.len() == cached_clients.len() && enabled == cached
 }
 
-/// Save TUI data to disk cache.
+fn cache_source_space_matches_exact(
+    enabled_clients: &HashSet<ClientId>,
+    source_space: &BTreeMap<String, u64>,
+) -> bool {
+    source_space.len() == enabled_clients.len()
+        && enabled_clients
+            .iter()
+            .all(|client| source_space.contains_key(client.as_str()))
+}
+
+fn cache_session_sources_are_enabled(
+    enabled_clients: &HashSet<ClientId>,
+    sessions: &[TuiSessionEntry],
+) -> bool {
+    sessions.iter().all(|session| {
+        enabled_clients
+            .iter()
+            .any(|client| client.as_str() == session.source.as_str())
+            || (session.source.starts_with("cc-mirror/")
+                && enabled_clients.contains(&ClientId::Claude))
+    })
+}
+
+/// A complete, generation-consistent TUI cache snapshot.
 ///
-/// The on-disk cache key stores the enabled client ids.
-pub fn save_cached_data(
-    data: &UsageData,
+/// `projection_store` owns the same file handle that was used to deserialize
+/// `data` and `sessions`. Keeping that handle open pins the cache inode even if
+/// another process atomically replaces the canonical cache path later.
+#[derive(Debug)]
+pub struct LoadedTuiCache {
+    pub data: UsageData,
+    pub sessions: Vec<TuiSessionEntry>,
+    pub source_space: BTreeMap<String, u64>,
+    pub projection_store: ProjectionStore,
+    pub source_inventory_signature: SourceInventorySignature,
+}
+
+/// Result of loading the schema-39 TUI bundle.
+pub enum CacheResult {
+    Fresh(LoadedTuiCache),
+    Stale(LoadedTuiCache),
+    Miss,
+}
+
+/// Lazy reader for the four public TUI usage projections.
+///
+/// The store never reopens the path. Each projection seek starts from the
+/// beginning of the pinned inode and a serde seed ignores all unrelated JSON
+/// subtrees without materializing them.
+#[derive(Debug)]
+pub struct ProjectionStore {
+    file: File,
+    health: tokscale_core::source_health::HealthReport,
+}
+
+impl ProjectionStore {
+    pub fn project(&mut self, group_by: &GroupBy) -> anyhow::Result<UsageData> {
+        projection_field(group_by)?;
+        self.file.seek(SeekFrom::Start(0))?;
+
+        let cached = {
+            let mut deserializer =
+                serde_json::Deserializer::from_reader(BufReader::new(&mut self.file));
+            let cached = ProjectionBundleSeed { group_by }.deserialize(&mut deserializer)?;
+            deserializer.end()?;
+            cached
+        };
+        let mut data: UsageData = cached.try_into()?;
+        data.health = self.health.clone();
+        if cached_models_missing_identity(&data) {
+            anyhow::bail!("cached TUI projection is missing authoritative model identity");
+        }
+        Ok(data)
+    }
+
+    pub fn load_snapshot(
+        self,
+        enabled_clients: &HashSet<ClientId>,
+        group_by: &GroupBy,
+        report_scope: &CacheReportScope,
+    ) -> anyhow::Result<LoadedTuiCache> {
+        let Self { file, health: _ } = self;
+        load_bundle_from_file(file, enabled_clients, group_by, report_scope)
+            .map(|parsed| parsed.loaded)
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedTuiBundleRef<'a> {
+    schema_version: u32,
+    timestamp: u64,
+    enabled_clients: &'a [&'a str],
+    report_scope: &'a CacheReportScope,
+    source_inventory_signature: &'a SourceInventorySignature,
+    health: &'a tokscale_core::source_health::HealthReport,
+    sessions: &'a [TuiSessionEntry],
+    source_space: &'a BTreeMap<String, u64>,
+    projections: CachedProjectionSetRef<'a>,
+}
+
+struct CachedProjectionSetRef<'a>(&'a TuiAcc);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedProjectionUsageDataRef<'a> {
+    models: CachedModelsRef<'a>,
+    agents: CachedAgentsRef<'a>,
+    daily: CachedDailyEntriesRef<'a>,
+    hourly: CachedHourlyEntriesRef<'a>,
+    graph: Option<CachedGraphDataRef<'a>>,
+    total_tokens: u64,
+    total_cost: f64,
+    current_streak: u32,
+    longest_streak: u32,
+}
+
+impl<'a> From<&'a UsageData> for CachedProjectionUsageDataRef<'a> {
+    fn from(data: &'a UsageData) -> Self {
+        Self {
+            models: CachedModelsRef(&data.models),
+            agents: CachedAgentsRef(&data.agents),
+            daily: CachedDailyEntriesRef(&data.daily),
+            hourly: CachedHourlyEntriesRef(&data.hourly),
+            graph: data.graph.as_ref().map(CachedGraphDataRef::from),
+            total_tokens: data.total_tokens,
+            total_cost: data.total_cost,
+            current_streak: data.current_streak,
+            longest_streak: data.longest_streak,
+        }
+    }
+}
+
+impl Serialize for CachedProjectionSetRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(4))?;
+
+        let model = self.0.project(&GroupBy::Model);
+        map.serialize_entry("model", &CachedProjectionUsageDataRef::from(&model))?;
+        drop(model);
+
+        let client_model = self.0.project(&GroupBy::ClientModel);
+        map.serialize_entry(
+            "clientModel",
+            &CachedProjectionUsageDataRef::from(&client_model),
+        )?;
+        drop(client_model);
+
+        let client_provider_model = self.0.project(&GroupBy::ClientProviderModel);
+        map.serialize_entry(
+            "clientProviderModel",
+            &CachedProjectionUsageDataRef::from(&client_provider_model),
+        )?;
+        drop(client_provider_model);
+
+        let workspace_model = self.0.project(&GroupBy::WorkspaceModel);
+        map.serialize_entry(
+            "workspaceModel",
+            &CachedProjectionUsageDataRef::from(&workspace_model),
+        )?;
+
+        map.end()
+    }
+}
+
+fn projection_field(group_by: &GroupBy) -> anyhow::Result<&'static str> {
+    match group_by {
+        GroupBy::Model => Ok("model"),
+        GroupBy::ClientModel => Ok("clientModel"),
+        GroupBy::ClientProviderModel => Ok("clientProviderModel"),
+        GroupBy::WorkspaceModel => Ok("workspaceModel"),
+        GroupBy::Session | GroupBy::ClientSession => {
+            anyhow::bail!("session groupings are not public TUI usage projections")
+        }
+    }
+}
+
+struct ProjectionSetSeed<'a> {
+    group_by: &'a GroupBy,
+}
+
+impl<'de> DeserializeSeed<'de> for ProjectionSetSeed<'_> {
+    type Value = CachedUsageData;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ProjectionSetVisitor {
+            selected_field: projection_field(self.group_by).map_err(serde::de::Error::custom)?,
+        })
+    }
+}
+
+struct ProjectionSetVisitor {
+    selected_field: &'static str,
+}
+
+impl<'de> Visitor<'de> for ProjectionSetVisitor {
+    type Value = CachedUsageData;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the four public TUI usage projections")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut selected = None;
+        let mut present = 0_u8;
+
+        while let Some(field) = map.next_key::<String>()? {
+            let bit = match field.as_str() {
+                "model" => 1,
+                "clientModel" => 2,
+                "clientProviderModel" => 4,
+                "workspaceModel" => 8,
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                    continue;
+                }
+            };
+            if present & bit != 0 {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate TUI projection `{field}`"
+                )));
+            }
+            present |= bit;
+
+            if field == self.selected_field {
+                selected = Some(map.next_value()?);
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+
+        if present != 0b1111 {
+            return Err(serde::de::Error::custom(
+                "cached TUI bundle is missing one or more public projections",
+            ));
+        }
+        selected.ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "cached TUI bundle is missing projection `{}`",
+                self.selected_field
+            ))
+        })
+    }
+}
+
+struct ParsedTuiBundle {
+    schema_version: u32,
+    timestamp: u64,
+    enabled_clients: Vec<String>,
+    report_scope: CacheReportScope,
+    source_inventory_signature: SourceInventorySignature,
+    health: tokscale_core::source_health::HealthReport,
+    sessions: Vec<TuiSessionEntry>,
+    source_space: BTreeMap<String, u64>,
+    data: CachedUsageData,
+}
+
+struct FullBundleSeed<'a> {
+    group_by: &'a GroupBy,
+}
+
+impl<'de> DeserializeSeed<'de> for FullBundleSeed<'_> {
+    type Value = ParsedTuiBundle;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(FullBundleVisitor {
+            group_by: self.group_by,
+        })
+    }
+}
+
+struct FullBundleVisitor<'a> {
+    group_by: &'a GroupBy,
+}
+
+impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
+    type Value = ParsedTuiBundle;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a schema-39 TUI cache bundle")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut schema_version: Option<u32> = None;
+        let mut timestamp = None;
+        let mut enabled_clients = None;
+        let mut report_scope = None;
+        let mut source_inventory_signature = None;
+        let mut health = None;
+        let mut sessions = None;
+        let mut source_space = None;
+        let mut data = None;
+
+        while let Some(field) = map.next_key::<String>()? {
+            match field.as_str() {
+                "schemaVersion" => {
+                    set_once(&mut schema_version, map.next_value()?, "schemaVersion")?
+                }
+                "timestamp" => set_once(&mut timestamp, map.next_value()?, "timestamp")?,
+                "enabledClients" => {
+                    set_once(&mut enabled_clients, map.next_value()?, "enabledClients")?
+                }
+                "reportScope" => set_once(&mut report_scope, map.next_value()?, "reportScope")?,
+                "sourceInventorySignature" => set_once(
+                    &mut source_inventory_signature,
+                    map.next_value()?,
+                    "sourceInventorySignature",
+                )?,
+                "health" => set_once(&mut health, map.next_value()?, "health")?,
+                "sessions" => set_once(&mut sessions, map.next_value()?, "sessions")?,
+                "sourceSpace" => set_once(&mut source_space, map.next_value()?, "sourceSpace")?,
+                "projections" => {
+                    if data.is_some() {
+                        return Err(serde::de::Error::duplicate_field("projections"));
+                    }
+                    data = Some(map.next_value_seed(ProjectionSetSeed {
+                        group_by: self.group_by,
+                    })?);
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        Ok(ParsedTuiBundle {
+            schema_version: required(schema_version, "schemaVersion")?,
+            timestamp: required(timestamp, "timestamp")?,
+            enabled_clients: required(enabled_clients, "enabledClients")?,
+            report_scope: required(report_scope, "reportScope")?,
+            source_inventory_signature: required(
+                source_inventory_signature,
+                "sourceInventorySignature",
+            )?,
+            health: required(health, "health")?,
+            sessions: required(sessions, "sessions")?,
+            source_space: required(source_space, "sourceSpace")?,
+            data: required(data, "projections")?,
+        })
+    }
+}
+
+fn set_once<T, E>(slot: &mut Option<T>, value: T, field: &'static str) -> Result<(), E>
+where
+    E: serde::de::Error,
+{
+    if slot.replace(value).is_some() {
+        return Err(E::duplicate_field(field));
+    }
+    Ok(())
+}
+
+fn required<T, E>(value: Option<T>, field: &'static str) -> Result<T, E>
+where
+    E: serde::de::Error,
+{
+    value.ok_or_else(|| E::missing_field(field))
+}
+
+struct ProjectionBundleSeed<'a> {
+    group_by: &'a GroupBy,
+}
+
+impl<'de> DeserializeSeed<'de> for ProjectionBundleSeed<'_> {
+    type Value = CachedUsageData;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ProjectionBundleVisitor {
+            group_by: self.group_by,
+        })
+    }
+}
+
+struct ProjectionBundleVisitor<'a> {
+    group_by: &'a GroupBy,
+}
+
+impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
+    type Value = CachedUsageData;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a schema-39 TUI cache bundle")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut schema_version: Option<u32> = None;
+        let mut data = None;
+        while let Some(field) = map.next_key::<String>()? {
+            match field.as_str() {
+                "schemaVersion" => {
+                    set_once(&mut schema_version, map.next_value()?, "schemaVersion")?
+                }
+                "projections" => {
+                    if data.is_some() {
+                        return Err(serde::de::Error::duplicate_field("projections"));
+                    }
+                    data = Some(map.next_value_seed(ProjectionSetSeed {
+                        group_by: self.group_by,
+                    })?);
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        let schema_version = required(schema_version, "schemaVersion")?;
+        if schema_version != CACHE_SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported TUI cache schema {schema_version}"
+            )));
+        }
+        required(data, "projections")
+    }
+}
+
+struct ParsedLoad {
+    loaded: LoadedTuiCache,
+    timestamp: u64,
+}
+
+fn load_bundle_from_file(
+    mut file: File,
     enabled_clients: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
+) -> anyhow::Result<ParsedLoad> {
+    projection_field(group_by)?;
+    file.seek(SeekFrom::Start(0))?;
+    let parsed = {
+        let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(&mut file));
+        let parsed = FullBundleSeed { group_by }.deserialize(&mut deserializer)?;
+        deserializer.end()?;
+        parsed
+    };
+
+    if parsed.schema_version != CACHE_SCHEMA_VERSION {
+        anyhow::bail!("unsupported TUI cache schema {}", parsed.schema_version);
+    }
+    if &parsed.report_scope != report_scope {
+        anyhow::bail!("cached TUI report scope does not match the request");
+    }
+    if !cache_clients_match_exact(enabled_clients, &parsed.enabled_clients) {
+        anyhow::bail!("cached TUI client set does not match the request");
+    }
+    if !cache_source_space_matches_exact(enabled_clients, &parsed.source_space) {
+        anyhow::bail!("cached TUI source-space keys do not match the enabled client set");
+    }
+    if !cache_session_sources_are_enabled(enabled_clients, &parsed.sessions) {
+        anyhow::bail!("cached TUI Sessions contain a source outside the enabled client set");
+    }
+
+    let mut data: UsageData = parsed.data.try_into()?;
+    data.health = parsed.health.clone();
+    if cached_models_missing_identity(&data) {
+        anyhow::bail!("cached TUI projection is missing authoritative model identity");
+    }
+    file.seek(SeekFrom::Start(0))?;
+
+    Ok(ParsedLoad {
+        loaded: LoadedTuiCache {
+            data,
+            sessions: parsed.sessions,
+            source_space: parsed.source_space,
+            projection_store: ProjectionStore {
+                file,
+                health: parsed.health,
+            },
+            source_inventory_signature: parsed.source_inventory_signature,
+        },
+        timestamp: parsed.timestamp,
+    })
+}
+
+/// Load one complete TUI snapshot while materializing only the requested usage
+/// projection plus Sessions. Unsupported/legacy/corrupt files are explicit
+/// misses; the caller remains responsible for reporting a refresh failure.
+pub fn load_cache(
+    enabled_clients: &HashSet<ClientId>,
+    group_by: &GroupBy,
+    report_scope: &CacheReportScope,
+) -> CacheResult {
+    let cache_path = match cache_file() {
+        Ok(path) => path,
+        Err(_) => return CacheResult::Miss,
+    };
+    let file = match File::open(cache_path) {
+        Ok(file) => file,
+        Err(_) => return CacheResult::Miss,
+    };
+    let parsed = match load_bundle_from_file(file, enabled_clients, group_by, report_scope) {
+        Ok(parsed) => parsed,
+        Err(_) => return CacheResult::Miss,
+    };
+
+    if parsed.loaded.data.health.requires_source_retry() {
+        return CacheResult::Stale(parsed.loaded);
+    }
+
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as u64,
+        Err(_) => return CacheResult::Miss,
+    };
+    match now.checked_sub(parsed.timestamp) {
+        Some(age) if age <= CACHE_STALE_THRESHOLD_MS => CacheResult::Fresh(parsed.loaded),
+        _ => CacheResult::Stale(parsed.loaded),
+    }
+}
+
+/// Atomically persist one complete schema-39 TUI bundle.
+///
+/// Projection serialization borrows the canonical accumulator and materializes
+/// one grouping at a time, so the four projections never coexist in memory.
+/// The returned store pins the temporary file's inode before the atomic rename,
+/// so later reads cannot race with another writer replacing the canonical path.
+pub fn save_tui_bundle_cache(
+    accumulator: &TuiAcc,
+    sessions: &[TuiSessionEntry],
+    source_space: &BTreeMap<String, u64>,
+    health: &tokscale_core::source_health::HealthReport,
+    enabled_clients: &HashSet<ClientId>,
+    report_scope: &CacheReportScope,
     source_inventory_signature: SourceInventorySignature,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ProjectionStore> {
+    if !cache_source_space_matches_exact(enabled_clients, source_space) {
+        anyhow::bail!("TUI source-space keys do not match the enabled client set");
+    }
+    if !cache_session_sources_are_enabled(enabled_clients, sessions) {
+        anyhow::bail!("TUI Sessions contain a source outside the enabled client set");
+    }
+
     let cache_path = cache_file()?;
-
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-
     let mut clients_vec: Vec<&str> = enabled_clients
         .iter()
         .map(|client| client.as_str())
         .collect();
-    // Sort so the cache key is deterministic across runs / HashSet
-    // iteration order — otherwise unrelated runs would invalidate each
-    // other's caches just because the JSON ordering shuffled.
-    clients_vec.sort();
+    clients_vec.sort_unstable();
 
-    let cached = CachedTUIDataRef {
+    let cached = CachedTuiBundleRef {
         schema_version: CACHE_SCHEMA_VERSION,
         timestamp,
         enabled_clients: &clients_vec,
-        group_by: CachedGroupByRef(group_by),
         report_scope,
         source_inventory_signature: &source_inventory_signature,
-        data: data.into(),
+        health,
+        sessions,
+        source_space,
+        projections: CachedProjectionSetRef(accumulator),
     };
 
-    // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
-    // the canonical cache file before writing — a partial save or process
-    // crash between delete and rename would lose the cache. The temp-file
-    // pattern makes corruption-on-crash impossible.
+    let mut pinned_file = None;
     tokscale_core::fs_atomic::write_atomic_with(&cache_path, |file| {
-        let mut writer = BufWriter::new(file);
+        let mut writer = BufWriter::new(&mut *file);
         serde_json::to_writer(&mut writer, &cached).map_err(std::io::Error::other)?;
-        writer.flush()
+        writer.flush()?;
+        drop(writer);
+        pinned_file = Some(file.try_clone()?);
+        Ok(())
     })
     .with_context(|| format!("failed to persist TUI cache `{}`", cache_path.display()))?;
-    Ok(())
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::de::{MapAccess, SeqAccess, Visitor};
-    use serial_test::serial;
-    use std::ffi::{OsStr, OsString};
-    use std::fmt;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{env, fs};
-    use tempfile::TempDir;
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &OsStr) -> Self {
-            let previous = env::var_os(key);
-            unsafe {
-                env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.previous.take() {
-                    Some(value) => env::set_var(self.key, value),
-                    None => env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    enum OrderedJson {
-        Object(Vec<(String, OrderedJson)>),
-        Array(Vec<OrderedJson>),
-        Scalar,
-    }
-
-    impl OrderedJson {
-        fn keys(&self) -> Vec<&str> {
-            match self {
-                Self::Object(fields) => fields.iter().map(|(key, _)| key.as_str()).collect(),
-                other => panic!("expected JSON object, got {other:?}"),
-            }
-        }
-
-        fn field(&self, expected_key: &str) -> &Self {
-            match self {
-                Self::Object(fields) => fields
-                    .iter()
-                    .find_map(|(key, value)| (key == expected_key).then_some(value))
-                    .unwrap_or_else(|| panic!("missing JSON field {expected_key}")),
-                other => panic!("expected JSON object, got {other:?}"),
-            }
-        }
-
-        fn element(&self, index: usize) -> &Self {
-            match self {
-                Self::Array(values) => &values[index],
-                other => panic!("expected JSON array, got {other:?}"),
-            }
-        }
-    }
-
-    impl<'de> Deserialize<'de> for OrderedJson {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            deserializer.deserialize_any(OrderedJsonVisitor)
-        }
-    }
-
-    struct OrderedJsonVisitor;
-
-    impl<'de> Visitor<'de> for OrderedJsonVisitor {
-        type Value = OrderedJson;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("any JSON value")
-        }
-
-        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-        where
-            A: MapAccess<'de>,
-        {
-            let mut fields = Vec::new();
-            while let Some(entry) = map.next_entry()? {
-                fields.push(entry);
-            }
-            Ok(OrderedJson::Object(fields))
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let mut values = Vec::new();
-            while let Some(value) = sequence.next_element()? {
-                values.push(value);
-            }
-            Ok(OrderedJson::Array(values))
-        }
-
-        fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-            Ok(OrderedJson::Scalar)
-        }
-
-        fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-            Ok(OrderedJson::Scalar)
-        }
-
-        fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-            Ok(OrderedJson::Scalar)
-        }
-
-        fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-            Ok(OrderedJson::Scalar)
-        }
-
-        fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(OrderedJson::Scalar)
-        }
-
-        fn visit_none<E>(self) -> Result<Self::Value, E> {
-            Ok(OrderedJson::Scalar)
-        }
-
-        fn visit_unit<E>(self) -> Result<Self::Value, E> {
-            Ok(OrderedJson::Scalar)
-        }
-    }
-
-    fn tuple_array_keys(value: &serde_json::Value) -> Vec<&str> {
-        value
-            .as_array()
-            .expect("expected tuple array")
-            .iter()
-            .map(|entry| {
-                entry
-                    .as_array()
-                    .and_then(|tuple| tuple.first())
-                    .and_then(serde_json::Value::as_str)
-                    .expect("expected [string, value] tuple")
-            })
-            .collect()
-    }
-
-    fn make_filters(filters: &[ClientId]) -> HashSet<ClientId> {
-        filters.iter().copied().collect()
-    }
-
-    fn cached_agent(agent: &str, clients: &str, total_seed: u64) -> CachedAgentUsage {
-        CachedAgentUsage {
-            agent: agent.to_string(),
-            clients: clients.to_string(),
-            tokens: CachedTokenBreakdown {
-                input: total_seed,
-                output: 1,
-                cache_read: 2,
-                cache_write: 3,
-                reasoning: 4,
-            },
-            cost: total_seed as f64,
-            message_count: 1,
-            instance_count: 1,
-        }
-    }
-
-    fn fresh_timestamp_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-    }
-
-    fn test_signature() -> SourceInventorySignature {
-        SourceInventorySignature::from_bytes([0x5a; 32])
-    }
-
-    fn token_breakdown(seed: u64) -> TokenBreakdown {
-        TokenBreakdown {
-            input: seed,
-            output: seed + 1,
-            cache_read: seed + 2,
-            cache_write: seed + 3,
-            reasoning: seed + 4,
-        }
-    }
-
-    fn complete_usage_data() -> UsageData {
-        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 11).unwrap();
-
-        let mut daily_models = BTreeMap::new();
-        daily_models.insert(
-            "zeta-model".to_string(),
-            DailyModelInfo {
-                provider: "anthropic".to_string(),
-                model_id: "zeta-model".to_string(),
-                display_name: "Zeta Model".to_string(),
-                color_key: "zeta-model".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: token_breakdown(31),
-                cost: 3.1,
-                messages: 7,
-            },
-        );
-        daily_models.insert(
-            "alpha-model".to_string(),
-            DailyModelInfo {
-                provider: "openai".to_string(),
-                model_id: "alpha-model".to_string(),
-                display_name: "Alpha Model".to_string(),
-                color_key: "alpha-model".to_string(),
-                workspace_key: Some("/repo-alpha".to_string()),
-                workspace_label: Some("repo-alpha".to_string()),
-                tokens: token_breakdown(32),
-                cost: 3.2,
-                messages: 8,
-            },
-        );
-
-        let mut gemini_daily_models = BTreeMap::new();
-        gemini_daily_models.insert(
-            "gemini-model".to_string(),
-            DailyModelInfo {
-                provider: "google".to_string(),
-                model_id: "gemini-model".to_string(),
-                display_name: "Gemini Model".to_string(),
-                color_key: "gemini-model".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: token_breakdown(33),
-                cost: 3.3,
-                messages: 9,
-            },
-        );
-        let mut source_breakdown = BTreeMap::new();
-        source_breakdown.insert(
-            "gemini".to_string(),
-            DailySourceInfo {
-                tokens: token_breakdown(22),
-                cost: 2.2,
-                models: gemini_daily_models,
-            },
-        );
-        source_breakdown.insert(
-            "claude".to_string(),
-            DailySourceInfo {
-                tokens: token_breakdown(21),
-                cost: 2.1,
-                models: daily_models,
-            },
-        );
-
-        let mut hourly_models = BTreeMap::new();
-        hourly_models.insert(
-            "zeta-model".to_string(),
-            HourlyModelInfo {
-                provider: "anthropic".to_string(),
-                model_id: "zeta-model".to_string(),
-                display_name: "Zeta Model".to_string(),
-                color_key: "zeta-model".to_string(),
-                tokens: token_breakdown(51),
-                cost: 5.1,
-            },
-        );
-        hourly_models.insert(
-            "alpha-model".to_string(),
-            HourlyModelInfo {
-                provider: "openai".to_string(),
-                model_id: "alpha-model".to_string(),
-                display_name: "Alpha Model".to_string(),
-                color_key: "alpha-model".to_string(),
-                tokens: token_breakdown(52),
-                cost: 5.2,
-            },
-        );
-        let hourly_clients = ["claude".to_string(), "gemini".to_string()]
-            .into_iter()
-            .collect();
-
-        UsageData {
-            health: Default::default(),
-            models: vec![ModelUsage {
-                model: "claude-sonnet-4".to_string(),
-                provider: "anthropic".to_string(),
-                client: "claude".to_string(),
-                workspace_key: Some("workspace-key".to_string()),
-                workspace_label: Some("Workspace Label".to_string()),
-                tokens: token_breakdown(1),
-                cost: 1.25,
-                performance: ModelPerformance {
-                    ms_per_1k_tokens: Some(12.5),
-                    total_duration_ms: 250,
-                    timed_tokens: 20_000,
-                    sample_count: 3,
-                    token_coverage: 0.75,
-                },
-                session_count: 2,
-            }],
-            agents: vec![AgentUsage {
-                agent: "Researcher".to_string(),
-                clients: "claude".to_string(),
-                tokens: token_breakdown(11),
-                cost: 1.1,
-                message_count: 4,
-                instance_count: 2,
-            }],
-            daily: vec![DailyUsage {
-                date,
-                tokens: token_breakdown(41),
-                cost: 4.1,
-                source_breakdown,
-                message_count: 8,
-                turn_count: 6,
-            }],
-            hourly: vec![HourlyUsage {
-                datetime: date.and_hms_opt(14, 5, 6).unwrap(),
-                tokens: token_breakdown(61),
-                cost: 6.1,
-                clients: hourly_clients,
-                models: hourly_models,
-                message_count: 5,
-                turn_count: 4,
-            }],
-            graph: Some(GraphData {
-                weeks: vec![vec![
-                    None,
-                    Some(ContributionDay {
-                        date,
-                        tokens: 71,
-                        cost: 7.1,
-                        intensity: 0.8,
-                    }),
-                ]],
-            }),
-            total_tokens: 1_234,
-            total_cost: 12.34,
-            loading: true,
-            error: Some("not persisted".to_string()),
-            current_streak: 3,
-            longest_streak: 9,
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn streamed_cache_matches_owned_schema_and_round_trips_complete_data() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
-
-        let clients = make_filters(&[ClientId::Gemini, ClientId::Claude]);
-        let scope = CacheReportScope::new(
-            temp_dir.path().to_string_lossy().into_owned(),
-            true,
-            Some("2026-07-01".to_string()),
-            Some("2026-07-11".to_string()),
-            Some("2026".to_string()),
-        );
-        let data = complete_usage_data();
-        save_cached_data(
-            &data,
-            &clients,
-            &GroupBy::WorkspaceModel,
-            &scope,
-            test_signature(),
-        )
-        .unwrap();
-
-        let serialized = fs::read(cache_file().unwrap()).unwrap();
-        let owned: CachedTUIData = serde_json::from_slice(&serialized).unwrap();
-        assert_eq!(
-            serialized,
-            serde_json::to_vec(&owned).unwrap(),
-            "borrowed writer must preserve the owned schema's compact bytes and field order"
-        );
-
-        let value: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
-        assert_eq!(value["schemaVersion"], CACHE_SCHEMA_VERSION);
-        assert_eq!(
-            value["enabledClients"],
-            serde_json::json!(["claude", "gemini"])
-        );
-        assert_eq!(value["data"]["daily"][0]["date"], "2026-07-11");
-        assert_eq!(
-            value["data"]["hourly"][0]["datetime"],
-            "2026-07-11 14:05:06"
-        );
-        assert!(value["data"]["daily"][0]["sourceBreakdown"][0].is_array());
-        assert!(value["data"]["daily"][0]["sourceBreakdown"][0][1]["models"][0].is_array());
-        assert!(value["data"]["hourly"][0]["models"][0].is_array());
-        assert_eq!(
-            value["data"]["graph"]["weeks"][0][0],
-            serde_json::Value::Null
-        );
-        assert_eq!(value["data"]["health"]["complete"], true);
-        assert_eq!(
-            tuple_array_keys(&value["data"]["daily"][0]["sourceBreakdown"]),
-            vec!["claude", "gemini"]
-        );
-        assert_eq!(
-            tuple_array_keys(&value["data"]["daily"][0]["sourceBreakdown"][0][1]["models"]),
-            vec!["alpha-model", "zeta-model"]
-        );
-        assert_eq!(
-            tuple_array_keys(&value["data"]["hourly"][0]["models"]),
-            vec!["alpha-model", "zeta-model"]
-        );
-
-        let ordered: OrderedJson = serde_json::from_slice(&serialized).unwrap();
-        assert_eq!(
-            ordered.keys(),
-            vec![
-                "schemaVersion",
-                "timestamp",
-                "enabledClients",
-                "groupBy",
-                "reportScope",
-                "sourceInventorySignature",
-                "data",
-            ]
-        );
-        assert_eq!(
-            ordered.field("reportScope").keys(),
-            vec!["resolvedHomeDir", "useEnvRoots", "since", "until", "year",]
-        );
-
-        let ordered_data = ordered.field("data");
-        assert_eq!(
-            ordered_data.keys(),
-            vec![
-                "models",
-                "agents",
-                "daily",
-                "hourly",
-                "graph",
-                "totalTokens",
-                "totalCost",
-                "currentStreak",
-                "longestStreak",
-                "health",
-            ]
-        );
-        let ordered_model = ordered_data.field("models").element(0);
-        assert_eq!(
-            ordered_model.keys(),
-            vec![
-                "model",
-                "provider",
-                "client",
-                "workspaceKey",
-                "workspaceLabel",
-                "tokens",
-                "cost",
-                "performance",
-                "sessionCount",
-            ]
-        );
-        assert_eq!(
-            ordered_model.field("tokens").keys(),
-            vec!["input", "output", "cacheRead", "cacheWrite", "reasoning"]
-        );
-        assert_eq!(
-            ordered_model.field("performance").keys(),
-            vec![
-                "msPer1KTokens",
-                "totalDurationMs",
-                "timedTokens",
-                "sampleCount",
-                "tokenCoverage",
-            ]
-        );
-        assert_eq!(
-            ordered_data.field("agents").element(0).keys(),
-            vec![
-                "agent",
-                "clients",
-                "tokens",
-                "cost",
-                "messageCount",
-                "instanceCount",
-            ]
-        );
-
-        let ordered_daily = ordered_data.field("daily").element(0);
-        assert_eq!(
-            ordered_daily.keys(),
-            vec![
-                "date",
-                "tokens",
-                "cost",
-                "sourceBreakdown",
-                "messageCount",
-                "turnCount",
-            ]
-        );
-        let ordered_daily_source = ordered_daily.field("sourceBreakdown").element(0).element(1);
-        assert_eq!(
-            ordered_daily_source.keys(),
-            vec!["tokens", "cost", "models"]
-        );
-        assert_eq!(
-            ordered_daily_source
-                .field("models")
-                .element(0)
-                .element(1)
-                .keys(),
-            vec![
-                "provider",
-                "modelId",
-                "displayName",
-                "colorKey",
-                "workspaceKey",
-                "workspaceLabel",
-                "tokens",
-                "cost",
-                "messages",
-            ]
-        );
-
-        let ordered_hourly = ordered_data.field("hourly").element(0);
-        assert_eq!(
-            ordered_hourly.keys(),
-            vec![
-                "datetime",
-                "tokens",
-                "cost",
-                "clients",
-                "models",
-                "messageCount",
-                "turnCount",
-            ]
-        );
-        assert_eq!(
-            ordered_hourly.field("models").element(0).element(1).keys(),
-            vec![
-                "provider",
-                "modelId",
-                "displayName",
-                "colorKey",
-                "tokens",
-                "cost"
-            ]
-        );
-
-        let ordered_graph = ordered_data.field("graph");
-        assert_eq!(ordered_graph.keys(), vec!["weeks"]);
-        assert_eq!(
-            ordered_graph.field("weeks").element(0).element(1).keys(),
-            vec!["date", "tokens", "cost", "intensity"]
-        );
-
-        let loaded = match load_cache(&clients, &GroupBy::WorkspaceModel, &scope) {
-            CacheResult::Fresh(data, signature) => {
-                assert_eq!(signature, test_signature());
-                data
-            }
-            result => panic!("expected fresh cache, got {}", other_variant_name(&result)),
-        };
-        assert_eq!(
-            value["data"],
-            serde_json::to_value(CachedUsageDataRef::from(&loaded)).unwrap(),
-            "all persisted aggregate fields must survive the owned read DTO round trip"
-        );
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-        match previous_override {
-            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn structured_model_map_keys_round_trip_without_coalescing() {
-        let temp_dir = TempDir::new().unwrap();
-        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
-
-        let mut data = complete_usage_data();
-        let daily_models = &mut data.daily[0]
-            .source_breakdown
-            .get_mut("claude")
-            .unwrap()
-            .models;
-        let daily_value = daily_models.values().next().unwrap().clone();
-        daily_models.clear();
-        daily_models.insert("v1|cpm|1:a3:b:c1:d".to_string(), daily_value.clone());
-        daily_models.insert("v1|cpm|1:a1:b3:c:d".to_string(), daily_value);
-
-        let hourly_models = &mut data.hourly[0].models;
-        let hourly_value = hourly_models.values().next().unwrap().clone();
-        hourly_models.clear();
-        hourly_models.insert("v1|pm|3:b:c1:d".to_string(), hourly_value.clone());
-        hourly_models.insert("v1|pm|1:b3:c:d".to_string(), hourly_value);
-
-        let clients = make_filters(&[ClientId::Claude]);
-        let scope = CacheReportScope::default();
-        save_cached_data(
-            &data,
-            &clients,
-            &GroupBy::ClientProviderModel,
-            &scope,
-            test_signature(),
-        )
-        .unwrap();
-
-        let CacheResult::Fresh(loaded, _) =
-            load_cache(&clients, &GroupBy::ClientProviderModel, &scope)
-        else {
-            panic!("current-schema cache should load as fresh");
-        };
-        let loaded_daily = &loaded.daily[0].source_breakdown["claude"].models;
-        assert_eq!(loaded_daily.len(), 2);
-        assert!(loaded_daily.contains_key("v1|cpm|1:a3:b:c1:d"));
-        assert!(loaded_daily.contains_key("v1|cpm|1:a1:b3:c:d"));
-        let loaded_hourly = &loaded.hourly[0].models;
-        assert_eq!(loaded_hourly.len(), 2);
-        assert!(loaded_hourly.contains_key("v1|pm|3:b:c1:d"));
-        assert!(loaded_hourly.contains_key("v1|pm|1:b3:c:d"));
-    }
-
-    #[test]
-    fn test_normalize_cached_agents_merges_opencode_display_variants() {
-        let agents = normalize_cached_agents(vec![
-            cached_agent("Sisyphus", "opencode", 10),
-            cached_agent("\u{200B} Sisyphus   -   Ultraworker", "opencode", 20),
-            cached_agent(
-                "\u{200B}\u{200B}\u{200B} Prometheus    Plan Builder",
-                "opencode",
-                30,
-            ),
-        ])
-        .unwrap();
-
-        assert_eq!(agents.len(), 2);
-        let sisyphus = agents
-            .iter()
-            .find(|agent| agent.agent == "Sisyphus")
-            .unwrap();
-        assert_eq!(sisyphus.clients, "opencode");
-        assert_eq!(sisyphus.message_count, 2);
-        assert_eq!(sisyphus.tokens.input, 30);
-        assert!((sisyphus.cost - 30.0).abs() < f64::EPSILON);
-
-        let prometheus = agents
-            .iter()
-            .find(|agent| agent.agent == "Prometheus")
-            .unwrap();
-        assert_eq!(prometheus.message_count, 1);
-    }
-
-    #[test]
-    fn test_normalize_cached_agents_merges_copilot_default_variants() {
-        let agents = normalize_cached_agents(vec![
-            cached_agent("Default", "copilot", 10),
-            cached_agent("   ", "copilot", 20),
-        ])
-        .unwrap();
-
-        assert_eq!(agents.len(), 1);
-        let copilot = agents
-            .iter()
-            .find(|agent| agent.agent == "Default")
-            .unwrap();
-        assert_eq!(copilot.clients, "copilot");
-        assert_eq!(copilot.message_count, 2);
-        assert_eq!(copilot.tokens.input, 30);
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_when_agent_token_normalization_overflows() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        let cached = CachedTUIData {
-            schema_version: CACHE_SCHEMA_VERSION,
-            timestamp: fresh_timestamp_ms(),
-            enabled_clients: vec!["opencode".to_string()],
-            group_by: GroupBy::Model.to_string(),
-            report_scope: CacheReportScope::default(),
-            source_inventory_signature: test_signature(),
-            data: CachedUsageData {
-                health: Default::default(),
-                models: Vec::new(),
-                agents: vec![
-                    cached_agent("Sisyphus", "opencode", u64::MAX),
-                    cached_agent("Sisyphus", "opencode", 1),
-                ],
-                daily: Vec::new(),
-                hourly: Vec::new(),
-                graph: None,
-                total_tokens: 0,
-                total_cost: 0.0,
-                current_streak: 0,
-                longest_streak: 0,
-            },
-        };
-        fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
-
-        let clients = make_filters(&[ClientId::OpenCode]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    // ── cache_clients_match_exact ──────────────────────────────────
-
-    #[test]
-    fn test_exact_match() {
-        let enabled = make_filters(&[ClientId::Claude, ClientId::OpenCode]);
-        let cached = vec!["claude".to_string(), "opencode".to_string()];
-        assert!(cache_clients_match_exact(&enabled, &cached));
-    }
-
-    #[test]
-    fn test_new_client_added_is_not_exact_match() {
-        let enabled = make_filters(&[ClientId::Claude, ClientId::OpenCode, ClientId::Qwen]);
-        let cached = vec!["claude".to_string(), "opencode".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached));
-    }
-
-    #[test]
-    fn test_mismatch_superset() {
-        // Cache has more clients than enabled (user narrowed filter)
-        let enabled = make_filters(&[ClientId::Claude]);
-        let cached = vec!["claude".to_string(), "opencode".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached));
-    }
-
-    #[test]
-    fn test_mismatch_disjoint() {
-        let enabled = make_filters(&[ClientId::Claude]);
-        let cached = vec!["opencode".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached));
-    }
-
-    #[test]
-    fn test_new_client_is_not_exact_match() {
-        let enabled = make_filters(&[ClientId::Claude, ClientId::Qwen]);
-        let cached = vec!["claude".to_string()];
-        assert!(!cache_clients_match_exact(&enabled, &cached));
-    }
-
-    #[test]
-    fn test_empty_cache_is_not_exact_match() {
-        let enabled = make_filters(&[ClientId::Claude]);
-        let cached: Vec<String> = vec![];
-        assert!(!cache_clients_match_exact(&enabled, &cached));
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_for_legacy_schema_without_group_by() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "data": {
-    "models": [],
-    "daily": [],
-    "graph": null,
-    "totalTokens": 0,
-    "totalCost": 0.0,
-    "currentStreak": 0,
-    "longestStreak": 0
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_when_group_by_differs() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "schemaVersion": 27,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "reportScope": {
-    "since": null,
-    "until": null,
-    "year": null
-  },
-	"sourceInventorySignature": [90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90],
-	  "data": {
-	    "models": [],
-	    "agents": [],
-	    "daily": [],
-	    "hourly": [],
-	    "graph": null,
-    "totalTokens": 0,
-    "totalCost": 0.0,
-    "currentStreak": 0,
-    "longestStreak": 0
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(
-                &clients,
-                &GroupBy::WorkspaceModel,
-                &CacheReportScope::default()
-            ),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_for_pre_identity_schema() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        // Schema 37 predates the model identity fields (modelId,
-        // workspaceKey, workspaceLabel on daily/hourly models). The file must
-        // still deserialize, then miss on the schema version check — no parse
-        // error, no partial data (ADR 0026).
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "schemaVersion": 37,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "reportScope": {
-    "resolvedHomeDir": "",
-    "useEnvRoots": false,
-    "since": null,
-    "until": null,
-    "year": null
-  },
-  "sourceInventorySignature": [90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90],
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [{
-      "date": "2026-07-11",
-      "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
-      "cost": 0.1,
-      "sourceBreakdown": [["claude", {
-        "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
-        "cost": 0.1,
-        "models": [["v1|m|5:model", {
-          "provider": "anthropic",
-          "displayName": "model",
-          "colorKey": "model",
-          "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
-          "cost": 0.1,
-          "messages": 1
-        }]]
-      }]],
-      "messageCount": 1,
-      "turnCount": 1
-    }],
-    "hourly": [],
-    "graph": null,
-    "totalTokens": 1,
-    "totalCost": 0.1,
-    "currentStreak": 1,
-    "longestStreak": 1
-  }
-}"#,
-        )
-        .unwrap();
-
-        let raw = fs::read(&cache_path).unwrap();
-        let parsed: CachedTUIData =
-            serde_json::from_slice(&raw).expect("legacy schema file must still deserialize");
-        assert_eq!(parsed.schema_version, 37);
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    /// Schema 38 made `modelId` the authoritative identity, but the cached
-    /// field is `#[serde(default)]`, so a file missing it would load with an
-    /// empty id and merge unrelated entries under the empty key. Such a cache
-    /// must miss instead (ADR 0026).
-    fn write_identity_cache_without_model_id(data: &str) {
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        let json = format!(
-            r#"{{
-  "schemaVersion": {CACHE_SCHEMA_VERSION},
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "reportScope": {{
-    "resolvedHomeDir": "",
-    "useEnvRoots": false,
-    "since": null,
-    "until": null,
-    "year": null
-  }},
-  "sourceInventorySignature": [90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90,90],
-  "data": {data}
-}}"#
-        );
-        fs::write(&cache_path, json).unwrap();
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_when_daily_model_lacks_model_id() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        write_identity_cache_without_model_id(
-            r#"{
-    "models": [],
-    "agents": [],
-    "daily": [{
-      "date": "2026-07-11",
-      "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
-      "cost": 0.1,
-      "sourceBreakdown": [["claude", {
-        "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
-        "cost": 0.1,
-        "models": [["v1|m|5:model", {
-          "provider": "anthropic",
-          "displayName": "model",
-          "colorKey": "model",
-          "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
-          "cost": 0.1,
-          "messages": 1
-        }]]
-      }]],
-      "messageCount": 1,
-      "turnCount": 1
-    }],
-    "hourly": [],
-    "graph": null,
-    "totalTokens": 1,
-    "totalCost": 0.1,
-    "currentStreak": 1,
-    "longestStreak": 1
-  }"#,
-        );
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_when_hourly_model_lacks_model_id() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        write_identity_cache_without_model_id(
-            r#"{
-    "models": [],
-    "agents": [],
-    "daily": [],
-    "hourly": [{
-      "datetime": "2026-07-11 10:00:00",
-      "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
-      "cost": 0.1,
-      "clients": ["claude"],
-      "models": [["v1|m|5:model", {
-        "provider": "anthropic",
-        "displayName": "model",
-        "colorKey": "model",
-        "tokens": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
-        "cost": 0.1
-      }]],
-      "messageCount": 1,
-      "turnCount": 1
-    }],
-    "graph": null,
-    "totalTokens": 1,
-    "totalCost": 0.1,
-    "currentStreak": 1,
-    "longestStreak": 1
-  }"#,
-        );
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_when_report_scope_differs() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let clients = make_filters(&[ClientId::Claude]);
-        let filtered_scope = CacheReportScope::new(
-            temp_dir.path().to_string_lossy().into_owned(),
-            true,
-            Some("2026-05-01".to_string()),
-            Some("2026-05-07".to_string()),
-            None,
-        );
-        save_cached_data(
-            &UsageData::default(),
-            &clients,
-            &GroupBy::Model,
-            &filtered_scope,
-            test_signature(),
-        )
-        .unwrap();
-
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &filtered_scope),
-            CacheResult::Fresh(_, _)
-        ));
-
-        let other_home_scope = CacheReportScope::new(
-            "/tmp/other-tokscale-home".to_string(),
-            false,
-            Some("2026-05-01".to_string()),
-            Some("2026-05-07".to_string()),
-            None,
-        );
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &other_home_scope),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn implicit_home_and_environment_roots_participate_in_cache_scope() {
-        let root = TempDir::new().unwrap();
-        let first_home = root.path().join("first-home");
-        let second_home = root.path().join("second-home");
-        let shared_config = root.path().join("shared-config");
-        fs::create_dir_all(&first_home).unwrap();
-        fs::create_dir_all(&second_home).unwrap();
-
-        let _home_guard = EnvVarGuard::set("HOME", first_home.as_os_str());
-        let _config_guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", shared_config.as_os_str());
-        let clients = make_filters(&[ClientId::Claude]);
-        let first_scope = CacheReportScope::for_request(None, None, None, None).unwrap();
-        save_cached_data(
-            &UsageData::default(),
-            &clients,
-            &GroupBy::Model,
-            &first_scope,
-            test_signature(),
-        )
-        .unwrap();
-
-        unsafe {
-            env::set_var("HOME", &second_home);
-        }
-        let second_scope = CacheReportScope::for_request(None, None, None, None).unwrap();
-        assert_ne!(first_scope, second_scope);
-        assert!(first_scope.use_env_roots);
-        assert!(second_scope.use_env_roots);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &second_scope),
-            CacheResult::Miss
-        ));
-
-        let explicit_second_scope = CacheReportScope::for_request(
-            Some(second_home.to_string_lossy().into_owned()),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            second_scope.resolved_home_dir,
-            explicit_second_scope.resolved_home_dir
-        );
-        assert!(second_scope.use_env_roots);
-        assert!(!explicit_second_scope.use_env_roots);
-        assert_ne!(second_scope, explicit_second_scope);
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_treats_future_timestamp_as_stale() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let clients = make_filters(&[ClientId::Claude]);
-        let scope = CacheReportScope::default();
-        save_cached_data(
-            &UsageData::default(),
-            &clients,
-            &GroupBy::Model,
-            &scope,
-            test_signature(),
-        )
-        .unwrap();
-
-        let cache_path = cache_file().unwrap();
-        let mut cached: CachedTUIData = serde_json::from_slice(&fs::read(&cache_path).unwrap())
-            .expect("saved cache should deserialize");
-        cached.timestamp = u64::MAX;
-        fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
-
-        let result = load_cache(&clients, &GroupBy::Model, &scope);
-        assert!(
-            matches!(result, CacheResult::Stale(_)),
-            "expected Stale for future cache timestamp, got {}",
-            other_variant_name(&result)
-        );
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn complete_rejections_remain_a_fresh_tui_cache_hit() {
-        let temp_dir = TempDir::new().unwrap();
-        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
-        let clients = make_filters(&[ClientId::Zed]);
-        let scope = CacheReportScope::default();
-        let data = UsageData {
-            health: tokscale_core::source_health::HealthReport {
-                complete: false,
-                clean_sources: 0,
-                degraded_sources: 1,
-                rejected_records: 1,
-                partial_sources: 0,
-                failed_sources: 0,
-                source_data_bytes: 4_096,
-                issues: vec![tokscale_core::source_health::HealthIssueReport {
-                    level: "warning".to_string(),
-                    source: "zed".to_string(),
-                    issue: "missing-model".to_string(),
-                    affected_sources: 1,
-                    rejected_records: Some(1),
-                    handling: "record-skipped".to_string(),
-                }],
-            },
-            ..Default::default()
-        };
-        save_cached_data(&data, &clients, &GroupBy::Model, &scope, test_signature()).unwrap();
-
-        let result = load_cache(&clients, &GroupBy::Model, &scope);
-
-        assert!(matches!(result, CacheResult::Fresh(_, _)));
-    }
-
-    #[test]
-    #[serial]
-    fn source_failures_make_recent_tui_cache_stale_for_immediate_retry() {
-        let temp_dir = TempDir::new().unwrap();
-        let _config_dir = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp_dir.path().as_os_str());
-        let clients = make_filters(&[ClientId::OpenCode]);
-        let scope = CacheReportScope::default();
-
-        for (issue, handling, partial_sources, failed_sources) in [
-            ("partial-source", "confirmed-data-kept", 1, 0),
-            ("source-unavailable", "source-skipped", 0, 1),
-        ] {
-            let data = UsageData {
-                health: tokscale_core::source_health::HealthReport {
-                    complete: false,
-                    clean_sources: 0,
-                    degraded_sources: 0,
-                    rejected_records: 0,
-                    partial_sources,
-                    failed_sources,
-                    source_data_bytes: 8_192,
-                    issues: vec![tokscale_core::source_health::HealthIssueReport {
-                        level: "error".to_string(),
-                        source: "opencode".to_string(),
-                        issue: issue.to_string(),
-                        affected_sources: 1,
-                        rejected_records: None,
-                        handling: handling.to_string(),
-                    }],
-                },
-                ..Default::default()
-            };
-            save_cached_data(&data, &clients, &GroupBy::Model, &scope, test_signature()).unwrap();
-
-            let result = load_cache(&clients, &GroupBy::Model, &scope);
-
-            assert!(
-                matches!(result, CacheResult::Stale(_)),
-                "{issue} health must force a retry"
-            );
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn source_inventory_signature_round_trips_in_schema_27() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-        let clients = make_filters(&[ClientId::Claude]);
-        let scope = CacheReportScope::default();
-        save_cached_data(
-            &UsageData::default(),
-            &clients,
-            &GroupBy::Model,
-            &scope,
-            test_signature(),
-        )
-        .unwrap();
-
-        match load_cache(&clients, &GroupBy::Model, &scope) {
-            CacheResult::Fresh(_, signature) => assert_eq!(signature, test_signature()),
-            result => panic!("expected fresh cache, got {}", other_variant_name(&result)),
-        }
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn schema_26_cache_is_an_explicit_miss() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-        let clients = make_filters(&[ClientId::Claude]);
-        let scope = CacheReportScope::default();
-        save_cached_data(
-            &UsageData::default(),
-            &clients,
-            &GroupBy::Model,
-            &scope,
-            test_signature(),
-        )
-        .unwrap();
-        let path = cache_file().unwrap();
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value["schemaVersion"] = serde_json::json!(26);
-        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &scope),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn schema_27_without_source_inventory_signature_is_a_miss() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-        let clients = make_filters(&[ClientId::Claude]);
-        let scope = CacheReportScope::default();
-        save_cached_data(
-            &UsageData::default(),
-            &clients,
-            &GroupBy::Model,
-            &scope,
-            test_signature(),
-        )
-        .unwrap();
-        let path = cache_file().unwrap();
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("sourceInventorySignature");
-        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &scope),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_schema_8_provider_groups() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "schemaVersion": 8,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "data": {
-    "models": [{
-      "model": "glm-5.1",
-      "provider": "zai, anthropic",
-      "client": "claude",
-      "tokens": {
-        "input": 10,
-        "output": 5,
-        "cacheRead": 0,
-        "cacheWrite": 0,
-        "reasoning": 0
-      },
-      "cost": 1.25,
-      "sessionCount": 1
-    }],
-    "agents": [],
-    "daily": [],
-    "hourly": [],
-    "graph": null,
-    "totalTokens": 15,
-    "totalCost": 1.25,
-    "currentStreak": 1,
-    "longestStreak": 1
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_legacy_daily_models_without_source_breakdown() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "schemaVersion": 3,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [{
-      "date": "2026-03-18",
-      "tokens": {
-        "input": 10,
-        "output": 5,
-        "cacheRead": 0,
-        "cacheWrite": 0,
-        "reasoning": 0
-      },
-      "cost": 1.25,
-      "models": [[
-        "claude-sonnet-4-5",
-        {
-          "client": "claude",
-          "tokens": {
-            "input": 10,
-            "output": 5,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-            "reasoning": 0
-          },
-          "cost": 1.25
-        }
-      ]]
-    }],
-    "graph": null,
-    "totalTokens": 15,
-    "totalCost": 1.25,
-    "currentStreak": 1,
-    "longestStreak": 1
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_reads_source_breakdown_from_current_schema() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        let mut cached: serde_json::Value = serde_json::from_str(
-            r#"{
-  "schemaVersion": 24,
-  "timestamp": 0,
-  "enabledClients": ["claude", "gemini"],
-  "groupBy": "model",
-  "reportScope": {
-    "since": null,
-    "until": null,
-    "year": null
-  },
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [{
-      "date": "2026-03-18",
-      "tokens": {
-        "input": 30,
-        "output": 15,
-        "cacheRead": 0,
-        "cacheWrite": 0,
-        "reasoning": 0
-      },
-      "cost": 3.25,
-      "sourceBreakdown": [[
-        "claude",
-        {
-          "tokens": {
-            "input": 10,
-            "output": 5,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-            "reasoning": 0
-          },
-          "cost": 1.25,
-          "models": [[
-            "claude-sonnet-4",
-            {
-              "provider": "anthropic",
-              "modelId": "claude-sonnet-4",
-              "displayName": "claude-sonnet-4",
-              "colorKey": "claude-sonnet-4",
-	              "tokens": {
-	                "input": 10,
-	                "output": 5,
-	                "cacheRead": 0,
-	                "cacheWrite": 0,
-	                "reasoning": 0
-	              },
-	              "cost": 1.25,
-	              "messages": 1
-	            }
-	          ]]
-	        }
-      ], [
-        "gemini",
-        {
-          "tokens": {
-            "input": 20,
-            "output": 10,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-            "reasoning": 0
-          },
-          "cost": 2.0,
-          "models": [[
-            "claude-sonnet-4",
-            {
-              "provider": "anthropic",
-              "modelId": "claude-sonnet-4",
-              "displayName": "claude-sonnet-4",
-              "colorKey": "claude-sonnet-4",
-	              "tokens": {
-	                "input": 20,
-	                "output": 10,
-	                "cacheRead": 0,
-	                "cacheWrite": 0,
-	                "reasoning": 0
-	              },
-	              "cost": 2.0,
-	              "messages": 1
-	            }
-	          ]]
-	        }
-	      ]],
-	      "messageCount": 2,
-	      "turnCount": 2
-	    }],
-	    "hourly": [],
-	    "graph": null,
-    "totalTokens": 45,
-    "totalCost": 3.25,
-    "currentStreak": 1,
-    "longestStreak": 1
-  }
-}"#,
-        )
-        .unwrap();
-        cached["timestamp"] = serde_json::Value::from(fresh_timestamp_ms());
-        cached["schemaVersion"] = serde_json::Value::from(CACHE_SCHEMA_VERSION);
-        cached["reportScope"] = serde_json::to_value(CacheReportScope::default()).unwrap();
-        cached["sourceInventorySignature"] = serde_json::json!(vec![0x5a_u8; 32]);
-        fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
-
-        let clients = make_filters(&[ClientId::Claude, ClientId::Gemini]);
-        match load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()) {
-            CacheResult::Fresh(data, signature) => {
-                assert_eq!(signature, test_signature());
-                assert_eq!(data.daily[0].source_breakdown.len(), 2);
-                let gemini = data.daily[0].source_breakdown.get("gemini").unwrap();
-                let model = gemini.models.get("claude-sonnet-4").unwrap();
-                assert_eq!(model.provider, "anthropic");
-                assert_eq!(model.tokens.total(), 30);
-            }
-            other => panic!(
-                "expected fresh current-schema cache, got {:?}",
-                other_variant_name(&other)
-            ),
-        }
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_legacy_hourly_models_without_display_fields() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "schemaVersion": 5,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [],
-    "hourly": [{
-      "datetime": "2026-03-18 10:00:00",
-      "tokens": {
-        "input": 10,
-        "output": 5,
-        "cacheRead": 0,
-        "cacheWrite": 0,
-        "reasoning": 0
-      },
-      "cost": 1.25,
-      "clients": ["claude"],
-      "models": [[
-        "claude-sonnet-4-5",
-        {
-          "tokens": {
-            "input": 10,
-            "output": 5,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-            "reasoning": 0
-          },
-          "cost": 1.25
-        }
-      ]],
-      "messageCount": 1,
-      "turnCount": 1
-    }],
-    "graph": null,
-    "totalTokens": 15,
-    "totalCost": 1.25,
-    "currentStreak": 1,
-    "longestStreak": 1
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_load_cache_misses_legacy_empty_client_data() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{
-  "schemaVersion": 3,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [{
-      "date": "2026-03-18",
-      "tokens": {
-        "input": 10,
-        "output": 5,
-        "cacheRead": 0,
-        "cacheWrite": 0,
-        "reasoning": 0
-      },
-      "cost": 1.25,
-      "models": [[
-        "claude-sonnet-4-5",
-        {
-          "client": "",
-          "tokens": {
-            "input": 10,
-            "output": 5,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-            "reasoning": 0
-          },
-          "cost": 1.25
-        }
-      ]]
-    }],
-    "graph": null,
-    "totalTokens": 15,
-    "totalCost": 1.25,
-    "currentStreak": 1,
-    "longestStreak": 1
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn load_cache_ignores_legacy_dot_cache_path() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        let previous_xdg_config_home = env::var_os("XDG_CONFIG_HOME");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-            env::set_var("XDG_CONFIG_HOME", temp_dir.path().join(".xdg-config"));
-        }
-
-        let legacy_path = temp_dir.path().join(".cache/tokscale/tui-data-cache.json");
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(
-            &legacy_path,
-            r#"{
-  "schemaVersion": 10,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [],
-    "hourly": [],
-    "graph": null,
-    "totalTokens": 0,
-    "totalCost": 0.0,
-    "currentStreak": 0,
-    "longestStreak": 0
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-        match previous_override {
-            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
-        }
-        match previous_xdg_config_home {
-            Some(value) => unsafe { env::set_var("XDG_CONFIG_HOME", value) },
-            None => unsafe { env::remove_var("XDG_CONFIG_HOME") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn load_cache_skips_legacy_when_overridden() {
-        let temp_dir = TempDir::new().unwrap();
-        let override_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-            env::set_var("TOKSCALE_CONFIG_DIR", override_dir.path());
-        }
-
-        let legacy_path = temp_dir.path().join(".cache/tokscale/tui-data-cache.json");
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(
-            &legacy_path,
-            r#"{
-  "schemaVersion": 6,
-  "timestamp": 9999999999999,
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "data": {
-    "models": [],
-    "agents": [],
-    "daily": [],
-    "hourly": [],
-    "graph": null,
-    "totalTokens": 0,
-    "totalCost": 0.0,
-    "currentStreak": 0,
-    "longestStreak": 0
-  }
-}"#,
-        )
-        .unwrap();
-
-        let clients = make_filters(&[ClientId::Claude]);
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &CacheReportScope::default()),
-            CacheResult::Miss
-        ));
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-        match previous_override {
-            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn save_cached_data_does_not_delete_destination() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
-
-        let cache_path = cache_file().unwrap();
-        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        let old_timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        fs::write(
-            &cache_path,
-            format!(
-                r#"{{
-  "schemaVersion": 6,
-  "timestamp": {old_timestamp},
-  "enabledClients": ["claude"],
-  "groupBy": "model",
-  "data": {{
-    "models": [],
-    "agents": [],
-    "daily": [],
-    "hourly": [],
-    "graph": null,
-    "totalTokens": 0,
-    "totalCost": 0.0,
-    "currentStreak": 0,
-    "longestStreak": 0
-  }}
-}}"#
-            ),
-        )
-        .unwrap();
-        assert!(fs::metadata(&cache_path).is_ok());
-
-        let clients = make_filters(&[ClientId::Claude]);
-        save_cached_data(
-            &UsageData::default(),
-            &clients,
-            &GroupBy::Model,
-            &CacheReportScope::default(),
-            test_signature(),
-        )
-        .unwrap();
-
-        let metadata = fs::metadata(&cache_path).unwrap();
-        assert!(metadata.is_file());
-        let saved: CachedTUIData = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
-        assert!(saved.timestamp >= old_timestamp);
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-        match previous_override {
-            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
-        }
-    }
-
-    fn other_variant_name(result: &CacheResult) -> &'static str {
-        match result {
-            CacheResult::Fresh(_, _) => "Fresh",
-            CacheResult::Stale(_) => "Stale",
-            CacheResult::Miss => "Miss",
-        }
-    }
-
-    /// Regression test for the TUI cache `group_by` mismatch bug.
-    ///
-    /// Symptom: `npx tokscale@latest` (TUI launch) silently dropped the
-    /// on-disk cache and showed an empty TUI screen until the background
-    /// scan finished, even though `~/.config/tokscale/cache/tui-data-cache.json`
-    /// existed and was well-formed.
-    ///
-    /// Root cause: the warm-tui-cache writer (`run_warm_tui_cache` in
-    /// `main.rs`) saved the cache with `GroupBy::default()`
-    /// (= `ClientModel`, serialized as `"client,model"`), while the TUI
-    /// reader (`tui::run`) loaded with the hard-coded `GroupBy::Model`
-    /// (serialized as `"model"`). `cache.rs::load_cache` does a strict
-    /// inequality check on the cached vs. requested `group_by`, so the
-    /// two never matched and every warm cache write silently invalidated the next
-    /// TUI launch's cache.
-    ///
-    /// Fix: anchor both ends on `TUI_DEFAULT_GROUP_BY`. This test pins
-    /// the contract — round-tripping a save→load under the canonical key
-    /// must return `Fresh`, never `Miss`.
-    #[test]
-    #[serial]
-    fn warm_cache_round_trip_under_canonical_key_is_fresh() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
-
-        let enabled = ClientId::iter().collect();
-        let scope = CacheReportScope::default();
-
-        // Write with the canonical key (mirrors what `run_warm_tui_cache`
-        // does after the fix).
-        save_cached_data(
-            &UsageData::default(),
-            &enabled,
-            &TUI_DEFAULT_GROUP_BY,
-            &scope,
-            test_signature(),
-        )
-        .unwrap();
-
-        // Read with the canonical key (mirrors what `tui::run` does on
-        // launch). The bug would have returned `Miss` here because the
-        // historical writer used `GroupBy::default()` (= ClientModel)
-        // while the reader used `GroupBy::Model`.
-        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope);
-        assert!(
-            matches!(result, CacheResult::Fresh(_, _)),
-            "expected Fresh after writing with TUI_DEFAULT_GROUP_BY, got {}",
-            other_variant_name(&result)
-        );
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-        match previous_override {
-            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
-        }
-    }
-
-    /// Documents the historical bug as a frozen regression: writing with
-    /// `GroupBy::default()` (the pre-fix `run_warm_tui_cache` behavior)
-    /// and reading with `TUI_DEFAULT_GROUP_BY` returns `Miss`. If
-    /// anyone re-introduces `GroupBy::default()` at any TUI cache write
-    /// site, this assertion proves the cache breaks.
-    #[test]
-    #[serial]
-    fn pre_fix_writer_key_misses_under_canonical_reader_key() {
-        let temp_dir = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        unsafe {
-            env::set_var("HOME", temp_dir.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
-
-        let enabled = ClientId::iter().collect();
-        let scope = CacheReportScope::default();
-
-        // Pre-fix: writer used `GroupBy::default()`.
-        save_cached_data(
-            &UsageData::default(),
-            &enabled,
-            &GroupBy::default(),
-            &scope,
-            test_signature(),
-        )
-        .unwrap();
-
-        // Reader uses the canonical key. If `GroupBy::default()` and
-        // `TUI_DEFAULT_GROUP_BY` ever coincide (e.g. someone changes
-        // `impl Default for GroupBy` to return `Model`), this assertion
-        // will start failing — at which point the divergent-write site
-        // in `run_warm_tui_cache` is no longer dangerous and the test
-        // should be updated accordingly.
-        let result = load_cache(&enabled, &TUI_DEFAULT_GROUP_BY, &scope);
-        assert!(
-            matches!(result, CacheResult::Miss),
-            "expected Miss when reader uses TUI_DEFAULT_GROUP_BY and writer used GroupBy::default(), got {}",
-            other_variant_name(&result)
-        );
-
-        match previous_home {
-            Some(home) => unsafe { env::set_var("HOME", home) },
-            None => unsafe { env::remove_var("HOME") },
-        }
-        match previous_override {
-            Some(value) => unsafe { env::set_var("TOKSCALE_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("TOKSCALE_CONFIG_DIR") },
-        }
-    }
+    let mut file = pinned_file
+        .ok_or_else(|| anyhow::anyhow!("atomic TUI cache writer did not retain its file handle"))?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(ProjectionStore {
+        file,
+        health: health.clone(),
+    })
 }

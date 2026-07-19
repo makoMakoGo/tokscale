@@ -30,8 +30,8 @@ fn load_local_messages_for_test(
     let counts = super::count_local_client_messages(options.clone())?.counts;
     let prepared = super::prepare_local_sources(options.clone())?;
     let mut messages = Vec::new();
-    let (_, health) =
-        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages)?;
+    let health =
+        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages)?.health;
     let messages = super::filter_unified_messages(messages, &options);
     Ok(LocalMessagesForTest {
         messages,
@@ -2075,9 +2075,10 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
         .join(".kimi-code/sessions/wd-project/session_1/agents/main/wire.jsonl");
     let parser_version = prepared.groups[0].units[0].parser_version;
     let mut cold_messages = Vec::new();
-    let (_, cold_health) =
+    let cold_health =
         super::fold_prepared_local_sources_with_pricing(prepared, None, &mut cold_messages)
-            .unwrap();
+            .unwrap()
+            .health;
     assert_eq!(cold_messages.len(), 2);
     assert_eq!(cold_health.issue_count(), 0);
     assert!(message_cache::SourceMessageCache::load()
@@ -2096,8 +2097,9 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
     assert_eq!(prepared.health.failed_sources(), 0);
 
     let mut messages = Vec::new();
-    let (_, health) =
-        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages).unwrap();
+    let health = super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages)
+        .unwrap()
+        .health;
     assert_eq!(messages.len(), 2);
     assert!(messages
         .iter()
@@ -2312,6 +2314,29 @@ fn prepared_test_group(
     }
 }
 
+fn confirmed_test_group(
+    client: ClientId,
+    units: Vec<crate::adapters::SourceUnit>,
+) -> crate::adapters::ConfirmedAdapterSources {
+    let prepared = prepared_test_group(client, units);
+    let mut present_files = Vec::new();
+    let unit_digests = prepared
+        .units
+        .iter()
+        .map(|unit| {
+            unit.prepared_source_input_snapshot()
+                .expect("test unit must carry a prepared snapshot")
+                .visit_present_files(|identity, size| present_files.push((identity, size)));
+            unit.inventory_signature_digest()
+        })
+        .collect();
+    crate::adapters::ConfirmedAdapterSources {
+        client,
+        unit_digests,
+        present_files,
+    }
+}
+
 #[test]
 fn source_data_size_counts_related_inputs_once_by_file_identity() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -2329,6 +2354,47 @@ fn source_data_size_counts_related_inputs_once_by_file_identity() {
         .unwrap();
 
     assert_eq!(super::source_data_bytes([&with_dependency, &duplicate]), 13);
+}
+
+#[test]
+fn source_data_size_by_client_deduplicates_within_each_client() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let shared = dir.path().join("shared.jsonl");
+    let amp_only = dir.path().join("amp.jsonl");
+    std::fs::write(&shared, b"12345678").unwrap();
+    std::fs::write(&amp_only, b"12345").unwrap();
+
+    let amp = confirmed_test_group(
+        ClientId::Amp,
+        vec![
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, shared.clone()),
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, shared.clone()),
+            crate::adapters::SourceUnit::plain_file(ClientId::Amp, amp_only),
+        ],
+    );
+    let codebuddy = confirmed_test_group(
+        ClientId::CodeBuddy,
+        vec![crate::adapters::SourceUnit::plain_file(
+            ClientId::CodeBuddy,
+            shared,
+        )],
+    );
+    let requested = vec![
+        "amp".to_string(),
+        "codebuddy".to_string(),
+        "codex".to_string(),
+    ];
+
+    let (by_client, global) = super::confirmed_source_data_bytes(&requested, &[amp, codebuddy]);
+    assert_eq!(
+        by_client,
+        std::collections::BTreeMap::from([
+            ("amp".to_string(), 13),
+            ("codebuddy".to_string(), 8),
+            ("codex".to_string(), 0),
+        ])
+    );
+    assert_eq!(global, 13);
 }
 
 #[test]
@@ -2532,6 +2598,58 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
     assert_ne!(stale_signature, result.source_inventory_signature);
     assert_eq!(confirmed_signature, result.source_inventory_signature);
     assert_eq!(result.data.total_tokens, 13);
+}
+
+#[test]
+#[serial_test::serial]
+fn prepared_tui_bundle_source_space_uses_confirmed_inventory() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let source = amp_dir.join("T-first.json");
+    let replacement = amp_dir.join("replacement.json");
+    let original = r#"{"id":"session-a","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":10,"outputTokens":2}}]}"#;
+    let changed = r#"{"id":"session-confirmed-after-prepare","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":111,"outputTokens":2}}]}"#;
+    assert!(changed.len() > original.len());
+    std::fs::write(&source, original).unwrap();
+    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
+    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let stale_signature = prepared.source_inventory_signature();
+
+    std::fs::write(&replacement, changed).unwrap();
+    std::fs::File::open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    #[cfg(windows)]
+    std::fs::remove_file(&source).unwrap();
+    std::fs::rename(&replacement, &source).unwrap();
+    let confirmed_bytes = std::fs::metadata(&source).unwrap().len();
+
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
+        .unwrap();
+    let confirmed_signature =
+        super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+            .unwrap()
+            .source_inventory_signature();
+
+    assert_ne!(stale_signature, result.source_inventory_signature);
+    assert_eq!(confirmed_signature, result.source_inventory_signature);
+    assert_eq!(result.source_space.get("amp"), Some(&confirmed_bytes));
+    assert_eq!(result.health.source_data_bytes(), confirmed_bytes);
+    assert_eq!(
+        result.accumulator.project(&GroupBy::Model).total_tokens,
+        113
+    );
+    assert_eq!(result.sessions.len(), 1);
+    assert_eq!(
+        result.sessions[0].session_id,
+        "session-confirmed-after-prepare"
+    );
 }
 
 #[test]

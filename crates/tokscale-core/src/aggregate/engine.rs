@@ -10,7 +10,7 @@ use crate::{
         finish_session_map, hour_key, AgentEntries, DailyAcc, HourAcc, ModelEntries, MonthAcc,
         SessionAcc,
     },
-    aggregate::tui::TuiAcc,
+    aggregate::{tui::TuiAcc, tui_sessions::TuiSessionAcc},
     checked_token_sum, AggregatedViews, AggregationConfig, ViewSet,
 };
 use crate::{
@@ -21,6 +21,7 @@ pub struct AggregationEngine {
     config: AggregationConfig,
     model_entries: Option<ModelEntries>,
     tui: Option<TuiAcc>,
+    tui_sessions: Option<TuiSessionAcc>,
     month_map: Option<HashMap<String, MonthAcc>>,
     hour_map: Option<HashMap<String, HourAcc>>,
     daily_map: Option<HashMap<String, DailyAcc>>,
@@ -39,6 +40,9 @@ impl AggregationEngine {
                 .contains(ViewSet::MODEL)
                 .then(|| ModelEntries::new(config.group_by.clone())),
             tui: views.contains(ViewSet::TUI).then(TuiAcc::new),
+            tui_sessions: views
+                .contains(ViewSet::TUI_SESSIONS)
+                .then(TuiSessionAcc::new),
             month_map: views.contains(ViewSet::MONTHLY).then(HashMap::new),
             hour_map: views.contains(ViewSet::HOURLY).then(HashMap::new),
             daily_map: views.contains(ViewSet::GRAPH).then(HashMap::new),
@@ -70,6 +74,9 @@ impl AggregationEngine {
         }
         if let Some(tui) = &mut self.tui {
             tui.push(msg);
+        }
+        if let Some(tui_sessions) = &mut self.tui_sessions {
+            tui_sessions.push(msg);
         }
         if let Some(month_map) = &mut self.month_map {
             let date = date.as_ref().expect("monthly view date key computed");
@@ -108,11 +115,16 @@ impl AggregationEngine {
         self.tui
     }
 
+    pub(crate) fn into_tui_bundle(self) -> (Option<TuiAcc>, Option<Vec<crate::TuiSessionEntry>>) {
+        (self.tui, self.tui_sessions.map(TuiSessionAcc::finish))
+    }
+
     pub fn finish(self) -> AggregatedViews {
         let Self {
             config,
             model_entries,
             tui,
+            tui_sessions: _,
             month_map,
             hour_map,
             daily_map,

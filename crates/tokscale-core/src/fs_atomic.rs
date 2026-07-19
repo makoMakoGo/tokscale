@@ -72,7 +72,9 @@ fn write_atomic_to_temp(tmp_path: &Path, final_path: &Path, bytes: &[u8]) -> io:
 
 fn create_temp_file(tmp_path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    // Read access lets streaming writers retain a cloned handle to the exact
+    // inode they publish, which is useful for generation-consistent caches.
+    options.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -194,6 +196,7 @@ fn windows_replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::io::{Read, Seek, SeekFrom};
     use std::{env, fs};
     use tempfile::TempDir;
 
@@ -234,6 +237,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "{\"ok\":true}");
+    }
+
+    #[test]
+    #[serial]
+    fn atomic_writer_can_pin_a_readable_published_inode() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cache.json");
+        let mut pinned = None;
+
+        write_atomic_with(&path, |file| {
+            file.write_all(b"old generation")?;
+            pinned = Some(file.try_clone()?);
+            Ok(())
+        })
+        .unwrap();
+
+        write_atomic(&path, b"new generation").unwrap();
+        let mut pinned = pinned.expect("writer must retain the temporary inode");
+        pinned.seek(SeekFrom::Start(0)).unwrap();
+        let mut content = String::new();
+        pinned.read_to_string(&mut content).unwrap();
+        assert_eq!(content, "old generation");
+        assert_eq!(fs::read_to_string(path).unwrap(), "new generation");
     }
 
     #[test]
