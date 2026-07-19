@@ -1,6 +1,4 @@
 {
-  "name": "tokscale-monorepo",
-  "version": "1.0.0",
   "private": true,
   "description": "Local AI coding usage reports for CLI and TUI workflows",
   "type": "module",
