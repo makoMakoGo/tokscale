@@ -14,8 +14,8 @@ use super::widgets::{
 };
 
 const CELL_WIDTH: u16 = 2;
-/// Width of the `Less █ █ █ █ █ More` legend row.
-const LEGEND_WIDTH: u16 = 19;
+/// Width of the `Less ██ ██ ██ ██ ██ More` legend row.
+const LEGEND_WIDTH: u16 = 24;
 const GRAPH_PANEL_H: u16 = 14;
 const GRAPH_MIN_H: u16 = 11;
 const DAY_INSIGHTS_MIN_H: u16 = 5;
@@ -146,21 +146,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let weeks_to_show = graph.weeks.len().min(max_weeks);
     let start_week = graph.weeks.len().saturating_sub(weeks_to_show);
     let colors = app.theme.colors;
-    let intensity_color = |intensity: f64| -> Color {
-        let value = if intensity.is_finite() {
-            intensity.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let index = match value {
-            x if x <= 0.0 => 0,
-            x if x < 0.25 => 1,
-            x if x < 0.50 => 2,
-            x if x < 0.75 => 3,
-            _ => 4,
-        };
-        colors[index]
-    };
+    let intensity_color = |intensity: f64| grade_color(colors, intensity);
 
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
         let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
@@ -173,7 +159,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
             let actual_week = week_idx + start_week;
             let selected = selected_date.is_some() && selected_cell == Some((actual_week, day_idx));
             let cell_area = Rect::new(x, y, CELL_WIDTH, 1);
-            let cell = match day {
+            let (symbol, style) = match day {
                 Some(day) => {
                     app.add_click_area(
                         cell_area,
@@ -183,16 +169,15 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                         },
                     );
                     let color = intensity_color(day.intensity);
-                    let glyph = if selected {
-                        Span::styled("▓", Style::default().fg(Color::White).bg(color))
+                    if selected {
+                        ("▓▓", Style::default().fg(Color::White).bg(color))
                     } else {
-                        Span::styled("█", Style::default().fg(color))
-                    };
-                    Line::from(vec![glyph, Span::raw(" ")])
+                        ("██", Style::default().fg(color))
+                    }
                 }
-                None => Line::from(Span::raw("  ")),
+                None => ("· ", app.theme.subtle_text_style()),
             };
-            frame.render_widget(Paragraph::new(cell), cell_area);
+            frame.render_widget(Paragraph::new(symbol).style(style), cell_area);
         }
     }
 
@@ -288,15 +273,15 @@ fn render_graph_metrics(
     if legend_y < content.bottom() {
         let legend = Line::from(vec![
             Span::styled("Less ", Style::default().fg(app.theme.muted)),
-            Span::styled("█", Style::default().fg(app.theme.colors[0])),
+            Span::styled("██", Style::default().fg(app.theme.colors[0])),
             Span::raw(" "),
-            Span::styled("█", Style::default().fg(app.theme.colors[1])),
+            Span::styled("██", Style::default().fg(app.theme.colors[1])),
             Span::raw(" "),
-            Span::styled("█", Style::default().fg(app.theme.colors[2])),
+            Span::styled("██", Style::default().fg(app.theme.colors[2])),
             Span::raw(" "),
-            Span::styled("█", Style::default().fg(app.theme.colors[3])),
+            Span::styled("██", Style::default().fg(app.theme.colors[3])),
             Span::raw(" "),
-            Span::styled("█", Style::default().fg(app.theme.colors[4])),
+            Span::styled("██", Style::default().fg(app.theme.colors[4])),
             Span::styled(" More", Style::default().fg(app.theme.muted)),
         ]);
         frame.render_widget(
@@ -383,14 +368,37 @@ fn selected_graph_day(app: &App) -> Option<&ContributionDay> {
     })
 }
 
-fn active_hours_for_day(app: &App, date: chrono::NaiveDate) -> [bool; HOUR_STRIP_LEN] {
-    let mut active_hours = [false; HOUR_STRIP_LEN];
+/// Per-hour token intensity for a day, normalized to its busiest hour (0..=1).
+fn hour_intensities_for_day(app: &App, date: chrono::NaiveDate) -> [f64; HOUR_STRIP_LEN] {
+    let mut tokens = [0u64; HOUR_STRIP_LEN];
     for entry in &app.data.hourly {
-        if entry.datetime.date() == date && entry.tokens.total() > 0 {
-            active_hours[entry.datetime.hour() as usize] = true;
+        if entry.datetime.date() == date {
+            let hour = entry.datetime.hour() as usize;
+            tokens[hour] = tokens[hour].saturating_add(entry.tokens.total());
         }
     }
-    active_hours
+    let max = tokens.iter().copied().max().unwrap_or(0);
+    if max == 0 {
+        return [0.0; HOUR_STRIP_LEN];
+    }
+    tokens.map(|value| value as f64 / max as f64)
+}
+
+/// Map a 0..=1 intensity onto the theme's five contribution grades.
+fn grade_color(colors: [Color; 5], intensity: f64) -> Color {
+    let value = if intensity.is_finite() {
+        intensity.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let index = match value {
+        x if x <= 0.0 => 0,
+        x if x < 0.25 => 1,
+        x if x < 0.50 => 2,
+        x if x < 0.75 => 3,
+        _ => 4,
+    };
+    colors[index]
 }
 
 fn render_day_insights(frame: &mut Frame, app: &App, area: Rect) {
@@ -427,7 +435,7 @@ fn render_day_insights(frame: &mut Frame, app: &App, area: Rect) {
     let canonical_total = ranked_models
         .iter()
         .fold(0u64, |total, model| total.saturating_add(model.tokens));
-    let active_hours = active_hours_for_day(app, day.date);
+    let hour_intensities = hour_intensities_for_day(app, day.date);
     let content = inner.inner(Margin {
         horizontal: 1,
         vertical: 0,
@@ -456,7 +464,7 @@ fn render_day_insights(frame: &mut Frame, app: &App, area: Rect) {
         day,
         daily,
         &ranked_models,
-        &active_hours,
+        &hour_intensities,
     );
 
     if show_radar {
@@ -483,7 +491,7 @@ fn render_day_stats_lines(
     day: &ContributionDay,
     daily: Option<&DailyUsage>,
     ranked_models: &[RankedModel],
-    active_hours: &[bool; HOUR_STRIP_LEN],
+    hour_intensities: &[f64; HOUR_STRIP_LEN],
 ) {
     let mut rows = vec![StatRow::Line(Line::from(vec![
         Span::styled(
@@ -563,7 +571,10 @@ fn render_day_stats_lines(
     }
 
     rows.push(StatRow::Rule);
-    let active_count = active_hours.iter().filter(|active| **active).count();
+    let active_count = hour_intensities
+        .iter()
+        .filter(|value| **value > 0.0)
+        .count();
     let hours_label = if app.is_narrow() {
         format!("{active_count}h active")
     } else {
@@ -575,12 +586,16 @@ fn render_day_stats_lines(
     ))));
 
     let mut hour_spans = Vec::with_capacity(HOUR_STRIP_LEN + 3);
-    for (hour, active) in active_hours.iter().enumerate() {
+    for (hour, intensity) in hour_intensities.iter().enumerate() {
         if hour > 0 && hour % 6 == 0 {
             hour_spans.push(Span::raw(" "));
         }
-        hour_spans.push(if *active {
-            Span::styled("█", Style::default().fg(app.theme.accent))
+        hour_spans.push(if *intensity > 0.0 {
+            // Shade active hours by the theme's contribution grades, like the graph.
+            Span::styled(
+                "█",
+                Style::default().fg(grade_color(app.theme.colors, *intensity)),
+            )
         } else {
             Span::styled("·", app.theme.subtle_text_style())
         });
@@ -939,9 +954,10 @@ mod tests {
         assert_eq!(selected.symbol(), "▓");
         assert_eq!(selected.fg, Color::White);
         assert_eq!(selected.bg, app.theme.colors[4]);
-        let gap = buffer.cell((7, selected_y)).unwrap();
-        assert_eq!(gap.symbol(), " ");
-        assert_ne!(gap.bg, app.theme.colors[4]);
+        let pair = buffer.cell((7, selected_y)).unwrap();
+        assert_eq!(pair.symbol(), "▓");
+        assert_eq!(pair.fg, Color::White);
+        assert_eq!(pair.bg, app.theme.colors[4]);
 
         let weekday = buffer.cell((2, selected_y)).unwrap();
         assert_eq!(weekday.symbol(), "T");
@@ -1025,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn none_cells_render_as_blank_spaces() {
+    fn none_cells_render_as_dot_placeholders() {
         let mut app = make_app(120);
         app.data.graph = Some(GraphData {
             weeks: vec![vec![
@@ -1050,23 +1066,18 @@ mod tests {
             .unwrap();
         let buffer = frame.buffer;
 
-        for y in 2..=8 {
-            let row = (0..120)
-                .map(|x| buffer.cell((x, y)).unwrap().symbol())
-                .collect::<String>();
-            assert!(
-                !row.contains('·'),
-                "grid row {y} contains a dot placeholder: {row:?}"
-            );
-        }
+        // The real day (day_idx 1) paints a solid pair; every None cell keeps
+        // the classic "· " placeholder with a blank gap cell.
+        assert_eq!(buffer.cell((6, 3)).unwrap().symbol(), "█");
+        assert_eq!(buffer.cell((7, 3)).unwrap().symbol(), "█");
         for y in [2, 4, 5, 6, 7, 8] {
-            assert_eq!(buffer.cell((6, y)).unwrap().symbol(), " ");
+            assert_eq!(buffer.cell((6, y)).unwrap().symbol(), "·");
             assert_eq!(buffer.cell((7, y)).unwrap().symbol(), " ");
         }
     }
 
     #[test]
-    fn grid_cells_paint_single_glyphs_with_grade_colors() {
+    fn grid_cells_paint_pairs_with_grade_colors() {
         let mut app = make_app(120);
         let sunday = NaiveDate::from_ymd_opt(2026, 7, 12).unwrap();
         let intensities = [0.0, 0.1, 0.3, 0.6, 0.9, 0.0, 0.0];
@@ -1091,10 +1102,11 @@ mod tests {
 
         for (day_idx, grade) in [0usize, 1, 2, 3, 4, 0, 0].iter().enumerate() {
             let y = 2 + day_idx as u16;
-            let cell = buffer.cell((6, y)).unwrap();
-            assert_eq!(cell.symbol(), "█");
-            assert_eq!(cell.fg, app.theme.colors[*grade]);
-            assert_eq!(buffer.cell((7, y)).unwrap().symbol(), " ");
+            for x in [6, 7] {
+                let cell = buffer.cell((x, y)).unwrap();
+                assert_eq!(cell.symbol(), "█");
+                assert_eq!(cell.fg, app.theme.colors[*grade]);
+            }
         }
     }
 
@@ -1184,9 +1196,11 @@ mod tests {
         assert_eq!(buffer.cell((1, 11)).unwrap().symbol(), " ");
         assert_eq!(buffer.cell((2, 11)).unwrap().symbol(), "L");
         for (grade, expected) in app.theme.colors.iter().enumerate() {
-            let cell = buffer.cell((7 + grade as u16 * 2, 11)).unwrap();
-            assert_eq!(cell.symbol(), "█");
-            assert_eq!(cell.fg, *expected);
+            for x in [7 + grade as u16 * 3, 8 + grade as u16 * 3] {
+                let cell = buffer.cell((x, 11)).unwrap();
+                assert_eq!(cell.symbol(), "█");
+                assert_eq!(cell.fg, *expected);
+            }
         }
 
         let hint = "click a day to inspect details";
@@ -1507,6 +1521,55 @@ mod tests {
             .find(|line| line.contains("Top model:"))
             .unwrap();
         assert!(top_model_row.contains("6K (50%)"));
+    }
+
+    #[test]
+    fn hour_strip_shades_active_hours_by_theme_grades() {
+        let mut app = make_app(120);
+        let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        select_day(&mut app, date, 12_000, 2.5);
+        app.data.daily = vec![day_usage(date, 12_000, 2.5, vec![])];
+        app.data.hourly = vec![
+            hourly_entry(date, 9, 100), // busiest hour -> grade 4
+            hourly_entry(date, 10, 40), // 0.4 -> grade 2
+            hourly_entry(date, 11, 10), // 0.1 -> grade 1
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render(frame, &mut app, Rect::new(0, 0, 120, 30)))
+            .unwrap();
+        let buffer = frame.buffer;
+        let rows: Vec<String> = (0..30u16)
+            .map(|y| {
+                (0..120u16)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                    .collect()
+            })
+            .collect();
+        let hours_y = rows
+            .iter()
+            .position(|row| row.contains("Hours:"))
+            .expect("hours label should render") as u16;
+        let strip_y = hours_y + 1;
+
+        // Content starts at x=2 (border + inset); hour h sits at 2 + h plus one
+        // gap per 6-hour group boundary it passes.
+        let hour_x = |hour: u16| 2 + hour + hour / 6;
+        assert_eq!(buffer.cell((hour_x(9), strip_y)).unwrap().symbol(), "█");
+        assert_eq!(
+            buffer.cell((hour_x(9), strip_y)).unwrap().fg,
+            app.theme.colors[4]
+        );
+        assert_eq!(
+            buffer.cell((hour_x(10), strip_y)).unwrap().fg,
+            app.theme.colors[2]
+        );
+        assert_eq!(
+            buffer.cell((hour_x(11), strip_y)).unwrap().fg,
+            app.theme.colors[1]
+        );
+        assert_eq!(buffer.cell((hour_x(0), strip_y)).unwrap().symbol(), "·");
     }
 
     #[test]
