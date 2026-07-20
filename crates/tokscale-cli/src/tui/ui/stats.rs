@@ -14,6 +14,8 @@ use super::widgets::{
 };
 
 const CELL_WIDTH: u16 = 2;
+/// Width of the `Less ■ ■ ■ ■ ■ More` legend row.
+const LEGEND_WIDTH: u16 = 19;
 const GRAPH_PANEL_H: u16 = 14;
 const GRAPH_MIN_H: u16 = 11;
 const DAY_INSIGHTS_MIN_H: u16 = 5;
@@ -77,13 +79,20 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     if inner.is_empty() {
         return;
     }
+    let content = inner.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    if content.is_empty() {
+        return;
+    }
 
     let Some(graph) = app.data.graph.clone() else {
         frame.render_widget(
             Paragraph::new("No contribution data available")
                 .style(Style::default().fg(app.theme.muted))
                 .alignment(Alignment::Center),
-            inner,
+            content,
         );
         return;
     };
@@ -100,9 +109,9 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected_weekday = selected_date.map(|date| date.weekday().num_days_from_sunday() as usize);
     let is_narrow = app.is_narrow();
     let label_width = if is_narrow { 2u16 } else { 4u16 };
-    let graph_start_x = inner.x.saturating_add(label_width);
-    let graph_start_y = inner.y.saturating_add(2);
-    let graph_bottom = inner.bottom();
+    let graph_start_x = content.x.saturating_add(label_width);
+    let graph_start_y = content.y.saturating_add(2);
+    let graph_bottom = content.bottom();
 
     for (day_idx, label) in DAY_LABELS.iter().enumerate() {
         let is_selected_row = selected_weekday == Some(day_idx);
@@ -127,13 +136,13 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
                 frame.render_widget(
                     Paragraph::new(display_label).style(style),
-                    Rect::new(inner.x, y, label_width, 1),
+                    Rect::new(content.x, y, label_width, 1),
                 );
             }
         }
     }
 
-    let max_weeks = (inner.width.saturating_sub(label_width) / CELL_WIDTH) as usize;
+    let max_weeks = (content.width.saturating_sub(label_width) / CELL_WIDTH) as usize;
     let weeks_to_show = graph.weeks.len().min(max_weeks);
     let start_week = graph.weeks.len().saturating_sub(weeks_to_show);
     let colors = app.theme.colors;
@@ -157,14 +166,14 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
         let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
         for (day_idx, day) in week.iter().enumerate() {
             let y = graph_start_y.saturating_add(day_idx as u16);
-            if x >= inner.right() || y >= graph_bottom {
+            if x >= content.right() || y >= graph_bottom {
                 continue;
             }
 
             let actual_week = week_idx + start_week;
             let selected = selected_date.is_some() && selected_cell == Some((actual_week, day_idx));
             let cell_area = Rect::new(x, y, CELL_WIDTH, 1);
-            let (symbol, style) = match day {
+            let cell = match day {
                 Some(day) => {
                     app.add_click_area(
                         cell_area,
@@ -174,20 +183,22 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                         },
                     );
                     let color = intensity_color(day.intensity);
-                    if selected {
-                        ("▓▓", Style::default().fg(Color::White).bg(color))
+                    let glyph = if selected {
+                        Span::styled("▓", Style::default().fg(Color::White).bg(color))
                     } else {
-                        ("██", Style::default().fg(color))
-                    }
+                        Span::styled("■", Style::default().fg(color))
+                    };
+                    Line::from(vec![glyph, Span::raw(" ")])
                 }
-                None => ("· ", app.theme.subtle_text_style()),
+                None => Line::from(Span::raw("  ")),
             };
-            frame.render_widget(Paragraph::new(symbol).style(style), cell_area);
+            frame.render_widget(Paragraph::new(cell), cell_area);
         }
     }
 
     let selected_month = selected_date.map(|date| (date.year(), date.month0() as usize));
     let mut current_month = None;
+    let mut last_label_end = None;
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
         let mut label_month = None;
         for day in week.iter().filter_map(Option::as_ref) {
@@ -204,8 +215,9 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
         if let Some(month @ (_, month_idx)) = label_month {
             current_month = Some(month);
             let x = graph_start_x.saturating_add(week_idx as u16 * CELL_WIDTH);
-            let label_x = x.min(inner.right().saturating_sub(3));
-            if label_x >= graph_start_x && month_idx < MONTH_LABELS.len() {
+            let label_x = x.min(content.right().saturating_sub(3));
+            let too_close = last_label_end.is_some_and(|end: u16| label_x < end.saturating_add(2));
+            if label_x >= graph_start_x && !too_close && month_idx < MONTH_LABELS.len() {
                 let style = if selected_month == Some(month) {
                     Style::default()
                         .fg(app.theme.accent)
@@ -215,19 +227,21 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
                 frame.render_widget(
                     Paragraph::new(MONTH_LABELS[month_idx]).style(style),
-                    Rect::new(label_x, inner.y, 3, 1),
+                    Rect::new(label_x, content.y, 3, 1),
                 );
+                last_label_end = Some(label_x.saturating_add(3));
             }
         }
     }
 
-    render_graph_metrics(frame, app, inner, &graph);
+    render_graph_metrics(frame, app, content, graph_start_y.saturating_add(6), &graph);
 }
 
 fn render_graph_metrics(
     frame: &mut Frame,
     app: &App,
-    inner: Rect,
+    content: Rect,
+    last_grid_row: u16,
     graph: &crate::tui::data::GraphData,
 ) {
     let active_days = graph
@@ -244,8 +258,8 @@ fn render_graph_metrics(
         .filter(|day| day.is_some())
         .count();
 
-    let metrics_y = inner.y.saturating_add(9);
-    if metrics_y < inner.bottom() {
+    let metrics_y = last_grid_row.saturating_add(1);
+    if metrics_y < content.bottom() {
         let metrics = Line::from(vec![
             Span::styled("Current ", Style::default().fg(app.theme.muted)),
             Span::styled(
@@ -265,32 +279,40 @@ fn render_graph_metrics(
         ]);
         frame.render_widget(
             Paragraph::new(metrics),
-            Rect::new(inner.x, metrics_y, inner.width, 1),
+            Rect::new(content.x, metrics_y, content.width, 1),
         );
     }
 
-    let legend_y = inner.y.saturating_add(10);
-    if legend_y < inner.bottom() {
+    let legend_y = metrics_y.saturating_add(1);
+    if legend_y < content.bottom() {
         let legend = Line::from(vec![
             Span::styled("Less ", Style::default().fg(app.theme.muted)),
-            Span::styled("· ", app.theme.subtle_text_style()),
-            Span::styled("██", Style::default().fg(app.theme.colors[1])),
+            Span::styled("■", Style::default().fg(app.theme.colors[0])),
             Span::raw(" "),
-            Span::styled("██", Style::default().fg(app.theme.colors[2])),
+            Span::styled("■", Style::default().fg(app.theme.colors[1])),
             Span::raw(" "),
-            Span::styled("██", Style::default().fg(app.theme.colors[3])),
+            Span::styled("■", Style::default().fg(app.theme.colors[2])),
             Span::raw(" "),
-            Span::styled("██", Style::default().fg(app.theme.colors[4])),
+            Span::styled("■", Style::default().fg(app.theme.colors[3])),
+            Span::raw(" "),
+            Span::styled("■", Style::default().fg(app.theme.colors[4])),
             Span::styled(" More", Style::default().fg(app.theme.muted)),
-            Span::styled(
-                "    click a day to inspect details",
-                Style::default().fg(app.theme.muted),
-            ),
         ]);
         frame.render_widget(
             Paragraph::new(legend),
-            Rect::new(inner.x, legend_y, inner.width, 1),
+            Rect::new(content.x, legend_y, content.width, 1),
         );
+
+        let hint = "click a day to inspect details";
+        let hint_width = hint.len() as u16;
+        let legend_end = content.x.saturating_add(LEGEND_WIDTH);
+        let hint_x = content.right().saturating_sub(hint_width);
+        if hint_x >= legend_end {
+            frame.render_widget(
+                Paragraph::new(Span::styled(hint, Style::default().fg(app.theme.muted))),
+                Rect::new(hint_x, legend_y, hint_width, 1),
+            );
+        }
     }
 }
 
@@ -912,19 +934,20 @@ mod tests {
         let buffer = frame.buffer;
         let selected_y = 3 + 4;
 
-        for x in 5..=6 {
-            let cell = buffer.cell((x, selected_y)).unwrap();
-            assert_eq!(cell.symbol(), "▓");
-            assert_eq!(cell.fg, Color::White);
-            assert_eq!(cell.bg, app.theme.colors[4]);
-        }
+        let selected = buffer.cell((6, selected_y)).unwrap();
+        assert_eq!(selected.symbol(), "▓");
+        assert_eq!(selected.fg, Color::White);
+        assert_eq!(selected.bg, app.theme.colors[4]);
+        let gap = buffer.cell((7, selected_y)).unwrap();
+        assert_eq!(gap.symbol(), " ");
+        assert_ne!(gap.bg, app.theme.colors[4]);
 
-        let weekday = buffer.cell((1, selected_y)).unwrap();
+        let weekday = buffer.cell((2, selected_y)).unwrap();
         assert_eq!(weekday.symbol(), "T");
         assert_eq!(weekday.fg, app.theme.accent);
         assert!(weekday.modifier.contains(Modifier::BOLD));
 
-        let month = buffer.cell((5, 1)).unwrap();
+        let month = buffer.cell((6, 1)).unwrap();
         assert_eq!(month.symbol(), "J");
         assert_eq!(month.fg, app.theme.accent);
         assert!(month.modifier.contains(Modifier::BOLD));
@@ -959,12 +982,12 @@ mod tests {
             .draw(|frame| render_graph(frame, &mut app, frame.area()))
             .unwrap();
         let buffer = frame.buffer;
-        let month_label = (76..79)
+        let month_label = (75..78)
             .map(|x| buffer.cell((x, 1)).unwrap().symbol())
             .collect::<String>();
 
         assert_eq!(month_label, "May");
-        for x in 76..79 {
+        for x in 75..78 {
             let cell = buffer.cell((x, 1)).unwrap();
             assert_eq!(cell.fg, app.theme.accent);
             assert!(cell.modifier.contains(Modifier::BOLD));
@@ -990,11 +1013,222 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert_eq!(buffer.cell((5, 7)).unwrap().symbol(), "█");
-        assert_eq!(buffer.cell((1, 7)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((5, 1)).unwrap().fg, app.theme.muted);
+        assert_eq!(buffer.cell((6, 7)).unwrap().symbol(), "■");
+        assert_eq!(buffer.cell((6, 7)).unwrap().fg, app.theme.colors[4]);
+        assert_eq!(buffer.cell((6, 3)).unwrap().symbol(), "■");
+        assert_eq!(buffer.cell((6, 3)).unwrap().fg, app.theme.colors[0]);
+        assert_eq!(buffer.cell((2, 7)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((6, 1)).unwrap().fg, app.theme.muted);
         assert!(rendered.contains("click a day to inspect details"));
         assert!(!rendered.contains("keyboard"));
+    }
+
+    #[test]
+    fn none_cells_render_as_blank_spaces() {
+        let mut app = make_app(120);
+        app.data.graph = Some(GraphData {
+            weeks: vec![vec![
+                None,
+                Some(ContributionDay {
+                    date: NaiveDate::from_ymd_opt(2026, 7, 13).unwrap(),
+                    tokens: 42,
+                    cost: 0.5,
+                    intensity: 0.75,
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ]],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+
+        for y in 3..=9 {
+            let row = (0..120)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                .collect::<String>();
+            assert!(
+                !row.contains('·'),
+                "grid row {y} contains a dot placeholder: {row:?}"
+            );
+        }
+        for y in [3, 5, 6, 7, 8, 9] {
+            assert_eq!(buffer.cell((6, y)).unwrap().symbol(), " ");
+            assert_eq!(buffer.cell((7, y)).unwrap().symbol(), " ");
+        }
+    }
+
+    #[test]
+    fn grid_cells_paint_single_glyphs_with_grade_colors() {
+        let mut app = make_app(120);
+        let sunday = NaiveDate::from_ymd_opt(2026, 7, 12).unwrap();
+        let intensities = [0.0, 0.1, 0.3, 0.6, 0.9, 0.0, 0.0];
+        app.data.graph = Some(GraphData {
+            weeks: vec![(0..7usize)
+                .map(|day_idx| {
+                    Some(ContributionDay {
+                        date: sunday + chrono::Duration::days(day_idx as i64),
+                        tokens: if intensities[day_idx] > 0.0 { 10 } else { 0 },
+                        cost: 0.0,
+                        intensity: intensities[day_idx],
+                    })
+                })
+                .collect()],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+
+        for (day_idx, grade) in [0usize, 1, 2, 3, 4, 0, 0].iter().enumerate() {
+            let y = 3 + day_idx as u16;
+            let cell = buffer.cell((6, y)).unwrap();
+            assert_eq!(cell.symbol(), "■");
+            assert_eq!(cell.fg, app.theme.colors[*grade]);
+            assert_eq!(buffer.cell((7, y)).unwrap().symbol(), " ");
+        }
+    }
+
+    #[test]
+    fn month_labels_never_overlap() {
+        let mut app = make_app(120);
+        // One in-range day per week, each week starting a new month, so label
+        // candidates land one week column (2 cells) apart and would collide
+        // without suppression.
+        app.data.graph = Some(GraphData {
+            weeks: (0..52usize)
+                .map(|week_idx| {
+                    (0..7usize)
+                        .map(|day_idx| {
+                            if day_idx == 3 {
+                                Some(ContributionDay {
+                                    date: NaiveDate::from_ymd_opt(
+                                        2026,
+                                        (week_idx % 12) as u32 + 1,
+                                        15,
+                                    )
+                                    .unwrap(),
+                                    tokens: 10,
+                                    cost: 0.1,
+                                    intensity: 0.5,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+
+        let row = (2..118)
+            .map(|x| buffer.cell((x, 1)).unwrap().symbol())
+            .collect::<String>();
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut run_start = None;
+        for (idx, ch) in row.char_indices() {
+            if ch == ' ' {
+                if let Some(start) = run_start.take() {
+                    runs.push((start, idx));
+                }
+            } else if run_start.is_none() {
+                run_start = Some(idx);
+            }
+        }
+        if let Some(start) = run_start {
+            runs.push((start, row.len()));
+        }
+
+        assert!(
+            runs.len() >= 10,
+            "expected many surviving month labels, got {runs:?}"
+        );
+        for (start, end) in &runs {
+            assert_eq!(end - start, 3, "month labels stay 3 cells wide: {runs:?}");
+        }
+        for pair in runs.windows(2) {
+            let gap = pair[1].0 - pair[0].1;
+            assert!(gap >= 2, "month labels closer than 2 cells: {pair:?}");
+        }
+    }
+
+    #[test]
+    fn metrics_and_legend_share_the_inset_offset() {
+        let mut app = make_app(120);
+        app.data.graph = Some(sample_week_graph());
+        let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+
+        // Border 1 + inset 1: both rows start at the shared content edge.
+        assert_eq!(buffer.cell((1, 10)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((2, 10)).unwrap().symbol(), "C");
+        assert_eq!(buffer.cell((1, 11)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((2, 11)).unwrap().symbol(), "L");
+        for (grade, expected) in app.theme.colors.iter().enumerate() {
+            let cell = buffer.cell((7 + grade as u16 * 2, 11)).unwrap();
+            assert_eq!(cell.symbol(), "■");
+            assert_eq!(cell.fg, *expected);
+        }
+
+        let hint = "click a day to inspect details";
+        let hint_x = 118 - hint.len() as u16;
+        let rendered_hint = (hint_x..118)
+            .map(|x| buffer.cell((x, 11)).unwrap().symbol())
+            .collect::<String>();
+        assert_eq!(rendered_hint, hint);
+    }
+
+    #[test]
+    fn legend_hint_drops_when_it_would_overlap_the_legend() {
+        let mut app = make_app(50);
+        app.data.graph = Some(sample_week_graph());
+        let mut terminal = Terminal::new(TestBackend::new(50, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+        let legend_row = (0..50)
+            .map(|x| buffer.cell((x, 11)).unwrap().symbol())
+            .collect::<String>();
+
+        assert_eq!(buffer.cell((2, 11)).unwrap().symbol(), "L");
+        assert!(!legend_row.contains("click a day"));
+    }
+
+    #[test]
+    fn narrow_width_renders_without_overflowing_the_border() {
+        let mut app = make_app(70);
+        app.data.graph = Some(sample_week_graph());
+        let mut terminal = Terminal::new(TestBackend::new(70, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let buffer = frame.buffer;
+
+        for y in 1..GRAPH_PANEL_H - 1 {
+            assert_eq!(buffer.cell((0, y)).unwrap().symbol(), "│");
+            assert_eq!(buffer.cell((69, y)).unwrap().symbol(), "│");
+        }
     }
 
     #[test]
