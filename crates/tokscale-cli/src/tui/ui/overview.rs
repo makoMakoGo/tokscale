@@ -220,11 +220,14 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
-    // Models that did not fit collapse into a muted `+N` suffix after the last
-    // visible model; the fitting logic already reserved room for it.
+    // Models that did not fit collapse into a muted `+N` suffix. It follows
+    // the last visible model — or renders alone when no model fits at all, so
+    // the legend never goes blank while models exist.
     let hidden_count = total_models - visible_count;
-    if visible_count > 0 && hidden_count > 0 {
-        spans.push(Span::raw("  "));
+    if hidden_count > 0 {
+        if visible_count > 0 {
+            spans.push(Span::raw("  "));
+        }
         spans.push(Span::styled(
             format!("+{hidden_count}"),
             Style::default().fg(app.theme.muted),
@@ -420,6 +423,23 @@ mod tests {
         assert_eq!(row.matches('■').count(), 3, "{row}");
         assert!(!row.contains('●'), "{row}");
         assert!(row.ends_with("+1"), "suffix must be fully visible: {row}");
+    }
+
+    #[test]
+    fn legend_keeps_the_overflow_suffix_when_no_model_fits() {
+        let app = app_with_models(120, &["一个名字非常非常长的模型"]);
+        // Too narrow for even one truncated item: the legend must still show
+        // the overflow count instead of going blank.
+        let mut terminal = Terminal::new(TestBackend::new(10, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_legend(frame, &app, frame.area()))
+            .unwrap();
+
+        let row = buffer_lines(&terminal).remove(0);
+        let row = row.trim_end();
+        assert!(!row.contains('■'), "{row}");
+        assert_eq!(row, "+1");
     }
 
     #[test]
