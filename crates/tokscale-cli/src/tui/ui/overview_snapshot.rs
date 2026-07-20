@@ -233,7 +233,7 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Percentage(65), Constraint::Min(0)])
         .split(rows[1]);
     let donut = DonutChart::new(
-        source_buckets(app)
+        source_state_buckets(app)
             .into_iter()
             .map(|(_, value, color)| DonutSegment::new(value, color))
             .collect(),
@@ -439,15 +439,35 @@ fn token_buckets(app: &App, data: &SnapshotData) -> [(&'static str, u64, Color);
     ]
 }
 
-/// (label, value, color) buckets shared by the Sources donut and its legend.
-fn source_buckets(app: &App) -> [(&'static str, u64, Color); 5] {
+/// (label, value, color) source-state buckets for the Sources donut. These
+/// share the denominator of the center health percentage (source counts), so
+/// the ring and the percentage never contradict each other. Rejected records
+/// are excluded: they count individual parser records, not sources, and one
+/// degraded source can contribute many of them.
+fn source_state_buckets(app: &App) -> [(&'static str, u64, Color); 4] {
     let health = &app.data.health;
     [
         ("Clean", health.clean_sources as u64, app.theme.accent),
         ("Degraded", health.degraded_sources as u64, Color::Yellow),
         ("Partial", health.partial_sources as u64, PARTIAL_COLOR),
         ("Failed", health.failed_sources as u64, Color::Red),
-        ("Rejected", health.rejected_records, Color::DarkGray),
+    ]
+}
+
+/// (label, value, color) buckets for the Sources legend, which additionally
+/// shows the exact rejected-record count.
+fn source_buckets(app: &App) -> [(&'static str, u64, Color); 5] {
+    let [clean, degraded, partial, failed] = source_state_buckets(app);
+    [
+        clean,
+        degraded,
+        partial,
+        failed,
+        (
+            "Rejected",
+            app.data.health.rejected_records,
+            Color::DarkGray,
+        ),
     ]
 }
 
@@ -801,7 +821,10 @@ mod tests {
         app.data.health.degraded_sources = 2;
         app.data.health.partial_sources = 1;
         app.data.health.failed_sources = 1;
-        app.data.health.rejected_records = 0;
+        // Non-zero on purpose: rejected records count parser records, not
+        // sources, so they must not become a donut segment even when plenty
+        // of them exist.
+        app.data.health.rejected_records = 7;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
@@ -819,8 +842,13 @@ mod tests {
         }
         assert!(
             !colors.contains(&Color::DarkGray),
-            "zero rejected records must stay invisible"
+            "rejected records are not a source state and stay out of the donut"
         );
+        let legend_row = buffer_lines(&terminal)
+            .into_iter()
+            .find(|line| line.contains("Rejected"))
+            .expect("sources legend should list Rejected");
+        assert!(legend_row.contains('7'), "{legend_row}");
     }
 
     #[test]
