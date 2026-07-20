@@ -1,35 +1,7 @@
 use anyhow::Result;
-use serde::Deserialize;
 
 use super::helpers::{capitalize, read_keychain};
 use super::{UsageMetric, UsageOutput};
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct PaidQuotaSnapshot {
-    percent_remaining: Option<i64>,
-    remaining: Option<i64>,
-    entitlement: Option<i64>,
-    #[allow(dead_code)]
-    quota_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct PaidResponse {
-    copilot_plan: Option<String>,
-    quota_reset_date: Option<String>,
-    quota_snapshots: Option<std::collections::HashMap<String, PaidQuotaSnapshot>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct FreeResponse {
-    copilot_plan: Option<String>,
-    limited_user_quotas: Option<std::collections::HashMap<String, i64>>,
-    monthly_quotas: Option<std::collections::HashMap<String, i64>>,
-    limited_user_reset_date: Option<String>,
-}
 
 fn read_token_from_keychain() -> Result<String> {
     let raw = read_keychain("gh:github.com")?;

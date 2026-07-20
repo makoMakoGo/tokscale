@@ -11,7 +11,6 @@ struct Secrets {
 
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
-    #[allow(dead_code)]
     ok: Option<bool>,
     result: Option<ApiResult>,
 }
