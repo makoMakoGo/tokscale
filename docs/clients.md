@@ -43,7 +43,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `zcode` | ZCode | `~/.zcode/projects/**/*.jsonl` | Reads Z.ai ADE JSONL sessions. |
 | `kiro` | Kiro | `~/.kiro/sessions/cli/`, `~/.local/share/kiro-cli/data.sqlite3`, and Kiro IDE globalStorage snapshots | Combines CLI and IDE local sources when present. |
 | `junie` | Junie | `~/.junie/sessions/**/events.jsonl` | Reads JetBrains Junie session events. |
-| `cline` | Cline | VS Code globalStorage `saoudrizwan.claude-dev/tasks/**/ui_messages.json` | Same task-log family as Roo Code and KiloCode. |
+| `cline` | Cline | `$CLINE_SESSION_DATA_DIR/**/*.messages.json`, then `$CLINE_DATA_DIR/sessions`, `$CLINE_DIR/data/sessions`, or `~/.cline/data/sessions` | Reads the shared SDK v1 artifacts written by VS Code 4.0+ and CLI 3.x. Retired VS Code globalStorage task logs are unsupported. |
 | `commandcode` | Command Code | `~/.commandcode/projects/**/*.jsonl` | Estimated from transcripts. |
 | `grok` | Grok Build | `$GROK_HOME/sessions/**/updates.jsonl`, fallback `~/.grok/sessions/` | Reads total-token deltas and applies the fixed total-only bucket allocation from ADR 0017. |
 | `warp` | Warp/Oz | `~/.local/state/warp-terminal/warp.sqlite` on Linux, Warp App Group/Application Support on macOS, `%LOCALAPPDATA%\warp\Warp\data\warp.sqlite` on Windows | Reads local per-conversation, per-model token totals and applies the fixed total-only bucket allocation from ADR 0017. |

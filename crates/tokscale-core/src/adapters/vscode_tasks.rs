@@ -55,7 +55,6 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
         roots.extend(match self.client {
             ClientId::RooCode => roocode_additional_roots(ctx.home_dir),
             ClientId::KiloCode => kilocode_additional_roots(ctx.home_dir),
-            ClientId::Cline => cline_additional_roots(ctx.home_dir, ctx.use_env_roots),
             _ => Vec::new(),
         });
         roots.extend(adapter_discover::extra_roots_for_client(self.client, ctx)?);
@@ -109,30 +108,6 @@ fn kilocode_additional_roots(home_dir: &str) -> Vec<PathBuf> {
         .join(".vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks")]
 }
 
-fn cline_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
-    let mut roots = vec![PathBuf::from(home_dir)
-        .join("Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks")];
-
-    if cfg!(target_os = "windows") && use_env_roots {
-        if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
-            roots.push(
-                PathBuf::from(app_data)
-                    .join("Code/User/globalStorage/saoudrizwan.claude-dev/tasks"),
-            );
-        }
-    }
-
-    roots.push(
-        PathBuf::from(home_dir)
-            .join("AppData/Roaming/Code/User/globalStorage/saoudrizwan.claude-dev/tasks"),
-    );
-    roots.push(
-        PathBuf::from(home_dir)
-            .join(".vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks"),
-    );
-    roots
-}
-
 pub(crate) static ROOCODE_ADAPTER: VscodeTaskAdapter = VscodeTaskAdapter::new(
     ClientId::RooCode,
     ParserId::RooCode,
@@ -142,11 +117,6 @@ pub(crate) static KILOCODE_ADAPTER: VscodeTaskAdapter = VscodeTaskAdapter::new(
     ClientId::KiloCode,
     ParserId::KiloCode,
     sessions::kilocode::parse_kilocode_file,
-);
-pub(crate) static CLINE_ADAPTER: VscodeTaskAdapter = VscodeTaskAdapter::new(
-    ClientId::Cline,
-    ParserId::Cline,
-    sessions::cline::parse_cline_file,
 );
 
 #[cfg(test)]
@@ -241,41 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn cline_adapter_discovers_all_home_relative_vscode_roots() {
-        let home = tempfile::TempDir::new().unwrap();
-        let paths = vec![
-            home.path().join(
-                ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/local/ui_messages.json",
-            ),
-            home.path().join(
-                "Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/macos/ui_messages.json",
-            ),
-            home.path().join(
-                "AppData/Roaming/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/windows-home/ui_messages.json",
-            ),
-            home.path().join(
-                ".vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/server/ui_messages.json",
-            ),
-        ];
-        for path in &paths {
-            write_file(path);
-        }
-
-        let settings = crate::scanner::ScannerSettings::default();
-        let ctx = scan_context(home.path(), &settings);
-        let actual: Vec<_> = CLINE_ADAPTER
-            .discover_checked(&ctx)
-            .unwrap()
-            .into_iter()
-            .map(|unit| unit.path)
-            .collect();
-        let mut expected = paths;
-        expected.sort_unstable();
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn roo_family_all_bad_scans_cache_rejections_with_each_adapter_identity() {
         let home = tempfile::TempDir::new().unwrap();
         let cases = [
@@ -293,14 +228,6 @@ mod tests {
                 ParserId::KiloCode,
                 home.path().join(
                     ".config/Code/User/globalStorage/kilocode.kilo-code/tasks/kilo-bad/ui_messages.json",
-                ),
-            ),
-            (
-                &CLINE_ADAPTER,
-                ClientId::Cline,
-                ParserId::Cline,
-                home.path().join(
-                    ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/cline-bad/ui_messages.json",
                 ),
             ),
         ];

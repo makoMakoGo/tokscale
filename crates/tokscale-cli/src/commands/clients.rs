@@ -16,8 +16,8 @@ pub(crate) fn run_clients_command(
         parse_extra_dirs, ScannerError,
     };
     use tokscale_core::{
-        count_local_client_messages, warp_sqlite_roots_with_env_strategy, ClientId,
-        LocalParseOptions,
+        cline_session_data_dir_with_env_strategy, count_local_client_messages,
+        warp_sqlite_roots_with_env_strategy, ClientId, LocalParseOptions,
     };
 
     let start = std::time::Instant::now();
@@ -150,6 +150,10 @@ pub(crate) fn run_clients_command(
                 };
                 let sessions_path = if client == ClientId::OpenCode {
                     opencode_data_root.to_string_lossy().into_owned()
+                } else if client == ClientId::Cline {
+                    cline_session_data_dir_with_env_strategy(&home_dir_str, use_env_roots)
+                        .to_string_lossy()
+                        .into_owned()
                 } else if let Some(path) = warp_default_roots.first() {
                     path.to_string_lossy().to_string()
                 } else {

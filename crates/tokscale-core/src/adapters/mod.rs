@@ -1,6 +1,7 @@
 mod antigravity;
 pub(crate) mod cache;
 mod claude;
+mod cline;
 mod codebuddy;
 mod codebuff;
 mod codex;
@@ -692,7 +693,7 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &openclaw::OPENCLAW_ADAPTER,
     &vscode_tasks::ROOCODE_ADAPTER,
     &vscode_tasks::KILOCODE_ADAPTER,
-    &vscode_tasks::CLINE_ADAPTER,
+    &cline::CLINE_ADAPTER,
     &antigravity::ANTIGRAVITY_ADAPTER,
     &kilo::KILO_ADAPTER,
     &hermes::HERMES_ADAPTER,

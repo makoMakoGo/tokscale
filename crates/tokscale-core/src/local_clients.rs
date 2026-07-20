@@ -321,8 +321,8 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         client: ClientId::Cline,
         def: LocalClientDef {
             root: PathRoot::Home,
-            relative_path: ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
-            pattern: "ui_messages.json",
+            relative_path: ".cline/data/sessions",
+            pattern: "*.messages.json",
         },
     },
     LocalClientEntry {
@@ -345,6 +345,27 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
 ];
+
+/// Resolve the canonical Cline SDK session-artifact directory.
+///
+/// Cline applies these overrides as an exclusive precedence chain rather than
+/// scanning every configured root together. Explicit `--home` scans disable
+/// ambient environment roots and always use the supplied home directory.
+pub fn cline_session_data_dir_with_env_strategy(home_dir: &str, use_env_roots: bool) -> PathBuf {
+    if use_env_roots {
+        if let Some(session_dir) = configured_path_env("CLINE_SESSION_DATA_DIR") {
+            return session_dir;
+        }
+        if let Some(data_dir) = configured_path_env("CLINE_DATA_DIR") {
+            return data_dir.join("sessions");
+        }
+        if let Some(cline_dir) = configured_path_env("CLINE_DIR") {
+            return cline_dir.join("data/sessions");
+        }
+    }
+
+    PathBuf::from(home_dir).join(".cline/data/sessions")
+}
 
 pub fn warp_sqlite_roots_with_env_strategy(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     let home = PathBuf::from(home_dir);
@@ -456,6 +477,54 @@ mod tests {
     fn warp_reads_local_sqlite_usage() {
         let warp = ClientId::Warp.local_def().expect("warp has scan policy");
         assert_eq!(warp.pattern, "warp.sqlite");
+    }
+
+    #[test]
+    fn cline_reads_shared_sdk_v1_message_artifacts() {
+        let cline = ClientId::Cline.local_def().expect("cline has scan policy");
+        assert_eq!(cline.relative_path, ".cline/data/sessions");
+        assert_eq!(cline.pattern, "*.messages.json");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cline_session_root_honors_environment_precedence() {
+        let _guard = env_lock().lock().unwrap();
+        let variables = ["CLINE_SESSION_DATA_DIR", "CLINE_DATA_DIR", "CLINE_DIR"];
+        let previous: Vec<_> = variables
+            .iter()
+            .map(|variable| (*variable, std::env::var(variable).ok()))
+            .collect();
+
+        unsafe {
+            std::env::set_var("CLINE_SESSION_DATA_DIR", "/tmp/cline-session-data");
+            std::env::set_var("CLINE_DATA_DIR", "/tmp/cline-data");
+            std::env::set_var("CLINE_DIR", "/tmp/cline-home");
+        }
+        assert_eq!(
+            cline_session_data_dir_with_env_strategy("/tmp/home", true),
+            PathBuf::from("/tmp/cline-session-data")
+        );
+
+        unsafe { std::env::remove_var("CLINE_SESSION_DATA_DIR") };
+        assert_eq!(
+            cline_session_data_dir_with_env_strategy("/tmp/home", true),
+            PathBuf::from("/tmp/cline-data/sessions")
+        );
+
+        unsafe { std::env::remove_var("CLINE_DATA_DIR") };
+        assert_eq!(
+            cline_session_data_dir_with_env_strategy("/tmp/home", true),
+            PathBuf::from("/tmp/cline-home/data/sessions")
+        );
+        assert_eq!(
+            cline_session_data_dir_with_env_strategy("/tmp/explicit-home", false),
+            PathBuf::from("/tmp/explicit-home/.cline/data/sessions")
+        );
+
+        for (variable, value) in previous {
+            restore_env(variable, value);
+        }
     }
 
     #[test]
