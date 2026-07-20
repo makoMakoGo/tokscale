@@ -2943,7 +2943,12 @@ mod tests {
         let home = dir.path();
         setup_mock_cline_dir(home);
 
-        let result = scan_all_clients(home.to_str().unwrap(), &["cline".to_string()]);
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["cline".to_string()],
+            false,
+        )
+        .unwrap();
         assert_eq!(result.get(ClientId::Cline).len(), 1);
         assert!(result
             .get(ClientId::Cline)

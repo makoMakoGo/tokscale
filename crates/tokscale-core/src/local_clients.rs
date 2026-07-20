@@ -487,6 +487,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn cline_session_root_honors_environment_precedence() {
         let _guard = env_lock().lock().unwrap();
         let variables = ["CLINE_SESSION_DATA_DIR", "CLINE_DATA_DIR", "CLINE_DIR"];
