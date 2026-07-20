@@ -1,15 +1,11 @@
 use std::collections::BTreeMap;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
 use crate::tui::app::{App, ChartGranularity};
-
-const LEGEND_HORIZONTAL_PADDING: u16 = 2;
-const LEGEND_ITEM_GAP: &str = "    ";
-const LEGEND_MARKER: &str = "●";
 
 #[derive(Debug, Clone, Default)]
 struct ModelAggregate {
@@ -43,15 +39,41 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(chart_height.min(area.height)),
-            Constraint::Length(1),
+            // The box border absorbs the old standalone legend row.
+            Constraint::Length((chart_height + 1).min(area.height)),
             Constraint::Min(0),
         ])
         .split(area);
 
-    render_chart(frame, app, chunks[0]);
-    render_legend(frame, app, chunks[1]);
-    chunks[2]
+    let title = if app.is_very_narrow() {
+        " Tokens "
+    } else {
+        " Tokens per Day "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(app.theme.background));
+    let inner = block.inner(chunks[0]);
+    frame.render_widget(block, chunks[0]);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    let inset = Margin {
+        horizontal: 1,
+        vertical: 0,
+    };
+    render_chart(frame, app, sections[0].inner(inset));
+    render_legend(frame, app, sections[1].inner(inset));
+    chunks[1]
 }
 
 fn collect_overview_data(app: &App) -> OverviewData {
@@ -160,11 +182,6 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
-    // Match the Snapshot text inset: one cell for its border and one for padding.
-    let area = area.inner(Margin {
-        horizontal: LEGEND_HORIZONTAL_PADDING,
-        vertical: 0,
-    });
     if area.is_empty() {
         return;
     }
@@ -181,6 +198,7 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
 
     let limit = if app.is_narrow() { 3 } else { 5 };
     let name_width = if app.is_narrow() { 12 } else { 18 };
+    let total_models = models.len();
     let visible_count = visible_legend_count(
         models.iter().map(|(model, _)| model.as_str()),
         limit,
@@ -190,16 +208,27 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = Vec::new();
     for (index, (model, aggregate)) in models.into_iter().take(visible_count).enumerate() {
         if index > 0 {
-            spans.push(Span::raw(LEGEND_ITEM_GAP));
+            spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(
-            LEGEND_MARKER,
+            "■",
             Style::default().fg(app.model_color_for(&aggregate.provider, model)),
         ));
         spans.push(Span::raw(format!(
             " {}",
             truncate_string(model, name_width)
         )));
+    }
+
+    // Models that did not fit collapse into a muted `+N` suffix after the last
+    // visible model; the fitting logic already reserved room for it.
+    let hidden_count = total_models - visible_count;
+    if visible_count > 0 && hidden_count > 0 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("+{hidden_count}"),
+            Style::default().fg(app.theme.muted),
+        ));
     }
 
     if !spans.is_empty() {
@@ -213,23 +242,27 @@ fn visible_legend_count<'a>(
     name_width: usize,
     available_width: usize,
 ) -> usize {
+    let models: Vec<&str> = models.into_iter().collect();
     let mut used_width = 0usize;
     let mut visible_count = 0;
 
-    for model in models.into_iter().take(limit) {
+    for model in models.iter().copied().take(limit) {
         let display_name = truncate_string(model, name_width);
-        let item_width = LEGEND_MARKER.width() + 1 + display_name.width();
-        let gap_width = if visible_count == 0 {
-            0
+        let item_width = "■".width() + 1 + display_name.width();
+        let gap_width = if visible_count == 0 { 0 } else { "  ".width() };
+        // While accepting this item would still leave hidden models, reserve
+        // room for the `+N` suffix so it too renders completely.
+        let suffix_width = if visible_count + 1 < models.len() {
+            "  ".width() + format!("+{}", models.len() - visible_count - 1).width()
         } else {
-            LEGEND_ITEM_GAP.width()
+            0
         };
-        let required_width = gap_width + item_width;
+        let required_width = gap_width + item_width + suffix_width;
         if used_width.saturating_add(required_width) > available_width {
             break;
         }
 
-        used_width += required_width;
+        used_width += gap_width + item_width;
         visible_count += 1;
     }
 
@@ -252,27 +285,171 @@ fn truncate_string(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{DailyModelInfo, DailySourceInfo, DailyUsage, TokenBreakdown};
+    use chrono::NaiveDate;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn make_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.terminal_width = width;
+        app
+    }
+
+    fn app_with_models(width: u16, model_names: &[&str]) -> App {
+        let mut app = make_app(width);
+        let mut models = BTreeMap::new();
+        for name in model_names {
+            models.insert(
+                name.to_string(),
+                DailyModelInfo {
+                    provider: "provider".to_string(),
+                    model_id: name.to_string(),
+                    display_name: name.to_string(),
+                    color_key: name.to_string(),
+                    workspace_key: None,
+                    workspace_label: None,
+                    tokens: TokenBreakdown {
+                        input: 100,
+                        output: 10,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    cost: 1.0,
+                    messages: 1,
+                },
+            );
+        }
+        let mut source_breakdown = BTreeMap::new();
+        source_breakdown.insert(
+            "claude".to_string(),
+            DailySourceInfo {
+                tokens: TokenBreakdown::default(),
+                cost: 1.0,
+                models,
+            },
+        );
+        app.data.daily = vec![DailyUsage {
+            date: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+            tokens: TokenBreakdown::default(),
+            cost: 1.0,
+            source_breakdown,
+            message_count: 1,
+            turn_count: 1,
+        }];
+        app
+    }
+
+    fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
 
     #[test]
     fn legend_only_includes_complete_items_that_fit() {
+        // '■' + space + 18-cell name = 20 cells per item, gaps are 2 cells, and
+        // while models stay hidden 4 more cells are reserved for the `+N` suffix.
         let models = ["123456789012345678"; 5];
-        let three_items_width = 3 * 20 + 2 * LEGEND_ITEM_GAP.width();
-        let fourth_item_width = LEGEND_ITEM_GAP.width() + 20;
+        assert_eq!(visible_legend_count(models, 5, 18, 67), 2);
+        assert_eq!(visible_legend_count(models, 5, 18, 68), 3);
+        assert_eq!(visible_legend_count(models, 5, 18, 89), 3);
+        assert_eq!(visible_legend_count(models, 5, 18, 90), 4);
+        // Once every model fits, the last item needs no suffix reservation.
+        assert_eq!(visible_legend_count(models, 5, 18, 107), 4);
+        assert_eq!(visible_legend_count(models, 5, 18, 108), 5);
+    }
 
-        assert_eq!(visible_legend_count(models, 5, 18, three_items_width), 3);
-        assert_eq!(
-            visible_legend_count(models, 5, 18, three_items_width + fourth_item_width - 1),
-            3
-        );
-        assert_eq!(
-            visible_legend_count(models, 5, 18, three_items_width + fourth_item_width),
-            4
-        );
+    #[test]
+    fn legend_suffix_width_grows_with_the_hidden_count() {
+        // 2-cell names make each item 4 cells ('■' + space + name), gaps 2.
+        let models = ["aa"; 12];
+        // At 28 cells the fifth model plus its `+7` reservation does not fit…
+        assert_eq!(visible_legend_count(models, 5, 18, 28), 4);
+        // …but at 32 it does, because `+7` needs only 4 cells after 5 items.
+        assert_eq!(visible_legend_count(models, 5, 18, 32), 5);
     }
 
     #[test]
     fn legend_width_uses_rendered_character_width() {
         assert_eq!(visible_legend_count(["模型"], 1, 18, 5), 0);
         assert_eq!(visible_legend_count(["模型"], 1, 18, 6), 1);
+    }
+
+    #[test]
+    fn legend_renders_square_markers_and_a_fully_visible_overflow_suffix() {
+        let app = app_with_models(
+            120,
+            &[
+                "model-alpha-000001",
+                "model-alpha-000002",
+                "model-alpha-000003",
+                "model-alpha-000004",
+            ],
+        );
+        // Exactly three 20-cell items plus gaps and the `+1` suffix fit.
+        let legend_width = (3 * 20 + 2 * 2 + 2 + 2) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(legend_width, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_legend(frame, &app, frame.area()))
+            .unwrap();
+
+        let row = buffer_lines(&terminal).remove(0);
+        let row = row.trim_end();
+        assert_eq!(row.matches('■').count(), 3, "{row}");
+        assert!(!row.contains('●'), "{row}");
+        assert!(row.ends_with("+1"), "suffix must be fully visible: {row}");
+    }
+
+    #[test]
+    fn chart_box_renders_its_title_and_border_above_the_snapshot() {
+        let width = 120;
+        let height = 30;
+        let mut app = make_app(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| crate::tui::ui::overview_snapshot::render(frame, &mut app, frame.area()))
+            .unwrap();
+
+        let lines = buffer_lines(&terminal);
+        let title_row = lines
+            .iter()
+            .position(|line| line.contains("Tokens per Day"))
+            .expect("chart box title should render");
+        let top_border = &lines[title_row];
+        assert!(top_border.starts_with('┌'), "{top_border}");
+        assert!(top_border.ends_with('┐'), "{top_border}");
+        let snapshot_row = lines
+            .iter()
+            .position(|line| line.contains("Snapshot"))
+            .expect("snapshot box should render below the chart box");
+        assert!(title_row < snapshot_row);
+        let bottom_border = &lines[snapshot_row - 1];
+        assert!(
+            bottom_border.starts_with('└') && bottom_border.ends_with('┘'),
+            "{bottom_border}"
+        );
     }
 }
