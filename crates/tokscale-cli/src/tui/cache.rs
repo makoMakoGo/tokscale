@@ -27,7 +27,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 39;
+const CACHE_SCHEMA_VERSION: u32 = 40;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,7 +176,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_39_bundle_round_trips_sessions_and_metadata() {
+    fn schema_40_bundle_round_trips_sessions_and_metadata() {
         let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
         let accumulator = TuiAcc::new();
         let expected_signature = signature();
@@ -212,7 +212,7 @@ mod bundle_tests {
         assert!(raw["projections"]["model"].get("health").is_none());
 
         let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
-            panic!("expected a fresh schema-39 bundle");
+            panic!("expected a fresh schema-40 bundle");
         };
         assert_eq!(loaded.sessions, sessions);
         assert_eq!(loaded.source_space, source_space);
@@ -222,7 +222,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_39_nonempty_bundle_round_trips_all_four_public_groupings() {
+    fn schema_40_nonempty_bundle_round_trips_all_four_public_groupings() {
         let (temp, _guard, _clients, scope, _sessions, _source_space) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
@@ -302,7 +302,7 @@ mod bundle_tests {
             let expected = accumulator.project(&group_by);
             let loaded = match load_cache(&clients, &group_by, &scope) {
                 CacheResult::Fresh(loaded) | CacheResult::Stale(loaded) => loaded,
-                CacheResult::Miss => panic!("schema-39 bundle must load for {group_by}"),
+                CacheResult::Miss => panic!("schema-40 bundle must load for {group_by}"),
             };
             assert_projection_eq(&loaded.data, &expected);
             assert_eq!(loaded.data.health, health);
@@ -491,7 +491,7 @@ impl CacheReportScope {
     }
 }
 
-/// Default usage projection selected when the TUI starts. Schema 39 stores all
+/// Default usage projection selected when the TUI starts. Schema 40 stores all
 /// four public projections, so this is presentation state rather than a cache
 /// key; startup and `App.group_by` must still agree on the initially displayed
 /// rows.
@@ -1347,7 +1347,7 @@ pub struct LoadedTuiCache {
     pub source_inventory_signature: SourceInventorySignature,
 }
 
-/// Result of loading the schema-39 TUI bundle.
+/// Result of loading the schema-40 TUI bundle.
 pub enum CacheResult {
     Fresh(LoadedTuiCache),
     Stale(LoadedTuiCache),
@@ -1601,7 +1601,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     type Value = ParsedTuiBundle;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-39 TUI cache bundle")
+        formatter.write_str("a schema-40 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1709,7 +1709,7 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
     type Value = CachedUsageData;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-39 TUI cache bundle")
+        formatter.write_str("a schema-40 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1840,7 +1840,7 @@ pub fn load_cache(
     }
 }
 
-/// Atomically persist one complete schema-39 TUI bundle.
+/// Atomically persist one complete schema-40 TUI bundle.
 ///
 /// Projection serialization borrows the canonical accumulator and materializes
 /// one grouping at a time, so the four projections never coexist in memory.

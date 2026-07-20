@@ -392,6 +392,7 @@ pub fn scan_directory(
                 "updates.jsonl" => file_name == "updates.jsonl",
                 "events.jsonl" => file_name == "events.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
+                "*.messages.json" => file_name.ends_with(".messages.json"),
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
                 "state.db" => file_name == "state.db",
@@ -686,31 +687,6 @@ fn is_opencode_db_filename(name: &str) -> bool {
     channel
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
-fn cline_additional_vscode_task_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
-    let mut roots = vec![PathBuf::from(home_dir)
-        .join("Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks")];
-
-    if cfg!(target_os = "windows") && use_env_roots {
-        if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
-            roots.push(
-                PathBuf::from(app_data)
-                    .join("Code/User/globalStorage/saoudrizwan.claude-dev/tasks"),
-            );
-        }
-    }
-
-    roots.push(
-        PathBuf::from(home_dir)
-            .join("AppData/Roaming/Code/User/globalStorage/saoudrizwan.claude-dev/tasks"),
-    );
-    roots.push(
-        PathBuf::from(home_dir)
-            .join(".vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks"),
-    );
-
-    roots
 }
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
@@ -1038,17 +1014,15 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::Cline) {
         let local_path =
-            local_def(ClientId::Cline).resolve_path_with_env_strategy(home_dir, use_env_roots);
+            local_clients::cline_session_data_dir_with_env_strategy(home_dir, use_env_roots)
+                .to_string_lossy()
+                .into_owned();
         push_unique_scan_task(
             &mut tasks,
             &mut seen_scan_roots,
             ClientId::Cline,
             local_path,
         );
-
-        for root in cline_additional_vscode_task_roots(home_dir, use_env_roots) {
-            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Cline, root);
-        }
     }
 
     if enabled.contains(&ClientId::Kilo) {
@@ -1775,25 +1749,13 @@ mod tests {
     }
 
     fn setup_mock_cline_dir(base: &std::path::Path) {
-        let local =
+        let current = base.join(".cline/data/sessions/session-a");
+        let legacy =
             base.join(".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/task-local");
-        let macos = base.join(
-            "Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/task-macos",
-        );
-        let windows = base.join(
-            "AppData/Roaming/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/task-windows",
-        );
-        let server = base.join(
-            ".vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/task-server",
-        );
-        fs::create_dir_all(&local).unwrap();
-        fs::create_dir_all(&macos).unwrap();
-        fs::create_dir_all(&windows).unwrap();
-        fs::create_dir_all(&server).unwrap();
-        File::create(local.join("ui_messages.json")).unwrap();
-        File::create(macos.join("ui_messages.json")).unwrap();
-        File::create(windows.join("ui_messages.json")).unwrap();
-        File::create(server.join("ui_messages.json")).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        File::create(current.join("session-a.messages.json")).unwrap();
+        File::create(legacy.join("ui_messages.json")).unwrap();
     }
 
     #[test]
@@ -2982,11 +2944,87 @@ mod tests {
         setup_mock_cline_dir(home);
 
         let result = scan_all_clients(home.to_str().unwrap(), &["cline".to_string()]);
-        assert_eq!(result.get(ClientId::Cline).len(), 4);
+        assert_eq!(result.get(ClientId::Cline).len(), 1);
         assert!(result
             .get(ClientId::Cline)
             .iter()
-            .all(|p| p.ends_with("ui_messages.json")));
+            .all(|p| p.ends_with("session-a.messages.json")));
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_cline_honors_env_and_deduplicates_extra_roots() {
+        let variables = [
+            "CLINE_SESSION_DATA_DIR",
+            "CLINE_DATA_DIR",
+            "CLINE_DIR",
+            "TOKSCALE_EXTRA_DIRS",
+        ];
+        let previous: Vec<_> = variables
+            .iter()
+            .map(|variable| (*variable, std::env::var(variable).ok()))
+            .collect();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let session_root = home.join("session-override");
+        let data_root = home.join("data-override");
+        let cline_root = home.join("cline-override");
+        let extra_root = home.join("extra");
+        let explicit_home_root = home.join(".cline/data/sessions/home-session");
+        for (root, file) in [
+            (&session_root, "session.messages.json"),
+            (&data_root.join("sessions"), "data.messages.json"),
+            (&cline_root.join("data/sessions"), "cline.messages.json"),
+            (&extra_root, "extra.messages.json"),
+            (&explicit_home_root, "home.messages.json"),
+        ] {
+            fs::create_dir_all(root).unwrap();
+            File::create(root.join(file)).unwrap();
+        }
+
+        unsafe {
+            std::env::set_var("CLINE_SESSION_DATA_DIR", &session_root);
+            std::env::set_var("CLINE_DATA_DIR", &data_root);
+            std::env::set_var("CLINE_DIR", &cline_root);
+            std::env::set_var(
+                "TOKSCALE_EXTRA_DIRS",
+                format!("cline:{}", extra_root.display()),
+            );
+        }
+        let mut settings = ScannerSettings::default();
+        settings
+            .extra_scan_paths
+            .insert("cline".to_string(), vec![extra_root.clone()]);
+
+        let env_result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["cline".to_string()],
+            true,
+            &settings,
+        )
+        .unwrap();
+        let env_names: HashSet<_> = env_result
+            .get(ClientId::Cline)
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect();
+        assert_eq!(
+            env_names,
+            HashSet::from(["session.messages.json", "extra.messages.json"])
+        );
+
+        let explicit_home_result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["cline".to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(explicit_home_result.get(ClientId::Cline).len(), 1);
+        assert!(explicit_home_result.get(ClientId::Cline)[0].ends_with("home.messages.json"));
+
+        for (variable, value) in previous {
+            restore_env(variable, value);
+        }
     }
 
     #[test]

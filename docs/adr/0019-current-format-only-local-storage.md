@@ -22,6 +22,10 @@ retired layout identifies project directories by a SHA-256 storage key. The
 current layout uses a readable project directory and records the exact
 workspace path in a `.project_root` sidecar.
 
+Cline VS Code 4.0+ and Cline CLI 3.x now share SDK v1 session artifacts under
+the Cline data root. Earlier VS Code releases stored a separate task-log shape
+under extension globalStorage.
+
 ## Decision
 
 Local client adapters read only the currently supported storage format unless
@@ -63,6 +67,17 @@ For Gemini CLI:
 - do not reconstruct retired project identities from path hashes, auxiliary
   indexes, or transcript heuristics.
 
+For Cline:
+
+- discover only SDK v1 `*.messages.json` artifacts under the active Cline
+  session-data root and configured extra Cline scan roots;
+- accept only the version-1 messages envelope shared by VS Code 4.0+ and CLI
+  3.x;
+- use the sibling root manifest only as optional workspace metadata and a cache
+  dependency, and do not read `sessions.db` for usage; and
+- do not discover or parse retired VS Code globalStorage `ui_messages.json`
+  task logs.
+
 ## Consequences
 
 This is intentionally breaking. Users whose only OpenCode history is in the
@@ -80,3 +95,8 @@ Gemini history stored only in retired SHA-256 project directories is likewise
 absent from reports. Tokscale ignores those directories without migrating or
 deleting them. Supporting both JSON and JSONL session files in the current
 named layout does not reintroduce the retired storage contract.
+
+Cline history that exists only in retired VS Code globalStorage task logs is
+absent from reports. Current VS Code and CLI artifacts follow one discovery,
+identity, usage, and cache contract; unknown future envelope versions surface
+as unavailable input rather than being guessed.

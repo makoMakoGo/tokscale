@@ -29,8 +29,8 @@ pub use aggregate::{
     TuiSessionTokens, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
 };
 pub use clients::{
-    warp_sqlite_roots_with_env_strategy, ClientCounts, ClientId, ClientIdentity, LocalClientDef,
-    PathRoot,
+    cline_session_data_dir_with_env_strategy, warp_sqlite_roots_with_env_strategy, ClientCounts,
+    ClientId, ClientIdentity, LocalClientDef, PathRoot,
 };
 pub use local_report_error::{LocalReportError, LocalReportErrorKind};
 pub use message_cache::{prune_source_message_cache, SourceCachePruneError, SourceCachePruneStats};
