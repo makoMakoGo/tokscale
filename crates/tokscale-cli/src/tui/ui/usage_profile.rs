@@ -4,13 +4,118 @@ use ratatui::prelude::*;
 use super::widgets::{format_cost, format_tokens};
 use crate::tui::app::App;
 
-const PROFILE_FIXED_WIDTH: usize = 36;
 const PROFILE_MAX_BAR_WIDTH: usize = 80;
+const PROFILE_MIN_BAR_WIDTH: usize = 6;
 
-pub(crate) fn bar_width(area_width: u16) -> usize {
-    (area_width as usize)
-        .saturating_sub(PROFILE_FIXED_WIDTH)
-        .min(PROFILE_MAX_BAR_WIDTH)
+/// One responsive bar row in a profile panel (shared by daily and hourly).
+///
+/// Row layout adapts to the available content `width`:
+/// `label  detail  ████████░░░  12.3%`
+/// - The filled bar always uses `app.theme.accent`; the track uses the subtle
+///   text style; the percentage column is never clipped.
+/// - As width shrinks the row degrades gracefully: the detail column drops
+///   first, then the bar, leaving label + percentage.
+#[derive(Debug, Clone)]
+pub(crate) struct ProfileBarRow {
+    /// Left-aligned label ("Monday", "14").
+    pub label: String,
+    /// Secondary column rendered muted ("7.2B", "14:00-14:59").
+    pub detail: String,
+    /// Bar magnitude.
+    pub value: u64,
+    /// Scale reference for a full bar.
+    pub max_value: u64,
+    /// Percentage denominator.
+    pub total: u64,
+    /// Peak styling: the label renders bold yellow.
+    pub highlight: bool,
+}
+
+/// Renders one profile row, degrading gracefully as `width` shrinks.
+///
+/// Columns are separated by a two-space gap:
+/// `{label:<10}  {detail:>12}  {bar}  {pct:>5.1}%`.
+/// The bar takes the width left after the fixed columns, capped at
+/// `PROFILE_MAX_BAR_WIDTH`; below `PROFILE_MIN_BAR_WIDTH` of bar space the
+/// detail column drops first and then the bar, leaving label + percentage.
+/// The percentage is always the last column standing and is never clipped.
+pub(crate) fn bar_row(app: &App, row: &ProfileBarRow, width: usize) -> Line<'static> {
+    const LABEL_W: usize = 10;
+    const DETAIL_W: usize = 12;
+    const PCT_W: usize = 6; // "{:>5.1}%"
+    const GAP: usize = 2;
+
+    let percentage = if row.total > 0 {
+        row.value as f64 / row.total as f64 * 100.0
+    } else {
+        0.0
+    };
+    let label_style = if row.highlight {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.foreground)
+    };
+
+    // Width left for the bar after the fixed columns and gaps. Degradation
+    // order: full -> no detail -> no bar (label + percentage only).
+    let full_bar = width.saturating_sub(LABEL_W + DETAIL_W + PCT_W + 3 * GAP);
+    let plain_bar = width.saturating_sub(LABEL_W + PCT_W + 2 * GAP);
+    let (show_detail, bar_width) = if full_bar >= PROFILE_MIN_BAR_WIDTH {
+        (true, full_bar.min(PROFILE_MAX_BAR_WIDTH))
+    } else if plain_bar >= PROFILE_MIN_BAR_WIDTH {
+        (false, plain_bar.min(PROFILE_MAX_BAR_WIDTH))
+    } else {
+        (false, 0)
+    };
+    // Once only label + percentage remain, the label shrinks before the
+    // percentage ever clips.
+    let label_w = if show_detail || bar_width > 0 {
+        LABEL_W
+    } else {
+        LABEL_W.min(width.saturating_sub(GAP + PCT_W))
+    };
+
+    let label: String = row.label.chars().take(label_w).collect();
+    let detail: String = row.detail.chars().take(DETAIL_W).collect();
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if label_w > 0 {
+        spans.push(Span::styled(format!("{label:<label_w$}"), label_style));
+    }
+    if show_detail {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("{detail:>12}"),
+            Style::default().fg(app.theme.muted),
+        ));
+    }
+    if bar_width > 0 {
+        let filled = if row.max_value > 0 {
+            (row.value as f64 / row.max_value as f64 * bar_width as f64).round() as usize
+        } else {
+            0
+        }
+        .min(bar_width);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "█".repeat(filled),
+            Style::default().fg(app.theme.accent),
+        ));
+        spans.push(Span::styled(
+            "░".repeat(bar_width - filled),
+            app.theme.subtle_text_style(),
+        ));
+    }
+    if !spans.is_empty() {
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::styled(
+        format!("{percentage:>5.1}%"),
+        Style::default().fg(app.theme.foreground),
+    ));
+    Line::from(spans)
 }
 
 /// Builds the shared profile heading and all-data summary. View-specific
@@ -135,11 +240,148 @@ mod tests {
             .collect()
     }
 
+    fn bar_row_fixture() -> ProfileBarRow {
+        ProfileBarRow {
+            label: "Monday".to_string(),
+            detail: "7.2B".to_string(),
+            value: 50,
+            max_value: 100,
+            total: 200,
+            highlight: false,
+        }
+    }
+
+    fn bar_cell_count(line: &Line<'_>) -> usize {
+        line.spans
+            .iter()
+            .flat_map(|span| span.content.chars())
+            .filter(|c| *c == '█' || *c == '░')
+            .count()
+    }
+
     #[test]
-    fn profile_bar_does_not_overflow_a_narrow_view() {
-        assert_eq!(bar_width(20), 0);
-        assert_eq!(bar_width(40), 4);
-        assert_eq!(bar_width(200), 80);
+    fn bar_row_renders_all_columns_at_wide_width() {
+        let app = make_app();
+        let line = bar_row(&app, &bar_row_fixture(), 120);
+        let text = line_text(&line);
+
+        assert!(text.starts_with("Monday    "));
+        assert!(text.contains("7.2B"));
+        assert!(text.contains('█'));
+        assert!(text.contains('░'));
+        assert!(text.ends_with(" 25.0%"));
+        assert!(line.width() <= 120);
+        assert_eq!(bar_cell_count(&line), PROFILE_MAX_BAR_WIDTH);
+    }
+
+    #[test]
+    fn bar_row_fill_uses_theme_accent_and_subtle_track() {
+        let app = make_app();
+        let line = bar_row(&app, &bar_row_fixture(), 120);
+
+        let fill = line
+            .spans
+            .iter()
+            .find(|span| span.content.contains('█'))
+            .expect("fill span");
+        assert_eq!(fill.style.fg, Some(app.theme.accent));
+
+        let track = line
+            .spans
+            .iter()
+            .find(|span| span.content.contains('░'))
+            .expect("track span");
+        assert_eq!(track.style, app.theme.subtle_text_style());
+    }
+
+    #[test]
+    fn bar_row_peak_highlight_renders_bold_yellow_label() {
+        let app = make_app();
+        let row = ProfileBarRow {
+            highlight: true,
+            ..bar_row_fixture()
+        };
+        let line = bar_row(&app, &row, 120);
+
+        let label = &line.spans[0];
+        assert!(label.content.contains("Monday"));
+        assert_eq!(label.style.fg, Some(Color::Yellow));
+        assert!(label.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn bar_row_percentage_is_never_clipped() {
+        let app = make_app();
+        let row = ProfileBarRow {
+            label: "Wednesday".to_string(),
+            detail: "14:00-14:59".to_string(),
+            value: 33,
+            max_value: 100,
+            total: 150,
+            highlight: false,
+        };
+
+        for width in 20..=200 {
+            let line = bar_row(&app, &row, width);
+            assert!(line.width() <= width, "row overflows at width {width}");
+            let text = line_text(&line);
+            assert!(
+                text.ends_with(" 22.0%"),
+                "percentage clipped at width {width}: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bar_row_degrades_detail_then_bar_as_width_shrinks() {
+        let app = make_app();
+
+        let full = line_text(&bar_row(&app, &bar_row_fixture(), 60));
+        assert!(full.contains("7.2B"));
+        assert!(full.contains('█'));
+
+        // The bar still fits at its minimum width, so the detail stays.
+        let edge = line_text(&bar_row(&app, &bar_row_fixture(), 40));
+        assert!(edge.contains("7.2B"));
+        assert!(edge.contains('█'));
+
+        let no_detail = line_text(&bar_row(&app, &bar_row_fixture(), 39));
+        assert!(!no_detail.contains("7.2B"));
+        assert!(no_detail.contains('█'));
+        assert!(no_detail.contains("Monday"));
+
+        let minimal = line_text(&bar_row(&app, &bar_row_fixture(), 20));
+        assert!(!minimal.contains("7.2B"));
+        assert!(!minimal.contains('█'));
+        assert!(!minimal.contains('░'));
+        assert!(minimal.contains("Monday"));
+        assert!(minimal.ends_with(" 25.0%"));
+    }
+
+    #[test]
+    fn bar_row_zero_total_renders_zero_percent() {
+        let app = make_app();
+        let row = ProfileBarRow {
+            value: 0,
+            total: 0,
+            ..bar_row_fixture()
+        };
+        let text = line_text(&bar_row(&app, &row, 120));
+        assert!(text.ends_with("  0.0%"));
+    }
+
+    #[test]
+    fn bar_row_zero_max_value_renders_track_without_fill() {
+        let app = make_app();
+        let row = ProfileBarRow {
+            max_value: 0,
+            ..bar_row_fixture()
+        };
+        let line = bar_row(&app, &row, 120);
+        let text = line_text(&line);
+
+        assert!(!text.contains('█'));
+        assert_eq!(bar_cell_count(&line), PROFILE_MAX_BAR_WIDTH);
     }
 
     #[test]

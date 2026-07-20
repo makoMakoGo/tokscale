@@ -74,28 +74,32 @@ pub fn render(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
         .style(Style::default().bg(app.theme.background));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.is_empty() {
+    let content = inner.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    if content.is_empty() {
         state.set_daily_profile_text_viewport(0, 0);
         return;
     }
 
     if app.data.daily.is_empty() {
-        state.set_daily_profile_text_viewport(inner.height as usize, 0);
+        state.set_daily_profile_text_viewport(content.height as usize, 0);
         frame.render_widget(
             Paragraph::new("No daily usage data available")
                 .style(Style::default().fg(app.theme.muted))
                 .alignment(Alignment::Center),
-            inner,
+            content,
         );
         return;
     }
 
-    let lines = build_daily_profile_lines(app, inner.width);
+    let lines = build_daily_profile_lines(app, content.width);
     let total_lines = lines.len();
-    let visible_height = inner.height as usize;
+    let visible_height = content.height as usize;
     state.set_daily_profile_text_viewport(visible_height, total_lines);
     let visible = lines[state.daily_profile_text_visible_range()].to_vec();
-    frame.render_widget(Paragraph::new(visible), inner);
+    frame.render_widget(Paragraph::new(visible), content);
 
     if total_lines > visible_height {
         let mut scrollbar_state =
@@ -122,7 +126,7 @@ pub(crate) fn build_daily_profile_lines(app: &App, area_width: u16) -> Vec<Line<
         .map(|weekday| weekday.tokens)
         .max()
         .unwrap_or(0);
-    let bar_width = usage_profile::bar_width(area_width);
+    let width = area_width as usize;
     let mut lines = usage_profile::summary_lines(
         app,
         app.data.daily.iter().map(|day| day.date),
@@ -134,42 +138,19 @@ pub(crate) fn build_daily_profile_lines(app: &App, area_width: u16) -> Vec<Line<
     lines.push(Line::default());
 
     for weekday in weekdays {
-        let percentage = if total_tokens > 0 {
-            weekday.tokens as f64 / total_tokens as f64 * 100.0
-        } else {
-            0.0
-        };
-        let filled = if max_tokens > 0 {
-            (weekday.tokens as f64 / max_tokens as f64 * bar_width as f64).round() as usize
-        } else {
-            0
-        }
-        .min(bar_width);
         let is_peak = peak.is_some_and(|peak| peak.label == weekday.label);
-        let label_style = if is_peak {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.theme.foreground)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:<10}", weekday.label), label_style),
-            Span::styled(
-                format!("{:>12}", format_tokens(weekday.tokens)),
-                Style::default().fg(app.theme.muted),
-            ),
-            Span::raw("  "),
-            Span::styled("█".repeat(filled), Style::default().fg(Color::Green)),
-            Span::styled(
-                "░".repeat(bar_width.saturating_sub(filled)),
-                app.theme.subtle_text_style(),
-            ),
-            Span::styled(
-                format!("  {:>5.1}%", percentage),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]));
+        lines.push(usage_profile::bar_row(
+            app,
+            &usage_profile::ProfileBarRow {
+                label: weekday.label.to_string(),
+                detail: format_tokens(weekday.tokens),
+                value: weekday.tokens,
+                max_value: max_tokens,
+                total: total_tokens,
+                highlight: is_peak,
+            },
+            width,
+        ));
     }
 
     lines.push(Line::default());
@@ -252,6 +233,26 @@ mod tests {
             .join("\n")
     }
 
+    fn render_buffer(
+        app: &App,
+        state: &mut ViewState,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, state, Rect::new(0, 0, width, height)))
+            .unwrap()
+            .buffer
+            .clone()
+    }
+
+    fn buffer_row(buffer: &ratatui::buffer::Buffer, width: u16, y: u16) -> String {
+        (0..width)
+            .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+            .collect()
+    }
+
     #[test]
     fn weekday_aggregation_combines_dates_and_costs() {
         let daily = vec![
@@ -287,7 +288,9 @@ mod tests {
         assert!(text[1].contains("2 active days"));
         assert!(text[1].contains("1K tokens"));
         assert!(text[1].contains("$10.00"));
-        assert!(text[7].contains("Friday"));
+        assert!(text[3].starts_with("Monday"));
+        assert!(text[7].starts_with("Friday"));
+        assert!(text[7].contains("600"));
         assert!(text[7].contains("60.0%"));
         assert!(text[11].contains("Peak day Friday"));
         assert!(text[11].contains("600 tokens"));
@@ -345,5 +348,94 @@ mod tests {
         assert!(bottom.contains("Peak day Friday"));
         assert!(bottom.contains("Press [v] to switch to table view"));
         assert_eq!(app.selected_index, 5);
+    }
+
+    #[test]
+    fn content_rows_start_at_the_shared_inner_padding_offset() {
+        let (mut app, _home_dir) = make_app();
+        app.data.daily = vec![day("2026-07-13", 400, 4.0), day("2026-07-17", 600, 6.0)];
+        app.data.total_tokens = 1_000;
+        app.data.total_cost = 10.0;
+        let mut state = ViewState::default();
+        let (width, height) = (120, 16);
+
+        let buffer = render_buffer(&app, &mut state, width, height);
+
+        for y in 1..height - 1 {
+            let first_content_x =
+                (1..width - 1).find(|&x| buffer.cell((x, y)).unwrap().symbol() != " ");
+            if let Some(x) = first_content_x {
+                assert_eq!(
+                    x, 2,
+                    "row {y} starts at x={x}, expected the border+inset offset 2"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_widths_keep_rows_inside_the_border_and_the_percentage_visible() {
+        let (mut app, _home_dir) = make_app();
+        app.data.daily = vec![day("2026-07-13", 400, 4.0), day("2026-07-17", 600, 6.0)];
+        app.data.total_tokens = 1_000;
+        app.data.total_cost = 10.0;
+        let mut state = ViewState::default();
+
+        for width in [50u16, 36] {
+            let height = 16;
+            let buffer = render_buffer(&app, &mut state, width, height);
+            let mut screen = String::new();
+
+            for y in 1..height - 1 {
+                let row = buffer_row(&buffer, width, y);
+                screen.push_str(&row);
+                screen.push('\n');
+                assert_eq!(
+                    buffer.cell((width - 1, y)).unwrap().symbol(),
+                    "│",
+                    "row {y} overruns the right border at width {width}"
+                );
+                let first_content_x =
+                    (1..width - 1).find(|&x| buffer.cell((x, y)).unwrap().symbol() != " ");
+                if let Some(x) = first_content_x {
+                    assert_eq!(x, 2, "row {y} lost the inset offset at width {width}");
+                    assert_eq!(
+                        buffer.cell((width - 2, y)).unwrap().symbol(),
+                        " ",
+                        "row {y} reaches the right inset cell at width {width}"
+                    );
+                }
+            }
+
+            assert!(
+                screen.contains("60.0%"),
+                "percentage clipped at width {width}:\n{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn peak_weekday_label_renders_bold_yellow() {
+        let (mut app, _home_dir) = make_app();
+        app.data.daily = vec![day("2026-07-13", 400, 4.0), day("2026-07-17", 600, 6.0)];
+        app.data.total_tokens = 1_000;
+        app.data.total_cost = 10.0;
+        let mut state = ViewState::default();
+        let (width, height) = (120, 16);
+
+        let buffer = render_buffer(&app, &mut state, width, height);
+        let peak_y = (1..height - 1)
+            .find(|&y| buffer_row(&buffer, width, y).contains("Friday"))
+            .expect("Friday row should render");
+
+        let peak_label = buffer.cell((2, peak_y)).unwrap();
+        assert_eq!(peak_label.symbol(), "F");
+        assert_eq!(peak_label.fg, Color::Yellow);
+        assert!(peak_label.modifier.contains(Modifier::BOLD));
+
+        let plain_y = (1..height - 1)
+            .find(|&y| buffer_row(&buffer, width, y).contains("Monday"))
+            .expect("Monday row should render");
+        assert_ne!(buffer.cell((2, plain_y)).unwrap().fg, Color::Yellow);
     }
 }

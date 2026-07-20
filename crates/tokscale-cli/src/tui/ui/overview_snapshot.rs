@@ -771,7 +771,14 @@ mod tests {
         let screen = lines.join("\n");
         assert!(screen.contains("Total Tokens"));
         assert!(!screen.contains("Sources"), "Sources section should hide");
-        let token_rows = lines.iter().filter(|line| line.contains("Tokens")).count();
+        let snapshot_start = lines
+            .iter()
+            .position(|line| line.contains("Snapshot"))
+            .expect("snapshot panel should render");
+        let token_rows = lines[snapshot_start..]
+            .iter()
+            .filter(|line| line.contains("Tokens"))
+            .count();
         assert_eq!(
             token_rows, 2,
             "only the two token metric rows should mention Tokens"
@@ -798,7 +805,14 @@ mod tests {
         let screen = lines.join("\n");
         assert!(screen.contains("Total Tokens"));
         assert!(screen.contains("Sources"), "stacked fallback lists Sources");
-        let token_rows = lines.iter().filter(|line| line.contains("Tokens")).count();
+        let snapshot_start = lines
+            .iter()
+            .position(|line| line.contains("Snapshot"))
+            .expect("snapshot panel should render");
+        let token_rows = lines[snapshot_start..]
+            .iter()
+            .filter(|line| line.contains("Tokens"))
+            .count();
         assert_eq!(
             token_rows, 3,
             "stacked fallback adds a Tokens section title"

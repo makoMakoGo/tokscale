@@ -1,3 +1,17 @@
+//! Chromeless stacked bar chart for the Overview "Tokens per Day" panel.
+//!
+//! Rendering contract (implemented in this module):
+//! - `area` is the whole chart content area inside a bordered box drawn by the
+//!   caller: there is no y-axis gutter and no title row, so bars span the full
+//!   width edge to edge.
+//! - Rows relative to `area`: bars occupy rows `0..h-2`, row `h-2` is a
+//!   baseline of '─', row `h-1` holds the date labels.
+//! - A single dotted gridline ('┄') crosses the vertical middle of the bar
+//!   field; it is drawn before the bars so it only shows through empty cells.
+//! - A compact `peak {max}` marker overlays the top-right of bar row 0.
+//! - Date labels are anchored to the edges: first date left-aligned, last date
+//!   right-aligned, middle date centered when there is room.
+
 use ratatui::prelude::*;
 
 use super::widgets::format_tokens;
@@ -28,19 +42,12 @@ pub struct StackedBarData {
 
 /// Render a stacked bar chart where each bar shows model breakdown
 pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: &[StackedBarData]) {
-    if data.is_empty() {
+    if data.is_empty() || area.height < 2 || area.width == 0 {
         return;
     }
 
-    let is_very_narrow = app.is_very_narrow();
-    let y_label_width: u16 = if is_very_narrow { 6 } else { 7 };
-
-    let chart_width = area.width.saturating_sub(y_label_width) as usize;
-    let chart_height = area.height.saturating_sub(3) as usize;
-
-    if chart_width == 0 || chart_height == 0 {
-        return;
-    }
+    let chart_width = area.width as usize;
+    let chart_height = area.height.saturating_sub(2) as usize;
 
     let max_value = data
         .iter()
@@ -60,45 +67,24 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
         (end - start).max(1)
     };
 
-    // Title
-    let title = if is_very_narrow {
-        "Tokens"
-    } else {
-        "Tokens per Day"
-    };
-    let title_y = area.y;
-    for (i, ch) in title.chars().enumerate() {
-        let x = area.x + y_label_width + i as u16;
-        if x < area.x + area.width {
-            buf[(x, title_y)]
-                .set_char(ch)
-                .set_style(Style::default().add_modifier(Modifier::BOLD));
+    // Dotted mid gridline, drawn before the bars so they overwrite it and it
+    // only shows through the empty cells above shorter bars.
+    if chart_height >= 4 {
+        let grid_y = area.y + (chart_height / 2) as u16;
+        for x in area.x..area.x + area.width {
+            buf[(x, grid_y)]
+                .set_char('┄')
+                .set_style(Style::default().fg(app.theme.border));
         }
     }
 
     // Render bars row by row (from top to bottom visually, which is high values to low)
     for row_from_bottom in (0..chart_height).rev() {
         let row_index = chart_height - 1 - row_from_bottom;
-        let y = area.y + 1 + row_index as u16;
-
-        // Y-axis label (only at top)
-        let y_label = if row_from_bottom == chart_height - 1 {
-            format_tokens(max_value as u64)
-        } else {
-            String::new()
-        };
-        let padded_label = format!("{:>width$}│", y_label, width = (y_label_width - 1) as usize);
-        for (i, ch) in padded_label.chars().enumerate() {
-            let x = area.x + i as u16;
-            if x < area.x + y_label_width {
-                buf[(x, y)]
-                    .set_char(ch)
-                    .set_style(Style::default().fg(app.theme.muted));
-            }
-        }
+        let y = area.y + row_index as u16;
 
         // Render each bar
-        let mut x_pos = area.x + y_label_width;
+        let mut x_pos = area.x;
         for (bar_index, bar_data) in data.iter().enumerate() {
             let bar_width = get_bar_width(bar_index);
 
@@ -121,72 +107,134 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
 
             for _ in 0..bar_width {
                 if x_pos < area.x + area.width {
-                    buf[(x_pos, y)].set_char(ch).set_fg(fg_color);
+                    // Leave empty cells untouched so the gridline shows through.
+                    if ch != ' ' {
+                        buf[(x_pos, y)].set_char(ch).set_fg(fg_color);
+                    }
                     x_pos += 1;
                 }
             }
         }
     }
 
-    // X-axis
-    let axis_y = area.y + 1 + chart_height as u16;
-    if axis_y < area.y + area.height {
-        let zero_label = format!("{:>width$}│", "0", width = (y_label_width - 1) as usize);
-        for (i, ch) in zero_label.chars().enumerate() {
-            let x = area.x + i as u16;
-            if x < area.x + y_label_width {
-                buf[(x, axis_y)]
+    // Baseline separating the bars from the date labels
+    let baseline_y = area.y + area.height - 2;
+    for x in area.x..area.x + area.width {
+        buf[(x, baseline_y)]
+            .set_char('─')
+            .set_style(Style::default().fg(app.theme.muted));
+    }
+
+    // Compact peak marker, right-aligned on the top bar row; drawn after the
+    // bars with an explicit background so it reads over any bar beneath it.
+    if chart_height > 0 {
+        let peak_label = format!("peak {}", compact_tokens(max_value as u64));
+        let peak_width = peak_label.chars().count() as u16;
+        if area.width >= peak_width + 2 {
+            let peak_x = area.x + area.width - peak_width;
+            for (i, ch) in peak_label.chars().enumerate() {
+                buf[(peak_x + i as u16, area.y)].set_char(ch).set_style(
+                    Style::default()
+                        .fg(app.theme.muted)
+                        .bg(app.theme.background),
+                );
+            }
+        }
+    }
+
+    render_date_labels(buf, app, area, data);
+}
+
+/// Date labels anchored to the edges of the chart: first date left-aligned at
+/// `area.x`, last date right-aligned to end at the right edge, and — unless the
+/// app is very narrow — the middle date centered. When the labels would
+/// overlap, the middle one is dropped first; if the remaining two still
+/// collide, the right one is truncated from the left, keeping its tail.
+fn render_date_labels(buf: &mut Buffer, app: &App, area: Rect, data: &[StackedBarData]) {
+    let label_y = area.y + area.height - 1;
+    let is_very_narrow = app.is_very_narrow();
+    let bar_count = data.len();
+
+    let first_label = format_date_label(&data[0].date, is_very_narrow);
+    let first_width = first_label.chars().count() as u16;
+
+    let mut labels: Vec<(String, u16)> = vec![(first_label, area.x)];
+
+    if bar_count > 1 {
+        let last_label = format_date_label(&data[bar_count - 1].date, is_very_narrow);
+        let last_width = last_label.chars().count() as u16;
+
+        if !is_very_narrow && bar_count > 2 {
+            let middle_label = format_date_label(&data[bar_count / 2].date, is_very_narrow);
+            let middle_width = middle_label.chars().count() as u16;
+            // Keep the middle label only when all three fit with a gap each.
+            if first_width + middle_width + last_width + 2 <= area.width {
+                let middle_x = area.x + (area.width - middle_width) / 2;
+                labels.push((middle_label, middle_x));
+            }
+        }
+
+        let last_label = if first_width + last_width + 1 > area.width {
+            // Still colliding without the middle label: truncate the right
+            // label from the left, keeping its tail.
+            let keep = area.width.saturating_sub(first_width + 1) as usize;
+            last_label
+                .chars()
+                .skip(last_label.chars().count().saturating_sub(keep))
+                .collect()
+        } else {
+            last_label
+        };
+        let last_width = last_label.chars().count() as u16;
+        if last_width > 0 {
+            labels.push((last_label, area.x + area.width - last_width));
+        }
+    }
+
+    for (label, label_x) in labels {
+        for (i, ch) in label.chars().enumerate() {
+            let x = label_x + i as u16;
+            if x < area.x + area.width {
+                buf[(x, label_y)]
                     .set_char(ch)
                     .set_style(Style::default().fg(app.theme.muted));
             }
         }
-        for x in (area.x + y_label_width)..(area.x + area.width) {
-            buf[(x, axis_y)]
-                .set_char('─')
-                .set_style(Style::default().fg(app.theme.muted));
-        }
     }
+}
 
-    // X-axis labels
-    let label_y = axis_y + 1;
-    if label_y < area.y + area.height && !data.is_empty() {
-        let num_labels = if is_very_narrow { 2 } else { 3 };
-        let label_interval = (bar_count / num_labels).max(1);
-
-        for i in (0..bar_count).step_by(label_interval) {
-            let date_str = &data[i].date;
-
-            let label = if let Some((month_str, day_str)) = date_str.split_once('/') {
-                if let (Ok(month), Ok(day)) = (month_str.parse::<usize>(), day_str.parse::<u32>()) {
-                    if (1..=12).contains(&month) {
-                        if is_very_narrow {
-                            format!("{}/{}", month, day)
-                        } else {
-                            format!("{} {}", MONTH_NAMES[month - 1], day)
-                        }
-                    } else {
-                        date_str.clone()
-                    }
+/// Format a raw `month/day` date string for the label row.
+fn format_date_label(date_str: &str, is_very_narrow: bool) -> String {
+    if let Some((month_str, day_str)) = date_str.split_once('/') {
+        if let (Ok(month), Ok(day)) = (month_str.parse::<usize>(), day_str.parse::<u32>()) {
+            if (1..=12).contains(&month) {
+                return if is_very_narrow {
+                    format!("{}/{}", month, day)
                 } else {
-                    date_str.clone()
-                }
-            } else {
-                date_str.clone()
-            };
-
-            let bar_start_x = (i * chart_width) / bar_count;
-            let label_x = area.x + y_label_width + bar_start_x as u16;
-
-            for (j, ch) in label.chars().enumerate() {
-                let x = label_x + j as u16;
-                if x < area.x + area.width {
-                    buf[(x, label_y)]
-                        .set_char(ch)
-                        .set_style(Style::default().fg(app.theme.muted));
-                }
+                    format!("{} {}", MONTH_NAMES[month - 1], day)
+                };
             }
         }
     }
+    date_str.to_string()
+}
+
+/// Compact token count for the peak marker: when the integer part has 2+
+/// digits, drop the decimal ("38.2B" -> "38B", "123.4B" -> "123B"; "2.1B"
+/// stays as-is).
+fn compact_tokens(tokens: u64) -> String {
+    let formatted = format_tokens(tokens);
+    if let Some(dot) = formatted.find('.') {
+        let int_digits = formatted[..dot]
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .count();
+        if int_digits >= 2 {
+            let unit = formatted[dot + 1..].trim_start_matches(|c: char| c.is_ascii_digit());
+            return format!("{}{}", &formatted[..dot], unit);
+        }
+    }
+    formatted
 }
 
 fn get_stacked_bar_content(
@@ -247,4 +295,206 @@ fn get_stacked_bar_content(
     };
     let block_index = (ratio * 8.0).floor().clamp(1.0, 8.0) as usize;
     (BLOCKS[block_index], best_color)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn make_app(width: u16) -> App {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        app.terminal_width = width;
+        app
+    }
+
+    fn bar(date: &str, total: u64) -> StackedBarData {
+        StackedBarData {
+            date: date.to_string(),
+            models: vec![ModelSegment {
+                model_id: "test-model".to_string(),
+                tokens: total,
+                color: Color::Green,
+            }],
+            total,
+        }
+    }
+
+    fn render_chart(
+        app: &App,
+        area: Rect,
+        data: &[StackedBarData],
+        width: u16,
+        height: u16,
+    ) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render_stacked_bar_chart(frame, app, area, data))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_string(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn bars_touch_both_edges_of_the_area() {
+        let app = make_app(120);
+        let data: Vec<StackedBarData> = (0..7).map(|i| bar("1/5", 100 + i)).collect();
+        let area = Rect::new(2, 1, 40, 10);
+        let buf = render_chart(&app, area, &data, 44, 12);
+
+        // The tallest bar reaches the top row; every row of the bar field
+        // starts at area.x and ends at the right edge.
+        let bar_rows = area.y..area.y + area.height - 2;
+        for y in bar_rows.clone() {
+            assert_ne!(
+                buf[(area.x, y)].symbol(),
+                " ",
+                "left edge of row {y} should be covered by a bar"
+            );
+            assert_ne!(
+                buf[(area.x + area.width - 1, y)].symbol(),
+                " ",
+                "right edge of row {y} should be covered by a bar"
+            );
+        }
+        // No y-axis gutter: the cell just left of the area stays untouched.
+        for y in bar_rows {
+            assert_eq!(buf[(area.x - 1, y)].symbol(), " ");
+        }
+    }
+
+    #[test]
+    fn baseline_row_is_all_horizontal_lines() {
+        let app = make_app(120);
+        let data = vec![bar("1/5", 100), bar("1/6", 0), bar("1/7", 50)];
+        let area = Rect::new(0, 0, 30, 8);
+        let buf = render_chart(&app, area, &data, 30, 8);
+
+        let baseline_y = area.y + area.height - 2;
+        for x in area.x..area.x + area.width {
+            assert_eq!(buf[(x, baseline_y)].symbol(), "─");
+            assert_eq!(buf[(x, baseline_y)].fg, app.theme.muted);
+        }
+    }
+
+    #[test]
+    fn peak_label_sits_top_right_and_compacts_the_value() {
+        let app = make_app(120);
+        let data = vec![bar("1/5", 38_200_000_000), bar("1/6", 100)];
+        let area = Rect::new(0, 0, 30, 8);
+        let buf = render_chart(&app, area, &data, 30, 8);
+
+        let label = "peak 38B";
+        let start_x = area.x + area.width - label.len() as u16;
+        let row: String = row_string(&buf, area.y)
+            .chars()
+            .skip(start_x as usize)
+            .collect();
+        assert_eq!(row, label);
+        assert_eq!(buf[(start_x, area.y)].fg, app.theme.muted);
+        assert_eq!(buf[(start_x, area.y)].bg, app.theme.background);
+    }
+
+    #[test]
+    fn compact_tokens_drops_decimals_for_two_or_more_integer_digits() {
+        assert_eq!(compact_tokens(38_200_000_000), "38B");
+        assert_eq!(compact_tokens(123_400_000_000), "123B");
+        assert_eq!(compact_tokens(2_100_000_000), "2.1B");
+        assert_eq!(compact_tokens(500), "500");
+    }
+
+    #[test]
+    fn mid_gridline_shows_only_through_empty_cells() {
+        let app = make_app(120);
+        // Left half full height, right half empty.
+        let data = vec![bar("1/5", 100), bar("1/6", 0)];
+        let area = Rect::new(0, 0, 20, 10);
+        let buf = render_chart(&app, area, &data, 20, 10);
+
+        let chart_height = area.height - 2;
+        let grid_y = area.y + chart_height / 2;
+        // Full bar overwrites the gridline on the left half.
+        assert_eq!(buf[(2, grid_y)].symbol(), "█");
+        // Empty bar lets the gridline show through on the right half.
+        assert_eq!(buf[(15, grid_y)].symbol(), "┄");
+        assert_eq!(buf[(15, grid_y)].fg, app.theme.border);
+    }
+
+    #[test]
+    fn date_labels_anchor_to_the_edges() {
+        let app = make_app(120);
+        let data = vec![bar("1/5", 10), bar("6/15", 20), bar("12/25", 30)];
+        let area = Rect::new(3, 2, 40, 8);
+        let buf = render_chart(&app, area, &data, 46, 12);
+
+        let label_y = area.y + area.height - 1;
+        let row = row_string(&buf, label_y);
+        let inner: String = row
+            .chars()
+            .skip(area.x as usize)
+            .take(area.width as usize)
+            .collect();
+        assert!(
+            inner.starts_with("Jan 5"),
+            "first date at area.x: {inner:?}"
+        );
+        assert!(
+            inner.ends_with("Dec 25"),
+            "last date at right edge: {inner:?}"
+        );
+        assert!(inner.contains("Jun 15"), "middle date centered: {inner:?}");
+        let middle_start = inner.find("Jun 15").unwrap();
+        let expected = (area.width as usize - "Jun 15".len()) / 2;
+        assert!(
+            middle_start.abs_diff(expected) <= 1,
+            "middle label roughly centered at {middle_start}, expected ~{expected}"
+        );
+    }
+
+    #[test]
+    fn very_narrow_app_renders_only_two_labels() {
+        let app = make_app(50);
+        let data = vec![bar("1/5", 10), bar("6/15", 20), bar("12/25", 30)];
+        let area = Rect::new(0, 0, 30, 8);
+        let buf = render_chart(&app, area, &data, 30, 8);
+
+        let label_y = area.y + area.height - 1;
+        let inner = row_string(&buf, label_y);
+        assert!(inner.starts_with("1/5"), "first date at area.x: {inner:?}");
+        assert!(
+            inner.ends_with("12/25"),
+            "last date at right edge: {inner:?}"
+        );
+        assert!(
+            !inner.contains("6/15"),
+            "very narrow apps drop the middle label: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn tiny_and_empty_inputs_do_not_panic() {
+        let app = make_app(120);
+        let data = vec![bar("1/5", 100), bar("1/6", 50)];
+        for (width, height) in [(0, 0), (1, 0), (0, 1), (1, 1), (4, 1), (3, 2), (1, 5)] {
+            let _ = render_chart(&app, Rect::new(0, 0, width, height), &data, 8, 8);
+        }
+        let _ = render_chart(&app, Rect::new(0, 0, 8, 8), &[], 8, 8);
+    }
 }
