@@ -14,7 +14,7 @@ use super::widgets::{
 };
 
 const CELL_WIDTH: u16 = 2;
-/// Width of the `Less ■ ■ ■ ■ ■ More` legend row.
+/// Width of the `Less █ █ █ █ █ More` legend row.
 const LEGEND_WIDTH: u16 = 19;
 const GRAPH_PANEL_H: u16 = 14;
 const GRAPH_MIN_H: u16 = 11;
@@ -110,7 +110,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_narrow = app.is_narrow();
     let label_width = if is_narrow { 2u16 } else { 4u16 };
     let graph_start_x = content.x.saturating_add(label_width);
-    let graph_start_y = content.y.saturating_add(2);
+    let graph_start_y = content.y.saturating_add(1);
     let graph_bottom = content.bottom();
 
     for (day_idx, label) in DAY_LABELS.iter().enumerate() {
@@ -186,7 +186,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                     let glyph = if selected {
                         Span::styled("▓", Style::default().fg(Color::White).bg(color))
                     } else {
-                        Span::styled("■", Style::default().fg(color))
+                        Span::styled("█", Style::default().fg(color))
                     };
                     Line::from(vec![glyph, Span::raw(" ")])
                 }
@@ -258,7 +258,8 @@ fn render_graph_metrics(
         .filter(|day| day.is_some())
         .count();
 
-    let metrics_y = last_grid_row.saturating_add(1);
+    // One blank row separates the grid from the metrics section.
+    let metrics_y = last_grid_row.saturating_add(2);
     if metrics_y < content.bottom() {
         let metrics = Line::from(vec![
             Span::styled("Current ", Style::default().fg(app.theme.muted)),
@@ -287,15 +288,15 @@ fn render_graph_metrics(
     if legend_y < content.bottom() {
         let legend = Line::from(vec![
             Span::styled("Less ", Style::default().fg(app.theme.muted)),
-            Span::styled("■", Style::default().fg(app.theme.colors[0])),
+            Span::styled("█", Style::default().fg(app.theme.colors[0])),
             Span::raw(" "),
-            Span::styled("■", Style::default().fg(app.theme.colors[1])),
+            Span::styled("█", Style::default().fg(app.theme.colors[1])),
             Span::raw(" "),
-            Span::styled("■", Style::default().fg(app.theme.colors[2])),
+            Span::styled("█", Style::default().fg(app.theme.colors[2])),
             Span::raw(" "),
-            Span::styled("■", Style::default().fg(app.theme.colors[3])),
+            Span::styled("█", Style::default().fg(app.theme.colors[3])),
             Span::raw(" "),
-            Span::styled("■", Style::default().fg(app.theme.colors[4])),
+            Span::styled("█", Style::default().fg(app.theme.colors[4])),
             Span::styled(" More", Style::default().fg(app.theme.muted)),
         ]);
         frame.render_widget(
@@ -932,7 +933,7 @@ mod tests {
             .draw(|frame| render_graph(frame, &mut app, frame.area()))
             .unwrap();
         let buffer = frame.buffer;
-        let selected_y = 3 + 4;
+        let selected_y = 2 + 4;
 
         let selected = buffer.cell((6, selected_y)).unwrap();
         assert_eq!(selected.symbol(), "▓");
@@ -1013,11 +1014,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert_eq!(buffer.cell((6, 7)).unwrap().symbol(), "■");
-        assert_eq!(buffer.cell((6, 7)).unwrap().fg, app.theme.colors[4]);
-        assert_eq!(buffer.cell((6, 3)).unwrap().symbol(), "■");
-        assert_eq!(buffer.cell((6, 3)).unwrap().fg, app.theme.colors[0]);
-        assert_eq!(buffer.cell((2, 7)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((6, 6)).unwrap().symbol(), "█");
+        assert_eq!(buffer.cell((6, 6)).unwrap().fg, app.theme.colors[4]);
+        assert_eq!(buffer.cell((6, 2)).unwrap().symbol(), "█");
+        assert_eq!(buffer.cell((6, 2)).unwrap().fg, app.theme.colors[0]);
+        assert_eq!(buffer.cell((2, 6)).unwrap().symbol(), " ");
         assert_eq!(buffer.cell((6, 1)).unwrap().fg, app.theme.muted);
         assert!(rendered.contains("click a day to inspect details"));
         assert!(!rendered.contains("keyboard"));
@@ -1049,7 +1050,7 @@ mod tests {
             .unwrap();
         let buffer = frame.buffer;
 
-        for y in 3..=9 {
+        for y in 2..=8 {
             let row = (0..120)
                 .map(|x| buffer.cell((x, y)).unwrap().symbol())
                 .collect::<String>();
@@ -1058,7 +1059,7 @@ mod tests {
                 "grid row {y} contains a dot placeholder: {row:?}"
             );
         }
-        for y in [3, 5, 6, 7, 8, 9] {
+        for y in [2, 4, 5, 6, 7, 8] {
             assert_eq!(buffer.cell((6, y)).unwrap().symbol(), " ");
             assert_eq!(buffer.cell((7, y)).unwrap().symbol(), " ");
         }
@@ -1089,9 +1090,9 @@ mod tests {
         let buffer = frame.buffer;
 
         for (day_idx, grade) in [0usize, 1, 2, 3, 4, 0, 0].iter().enumerate() {
-            let y = 3 + day_idx as u16;
+            let y = 2 + day_idx as u16;
             let cell = buffer.cell((6, y)).unwrap();
-            assert_eq!(cell.symbol(), "■");
+            assert_eq!(cell.symbol(), "█");
             assert_eq!(cell.fg, app.theme.colors[*grade]);
             assert_eq!(buffer.cell((7, y)).unwrap().symbol(), " ");
         }
@@ -1184,7 +1185,7 @@ mod tests {
         assert_eq!(buffer.cell((2, 11)).unwrap().symbol(), "L");
         for (grade, expected) in app.theme.colors.iter().enumerate() {
             let cell = buffer.cell((7 + grade as u16 * 2, 11)).unwrap();
-            assert_eq!(cell.symbol(), "■");
+            assert_eq!(cell.symbol(), "█");
             assert_eq!(cell.fg, *expected);
         }
 
