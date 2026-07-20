@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-binary=${1:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS]}
-label=${2:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS]}
-clients=${3:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS]}
+binary=${1:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS] [REPORT]}
+label=${2:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS] [REPORT]}
+clients=${3:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS] [REPORT]}
 runs=${4:-3}
+report=${5:-time-metrics}
 
 if [[ ! "$runs" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: RUNS must be a positive integer, got: $runs" >&2
@@ -18,6 +19,19 @@ if [[ ! -x "$binary" ]]; then
   echo "error: binary is not executable: $binary" >&2
   exit 1
 fi
+
+case "$report" in
+  time-metrics)
+    report_args=(time-metrics --json --no-spinner -c "$clients")
+    ;;
+  graph)
+    report_args=(graph --no-spinner -c "$clients")
+    ;;
+  *)
+    echo "error: REPORT must be time-metrics or graph, got: $report" >&2
+    exit 1
+    ;;
+esac
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -37,16 +51,16 @@ if ! "$time_cmd" -f '' -o "$time_probe_file" true >/dev/null 2>&1; then
   exit 1
 fi
 
-"$binary" time-metrics --json --no-spinner -c "$clients" >/dev/null
+"$binary" "${report_args[@]}" >/dev/null
 
 printf 'label\trun\tprocessing_ms\twall_s\tuser_s\tsys_s\tmax_rss_kib\n'
 for run in $(seq 1 "$runs"); do
   json_file="$tmp_dir/result-$run.json"
   time_file="$tmp_dir/time-$run.tsv"
   "$time_cmd" -f '%e\t%U\t%S\t%M' -o "$time_file" \
-    "$binary" time-metrics --json --no-spinner -c "$clients" >"$json_file"
-  if ! processing_ms=$(jq -er '.processingTimeMs | numbers' "$json_file"); then
-    echo "error: processingTimeMs must be a JSON number in $json_file" >&2
+    "$binary" "${report_args[@]}" >"$json_file"
+  if ! processing_ms=$(jq -er '.metadata.processingTimeMs | numbers' "$json_file"); then
+    echo "error: metadata.processingTimeMs must be a JSON number in $json_file" >&2
     exit 1
   fi
   printf '%s\t%s\t%s\t' "$label" "$run" "$processing_ms"

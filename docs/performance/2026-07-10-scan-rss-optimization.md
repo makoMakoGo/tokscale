@@ -23,8 +23,12 @@ The fixed probe is automated by:
 
 ```bash
 scripts/measure-scan-performance.sh \
-  "$PWD/target/release/tokscale" <label> <comma-separated-clients> 3
+  "$PWD/target/release/tokscale" <label> <comma-separated-clients> 3 \
+  [time-metrics|graph]
 ```
+
+The optional report selector defaults to `time-metrics`; `graph` applies the
+same envelope timing and RSS contract to graph generation.
 
 The secondary aggregation probe runs the existing 100,000-message
 `aggregation` benchmark executable with the `tui_client_model --quick` filter.
