@@ -1848,6 +1848,10 @@ fn test_graph_offline_without_pricing_cache_still_succeeds() {
     assert_eq!(json["data"]["contributions"].as_array().unwrap().len(), 2);
     let total_cost = json["data"]["summary"]["totalCost"].as_f64().unwrap();
     assert_eq!(total_cost, 0.0);
+    assert_eq!(json["data"]["meta"]["pricingStatus"], "unavailable");
+    assert!(json["data"]["meta"]["pricingDiagnostics"]
+        .as_array()
+        .is_some_and(|diagnostics| !diagnostics.is_empty()));
 }
 
 #[test]
@@ -1981,7 +1985,6 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
     write_pricing_cache(tmp.path(), 1);
 
     let output = offline_cmd_with_home(tmp.path())
-        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
         .args(["graph", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
@@ -1998,6 +2001,14 @@ fn test_graph_offline_uses_stale_pricing_cache_when_available() {
         "unexpected totalCost: {total_cost}"
     );
     assert_eq!(json["health"]["complete"], true);
+    assert_eq!(json["data"]["meta"]["pricingStatus"], "cachedFallback");
+    assert!(json["data"]["meta"]["pricingDiagnostics"]
+        .as_array()
+        .is_some_and(|diagnostics| diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .as_str()
+                .is_some_and(|line| line.contains("using cached pricing"))
+        })));
 }
 
 #[test]

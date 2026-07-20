@@ -25,6 +25,44 @@ pub const DIAGNOSTIC_USING_CACHED_PRICING: &str =
 pub const DIAGNOSTIC_PRICING_UNAVAILABLE: &str =
     "[tokscale] pricing unavailable; costs may be missing";
 
+/// Pricing availability for a usage report.
+///
+/// This describes catalog resolution, not usage completeness. Tokens remain
+/// authoritative even when pricing is unavailable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PricingStatus {
+    /// Pricing initialized without diagnostics.
+    #[default]
+    Available,
+    /// Pricing initialized with non-fatal diagnostics.
+    AvailableWithWarnings,
+    /// Online refresh failed and an older on-disk cache was used.
+    CachedFallback,
+    /// No pricing service could be initialized.
+    Unavailable,
+}
+
+impl PricingStatus {
+    pub fn from_diagnostics(diagnostics: &[String]) -> Self {
+        if diagnostics
+            .iter()
+            .any(|line| line.starts_with(DIAGNOSTIC_PRICING_UNAVAILABLE))
+        {
+            Self::Unavailable
+        } else if diagnostics
+            .iter()
+            .any(|line| line.starts_with(DIAGNOSTIC_USING_CACHED_PRICING))
+        {
+            Self::CachedFallback
+        } else if diagnostics.is_empty() {
+            Self::Available
+        } else {
+            Self::AvailableWithWarnings
+        }
+    }
+}
+
 pub(crate) fn emit_diagnostic(sink: &mut PricingDiagnosticSink<'_>, message: String) {
     if let Some(messages) = sink.as_mut() {
         (**messages).push(message);
@@ -314,6 +352,30 @@ impl PricingService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pricing_status_classifies_resolution_diagnostics() {
+        assert_eq!(
+            PricingStatus::from_diagnostics(&[]),
+            PricingStatus::Available
+        );
+        assert_eq!(
+            PricingStatus::from_diagnostics(&["catalog warning".to_string()]),
+            PricingStatus::AvailableWithWarnings
+        );
+        assert_eq!(
+            PricingStatus::from_diagnostics(&[format!(
+                "{DIAGNOSTIC_USING_CACHED_PRICING}: network error"
+            )]),
+            PricingStatus::CachedFallback
+        );
+        assert_eq!(
+            PricingStatus::from_diagnostics(&[format!(
+                "{DIAGNOSTIC_PRICING_UNAVAILABLE}: network error"
+            )]),
+            PricingStatus::Unavailable
+        );
+    }
 
     fn model_pricing(input: f64, output: f64) -> ModelPricing {
         ModelPricing {

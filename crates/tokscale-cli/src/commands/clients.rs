@@ -13,7 +13,7 @@ pub(crate) fn run_clients_command(
     use tokscale_core::scanner::{
         built_in_extra_scan_paths_for, copilot_exporter_path_with_env_strategy,
         discover_opencode_dbs, extra_scan_paths_for, opencode_data_dir_with_env_strategy,
-        parse_extra_dirs, ScannerError,
+        parse_extra_dirs,
     };
     use tokscale_core::{
         cline_session_data_dir_with_env_strategy, count_local_client_messages,
@@ -118,11 +118,10 @@ pub(crate) fn run_clients_command(
     };
     let built_in_extra_paths = match built_in_extra_scan_paths_for(&home_dir, &all_clients) {
         Ok(paths) => paths,
-        Err(ScannerError::ClaudeMirror(_)) => {
+        Err(_) => {
             health.record_unavailable_source(ClientId::Claude.as_str());
             vec![(ClientId::Claude, home_dir.join(".claude/transcripts"))]
         }
-        Err(error) => return Err(error.into()),
     };
     let settings_extra_dirs = extra_scan_paths_for(&scanner_settings, &all_clients)?;
     let copilot_exporter_path = copilot_exporter_path_with_env_strategy(use_env_roots);

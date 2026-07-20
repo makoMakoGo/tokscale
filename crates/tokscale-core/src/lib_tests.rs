@@ -2544,13 +2544,10 @@ fn inventory_probe_isolates_a_source_that_disappears_after_prepare() {
         .expect("a vanished third-party source must not abort the inventory probe");
     let result = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(super::load_prepared_usage_data_with_diagnostics(
-            prepared,
-            GroupBy::Model,
-        ))
+        .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
         .unwrap();
 
-    assert_eq!(result.data.total_tokens, 12);
+    assert_eq!(result.accumulator.project(&GroupBy::Model).total_tokens, 12);
     assert_eq!(result.health.failed_sources(), 1);
     assert_eq!(result.health.sources()[0].path, removed);
 }
@@ -2586,10 +2583,7 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
 
     let result = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(super::load_prepared_usage_data_with_diagnostics(
-            prepared,
-            GroupBy::Model,
-        ))
+        .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
         .unwrap();
     let confirmed_signature =
         super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
@@ -2597,7 +2591,7 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
             .source_inventory_signature();
     assert_ne!(stale_signature, result.source_inventory_signature);
     assert_eq!(confirmed_signature, result.source_inventory_signature);
-    assert_eq!(result.data.total_tokens, 13);
+    assert_eq!(result.accumulator.project(&GroupBy::Model).total_tokens, 13);
 }
 
 #[test]
@@ -5841,9 +5835,8 @@ fn test_local_message_loader_preserves_gateway_message_client_counts() {
 #[test]
 #[serial_test::serial]
 fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
-    // Regression guard: local message loading used to call
-    // `scan_all_clients_with_env_strategy`, which silently dropped
-    // `options.scanner_settings`. Users with
+    // Regression guard: local message loading must forward
+    // `options.scanner_settings` into OpenCode adapter discovery. Users with
     // `scanner.opencodeDbPaths` pointing at an OPENCODE_DB outside the
     // XDG data dir would see no rows through the clients/wrapped
     // command paths even though model/monthly/graph reports honored

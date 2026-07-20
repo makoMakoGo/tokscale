@@ -133,6 +133,8 @@ pub(crate) fn finish_graph_result(
             date_range_start,
             date_range_end,
             processing_time_ms,
+            pricing_status: None,
+            pricing_diagnostics: Vec::new(),
         },
         summary,
         years,

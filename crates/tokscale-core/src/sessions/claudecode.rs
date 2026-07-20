@@ -735,24 +735,6 @@ pub(crate) fn parse_claude_file_with_project_resolver(
     )
 }
 
-pub fn parse_claude_file_with_cache(
-    path: &Path,
-    parent_cache: &mut ParentSubagentTypeCache,
-) -> SessionParseResult<ScannedSource> {
-    let home_dir = dirs::home_dir();
-    parse_claude_file_with_cache_and_home(path, parent_cache, home_dir.as_deref())
-}
-
-pub fn parse_claude_file_with_cache_and_home(
-    path: &Path,
-    parent_cache: &mut ParentSubagentTypeCache,
-    home_dir: Option<&Path>,
-) -> SessionParseResult<ScannedSource> {
-    let project_resolver = ClaudeProjectResolver::new(home_dir);
-    parse_claude_file_with_cache_home_and_resolver(path, parent_cache, home_dir, &project_resolver)
-        .map(|(scanned, _)| scanned)
-}
-
 fn parse_claude_file_with_cache_home_and_resolver(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
