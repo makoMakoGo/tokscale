@@ -191,7 +191,7 @@ fn exact_canonical_provider(normalized: &str) -> Option<&'static str> {
         "fireworks" | "fireworks_ai" => "fireworks",
         "google" | "gemini" | "vertex" | "vertex_ai" | "google_vertex" | "google_gemini_cli"
         | "google_antigravity" => "google",
-        "openai" | "openai_codex" | "openai_pro" | "chatgpt" => "openai",
+        "openai" | "openai_codex" | "openai_native" | "openai_pro" | "chatgpt" => "openai",
         "opencode" => "opencode",
         "openrouter" => "openrouter",
         "bedrock" => "bedrock",
@@ -775,6 +775,7 @@ mod tests {
             ("copilot-chat", "microsoft"),
             ("Anthropic", "anthropic"),
             ("OpenAI-Codex", "openai"),
+            ("openai-native", "openai"),
             ("Gemini", "google"),
             ("MistralAI", "mistral"),
             ("Meta-Llama", "meta"),
