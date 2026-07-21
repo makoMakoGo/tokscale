@@ -30,6 +30,7 @@ struct SnapshotData {
     tokens: TokenBreakdown,
     peak_daily_tokens: u64,
     peak_daily_cost: f64,
+    main_session_count: usize,
 }
 
 pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -109,7 +110,16 @@ fn section_area(area: Rect) -> Rect {
 }
 
 fn collect_snapshot(app: &App) -> SnapshotData {
-    let mut data = SnapshotData::default();
+    let mut data = SnapshotData {
+        main_session_count: app
+            .session_snapshot
+            .source_summaries()
+            .iter()
+            .filter(|summary| app.is_source_selected(&summary.source))
+            .map(|summary| summary.main_session_count)
+            .sum(),
+        ..SnapshotData::default()
+    };
     for day in &app.data.daily {
         data.tokens = data
             .tokens
@@ -149,12 +159,6 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         .iter()
         .filter(|day| day.tokens.total() > 0)
         .count();
-    let main_sessions: usize = app
-        .session_snapshot
-        .source_summaries()
-        .iter()
-        .map(|summary| summary.main_session_count)
-        .sum();
     let lines = vec![
         section_title(app, "Core"),
         Line::default(),
@@ -206,7 +210,12 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
             Color::Cyan,
         ),
         sources_metric_line(app),
-        metric_line(app, "Sessions", main_sessions.to_string(), Color::Cyan),
+        metric_line(
+            app,
+            "Sessions",
+            data.main_session_count.to_string(),
+            Color::Cyan,
+        ),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -834,9 +843,13 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::tui::app::TuiConfig;
+    use crate::tui::session_data::SessionSnapshot;
     use ratatui::{backend::TestBackend, Terminal};
+    use tokscale_core::{ClientId, TuiSessionEntry};
     use unicode_width::UnicodeWidthStr;
 
     fn make_app(width: u16) -> App {
@@ -1012,6 +1025,44 @@ mod tests {
             .find(|line| line.contains("Data Size"))
             .expect("core metric row should render");
         assert_eq!(core_row.matches('│').count(), 2, "{core_row}");
+    }
+
+    #[test]
+    fn snapshot_session_count_follows_the_selected_sources() {
+        let mut app = make_app(60);
+        let main_session = |source: &str, session_id: &str| TuiSessionEntry {
+            source: source.to_string(),
+            session_id: session_id.to_string(),
+            is_main_session: true,
+            ..TuiSessionEntry::default()
+        };
+        app.session_snapshot = SessionSnapshot::new(
+            vec![
+                main_session("claude", "claude-main"),
+                main_session("codex", "codex-main-1"),
+                main_session("codex", "codex-main-2"),
+            ],
+            BTreeMap::new(),
+        );
+
+        assert_eq!(app.session_snapshot.source_summaries().len(), 2);
+        assert_eq!(collect_snapshot(&app).main_session_count, 3);
+
+        *app.selected_clients.borrow_mut() = HashSet::from([ClientId::Claude]);
+
+        let snapshot = collect_snapshot(&app);
+        assert_eq!(app.session_snapshot.source_summaries().len(), 2);
+        assert_eq!(snapshot.main_session_count, 1);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| render_core(frame, &app, frame.area(), &snapshot))
+            .unwrap();
+        let sessions_row = buffer_lines(&terminal)
+            .into_iter()
+            .find(|line| line.contains("Sessions"))
+            .expect("Core should render its Sessions metric");
+        assert_eq!(sessions_row.split_whitespace().last(), Some("1"));
     }
 
     #[test]
