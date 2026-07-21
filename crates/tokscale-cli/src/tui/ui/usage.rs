@@ -43,37 +43,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_fetching(frame: &mut Frame, app: &App, area: Rect) {
-    let center = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Length(3),
-            Constraint::Percentage(40),
-        ])
-        .split(area)[1];
-
-    let spin = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][app.spinner_frame % 10];
-    let paragraph = Paragraph::new(format!("{spin} Fetching subscription data..."))
-        .style(Style::default().fg(app.theme.muted))
-        .alignment(Alignment::Center);
-    frame.render_widget(paragraph, center);
+    super::loading::render(frame, app, area, "Fetching subscription data...");
 }
 
 fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
-    let center = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Length(3),
-            Constraint::Percentage(40),
-        ])
-        .split(area)[1];
-
-    let msg = loading_message(app);
-    let paragraph = Paragraph::new(msg)
-        .style(Style::default().fg(app.theme.muted))
-        .alignment(Alignment::Center);
-    frame.render_widget(paragraph, center);
+    super::loading::render(frame, app, area, &loading_message(app));
 }
 
 fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
