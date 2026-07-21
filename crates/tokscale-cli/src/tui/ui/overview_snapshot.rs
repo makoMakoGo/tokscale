@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::achievements;
 use super::portraits;
@@ -156,6 +156,7 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         .sum();
     let lines = vec![
         section_title(app, "Core"),
+        Line::default(),
         Line::from(vec![
             Span::styled(
                 format_tokens(app.data.total_tokens),
@@ -174,6 +175,7 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         ]),
         separator_line(app, area.width as usize),
         section_title(app, "Fact"),
+        Line::default(),
         metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
         metric_line(
             app,
@@ -240,7 +242,8 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
                 .then_with(|| right_name.cmp(left_name))
         });
 
-    let mut lines: Vec<Line<'static>> = vec![section_title(app, "Fun Things")];
+    let mut lines: Vec<Line<'static>> = vec![section_title(app, "Fun Things"), Line::default()];
+    let width = area.width as usize;
     match favorite_family {
         Some((family, aggregate)) => {
             let color = portraits::family_color(app, *family);
@@ -248,26 +251,36 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
                 "Favorite Model",
                 Style::default().fg(app.theme.muted),
             )));
-            lines.extend(portraits::lines(app, *family));
-            lines.push(Line::from(Span::styled(
-                portraits::slogan(*family).to_string(),
-                Style::default().fg(color),
-            )));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    portraits::display_name(*family).to_string(),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        "  {} · {:.1}% · {}",
-                        format_tokens(aggregate.tokens),
-                        share_percent(aggregate.tokens, total),
-                        format_cost(aggregate.cost),
+            lines.extend(
+                portraits::lines(app, *family)
+                    .into_iter()
+                    .map(|line| center_line(line, width)),
+            );
+            lines.push(center_line(
+                Line::from(Span::styled(
+                    portraits::slogan(*family).to_string(),
+                    Style::default().fg(color),
+                )),
+                width,
+            ));
+            lines.push(center_line(
+                Line::from(vec![
+                    Span::styled(
+                        portraits::display_name(*family).to_string(),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
                     ),
-                    Style::default().fg(app.theme.muted),
-                ),
-            ]));
+                    Span::styled(
+                        format!(
+                            "  {} · {:.1}% · {}",
+                            format_tokens(aggregate.tokens),
+                            share_percent(aggregate.tokens, total),
+                            format_cost(aggregate.cost),
+                        ),
+                        Style::default().fg(app.theme.muted),
+                    ),
+                ]),
+                width,
+            ));
         }
         None => {
             lines.extend(portraits::lines(app, portraits::Family::Unknown));
@@ -278,23 +291,26 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
         }
     }
     if let Some((model_name, aggregate)) = favorite_model {
-        lines.push(Line::from(vec![
-            Span::styled(
-                model_name.clone(),
-                Style::default()
-                    .fg(app.model_color(model_name))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "  {} · {:.1}% · {}",
-                    format_tokens(aggregate.tokens),
-                    share_percent(aggregate.tokens, total),
-                    format_cost(aggregate.cost),
+        lines.push(center_line(
+            Line::from(vec![
+                Span::styled(
+                    model_name.clone(),
+                    Style::default()
+                        .fg(app.model_color(model_name))
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Style::default().fg(app.theme.muted),
-            ),
-        ]));
+                Span::styled(
+                    format!(
+                        "  {} · {:.1}% · {}",
+                        format_tokens(aggregate.tokens),
+                        share_percent(aggregate.tokens, total),
+                        format_cost(aggregate.cost),
+                    ),
+                    Style::default().fg(app.theme.muted),
+                ),
+            ]),
+            width,
+        ));
     }
 
     if let Some((key, display, aggregate)) = favorite_harness(data) {
@@ -327,8 +343,20 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
     }
 
     lines.truncate(area.height as usize);
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, area);
+    // No wrap: the center padding on the portrait block is meaningful and
+    // `Wrap { trim: true }` would strip it.
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Left-pads a line so it centers inside the given column width.
+fn center_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let pad = width.saturating_sub(line.width()) / 2;
+    if pad == 0 {
+        return line;
+    }
+    let mut spans = vec![Span::raw(" ".repeat(pad))];
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 /// Harness slogans, keyed off the raw harness id.
@@ -518,12 +546,13 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Min(0),
         ])
         .split(area);
     frame.render_widget(Paragraph::new(section_title(app, "Roast")), rows[0]);
-    render_fact_box(frame, app, rows[1], data);
+    render_fact_box(frame, app, rows[2], data);
 
     let items = achievements::build(
         app,
@@ -533,8 +562,8 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         data.harnesses.len(),
     );
     let mut lines = achievements::lines(app, &items);
-    lines.truncate(rows[2].height as usize);
-    frame.render_widget(Paragraph::new(lines), rows[2]);
+    lines.truncate(rows[3].height as usize);
+    frame.render_widget(Paragraph::new(lines), rows[3]);
 }
 
 fn section_title(app: &App, title: &'static str) -> Line<'static> {

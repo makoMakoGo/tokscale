@@ -112,13 +112,14 @@ pub(super) fn build(
 }
 
 pub(super) fn lines(app: &App, achievements: &[Achievement]) -> Vec<Line<'static>> {
-    let mut lines = Vec::with_capacity(achievements.len() + 1);
+    let mut lines = Vec::with_capacity(achievements.len() + 2);
     lines.push(Line::from(Span::styled(
         "Achievements",
         Style::default()
             .fg(app.theme.foreground)
             .add_modifier(Modifier::BOLD),
     )));
+    lines.push(Line::default());
     lines.extend(
         achievements
             .iter()
