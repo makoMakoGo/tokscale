@@ -98,14 +98,7 @@ pub(super) fn family_color(app: &App, family: Family) -> Color {
     app.theme.color(color)
 }
 
-const GPT: &[&str] = &[
-    "      ╲",
-    "   /‾‾‾╲",
-    "  | ⌒ ⌒ |",
-    "  |(¬‿¬)╮",
-    "   \\‾‾ /",
-    "   ⁄|~~|⁄",
-];
+const GPT: &[&str] = &["     ╲", "  (¬‿¬)╮", "   ⁄|~|⁄"];
 const CLAUDE: &[&str] = &["    ✧", "  ╭────╮ ✧", "  (｡•ᴗ•｡)", "   \\∪∪/"];
 const GEMINI: &[&str] = &["  ✦    ✦", "  (◕‿◕)✦", "   /||\\"];
 const GLM: &[&str] = &["   ___", "  (⌐■_■)▤", "   /|  |\\"];

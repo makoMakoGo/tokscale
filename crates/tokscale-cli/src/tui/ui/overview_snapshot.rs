@@ -251,11 +251,13 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
                 "Favorite Model",
                 Style::default().fg(app.theme.muted),
             )));
+            lines.push(Line::default());
             lines.extend(
                 portraits::lines(app, *family)
                     .into_iter()
                     .map(|line| center_line(line, width)),
             );
+            lines.push(Line::default());
             lines.push(center_line(
                 Line::from(Span::styled(
                     portraits::slogan(*family).to_string(),
