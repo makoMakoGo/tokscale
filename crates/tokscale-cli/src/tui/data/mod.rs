@@ -13,6 +13,9 @@ use tokscale_core::{
     InputInventorySignature, LocalParseOptions, PreparedLocalInputs, TuiAcc, TuiSessionEntry,
 };
 
+mod overview;
+pub(crate) use overview::{OverviewFamily, OverviewSummary};
+
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
 // aggregation engine can produce them directly (#37). Re-export them under the
 // historical names this crate already uses, so downstream modules keep their

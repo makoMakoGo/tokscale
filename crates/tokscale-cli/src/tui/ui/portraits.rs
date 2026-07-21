@@ -5,81 +5,52 @@ use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::App;
-use tokscale_core::inferred_provider_from_model;
+use crate::tui::data::OverviewFamily;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum Family {
-    Gpt,
-    Claude,
-    Gemini,
-    Glm,
-    Deepseek,
-    Qwen,
-    Kimi,
-    Minimax,
-    Mimo,
-    Unknown,
-}
-
-pub(super) fn family_of(model_id: &str) -> Family {
-    match inferred_provider_from_model(model_id) {
-        Some("openai") => Family::Gpt,
-        Some("anthropic") => Family::Claude,
-        Some("google") => Family::Gemini,
-        Some("zai") => Family::Glm,
-        Some("deepseek") => Family::Deepseek,
-        Some("qwen") => Family::Qwen,
-        Some("kimi") => Family::Kimi,
-        Some("minimax") => Family::Minimax,
-        Some("xiaomi") => Family::Mimo,
-        _ => Family::Unknown,
+pub(super) fn display_name(family: OverviewFamily) -> &'static str {
+    match family {
+        OverviewFamily::Gpt => "gpt",
+        OverviewFamily::Claude => "claude",
+        OverviewFamily::Gemini => "gemini",
+        OverviewFamily::Glm => "glm",
+        OverviewFamily::Deepseek => "deepseek",
+        OverviewFamily::Qwen => "qwen",
+        OverviewFamily::Kimi => "kimi",
+        OverviewFamily::Minimax => "minimax",
+        OverviewFamily::Mimo => "mimo",
+        OverviewFamily::Unknown => "???",
     }
 }
 
-pub(super) fn display_name(family: Family) -> &'static str {
+pub(super) fn slogan(family: OverviewFamily) -> &'static str {
     match family {
-        Family::Gpt => "gpt",
-        Family::Claude => "claude",
-        Family::Gemini => "gemini",
-        Family::Glm => "glm",
-        Family::Deepseek => "deepseek",
-        Family::Qwen => "qwen",
-        Family::Kimi => "kimi",
-        Family::Minimax => "minimax",
-        Family::Mimo => "mimo",
-        Family::Unknown => "???",
-    }
-}
-
-pub(super) fn slogan(family: Family) -> &'static str {
-    match family {
-        Family::Gpt => "最后还得找我~",
-        Family::Claude => "You are absolutely right!",
-        Family::Gemini => "你真是太棒了",
-        Family::Mimo => "我流口水",
-        Family::Minimax => "我不爱刷榜",
-        Family::Qwen => "我这次是真学会了",
-        Family::Kimi => "我不是区",
-        Family::Glm => "蒸馏之神,不解释",
-        Family::Deepseek => "杂鱼 杂鱼",
-        Family::Unknown => "……",
+        OverviewFamily::Gpt => "最后还得找我~",
+        OverviewFamily::Claude => "You are absolutely right!",
+        OverviewFamily::Gemini => "你真是太棒了",
+        OverviewFamily::Mimo => "我流口水",
+        OverviewFamily::Minimax => "我不爱刷榜",
+        OverviewFamily::Qwen => "我这次是真学会了",
+        OverviewFamily::Kimi => "我不是区",
+        OverviewFamily::Glm => "蒸馏之神,不解释",
+        OverviewFamily::Deepseek => "杂鱼 杂鱼",
+        OverviewFamily::Unknown => "……",
     }
 }
 
 /// Fixed brand color per family (logo primary colors), run through the
 /// theme's color-mode mapping so legacy terminals degrade gracefully.
-pub(super) fn family_color(app: &App, family: Family) -> Color {
+pub(super) fn family_color(app: &App, family: OverviewFamily) -> Color {
     let color = match family {
-        Family::Gpt => Color::Rgb(16, 163, 127),
-        Family::Claude => Color::Rgb(217, 119, 87),
-        Family::Gemini => Color::Rgb(142, 124, 240),
-        Family::Glm => Color::Rgb(232, 232, 232),
-        Family::Deepseek => Color::Rgb(77, 107, 254),
-        Family::Qwen => Color::Rgb(97, 92, 237),
-        Family::Kimi => Color::Rgb(192, 192, 192),
-        Family::Minimax => Color::Rgb(228, 58, 58),
-        Family::Mimo => Color::Rgb(255, 105, 0),
-        Family::Unknown => Color::Gray,
+        OverviewFamily::Gpt => Color::Rgb(16, 163, 127),
+        OverviewFamily::Claude => Color::Rgb(217, 119, 87),
+        OverviewFamily::Gemini => Color::Rgb(142, 124, 240),
+        OverviewFamily::Glm => Color::Rgb(232, 232, 232),
+        OverviewFamily::Deepseek => Color::Rgb(77, 107, 254),
+        OverviewFamily::Qwen => Color::Rgb(97, 92, 237),
+        OverviewFamily::Kimi => Color::Rgb(192, 192, 192),
+        OverviewFamily::Minimax => Color::Rgb(228, 58, 58),
+        OverviewFamily::Mimo => Color::Rgb(255, 105, 0),
+        OverviewFamily::Unknown => Color::Gray,
     };
     app.theme.color(color)
 }
@@ -94,43 +65,44 @@ const KIMI: &[&str] = &["   ☾", "  (｡･ω･｡)☾", "   /|\\"];
 const MINIMAX: &[&str] = &["   /\\  /\\", "  (｡•̀ᴗ•́)◆", "   /|  |\\"];
 const MIMO: &[&str] = &["   ___", "  (｡•ω•｡)¤", "   /|  |\\"];
 const UNKNOWN: &[&str] = &["  [■_■]", "  (•_•)", "   /|\\"];
+const ROW_PADDING: &str = "                ";
 
-pub(super) fn portrait(family: Family) -> &'static [&'static str] {
+pub(super) fn portrait(family: OverviewFamily) -> &'static [&'static str] {
     match family {
-        Family::Gpt => GPT,
-        Family::Claude => CLAUDE,
-        Family::Gemini => GEMINI,
-        Family::Glm => GLM,
-        Family::Deepseek => DEEPSEEK,
-        Family::Qwen => QWEN,
-        Family::Kimi => KIMI,
-        Family::Minimax => MINIMAX,
-        Family::Mimo => MIMO,
-        Family::Unknown => UNKNOWN,
+        OverviewFamily::Gpt => GPT,
+        OverviewFamily::Claude => CLAUDE,
+        OverviewFamily::Gemini => GEMINI,
+        OverviewFamily::Glm => GLM,
+        OverviewFamily::Deepseek => DEEPSEEK,
+        OverviewFamily::Qwen => QWEN,
+        OverviewFamily::Kimi => KIMI,
+        OverviewFamily::Minimax => MINIMAX,
+        OverviewFamily::Mimo => MIMO,
+        OverviewFamily::Unknown => UNKNOWN,
     }
 }
 
 /// Every line is padded on the right to the family block's width so the
 /// artwork's authored left-edge alignment survives per-line centering
 /// (left-padding each line independently was the misalignment bug).
-pub(super) fn lines(app: &App, family: Family) -> Vec<Line<'static>> {
+pub(super) fn lines(app: &App, family: OverviewFamily) -> Vec<Line<'static>> {
+    styled_lines(family, family_color(app, family))
+}
+
+fn styled_lines(family: OverviewFamily, color: Color) -> Vec<Line<'static>> {
     let art = portrait(family);
     let block_width = art
         .iter()
         .map(|row| UnicodeWidthStr::width(*row))
         .max()
         .unwrap_or(0);
-    let color = family_color(app, family);
     art.iter()
         .map(|row| {
-            let mut spans: Vec<Span<'static>> = row
-                .chars()
-                .map(|ch| Span::styled(ch.to_string(), Style::default().fg(color)))
-                .collect();
-            spans.push(Span::raw(
-                " ".repeat(block_width - UnicodeWidthStr::width(*row)),
-            ));
-            Line::from(spans)
+            let padding_width = block_width - UnicodeWidthStr::width(*row);
+            Line::from(vec![
+                Span::styled(*row, Style::default().fg(color)),
+                Span::raw(&ROW_PADDING[..padding_width]),
+            ])
         })
         .collect()
 }
@@ -142,16 +114,16 @@ mod tests {
     #[test]
     fn portrait_lines_share_one_block_width_per_family() {
         for family in [
-            Family::Gpt,
-            Family::Claude,
-            Family::Gemini,
-            Family::Glm,
-            Family::Deepseek,
-            Family::Qwen,
-            Family::Kimi,
-            Family::Minimax,
-            Family::Mimo,
-            Family::Unknown,
+            OverviewFamily::Gpt,
+            OverviewFamily::Claude,
+            OverviewFamily::Gemini,
+            OverviewFamily::Glm,
+            OverviewFamily::Deepseek,
+            OverviewFamily::Qwen,
+            OverviewFamily::Kimi,
+            OverviewFamily::Minimax,
+            OverviewFamily::Mimo,
+            OverviewFamily::Unknown,
         ] {
             let art = portrait(family);
             let width = art
@@ -164,33 +136,21 @@ mod tests {
                 "portrait rows must fit the block width"
             );
             assert!(width <= 16, "portrait too wide for the column: {width}");
+
+            let lines = styled_lines(family, Color::White);
+            assert_eq!(lines.len(), art.len());
+            assert!(lines.iter().all(|line| line.width() == width));
+            assert!(
+                lines.iter().all(|line| line.spans.len() == 2),
+                "each static row should render as one styled span plus padding"
+            );
         }
 
         assert!(
-            portrait(Family::Qwen)
+            portrait(OverviewFamily::Qwen)
                 .iter()
                 .any(|row| row.chars().count() != UnicodeWidthStr::width(*row)),
             "fixture must retain a combining-mark row that exercises display width"
         );
-    }
-
-    #[test]
-    fn family_detection_covers_the_major_model_ids() {
-        assert_eq!(family_of("gpt-5.5"), Family::Gpt);
-        assert_eq!(family_of("codex-mini-latest"), Family::Gpt);
-        assert_eq!(family_of("o3"), Family::Gpt);
-        assert_eq!(family_of("claude-opus-4-7"), Family::Claude);
-        assert_eq!(family_of("gemini-2.5-pro"), Family::Gemini);
-        assert_eq!(family_of("glm-4.6"), Family::Glm);
-        assert_eq!(family_of("deepseek-v3.2"), Family::Deepseek);
-        assert_eq!(family_of("qwen3-coder-plus"), Family::Qwen);
-        assert_eq!(family_of("qwq-32b"), Family::Qwen);
-        assert_eq!(family_of("qvq-max"), Family::Qwen);
-        assert_eq!(family_of("kimi-k2"), Family::Kimi);
-        assert_eq!(family_of("k3-thinking"), Family::Kimi);
-        assert_eq!(family_of("minimax-m3"), Family::Minimax);
-        assert_eq!(family_of("mimo-v2.5-pro"), Family::Mimo);
-        assert_eq!(family_of("llama-4-scout"), Family::Unknown);
-        assert_eq!(family_of("mistral-large-3"), Family::Unknown);
     }
 }
