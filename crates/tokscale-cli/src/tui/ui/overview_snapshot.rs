@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::UnicodeWidthChar;
 
 use super::achievements;
 use super::portraits;
@@ -329,7 +330,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
         )));
         harness_block.push(center_line(
             Line::from(Span::styled(
-                harness_slogan(&key).to_string(),
+                harness_slogan(key).to_string(),
                 Style::default().fg(app.theme.accent),
             )),
             width,
@@ -512,18 +513,22 @@ fn render_fact_box(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData
 fn split_cells(text: &str, width: usize) -> (String, String) {
     let mut first = String::new();
     let mut second = String::new();
-    let mut used = 0;
+    let mut first_width = 0;
+    let mut second_width = 0;
+    let mut filling_second = false;
     for ch in text.chars() {
-        let cell = if (ch as u32) > 0x2E80 { 2 } else { 1 };
-        if used + cell > width * 2 {
-            break;
-        }
-        if used + cell <= width {
+        let cell = UnicodeWidthChar::width(ch).unwrap_or_default();
+        if !filling_second && first_width + cell <= width {
             first.push(ch);
+            first_width += cell;
         } else {
+            filling_second = true;
+            if second_width + cell > width {
+                break;
+            }
             second.push(ch);
+            second_width += cell;
         }
-        used += cell;
     }
     (first, second)
 }
@@ -577,7 +582,7 @@ fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
             format_tokens(data.peak_daily_tokens)
         ));
     }
-    let streak = achievements::streak_days(&app.data.daily);
+    let streak = app.data.current_streak;
     if streak >= 3 {
         facts.push(format!("连击 {streak} 天 · 和终端锁了"));
     }
@@ -588,7 +593,7 @@ fn commafy(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::new();
     for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -617,7 +622,7 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     render_fact_box(frame, app, rows[2], data);
 
     let items = achievements::build(
-        app,
+        app.data.current_streak,
         data.tokens.total(),
         data.tokens.cache_read,
         data.models.len(),
@@ -881,6 +886,26 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn fact_split_uses_terminal_display_width() {
+        let (first, second) = split_cells("a\u{301}中b", 2);
+
+        assert_eq!(first, "a\u{301}");
+        assert_eq!(second, "中");
+        assert!(UnicodeWidthStr::width(first.as_str()) <= 2);
+        assert!(UnicodeWidthStr::width(second.as_str()) <= 2);
+    }
+
+    #[test]
+    fn roast_facts_use_the_authoritative_current_streak() {
+        let mut app = make_app(120);
+        app.data.current_streak = 3;
+
+        let facts = fun_facts(&app, &SnapshotData::default());
+
+        assert!(facts.iter().any(|fact| fact.contains("连击 3 天")));
     }
 
     #[test]

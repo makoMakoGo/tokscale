@@ -108,7 +108,7 @@ fn report_background_failure(app: &mut App, diagnostic: String) {
     if !has_installed_generation {
         app.set_error(Some(diagnostic.clone()));
     }
-    app.set_status(&format!("Error: {diagnostic}"));
+    app.set_local_report_status(&format!("Error: {diagnostic}"));
 }
 
 fn load_background_data(
@@ -1213,6 +1213,8 @@ mod tests {
             session_data::SessionProjectionStatus::Unavailable { .. }
         ));
         assert_eq!(app.data.error.as_deref(), Some("load failed"));
+        assert_eq!(app.general_status_message(), None);
+        assert_eq!(app.status_message.as_deref(), Some("Error: load failed"));
     }
 
     #[test]

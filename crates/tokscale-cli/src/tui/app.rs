@@ -141,6 +141,13 @@ impl Tab {
         }
     }
 
+    /// Whether this tab projects the installed local-report generation.
+    /// Subscription Usage has its own remote fetch lifecycle and must remain
+    /// usable while local source acquisition is cold-loading or has failed.
+    pub(crate) fn depends_on_local_generation(self) -> bool {
+        self != Tab::Usage
+    }
+
     pub fn next(self) -> Tab {
         match self {
             Tab::Overview => Tab::Usage,

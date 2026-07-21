@@ -27,6 +27,7 @@ pub(crate) mod widgets;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::{App, Tab};
 use crate::tui::view_state::ViewState;
@@ -51,18 +52,20 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
 
     header::render(frame, app, chunks[0]);
 
-    // A failed first scan without an installed generation gets an Oops page
-    // instead of misleading empty tabs. The Usage tab is not a local-report
-    // surface: it never shows the local-scan failure page.
-    let cold_failed = !app.has_installed_generation() && app.data.error.is_some();
-    if app.data.loading && !app.background_loading {
+    // Only local-report tabs project the installed generation. Subscription
+    // Usage has an independent remote-fetch lifecycle and stays usable while
+    // local acquisition is cold-loading or has failed.
+    let local_generation_tab = app.current_tab.depends_on_local_generation();
+    let cold_failed =
+        local_generation_tab && !app.has_installed_generation() && app.data.error.is_some();
+    if local_generation_tab && app.data.loading && !app.background_loading {
         render_loading(frame, app, chunks[1]);
-    } else if app.background_loading && !app.has_installed_generation() {
+    } else if local_generation_tab && app.background_loading && !app.has_installed_generation() {
         // Cold start: the first scan is still running and no cached
         // generation is installed, so there is nothing meaningful to show
         // yet — render the loading state instead of empty/zero tab states.
         render_loading(frame, app, chunks[1]);
-    } else if cold_failed && app.current_tab != Tab::Usage {
+    } else if cold_failed {
         render_cold_failed(frame, app, chunks[1]);
     } else {
         render_current_tab(frame, app, state, chunks[1]);
@@ -99,6 +102,9 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
 
     let lines = vec![
         Line::from(Span::styled(
@@ -122,9 +128,11 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: true });
 
     // Constrain the text block so long diagnostics wrap into a readable
-    // centered column instead of one clipped edge-to-edge line.
-    let content_width = inner.width.saturating_sub(4).min(100).max(20);
-    let content_height = (wrapped_line_count(diagnostic, content_width as usize) + 4) as u16;
+    // centered column without exceeding cramped content areas.
+    let content_width = inner.width.saturating_sub(4).clamp(1, 100);
+    let content_height =
+        u16::try_from(wrapped_line_count(diagnostic, content_width as usize).saturating_add(4))
+            .unwrap_or(u16::MAX);
     let content = Rect {
         x: inner.x + inner.width.saturating_sub(content_width) / 2,
         y: inner.y + inner.height.saturating_sub(content_height) / 2,
@@ -134,29 +142,35 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, content);
 }
 
-/// Rough word-wrap line estimate for centering the Oops text block (ratatui
-/// 0.29 does not expose its wrapped-height measurement).
+/// Estimate ratatui's word-wrapped height for vertical centering. Widths use
+/// terminal display cells, and explicit line breaks remain distinct rows.
 fn wrapped_line_count(text: &str, width: usize) -> usize {
     debug_assert!(width > 0);
-    let mut lines = 1;
-    let mut col = 0usize;
-    for word in text.split_whitespace() {
-        let word_len = word.chars().count();
-        let separator = usize::from(col > 0);
-        if col + separator + word_len <= width {
-            col += separator + word_len;
-        } else if word_len <= width {
-            lines += 1;
-            col = word_len;
-        } else {
-            // Word longer than a line: ratatui hard-splits it across rows.
-            let available = width.saturating_sub(col + separator);
-            let overflow = word_len - available;
-            lines += 1 + overflow / width;
-            col = overflow % width;
-        }
-    }
-    lines
+    text.split('\n')
+        .map(|line| {
+            let mut rows = 1;
+            let mut column = 0;
+            for word in line.split_whitespace() {
+                let word_width = UnicodeWidthStr::width(word);
+                let separator = usize::from(column > 0);
+                if column + separator + word_width <= width {
+                    column += separator + word_width;
+                    continue;
+                }
+
+                if column > 0 {
+                    rows += 1;
+                }
+                rows += word_width.saturating_sub(1) / width;
+                column = word_width % width;
+                if column == 0 && word_width > 0 {
+                    column = width;
+                }
+            }
+            rows
+        })
+        .sum::<usize>()
+        .max(1)
 }
 
 fn render_daily(frame: &mut Frame, app: &mut App, state: &mut ViewState, area: Rect) {
@@ -230,6 +244,13 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_line_count_uses_terminal_width_and_explicit_lines() {
+        assert_eq!(wrapped_line_count("abcd", 2), 2);
+        assert_eq!(wrapped_line_count("中中", 2), 2);
+        assert_eq!(wrapped_line_count("a\n\nb", 10), 3);
+    }
+
+    #[test]
     fn cold_start_scan_renders_loading_instead_of_empty_states() {
         let mut app = make_app();
         app.set_background_loading(true);
@@ -252,6 +273,18 @@ mod tests {
 
         assert!(screen.contains("Scanning session data..."), "{screen}");
         assert!(!screen.contains('°'), "pond must degrade away: {screen}");
+    }
+
+    #[test]
+    fn cold_start_scan_keeps_usage_tab_untouched() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.set_background_loading(true);
+
+        let screen = render_screen(&mut app, 120, 32).join("\n");
+
+        assert!(!screen.contains("Scanning session data..."), "{screen}");
+        assert!(screen.contains("subscription"), "{screen}");
     }
 
     #[test]
@@ -287,6 +320,7 @@ mod tests {
     fn cold_start_failure_keeps_usage_tab_untouched() {
         let mut app = make_app();
         app.set_error(Some("injected cold failure".to_string()));
+        app.set_local_report_status("Error: injected cold failure");
         app.current_tab = Tab::Usage;
 
         let lines = render_screen(&mut app, 120, 32);
@@ -302,6 +336,23 @@ mod tests {
             !footer.contains("injected cold failure"),
             "local-scan failures never leak into the footer: {footer}"
         );
+    }
+
+    #[test]
+    fn cramped_cold_failure_preserves_the_content_border() {
+        let width = 18;
+        let height = 18;
+        let mut app = make_app();
+        app.set_error(Some("a diagnostic that must wrap safely".to_string()));
+
+        let lines = render_screen(&mut app, width, height);
+        let content_rows = &lines[3..height as usize - 5];
+
+        assert!(content_rows[0].ends_with('┐'));
+        assert!(content_rows.last().unwrap().ends_with('┘'));
+        assert!(content_rows[1..content_rows.len() - 1]
+            .iter()
+            .all(|line| line.ends_with('│')));
     }
 
     #[test]

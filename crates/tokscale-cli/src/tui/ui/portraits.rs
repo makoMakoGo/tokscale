@@ -2,8 +2,10 @@
 //! one original artwork per family, painted in the family's brand color.
 
 use ratatui::prelude::*;
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::App;
+use tokscale_core::inferred_provider_from_model;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Family {
@@ -20,33 +22,17 @@ pub(super) enum Family {
 }
 
 pub(super) fn family_of(model_id: &str) -> Family {
-    let model = model_id.to_ascii_lowercase();
-    if model.contains("claude") {
-        Family::Claude
-    } else if model.contains("gemini") {
-        Family::Gemini
-    } else if model.contains("glm") || model.contains("chatglm") {
-        Family::Glm
-    } else if model.contains("deepseek") {
-        Family::Deepseek
-    } else if model.contains("qwen") {
-        Family::Qwen
-    } else if model.contains("kimi") || model.contains("moonshot") {
-        Family::Kimi
-    } else if model.contains("minimax") {
-        Family::Minimax
-    } else if model.contains("mimo") {
-        Family::Mimo
-    } else if model.contains("gpt")
-        || model.contains("codex")
-        || model.contains("openai")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-    {
-        Family::Gpt
-    } else {
-        Family::Unknown
+    match inferred_provider_from_model(model_id) {
+        Some("openai") => Family::Gpt,
+        Some("anthropic") => Family::Claude,
+        Some("google") => Family::Gemini,
+        Some("zai") => Family::Glm,
+        Some("deepseek") => Family::Deepseek,
+        Some("qwen") => Family::Qwen,
+        Some("kimi") => Family::Kimi,
+        Some("minimax") => Family::Minimax,
+        Some("xiaomi") => Family::Mimo,
+        _ => Family::Unknown,
     }
 }
 
@@ -129,7 +115,11 @@ pub(super) fn portrait(family: Family) -> &'static [&'static str] {
 /// (left-padding each line independently was the misalignment bug).
 pub(super) fn lines(app: &App, family: Family) -> Vec<Line<'static>> {
     let art = portrait(family);
-    let block_width = art.iter().map(|row| row.chars().count()).max().unwrap_or(0);
+    let block_width = art
+        .iter()
+        .map(|row| UnicodeWidthStr::width(*row))
+        .max()
+        .unwrap_or(0);
     let color = family_color(app, family);
     art.iter()
         .map(|row| {
@@ -137,7 +127,9 @@ pub(super) fn lines(app: &App, family: Family) -> Vec<Line<'static>> {
                 .chars()
                 .map(|ch| Span::styled(ch.to_string(), Style::default().fg(color)))
                 .collect();
-            spans.push(Span::raw(" ".repeat(block_width - row.chars().count())));
+            spans.push(Span::raw(
+                " ".repeat(block_width - UnicodeWidthStr::width(*row)),
+            ));
             Line::from(spans)
         })
         .collect()
@@ -162,13 +154,24 @@ mod tests {
             Family::Unknown,
         ] {
             let art = portrait(family);
-            let width = art.iter().map(|row| row.chars().count()).max().unwrap();
+            let width = art
+                .iter()
+                .map(|row| UnicodeWidthStr::width(*row))
+                .max()
+                .unwrap();
             assert!(
-                art.iter().all(|row| row.chars().count() <= width),
+                art.iter().all(|row| UnicodeWidthStr::width(*row) <= width),
                 "portrait rows must fit the block width"
             );
             assert!(width <= 16, "portrait too wide for the column: {width}");
         }
+
+        assert!(
+            portrait(Family::Qwen)
+                .iter()
+                .any(|row| row.chars().count() != UnicodeWidthStr::width(*row)),
+            "fixture must retain a combining-mark row that exercises display width"
+        );
     }
 
     #[test]
@@ -181,7 +184,10 @@ mod tests {
         assert_eq!(family_of("glm-4.6"), Family::Glm);
         assert_eq!(family_of("deepseek-v3.2"), Family::Deepseek);
         assert_eq!(family_of("qwen3-coder-plus"), Family::Qwen);
+        assert_eq!(family_of("qwq-32b"), Family::Qwen);
+        assert_eq!(family_of("qvq-max"), Family::Qwen);
         assert_eq!(family_of("kimi-k2"), Family::Kimi);
+        assert_eq!(family_of("k3-thinking"), Family::Kimi);
         assert_eq!(family_of("minimax-m3"), Family::Minimax);
         assert_eq!(family_of("mimo-v2.5-pro"), Family::Mimo);
         assert_eq!(family_of("llama-4-scout"), Family::Unknown);
