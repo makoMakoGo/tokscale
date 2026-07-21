@@ -5,7 +5,9 @@ use unicode_width::UnicodeWidthChar;
 use super::achievements;
 use super::portraits;
 use super::sessions::format_bytes;
-use super::widgets::{format_cost, format_tokens, get_client_display_name};
+use super::widgets::{
+    format_cost, format_tokens, format_tokens_with_commas, get_client_display_name,
+};
 use crate::tui::app::App;
 use crate::tui::data::{OverviewFamily, OverviewSummary};
 
@@ -370,7 +372,10 @@ fn client_slogan(client_id: &str) -> &'static str {
 fn inputs_healthy_metric_line(app: &App) -> Line<'static> {
     let inputs = total_inputs(app);
     let (value, color) = if inputs > 0 && app.data.health.clean_inputs == inputs {
-        (format!("✓ {} clean", commafy(inputs as u64)), Color::Green)
+        (
+            format!("✓ {} clean", format_tokens_with_commas(inputs as u64)),
+            Color::Green,
+        )
     } else {
         (health_percentage(app), health_color(app))
     };
@@ -446,7 +451,7 @@ fn fun_facts(app: &App, data: &OverviewSummary) -> Vec<String> {
         facts.push(format!(
             "{} tokens ≈ {} 部莎翁全集",
             format_tokens(total),
-            commafy(total / 1_100_000)
+            format_tokens_with_commas(total / 1_100_000)
         ));
     }
     let cost = app.data.total_cost;
@@ -454,9 +459,12 @@ fn fun_facts(app: &App, data: &OverviewSummary) -> Vec<String> {
         facts.push(format!(
             "{} ≈ {} 块原味鸡",
             format_cost(cost),
-            commafy((cost / 1.7) as u64)
+            format_tokens_with_commas((cost / 1.7) as u64)
         ));
-        facts.push(format!("≈ {} 杯奶茶", commafy((cost / 3.0) as u64)));
+        facts.push(format!(
+            "≈ {} 杯奶茶",
+            format_tokens_with_commas((cost / 3.0) as u64)
+        ));
     }
     if total > 0 {
         if data.cache_rate.reaches(80) {
@@ -485,18 +493,6 @@ fn fun_facts(app: &App, data: &OverviewSummary) -> Vec<String> {
         facts.push(format!("连击 {streak} 天 · 和终端锁了"));
     }
     facts
-}
-
-fn commafy(value: u64) -> String {
-    let digits = value.to_string();
-    let mut out = String::new();
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 fn render_divider(frame: &mut Frame, app: &App, area: Rect) {
