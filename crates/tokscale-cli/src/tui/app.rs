@@ -713,11 +713,19 @@ impl App {
 
     pub fn set_background_loading(&mut self, loading: bool) {
         self.background_loading = loading;
-        // Don't set data.loading - let cached data remain visible during background refresh
+        // Keep the installed generation visible during a background refresh.
     }
 
     pub fn has_installed_generation(&self) -> bool {
         self.projection_backend.is_some()
+    }
+
+    pub(crate) fn is_cold_loading(&self) -> bool {
+        self.background_loading && !self.has_installed_generation()
+    }
+
+    pub(crate) fn is_cold_failed(&self) -> bool {
+        !self.background_loading && !self.has_installed_generation() && self.data.error.is_some()
     }
 
     pub(crate) fn overview_summary(&self) -> &OverviewSummary {
@@ -1022,15 +1030,6 @@ impl App {
 
     pub fn model_color(&self, model: &str) -> Color {
         self.model_color_for("", model)
-    }
-
-    pub fn has_visible_data(&self) -> bool {
-        !self.data.models.is_empty()
-            || !self.data.daily.is_empty()
-            || !self.data.agents.is_empty()
-            || self.data.graph.is_some()
-            || self.data.total_tokens > 0
-            || self.data.total_cost > 0.0
     }
 
     pub fn set_error(&mut self, error: Option<String>) {

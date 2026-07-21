@@ -242,7 +242,6 @@ mod bundle_tests {
         assert_eq!(loaded.sessions, sessions);
         assert_eq!(loaded.client_space, client_space);
         assert_eq!(loaded.data.health, health);
-        assert!(!loaded.data.loading);
     }
 
     #[test]
@@ -338,7 +337,6 @@ mod bundle_tests {
             assert_eq!(loaded.data.health, health);
             assert_eq!(loaded.sessions, sessions);
             assert_eq!(loaded.client_space, client_space);
-            assert!(!loaded.data.loading);
             assert!(loaded.data.error.is_none());
         }
         let claude_only = HashSet::from([ClientId::Claude]);
@@ -1345,7 +1343,6 @@ impl TryFrom<CachedUsageData> for UsageData {
             graph: graph.transpose()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,
-            loading: false,
             error: None,
             current_streak: u.current_streak,
             longest_streak: u.longest_streak,
